@@ -1,0 +1,3 @@
+display_name: WX 文档格式
+short_description: 将 MD 或 Word 文档按 WX 文档格式规则生成 DOCX。
+default_prompt: wx文档格式：请把这个文件转换为 WX 文档格式并生成对应的 docx。
