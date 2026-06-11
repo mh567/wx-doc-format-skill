@@ -302,6 +302,13 @@ def append_num(numbering, abstract_num_id: int, num_id: int) -> None:
     numbering.append(num)
 
 
+def new_num_for_abstract(doc: Document, abstract_num_id: int) -> int:
+    numbering = doc.part.numbering_part.element
+    num_id = next_numbering_id(numbering, "w:num", "w:numId")
+    append_num(numbering, abstract_num_id, num_id)
+    return num_id
+
+
 def ensure_auto_numbering(doc: Document) -> dict:
     numbering = doc.part.numbering_part.element
     abstract_id = next_numbering_id(numbering, "w:abstractNum", "w:abstractNumId")
@@ -335,7 +342,13 @@ def ensure_auto_numbering(doc: Document) -> dict:
     numbering.append(decimal_abs)
     append_num(numbering, decimal_abs_id, decimal_num_id)
 
-    return {"heading": heading_num_id, "list_letter": letter_num_id, "list_decimal": decimal_num_id}
+    return {
+        "heading": heading_num_id,
+        "list_letter": letter_num_id,
+        "list_decimal": decimal_num_id,
+        "list_letter_abstract": letter_abs_id,
+        "list_decimal_abstract": decimal_abs_id,
+    }
 
 
 def apply_numbering(paragraph: Paragraph, num_id: int, ilvl: int = 0) -> None:
@@ -671,6 +684,7 @@ def add_table_from_rows(doc: Document, rows: list[list[str]], row_height_cm: flo
 def convert_md(src: Path, doc: Document, report: dict, row_height_cm: float, row_height_rule: str, numbering_ids: dict) -> None:
     lines = src.read_text(encoding="utf-8").splitlines()
     index = 0
+    active_list_nums: dict[int, int] = {}
     while index < len(lines):
         raw_line = lines[index]
         line = raw_line.strip()
@@ -692,6 +706,7 @@ def convert_md(src: Path, doc: Document, report: dict, row_height_cm: float, row
             if role == "heading":
                 apply_numbering(paragraph, numbering_ids["heading"], min(level - 2, 5))
                 report["automatic_numbers"].append({"type": "heading", "text": strip_heading_marker(text), "source": "md-heading"})
+            active_list_nums = {}
             index += 1
             continue
         inferred_level = heading_level_from_text(line)
@@ -701,6 +716,7 @@ def convert_md(src: Path, doc: Document, report: dict, row_height_cm: float, row
             apply_numbering(paragraph, numbering_ids["heading"], inferred_level - 1)
             report["inferred_headings"].append({"text": line, "level": inferred_level, "source": "md-text"})
             report["automatic_numbers"].append({"type": "heading", "text": clean_text, "source": "md-text"})
+            active_list_nums = {}
             index += 1
             continue
         role = "note" if line.startswith(("**备注：**", "**编写提示：**", "备注：", "编写提示：")) else "body"
@@ -708,11 +724,15 @@ def convert_md(src: Path, doc: Document, report: dict, row_height_cm: float, row
             list_level = list_level_from_text(line)
             style_name = "2.1二级列项-有编号" if list_level else "1.1一级列项-编号"
             paragraph = add_paragraph(doc, strip_list_marker(line), style_name, "list")
-            apply_numbering(paragraph, numbering_ids["list_decimal" if list_level else "list_letter"], 0)
+            if list_level not in active_list_nums:
+                abstract_key = "list_decimal_abstract" if list_level else "list_letter_abstract"
+                active_list_nums[list_level] = new_num_for_abstract(doc, numbering_ids[abstract_key])
+            apply_numbering(paragraph, active_list_nums[list_level], 0)
             report["inferred_lists"].append({"text": line, "source": "md-text"})
             report["automatic_numbers"].append({"type": "list", "text": strip_list_marker(line), "source": "md-text"})
         else:
             add_paragraph(doc, clean_note_prefix(line), role=role)
+            active_list_nums = {}
         index += 1
 
 
@@ -759,6 +779,7 @@ def append_table_clone(doc: Document, table: Table) -> Table:
 def convert_docx(src: Path, doc: Document, row_height_cm: float, row_height_rule: str, strict_normalize: bool, report: dict, numbering_ids: dict) -> None:
     src_doc = Document(src)
     seen_content = False
+    active_list_nums: dict[int, int] = {}
     for block in iter_blocks(src_doc):
         if isinstance(block, Paragraph):
             text = block.text.strip()
@@ -777,6 +798,7 @@ def convert_docx(src: Path, doc: Document, row_height_cm: float, row_height_rule
                 paragraph = add_paragraph(doc, text, style, role)
                 apply_numbering(paragraph, numbering_ids["heading"], heading_level - 1)
                 report["automatic_numbers"].append({"type": "heading", "text": text, "source": "docx-numbering"})
+                active_list_nums = {}
                 seen_content = True
                 continue
             elif role == "list":
@@ -784,7 +806,10 @@ def convert_docx(src: Path, doc: Document, row_height_cm: float, row_height_rule
                 text = strip_list_marker(text)
                 style = "2.1二级列项-有编号" if list_level else "1.1一级列项-编号"
                 paragraph = add_paragraph(doc, text, style, role)
-                apply_numbering(paragraph, numbering_ids["list_decimal" if list_level else "list_letter"], 0)
+                if list_level not in active_list_nums:
+                    abstract_key = "list_decimal_abstract" if list_level else "list_letter_abstract"
+                    active_list_nums[list_level] = new_num_for_abstract(doc, numbering_ids[abstract_key])
+                apply_numbering(paragraph, active_list_nums[list_level], 0)
                 report["automatic_numbers"].append({"type": "list", "text": text, "source": "docx-numbering" if num_id is not None else "docx-text"})
                 seen_content = True
                 continue
@@ -794,14 +819,17 @@ def convert_docx(src: Path, doc: Document, row_height_cm: float, row_height_rule
                 paragraph = add_paragraph(doc, text, style, role)
                 apply_numbering(paragraph, numbering_ids["heading"], heading_level - 1)
                 report["automatic_numbers"].append({"type": "heading", "text": text, "source": "docx-text"})
+                active_list_nums = {}
                 seen_content = True
                 continue
             add_paragraph(doc, text, style, role)
+            active_list_nums = {}
             seen_content = True
         else:
             new_table = append_table_clone(doc, block)
             normalize_table(new_table, row_height_cm, row_height_rule)
             report["tables_processed"] += 1
+            active_list_nums = {}
             seen_content = True
 
 
