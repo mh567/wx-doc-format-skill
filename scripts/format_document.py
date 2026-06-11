@@ -134,7 +134,17 @@ def set_spacing_xml(target, line: int | None = 300, line_rule: str = "auto", **a
 
 
 def set_standard_spacing(target) -> None:
-    set_spacing_xml(target, line=300, line_rule="auto")
+    set_spacing_xml(
+        target,
+        line=300,
+        line_rule="auto",
+        before=0,
+        beforeLines=0,
+        beforeAutospacing=0,
+        after=0,
+        afterLines=0,
+        afterAutospacing=0,
+    )
 
 
 def set_heading_spacing(target, style_name: str | None) -> None:
@@ -163,15 +173,44 @@ def set_heading_spacing(target, style_name: str | None) -> None:
 
 
 def set_caption_spacing(target) -> None:
-    set_spacing_xml(target, line=240, line_rule="auto", before=50, beforeLines=50, after=50, afterLines=50)
+    set_spacing_xml(
+        target,
+        line=240,
+        line_rule="auto",
+        before=50,
+        beforeLines=50,
+        beforeAutospacing=0,
+        after=50,
+        afterLines=50,
+        afterAutospacing=0,
+    )
 
 
 def set_table_body_spacing(target) -> None:
-    set_spacing_xml(target, line=0, line_rule="atLeast")
+    set_spacing_xml(
+        target,
+        line=0,
+        line_rule="atLeast",
+        before=0,
+        beforeLines=0,
+        beforeAutospacing=0,
+        after=0,
+        afterLines=0,
+        afterAutospacing=0,
+    )
 
 
 def set_note_spacing(target) -> None:
-    set_spacing_xml(target, line=300, line_rule="auto", before=448)
+    set_spacing_xml(
+        target,
+        line=300,
+        line_rule="auto",
+        before=448,
+        beforeAutospacing=0,
+        after=0,
+        afterLines=0,
+        afterAutospacing=0,
+    )
 
 
 def ensure_fallback_styles(doc: Document) -> None:
