@@ -1,13 +1,13 @@
 ---
 name: wx-doc-format
-description: Use when the user says “wx文档格式” or asks to convert Markdown, DOCX, or Word documents into a WX-style formatted .docx. Designed for any agent with Python and python-docx. Uses a fixed script for repeatable formatting, has built-in WX formatting rules, supports strict normalization for messy Word inputs, Markdown table conversion, heading and list inference, note styles, table body style, fixed table row height, JSON and Markdown audit reports, and render-based verification.
+description: Use when the user says “wx文档格式” or asks to convert Markdown, DOCX, or Word documents into a WX-style formatted .docx. Designed for any agent with Python. DOCX inputs can use a stdlib-only OOXML path without python-docx or lxml. Markdown and full document rebuilds use python-docx when available. Uses fixed scripts for repeatable formatting, built-in WX formatting rules, strict normalization, XML-level spacing constraints, Markdown table conversion, heading and list inference, note styles, table body style, fixed table row height, JSON and Markdown audit reports, and render-based verification.
 metadata:
   short-description: Convert MD or DOCX into WX Word format
 ---
 
 # WX 文档格式
 
-当用户说“wx文档格式”，或要求把 `.md`、`.docx`、Word 文件转换成 WX 文档格式并输出 `.docx` 时，使用本技能。本技能面向通用智能体设计，只要求能运行 Python 并安装 `python-docx` 与 `lxml`。
+当用户说“wx文档格式”，或要求把 `.md`、`.docx`、Word 文件转换成 WX 文档格式并输出 `.docx` 时，使用本技能。本技能面向通用智能体设计，只要求能运行 Python。DOCX 输入可使用纯标准库 OOXML 路径，无需安装 `python-docx` 或 `lxml`；Markdown 输入和完整重建模式仍建议安装 `python-docx` 与 `lxml`。
 
 ## 固化格式规则
 
@@ -27,42 +27,43 @@ metadata:
 ## 工作流
 
 1. 确认输入文件类型：支持 `.md`、`.markdown`、`.docx`。
-2. 确认可用 Python 环境已安装依赖。可在技能目录执行 `python -m pip install -r requirements.txt`，或执行 `python -m pip install python-docx lxml`。
-3. 运行 `scripts/format_document.py` 生成格式化 `.docx`。
-4. 若出现 `lxml` 签名、导入或动态库错误，优先重装依赖：`python -m pip install --upgrade --force-reinstall --no-cache-dir python-docx lxml`。macOS 环境若反复报签名或隔离问题，建议更换干净 Python 环境后重新安装依赖。
-5. 表格默认执行：
+2. DOCX 输入优先运行 `scripts/format_document.py`。若当前环境导入 `python-docx/lxml` 失败，主脚本会自动调用 `scripts/format_docx_ooxml.py`，直接编辑 DOCX 包内 XML，不要求额外依赖。
+3. Markdown 输入需要创建新的 Word 文件，应确认可用 Python 环境已安装依赖。可在技能目录执行 `python -m pip install -r requirements.txt`，或执行 `python -m pip install python-docx lxml`。
+4. 若 macOS 环境反复出现 `lxml` 签名、导入或动态库错误，DOCX 输入不要反复重装依赖，直接使用标准库 OOXML 路径。仅在处理 Markdown 或必须完整重建文档时再修复依赖。
+5. 运行 `scripts/format_document.py` 生成格式化 `.docx`。
+6. 表格默认执行：
    - 表格文字样式使用 `表正文`
    - 表格行高固定为 `0.69厘米`
    - 可用 `--table-row-height-rule exact|at-least` 控制固定行高或最小行高
    - 表头可使用浅蓝底色，正文单元格左对齐，表头居中
-6. 标题处理：
+7. 标题处理：
    - Markdown `#` 映射为 `文档标题`
    - Markdown `##` 到 `######` 映射为 `Heading 1` 到 `Heading 5`
    - 默认将源文件手工编号或自动编号转换为 Word 自动编号，保证标题显示章节号且正文文本中不重复写编号
    - DOCX 输入按原段落样式和标题文本推断标题层级
    - DOCX 输入若使用 Word 自动标题编号，应在输出文件中创建 Word 自动编号定义，并将编号挂到标题段落，标题正文文本中不写入编号
    - 标题字体颜色应统一为黑色，避免继承 Word 内置 Heading 主题色
-7. 强规范化处理：
+8. 强规范化处理：
    - 默认启用 `--strict-normalize`
    - 对 Word 中混乱标题样式进行文本识别，支持 `第X章`、`第X节`、`1`、`1.1`、`1.1.1`、`一、`、`（一）` 等标题形式
    - 对未设置标题样式但明显加粗、居中或字号较大的短段落，作为疑似标题处理并写入报告
    - 识别常见列项，如 `a)`、`1)`、`（1）`、中点、长横线列项，并套用列项兼容样式
    - DOCX 输入若使用 Word 自动列表编号，应在输出文件中创建 Word 自动编号定义，并将一级列表设置为 `a)`、`b)`，二级列表设置为 `1)`、`2)`，列项正文文本中不写入编号
    - DOCX 输入会重建段落样式，减少原始缩进、字体、行距混乱对输出的影响
-8. 备注处理：
+9. 备注处理：
    - Markdown 中 `**备注：**`、`备注：`、`**编写提示：**`、`编写提示：` 使用 `3.1注-无编号注`
    - 避免在正文里重复写“注：备注：”
-9. 表格处理：
+10. 表格处理：
    - Markdown 标准表格会转换为 Word 表格
    - DOCX 输入尽量复制原始表格 XML 后再规范化，保留合并单元格等结构
    - 统一表格样式、表正文、行高和垂直居中
-10. 生成审计报告：
+11. 生成审计报告：
    - 建议使用 `--report report.json`
    - 建议同时使用 `--report-md report.md`
    - 报告包含推断标题、疑似视觉标题、推断列项、模糊短段落、表格处理数量、非文本对象统计、风险提示和审计结果
    - 自动化批处理可增加 `--fail-on-risk`，当源文件含图片、公式、页眉页脚、目录域、批注、修订等对象或固定表格行高可能截断文字时，脚本会生成文件和报告后返回失败码
-11. 如当前智能体具备 Word、LibreOffice 或文档渲染能力，应渲染页面并目视检查关键页。
-12. 最终只返回生成的 `.docx` 链接，除非用户要求中间产物。
+12. 如当前智能体具备 Word、LibreOffice 或文档渲染能力，应渲染页面并目视检查关键页。
+13. 最终只返回生成的 `.docx` 链接，除非用户要求中间产物。
 
 ## 命令示例
 
@@ -94,6 +95,16 @@ python scripts/format_document.py \
   --fail-on-risk
 ```
 
+无 `lxml` 的 DOCX 标准库路径：
+
+```bash
+python scripts/format_docx_ooxml.py \
+  --input "/path/to/input.docx" \
+  --output "/path/to/output.docx" \
+  --report "/path/to/report.json" \
+  --report-md "/path/to/report.md"
+```
+
 ## 校验要点
 
 - 标题前不能出现两套章节编号。
@@ -110,6 +121,7 @@ python scripts/format_document.py \
 - 渲染页中不得出现文字重叠、明显截断、空白异常页。
 - 若源文件含有用户禁用句式或特殊写法，按当前对话要求同步清理。
 - 页眉页脚、页码分节、复杂目录域、附录自动编号等内容不由本脚本自动生成，需要人工复核或另行处理。
+- 当环境存在 `lxml` 签名问题时，DOCX 输入应优先走 `format_docx_ooxml.py` 或让 `format_document.py` 自动降级，避免在不稳定环境里反复重装依赖。
 
 ## 已知边界
 
@@ -117,3 +129,4 @@ python scripts/format_document.py \
 - 图片和公式不作为主要转换对象处理，必要时需单独检查。
 - 脚本会尽量保留 DOCX 表格结构，但极复杂嵌套表格仍需渲染复核。
 - 强规范化会根据文本和格式推断标题，疑似标题会写入报告，不能完全替代人工确认。
+- 标准库 OOXML 路径直接修改原 DOCX 的 XML，优点是无需 `lxml` 且能保留图片、页眉页脚、域、批注等对象；边界是不会像完整重建模式那样重排 Markdown 表格或深度推断复杂内容结构。

@@ -5,6 +5,7 @@
 ## Features
 
 - Converts `.md`, `.markdown`, and `.docx` inputs to `.docx`.
+- DOCX inputs can use a stdlib-only OOXML path without `python-docx` or `lxml`.
 - Uses built-in WX document formatting rules.
 - Normalizes messy Word headings, body text, lists, notes, captions, and tables.
 - Creates Word automatic numbering for headings and lists so visible numbers are preserved without writing numbers into paragraph text.
@@ -14,15 +15,13 @@
 
 ## Requirements
 
+DOCX input only needs Python 3. Markdown input and full document rebuild mode require `python-docx` and `lxml`:
+
 ```bash
 python -m pip install -r requirements.txt
 ```
 
-If `lxml` import, signature, or dynamic library errors occur on macOS, repair dependencies with:
-
-```bash
-python -m pip install --upgrade --force-reinstall --no-cache-dir python-docx lxml
-```
+If `lxml` import, signature, or dynamic library errors occur on macOS, use the stdlib OOXML path for DOCX instead of reinstalling repeatedly.
 
 ## Usage
 
@@ -43,6 +42,16 @@ python scripts/format_document.py \
   --report "/path/to/report.json" \
   --report-md "/path/to/report.md" \
   --fail-on-risk
+```
+
+Run the stdlib-only DOCX path directly:
+
+```bash
+python scripts/format_docx_ooxml.py \
+  --input "/path/to/input.docx" \
+  --output "/path/to/output.docx" \
+  --report "/path/to/report.json" \
+  --report-md "/path/to/report.md"
 ```
 
 See `SKILL.md` for the full skill instructions.

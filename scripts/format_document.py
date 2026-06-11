@@ -6,8 +6,10 @@ from copy import deepcopy
 import json
 from pathlib import Path
 import re
+import sys
 import zipfile
 
+DOCX_IMPORT_ERROR = None
 try:
     from docx import Document
     from docx.enum.style import WD_STYLE_TYPE
@@ -19,13 +21,7 @@ try:
     from docx.table import Table
     from docx.text.paragraph import Paragraph
 except Exception as exc:
-    raise SystemExit(
-        "Failed to import python-docx or lxml.\n"
-        "Repair dependencies with:\n"
-        "  python -m pip install --upgrade --force-reinstall --no-cache-dir python-docx lxml\n"
-        "On macOS, signature or quarantine errors usually mean the local Python environment needs a clean reinstall.\n"
-        f"Original error: {exc}"
-    ) from exc
+    DOCX_IMPORT_ERROR = exc
 
 
 STYLE_BY_MD_LEVEL = {
@@ -941,6 +937,23 @@ def main() -> None:
     parser.add_argument("--table-row-height-rule", choices=["exact", "at-least"], default="exact")
     parser.add_argument("--fail-on-risk", action="store_true", help="Exit with an error if conversion risk warnings are detected.")
     args = parser.parse_args()
+
+    if DOCX_IMPORT_ERROR is not None:
+        if args.input.suffix.lower() == ".docx":
+            script_dir = Path(__file__).resolve().parent
+            if str(script_dir) not in sys.path:
+                sys.path.insert(0, str(script_dir))
+            from format_docx_ooxml import convert_docx_ooxml
+
+            convert_docx_ooxml(args.input, args.output, args.report, args.report_md)
+            print(args.output)
+            return
+        raise SystemExit(
+            "python-docx or lxml could not be imported, and the input is not DOCX.\n"
+            "DOCX input can use the built-in stdlib OOXML fallback.\n"
+            "Markdown input still requires python-docx to create a new Word document.\n"
+            f"Original error: {DOCX_IMPORT_ERROR}"
+        )
 
     out_doc = Document()
     ensure_fallback_styles(out_doc)
