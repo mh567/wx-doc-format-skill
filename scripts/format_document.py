@@ -106,37 +106,103 @@ def ensure_paragraph_style(doc: Document, name: str):
         return doc.styles.add_style(name, WD_STYLE_TYPE.PARAGRAPH)
 
 
+def set_spacing_xml(target, line: int | None = 300, line_rule: str = "auto", **attrs) -> None:
+    p_pr = target._element.get_or_add_pPr() if hasattr(target, "_element") else target._p.get_or_add_pPr()
+    spacing = p_pr.find(qn("w:spacing"))
+    if spacing is None:
+        spacing = OxmlElement("w:spacing")
+        p_pr.append(spacing)
+    for attr in [
+        "before",
+        "beforeLines",
+        "beforeAutospacing",
+        "after",
+        "afterLines",
+        "afterAutospacing",
+        "line",
+        "lineRule",
+    ]:
+        key = qn(f"w:{attr}")
+        if key in spacing.attrib:
+            del spacing.attrib[key]
+    if line is not None:
+        spacing.set(qn("w:line"), str(line))
+        spacing.set(qn("w:lineRule"), line_rule)
+    for attr, value in attrs.items():
+        if value is not None:
+            spacing.set(qn(f"w:{attr}"), str(value))
+
+
+def set_standard_spacing(target) -> None:
+    set_spacing_xml(target, line=300, line_rule="auto")
+
+
+def set_heading_spacing(target, style_name: str | None) -> None:
+    if style_name == "Heading 1":
+        set_spacing_xml(
+            target,
+            line=300,
+            line_rule="auto",
+            before=50,
+            beforeLines=50,
+            beforeAutospacing=0,
+            after=50,
+            afterLines=50,
+            afterAutospacing=0,
+        )
+    else:
+        set_spacing_xml(
+            target,
+            line=300,
+            line_rule="auto",
+            beforeLines=0,
+            beforeAutospacing=0,
+            afterLines=0,
+            afterAutospacing=0,
+        )
+
+
+def set_caption_spacing(target) -> None:
+    set_spacing_xml(target, line=240, line_rule="auto", before=50, beforeLines=50, after=50, afterLines=50)
+
+
+def set_table_body_spacing(target) -> None:
+    set_spacing_xml(target, line=0, line_rule="atLeast")
+
+
+def set_note_spacing(target) -> None:
+    set_spacing_xml(target, line=300, line_rule="auto", before=448)
+
+
 def ensure_fallback_styles(doc: Document) -> None:
     normal = doc.styles["Normal"]
     set_style_fonts(normal, east_asia="宋体", size_pt=12, bold=False)
     normal.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
     normal.paragraph_format.first_line_indent = Cm(1.13)
-    normal.paragraph_format.line_spacing = 1.25
+    set_standard_spacing(normal)
 
     title = ensure_paragraph_style(doc, "文档标题")
     set_style_fonts(title, east_asia="黑体", size_pt=14, bold=False)
     title.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
     title.paragraph_format.left_indent = Pt(0)
     title.paragraph_format.first_line_indent = Pt(0)
-    title.paragraph_format.line_spacing = 1.25
+    set_standard_spacing(title)
 
     note = ensure_paragraph_style(doc, "3.1注-无编号注")
     set_style_fonts(note, east_asia="宋体", size_pt=10.5, bold=False)
-    note.paragraph_format.space_before = Cm(0.79)
     note.paragraph_format.left_indent = Cm(1.53)
     note.paragraph_format.first_line_indent = Cm(-0.74)
+    set_note_spacing(note)
 
     table_body = ensure_paragraph_style(doc, "表正文")
     set_style_fonts(table_body, east_asia="宋体", size_pt=10.5, bold=False)
     table_body.paragraph_format.first_line_indent = Pt(0)
-    table_body.paragraph_format.line_spacing = 0
+    set_table_body_spacing(table_body)
 
     caption = ensure_paragraph_style(doc, "Caption")
     set_style_fonts(caption, east_asia="黑体", size_pt=12, bold=False)
     caption.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    caption.paragraph_format.line_spacing = 1.0
-    caption.paragraph_format.space_before = Pt(6)
-    caption.paragraph_format.space_after = Pt(6)
+    set_caption_spacing(caption)
 
     heading_indents = {
         "Heading 1": 0.762,
@@ -150,13 +216,7 @@ def ensure_fallback_styles(doc: Document) -> None:
         set_style_fonts(style, east_asia="黑体", size_pt=12, bold=False)
         style.paragraph_format.left_indent = Cm(indent_cm)
         style.paragraph_format.first_line_indent = Cm(-indent_cm)
-        style.paragraph_format.line_spacing = 1.25
-        if name == "Heading 1":
-            style.paragraph_format.space_before = Pt(2.5)
-            style.paragraph_format.space_after = Pt(2.5)
-        else:
-            style.paragraph_format.space_before = Pt(0)
-            style.paragraph_format.space_after = Pt(0)
+        set_heading_spacing(style, name)
 
     for name, left_cm, hanging_cm in [
         ("1.1一级列项-编号", 1.6474722222222222, -0.8008055555555555),
@@ -168,7 +228,7 @@ def ensure_fallback_styles(doc: Document) -> None:
         set_style_fonts(style, east_asia="宋体", size_pt=12, bold=False)
         style.paragraph_format.left_indent = Cm(left_cm)
         style.paragraph_format.first_line_indent = Cm(hanging_cm)
-        style.paragraph_format.line_spacing = 1.25
+        set_standard_spacing(style)
 
 
 def apply_page_setup(doc: Document) -> None:
@@ -408,41 +468,39 @@ def normalize_paragraph(paragraph: Paragraph, role: str, style_name: str | None 
         paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
         paragraph.paragraph_format.left_indent = Pt(0)
         paragraph.paragraph_format.first_line_indent = Pt(0)
-        paragraph.paragraph_format.line_spacing = 1.25
+        set_standard_spacing(paragraph)
         for run in paragraph.runs:
             set_run_fonts(run, east_asia="黑体", size_pt=14, bold=False)
     elif role == "heading":
         if style_name:
             paragraph.style = style_name
-        paragraph.paragraph_format.line_spacing = 1.25
+        set_heading_spacing(paragraph, style_name)
         for run in paragraph.runs:
             set_run_fonts(run, east_asia="黑体", size_pt=12, bold=False)
     elif role == "note":
         paragraph.style = "3.1注-无编号注"
-        paragraph.paragraph_format.space_before = Cm(0.79)
         paragraph.paragraph_format.left_indent = Cm(1.53)
         paragraph.paragraph_format.first_line_indent = Cm(-0.74)
+        set_note_spacing(paragraph)
         for run in paragraph.runs:
             set_run_fonts(run, east_asia="宋体", size_pt=10.5, bold=False)
     elif role == "caption":
         paragraph.style = "Caption"
         paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        paragraph.paragraph_format.line_spacing = 1.0
-        paragraph.paragraph_format.space_before = Pt(6)
-        paragraph.paragraph_format.space_after = Pt(6)
+        set_caption_spacing(paragraph)
         for run in paragraph.runs:
             set_run_fonts(run, east_asia="黑体", size_pt=12, bold=False)
     elif role == "list":
         if style_name:
             paragraph.style = style_name
-        paragraph.paragraph_format.line_spacing = 1.25
+        set_standard_spacing(paragraph)
         for run in paragraph.runs:
             set_run_fonts(run, east_asia="宋体", size_pt=12, bold=False)
     else:
         paragraph.style = "Normal"
         paragraph.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
         paragraph.paragraph_format.first_line_indent = Cm(1.13)
-        paragraph.paragraph_format.line_spacing = 1.25
+        set_standard_spacing(paragraph)
         for run in paragraph.runs:
             set_run_fonts(run, east_asia="宋体", size_pt=12, bold=False)
 
@@ -470,7 +528,7 @@ def normalize_table(table: Table, row_height_cm: float, row_height_rule: str) ->
                 paragraph.style = "表正文"
                 paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER if ri == 0 else WD_ALIGN_PARAGRAPH.LEFT
                 paragraph.paragraph_format.first_line_indent = Pt(0)
-                paragraph.paragraph_format.line_spacing = 0
+                set_table_body_spacing(paragraph)
                 for run in paragraph.runs:
                     rpr = run._element.rPr
                     if rpr is not None:
