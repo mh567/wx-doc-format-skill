@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 from copy import deepcopy
 import json
+import os
 from pathlib import Path
 import re
 import sys
@@ -22,6 +23,26 @@ try:
     from docx.text.paragraph import Paragraph
 except Exception as exc:
     DOCX_IMPORT_ERROR = exc
+
+
+def maybe_reexec_with_skill_venv() -> None:
+    if DOCX_IMPORT_ERROR is None:
+        return
+    if os.environ.get("WX_DOC_FORMAT_NO_REEXEC") == "1":
+        return
+    script_path = Path(__file__).resolve()
+    skill_dir = script_path.parent.parent
+    candidates = []
+    env_venv = os.environ.get("WX_DOC_FORMAT_VENV")
+    if env_venv:
+        candidates.append(Path(env_venv) / "bin" / "python")
+    candidates.append(skill_dir / ".venv" / "bin" / "python")
+    current = Path(sys.executable).resolve()
+    for candidate in candidates:
+        if candidate.exists() and candidate.resolve() != current:
+            env = os.environ.copy()
+            env["WX_DOC_FORMAT_NO_REEXEC"] = "1"
+            os.execve(str(candidate), [str(candidate), str(script_path), *sys.argv[1:]], env)
 
 
 STYLE_BY_MD_LEVEL = {
@@ -1091,6 +1112,8 @@ def main() -> None:
     parser.add_argument("--fail-on-risk", action="store_true", help="Exit with an error if conversion risk warnings are detected.")
     args = parser.parse_args()
 
+    maybe_reexec_with_skill_venv()
+
     if DOCX_IMPORT_ERROR is not None:
         if args.input.suffix.lower() == ".docx":
             script_dir = Path(__file__).resolve().parent
@@ -1103,8 +1126,9 @@ def main() -> None:
             return
         raise SystemExit(
             "python-docx or lxml could not be imported, and the input is not DOCX.\n"
-            "DOCX input can use the built-in stdlib OOXML fallback.\n"
-            "Markdown input still requires python-docx to create a new Word document.\n"
+            "Run scripts/bootstrap_macos_lxml.sh to prepare an isolated best-effect environment.\n"
+            "You can also set WX_DOC_FORMAT_VENV to a venv that contains python-docx and lxml.\n"
+            "Markdown input requires python-docx and lxml to create a new Word document.\n"
             f"Original error: {DOCX_IMPORT_ERROR}"
         )
 

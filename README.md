@@ -5,7 +5,9 @@
 ## Features
 
 - Converts `.md`, `.markdown`, and `.docx` inputs to `.docx`.
-- DOCX inputs can use a stdlib-only OOXML path without `python-docx` or `lxml`.
+- Uses `python-docx` and `lxml` as the best-effect conversion path.
+- Provides a macOS bootstrap script that creates an isolated `.venv`, installs binary wheels, removes quarantine attributes, signs native modules ad hoc, and verifies imports.
+- Keeps a stdlib-only OOXML path as a last-resort DOCX fallback.
 - Uses built-in WX document formatting rules.
 - Normalizes messy Word headings, body text, lists, notes, captions, and tables.
 - Creates Word automatic numbering for headings and lists so visible numbers are preserved without writing numbers into paragraph text.
@@ -15,13 +17,23 @@
 
 ## Requirements
 
-DOCX input only needs Python 3. Markdown input and full document rebuild mode require `python-docx` and `lxml`:
+Best-effect conversion requires Python 3, `python-docx`, and `lxml`.
+
+On macOS or WorkBuddy, run the bundled bootstrap first:
+
+```bash
+./scripts/bootstrap_macos_lxml.sh
+```
+
+The main script automatically re-executes with `./.venv/bin/python` when the current Python cannot import `python-docx` or `lxml`.
+
+You can also install dependencies manually:
 
 ```bash
 python -m pip install -r requirements.txt
 ```
 
-If `lxml` import, signature, or dynamic library errors occur on macOS, use the stdlib OOXML path for DOCX instead of reinstalling repeatedly.
+If `lxml` import, signature, or dynamic library errors occur on macOS, rerun the bootstrap script to repair the isolated environment. The OOXML path is kept for DOCX fallback when the isolated environment is still unavailable.
 
 ## Usage
 
@@ -44,7 +56,7 @@ python scripts/format_document.py \
   --fail-on-risk
 ```
 
-Run the stdlib-only DOCX path directly:
+Run the stdlib-only DOCX fallback directly:
 
 ```bash
 python scripts/format_docx_ooxml.py \
