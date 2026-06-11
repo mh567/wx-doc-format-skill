@@ -1,13 +1,13 @@
 ---
 name: wx-doc-format
-description: Use when the user says “wx文档格式” or asks to convert Markdown, DOCX, or Word documents into a WX-style formatted .docx. Designed for any agent with Python. Uses python-docx and lxml as the best-effect conversion path, includes a macOS bootstrap script for isolated lxml installation and signature repair, and keeps stdlib-only OOXML as a last-resort DOCX fallback. Uses fixed scripts for repeatable formatting, built-in WX formatting rules, strict normalization, XML-level spacing constraints, Markdown table conversion, heading and list inference, note styles, table body style, fixed table row height, JSON and Markdown audit reports, and render-based verification.
+description: Use when the user says “wx文档格式” or asks to convert Markdown, DOCX, or Word documents into a WX-style formatted .docx. Designed for any agent with Python. Uses python-docx and lxml as the best-effect conversion path, includes a macOS bootstrap script for isolated lxml installation and signature repair, and includes an internal DOCX emergency fallback for dependency failures. Uses fixed scripts for repeatable formatting, built-in WX formatting rules, strict normalization, XML-level spacing constraints, Markdown table conversion, heading and list inference, note styles, table body style, fixed table row height, JSON and Markdown audit reports, and render-based verification.
 metadata:
   short-description: Convert MD or DOCX into WX Word format
 ---
 
 # WX 文档格式
 
-当用户说“wx文档格式”，或要求把 `.md`、`.docx`、Word 文件转换成 WX 文档格式并输出 `.docx` 时，使用本技能。本技能面向通用智能体设计，只要求能运行 Python。最佳效果路径使用 `python-docx` 与 `lxml`，DOCX 输入在依赖不可用时才使用纯标准库 OOXML 兜底路径。
+当用户说“wx文档格式”，或要求把 `.md`、`.docx`、Word 文件转换成 WX 文档格式并输出 `.docx` 时，使用本技能。本技能面向通用智能体设计，只要求能运行 Python。最佳效果路径使用 `python-docx` 与 `lxml`；DOCX 输入在依赖不可用时可由主脚本自动启用内部应急兜底路径。
 
 ## 固化格式规则
 
@@ -29,9 +29,9 @@ metadata:
 ## 工作流
 
 1. 确认输入文件类型：支持 `.md`、`.markdown`、`.docx`。
-2. 首次在 macOS 或 WorkBuddy 环境使用时，优先执行 `scripts/bootstrap_macos_lxml.sh`，在技能目录创建隔离 `.venv`，安装二进制版 `python-docx/lxml`，清理 quarantine 属性，并对 native extension 做 ad-hoc codesign。
+2. 首次在 macOS 或受限 Python 环境使用时，优先执行 `scripts/bootstrap_macos_lxml.sh`，在技能目录创建隔离 `.venv`，安装二进制版 `python-docx/lxml`，清理 quarantine 属性，并对 native extension 做 ad-hoc codesign。
 3. DOCX 和 Markdown 输入优先运行 `scripts/format_document.py`。若当前 Python 导入 `python-docx/lxml` 失败，主脚本会自动查找 `WX_DOC_FORMAT_VENV` 或技能目录 `.venv/bin/python` 并重新执行，从而使用 lxml 最佳效果路径。
-4. 若隔离环境仍不可用，DOCX 输入才会自动调用 `scripts/format_docx_ooxml.py`，直接编辑 DOCX 包内 XML 作为兜底。
+4. 若隔离环境仍不可用，DOCX 输入才会由主脚本自动启用内部应急兜底路径；正常使用无需直接调用该路径。
 5. Markdown 输入需要创建新的 Word 文件，必须使用可导入 `python-docx/lxml` 的 Python 环境。可执行 `scripts/bootstrap_macos_lxml.sh`，或在技能目录执行 `python -m pip install -r requirements.txt`。
 6. 运行 `scripts/format_document.py` 生成格式化 `.docx`。
 7. 表格默认执行：
@@ -71,7 +71,7 @@ metadata:
 
 ## 命令示例
 
-macOS 或 WorkBuddy 首次准备最佳效果环境：
+macOS 或受限 Python 环境首次准备最佳效果环境：
 
 ```bash
 ./scripts/bootstrap_macos_lxml.sh
@@ -105,16 +105,6 @@ python scripts/format_document.py \
   --fail-on-risk
 ```
 
-仅在隔离 lxml 环境仍不可用时，直接运行 DOCX 标准库兜底路径：
-
-```bash
-python scripts/format_docx_ooxml.py \
-  --input "/path/to/input.docx" \
-  --output "/path/to/output.docx" \
-  --report "/path/to/report.json" \
-  --report-md "/path/to/report.md"
-```
-
 ## 校验要点
 
 - 标题前不能出现两套章节编号。
@@ -139,4 +129,4 @@ python scripts/format_docx_ooxml.py \
 - 图片和公式不作为主要转换对象处理，必要时需单独检查。
 - 脚本会尽量保留 DOCX 表格结构，但极复杂嵌套表格仍需渲染复核。
 - 强规范化会根据文本和格式推断标题，疑似标题会写入报告，不能完全替代人工确认。
-- 标准库 OOXML 路径直接修改原 DOCX 的 XML，用于依赖不可用时保留图片、页眉页脚、域、批注等对象；边界是不会像完整重建模式那样重排 Markdown 表格或深度推断复杂内容结构。
+- 内部应急兜底路径仅面向 DOCX 依赖故障场景，用于尽量保留图片、页眉页脚、域、批注等对象；边界是不会像完整重建模式那样重排 Markdown 表格或深度推断复杂内容结构。

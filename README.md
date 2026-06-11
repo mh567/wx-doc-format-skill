@@ -7,7 +7,7 @@
 - Converts `.md`, `.markdown`, and `.docx` inputs to `.docx`.
 - Uses `python-docx` and `lxml` as the best-effect conversion path.
 - Provides a macOS bootstrap script that creates an isolated `.venv`, installs binary wheels, removes quarantine attributes, signs native modules ad hoc, and verifies imports.
-- Keeps a stdlib-only OOXML path as a last-resort DOCX fallback.
+- Includes an internal DOCX emergency fallback for dependency failures.
 - Uses built-in WX document formatting rules.
 - Normalizes messy Word headings, body text, lists, notes, captions, and tables.
 - Creates Word automatic numbering for headings and lists so visible numbers are preserved without writing numbers into paragraph text.
@@ -19,7 +19,7 @@
 
 Best-effect conversion requires Python 3, `python-docx`, and `lxml`.
 
-On macOS or WorkBuddy, run the bundled bootstrap first:
+On macOS or restricted Python environments, run the bundled bootstrap first:
 
 ```bash
 ./scripts/bootstrap_macos_lxml.sh
@@ -33,7 +33,7 @@ You can also install dependencies manually:
 python -m pip install -r requirements.txt
 ```
 
-If `lxml` import, signature, or dynamic library errors occur on macOS, rerun the bootstrap script to repair the isolated environment. The OOXML path is kept for DOCX fallback when the isolated environment is still unavailable.
+If `lxml` import, signature, or dynamic library errors occur on macOS, rerun the bootstrap script to repair the isolated environment. For DOCX inputs, the main script can still use an internal emergency fallback when the isolated environment is unavailable.
 
 ## Usage
 
@@ -54,16 +54,6 @@ python scripts/format_document.py \
   --report "/path/to/report.json" \
   --report-md "/path/to/report.md" \
   --fail-on-risk
-```
-
-Run the stdlib-only DOCX fallback directly:
-
-```bash
-python scripts/format_docx_ooxml.py \
-  --input "/path/to/input.docx" \
-  --output "/path/to/output.docx" \
-  --report "/path/to/report.json" \
-  --report-md "/path/to/report.md"
 ```
 
 See `SKILL.md` for the full skill instructions.
