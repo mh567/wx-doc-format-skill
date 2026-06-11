@@ -7,7 +7,7 @@
 - Converts `.md`, `.markdown`, and `.docx` inputs to `.docx`.
 - Uses built-in WX document formatting rules.
 - Normalizes messy Word headings, body text, lists, notes, captions, and tables.
-- Materializes Word automatic heading and list numbering so visible numbers are preserved after conversion.
+- Creates Word automatic numbering for headings and lists so visible numbers are preserved without writing numbers into paragraph text.
 - Applies WX heading hanging indents, body first-line indent, list indents, table body style, and fixed table row height.
 - Generates JSON and Markdown audit reports.
 - Detects conversion risks such as images, drawings, fields, headers, footers, comments, tracked changes, and possible table clipping.

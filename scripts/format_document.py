@@ -202,6 +202,12 @@ def heading_style_for_level(level: int) -> str:
     return f"Heading {max(1, min(level, 5))}"
 
 
+def strip_heading_marker(text: str) -> str:
+    text = re.sub(r"^\d+(?:\.\d+)*\s+", "", text, count=1)
+    text = re.sub(r"^第[一二三四五六七八九十百千万0-9]+[章节]\s*[:：、.\s]?", "", text, count=1)
+    return text
+
+
 def looks_like_list_item(text: str) -> bool:
     return any(pattern.match(text) for pattern in LIST_PATTERNS)
 
@@ -243,39 +249,108 @@ def heading_level_from_style(style_name: str) -> int | None:
     return None
 
 
-def materialize_heading_number(text: str, level: int, counters: list[int]) -> str:
-    if existing_heading_number(text):
-        return text
-    safe_level = max(1, min(level, len(counters)))
-    counters[safe_level - 1] += 1
-    for index in range(safe_level, len(counters)):
-        counters[index] = 0
-    prefix = ".".join(str(value) for value in counters[:safe_level] if value)
-    return f"{prefix}\t{text}" if prefix else text
+def strip_list_marker(text: str) -> str:
+    return re.sub(r"^([a-zA-Z]\)|\d+\)|[（(]\d+[）)]|[·•]|[\-\uff0d\u2014]{1,2})\s*", "", text, count=1)
 
 
-def existing_list_marker(text: str) -> bool:
-    return looks_like_list_item(text)
+def list_level_from_text(text: str, fallback: int | None = None) -> int:
+    if re.match(r"^\d+\)\s*\S+|^[（(]\d+[）)]\s*\S+", text):
+        return 1
+    return int(fallback or 0)
 
 
-def letter_marker(index: int) -> str:
-    alphabet = "abcdefghijklmnopqrstuvwxyz"
-    if index <= len(alphabet):
-        return alphabet[index - 1]
-    first = alphabet[(index - 1) // len(alphabet) - 1]
-    second = alphabet[(index - 1) % len(alphabet)]
-    return first + second
+def next_numbering_id(numbering, tag_name: str, attr_name: str) -> int:
+    values = []
+    for element in numbering.findall(qn(tag_name)):
+        raw = element.get(qn(attr_name))
+        if raw is not None and raw.isdigit():
+            values.append(int(raw))
+    return (max(values) + 1) if values else 1
 
 
-def materialize_list_marker(text: str, num_id: int | None, ilvl: int | None, counters: dict[tuple[int | None, int], int]) -> str:
-    if existing_list_marker(text):
-        return re.sub(r"^([a-zA-Z]\)|\d+\)|[（(]\d+[）)]|[·•]|[\-\uff0d\u2014]{1,2})\s*", r"\1\t", text, count=1)
-    safe_level = int(ilvl or 0)
-    key = (num_id, safe_level)
-    counters[key] = counters.get(key, 0) + 1
-    if safe_level == 0:
-        return f"{letter_marker(counters[key])})\t{text}"
-    return f"{counters[key]})\t{text}"
+def append_text_child(parent, tag: str, attr: str, value: str):
+    child = OxmlElement(tag)
+    child.set(qn(attr), value)
+    parent.append(child)
+    return child
+
+
+def append_level(parent, ilvl: int, num_fmt: str, lvl_text: str, left_twips: int, hanging_twips: int, style_id: str | None = None) -> None:
+    level = OxmlElement("w:lvl")
+    level.set(qn("w:ilvl"), str(ilvl))
+    append_text_child(level, "w:start", "w:val", "1")
+    append_text_child(level, "w:numFmt", "w:val", num_fmt)
+    append_text_child(level, "w:lvlText", "w:val", lvl_text)
+    append_text_child(level, "w:lvlJc", "w:val", "left")
+    if style_id:
+        append_text_child(level, "w:pStyle", "w:val", style_id)
+    p_pr = OxmlElement("w:pPr")
+    ind = OxmlElement("w:ind")
+    ind.set(qn("w:left"), str(left_twips))
+    ind.set(qn("w:hanging"), str(hanging_twips))
+    p_pr.append(ind)
+    level.append(p_pr)
+    parent.append(level)
+
+
+def append_num(numbering, abstract_num_id: int, num_id: int) -> None:
+    num = OxmlElement("w:num")
+    num.set(qn("w:numId"), str(num_id))
+    abstract_ref = OxmlElement("w:abstractNumId")
+    abstract_ref.set(qn("w:val"), str(abstract_num_id))
+    num.append(abstract_ref)
+    numbering.append(num)
+
+
+def ensure_auto_numbering(doc: Document) -> dict:
+    numbering = doc.part.numbering_part.element
+    abstract_id = next_numbering_id(numbering, "w:abstractNum", "w:abstractNumId")
+    num_id = next_numbering_id(numbering, "w:num", "w:numId")
+
+    heading_abs = OxmlElement("w:abstractNum")
+    heading_abs.set(qn("w:abstractNumId"), str(abstract_id))
+    append_text_child(heading_abs, "w:multiLevelType", "w:val", "multilevel")
+    for ilvl, left in enumerate([432, 575, 720, 864, 1008, 1151]):
+        tokens = ".".join(f"%{index}" for index in range(1, ilvl + 2))
+        append_level(heading_abs, ilvl, "decimal", f"{tokens} ", left, left, f"Heading{ilvl + 1}")
+    numbering.append(heading_abs)
+    append_num(numbering, abstract_id, num_id)
+    heading_num_id = num_id
+
+    letter_abs_id = abstract_id + 1
+    letter_num_id = num_id + 1
+    letter_abs = OxmlElement("w:abstractNum")
+    letter_abs.set(qn("w:abstractNumId"), str(letter_abs_id))
+    append_text_child(letter_abs, "w:multiLevelType", "w:val", "singleLevel")
+    append_level(letter_abs, 0, "lowerLetter", "%1)", 934, 454, None)
+    numbering.append(letter_abs)
+    append_num(numbering, letter_abs_id, letter_num_id)
+
+    decimal_abs_id = abstract_id + 2
+    decimal_num_id = num_id + 2
+    decimal_abs = OxmlElement("w:abstractNum")
+    decimal_abs.set(qn("w:abstractNumId"), str(decimal_abs_id))
+    append_text_child(decimal_abs, "w:multiLevelType", "w:val", "singleLevel")
+    append_level(decimal_abs, 0, "decimal", "%1)", 1385, 425, None)
+    numbering.append(decimal_abs)
+    append_num(numbering, decimal_abs_id, decimal_num_id)
+
+    return {"heading": heading_num_id, "list_letter": letter_num_id, "list_decimal": decimal_num_id}
+
+
+def apply_numbering(paragraph: Paragraph, num_id: int, ilvl: int = 0) -> None:
+    p_pr = paragraph._p.get_or_add_pPr()
+    existing = p_pr.find(qn("w:numPr"))
+    if existing is not None:
+        p_pr.remove(existing)
+    num_pr = OxmlElement("w:numPr")
+    ilvl_el = OxmlElement("w:ilvl")
+    ilvl_el.set(qn("w:val"), str(ilvl))
+    num_id_el = OxmlElement("w:numId")
+    num_id_el.set(qn("w:val"), str(num_id))
+    num_pr.append(ilvl_el)
+    num_pr.append(num_id_el)
+    p_pr.append(num_pr)
 
 
 def paragraph_direct_format_score(paragraph: Paragraph) -> tuple[bool, float | None]:
@@ -394,7 +469,7 @@ def new_report() -> dict:
         "inferred_headings": [],
         "suspect_visual_headings": [],
         "inferred_lists": [],
-        "materialized_numbers": [],
+        "automatic_numbers": [],
         "ambiguous_short_paragraphs": [],
         "tables_processed": 0,
         "non_text_objects": {},
@@ -512,7 +587,7 @@ def write_markdown_report(report: dict, path: Path) -> None:
         ("推断标题", "inferred_headings"),
         ("疑似视觉标题", "suspect_visual_headings"),
         ("推断列项", "inferred_lists"),
-        ("物化编号", "materialized_numbers"),
+        ("自动编号", "automatic_numbers"),
         ("模糊短段落", "ambiguous_short_paragraphs"),
     ]:
         items = report.get(key, [])
@@ -552,9 +627,10 @@ def write_markdown_report(report: dict, path: Path) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def add_paragraph(doc: Document, text: str, style: str | None = None, role: str = "body") -> None:
+def add_paragraph(doc: Document, text: str, style: str | None = None, role: str = "body") -> Paragraph:
     paragraph = doc.add_paragraph(text, style=style)
     normalize_paragraph(paragraph, role, style)
+    return paragraph
 
 
 def is_md_table_start(lines: list[str], index: int) -> bool:
@@ -592,7 +668,7 @@ def add_table_from_rows(doc: Document, rows: list[list[str]], row_height_cm: flo
     normalize_table(table, row_height_cm, row_height_rule)
 
 
-def convert_md(src: Path, doc: Document, report: dict, row_height_cm: float, row_height_rule: str) -> None:
+def convert_md(src: Path, doc: Document, report: dict, row_height_cm: float, row_height_rule: str, numbering_ids: dict) -> None:
     lines = src.read_text(encoding="utf-8").splitlines()
     index = 0
     while index < len(lines):
@@ -612,19 +688,29 @@ def convert_md(src: Path, doc: Document, report: dict, row_height_cm: float, row
             level = len(match.group(1))
             text = match.group(2).strip()
             role = "title" if level == 1 else "heading"
-            add_paragraph(doc, text, STYLE_BY_MD_LEVEL.get(level, "Heading 5"), role)
+            paragraph = add_paragraph(doc, strip_heading_marker(text), STYLE_BY_MD_LEVEL.get(level, "Heading 5"), role)
+            if role == "heading":
+                apply_numbering(paragraph, numbering_ids["heading"], min(level - 2, 5))
+                report["automatic_numbers"].append({"type": "heading", "text": strip_heading_marker(text), "source": "md-heading"})
             index += 1
             continue
         inferred_level = heading_level_from_text(line)
         if inferred_level is not None:
-            add_paragraph(doc, line, heading_style_for_level(inferred_level), "heading")
+            clean_text = strip_heading_marker(line)
+            paragraph = add_paragraph(doc, clean_text, heading_style_for_level(inferred_level), "heading")
+            apply_numbering(paragraph, numbering_ids["heading"], inferred_level - 1)
             report["inferred_headings"].append({"text": line, "level": inferred_level, "source": "md-text"})
+            report["automatic_numbers"].append({"type": "heading", "text": clean_text, "source": "md-text"})
             index += 1
             continue
         role = "note" if line.startswith(("**备注：**", "**编写提示：**", "备注：", "编写提示：")) else "body"
         if role == "body" and looks_like_list_item(line):
-            add_paragraph(doc, line, list_style_for_text(line), "list")
+            list_level = list_level_from_text(line)
+            style_name = "2.1二级列项-有编号" if list_level else "1.1一级列项-编号"
+            paragraph = add_paragraph(doc, strip_list_marker(line), style_name, "list")
+            apply_numbering(paragraph, numbering_ids["list_decimal" if list_level else "list_letter"], 0)
             report["inferred_lists"].append({"text": line, "source": "md-text"})
+            report["automatic_numbers"].append({"type": "list", "text": strip_list_marker(line), "source": "md-text"})
         else:
             add_paragraph(doc, clean_note_prefix(line), role=role)
         index += 1
@@ -670,11 +756,9 @@ def append_table_clone(doc: Document, table: Table) -> Table:
     return Table(new_el, doc)
 
 
-def convert_docx(src: Path, doc: Document, row_height_cm: float, row_height_rule: str, strict_normalize: bool, report: dict) -> None:
+def convert_docx(src: Path, doc: Document, row_height_cm: float, row_height_rule: str, strict_normalize: bool, report: dict, numbering_ids: dict) -> None:
     src_doc = Document(src)
     seen_content = False
-    heading_counters = [0, 0, 0, 0, 0, 0]
-    list_counters: dict[tuple[int | None, int], int] = {}
     for block in iter_blocks(src_doc):
         if isinstance(block, Paragraph):
             text = block.text.strip()
@@ -689,17 +773,29 @@ def convert_docx(src: Path, doc: Document, row_height_cm: float, row_height_rule
             text, style, role = infer_docx_role(block, strict_normalize, report)
             if role == "heading" and num_id is not None:
                 heading_level = heading_level_from_style(style or "") or ((num_level or 0) + 1)
-                numbered_text = materialize_heading_number(text, heading_level, heading_counters)
-                if numbered_text != text:
-                    report["materialized_numbers"].append({"type": "heading", "text": numbered_text})
-                    text = numbered_text
+                text = strip_heading_marker(text)
+                paragraph = add_paragraph(doc, text, style, role)
+                apply_numbering(paragraph, numbering_ids["heading"], heading_level - 1)
+                report["automatic_numbers"].append({"type": "heading", "text": text, "source": "docx-numbering"})
+                seen_content = True
+                continue
             elif role == "list":
-                text = materialize_list_marker(text, num_id, num_level, list_counters)
-                report["materialized_numbers"].append({"type": "list", "text": text})
-            else:
-                for key in list(list_counters):
-                    if key[0] is None:
-                        del list_counters[key]
+                list_level = list_level_from_text(text, num_level)
+                text = strip_list_marker(text)
+                style = "2.1二级列项-有编号" if list_level else "1.1一级列项-编号"
+                paragraph = add_paragraph(doc, text, style, role)
+                apply_numbering(paragraph, numbering_ids["list_decimal" if list_level else "list_letter"], 0)
+                report["automatic_numbers"].append({"type": "list", "text": text, "source": "docx-numbering" if num_id is not None else "docx-text"})
+                seen_content = True
+                continue
+            elif role == "heading" and existing_heading_number(text):
+                heading_level = heading_level_from_style(style or "") or heading_level_from_text(text) or 1
+                text = strip_heading_marker(text)
+                paragraph = add_paragraph(doc, text, style, role)
+                apply_numbering(paragraph, numbering_ids["heading"], heading_level - 1)
+                report["automatic_numbers"].append({"type": "heading", "text": text, "source": "docx-text"})
+                seen_content = True
+                continue
             add_paragraph(doc, text, style, role)
             seen_content = True
         else:
@@ -723,15 +819,16 @@ def main() -> None:
 
     out_doc = Document()
     ensure_fallback_styles(out_doc)
+    numbering_ids = ensure_auto_numbering(out_doc)
     apply_page_setup(out_doc)
     report = new_report()
     report["non_text_objects"] = scan_non_text_objects(args.input)
 
     suffix = args.input.suffix.lower()
     if suffix in {".md", ".markdown"}:
-        convert_md(args.input, out_doc, report, args.table_row_height_cm, args.table_row_height_rule)
+        convert_md(args.input, out_doc, report, args.table_row_height_cm, args.table_row_height_rule, numbering_ids)
     elif suffix == ".docx":
-        convert_docx(args.input, out_doc, args.table_row_height_cm, args.table_row_height_rule, args.strict_normalize, report)
+        convert_docx(args.input, out_doc, args.table_row_height_cm, args.table_row_height_rule, args.strict_normalize, report, numbering_ids)
     else:
         raise SystemExit(f"Unsupported input type: {args.input.suffix}")
 
