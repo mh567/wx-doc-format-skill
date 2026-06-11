@@ -30,7 +30,7 @@ STYLE_BY_MD_LEVEL = {
     3: "Heading 2",
     4: "Heading 3",
     5: "Heading 4",
-    6: "Heading 5",
+    6: "Heading 6",
 }
 
 HEADING_PATTERNS = [
@@ -209,6 +209,27 @@ def set_note_spacing(target) -> None:
     )
 
 
+def set_numbered_note_spacing(target) -> None:
+    set_spacing_xml(
+        target,
+        line=300,
+        line_rule="auto",
+        before=448,
+        beforeAutospacing=0,
+        after=0,
+        afterLines=0,
+        afterAutospacing=0,
+    )
+
+
+def set_formula_spacing(target) -> None:
+    set_standard_spacing(target)
+
+
+def set_toc_spacing(target) -> None:
+    set_standard_spacing(target)
+
+
 def ensure_fallback_styles(doc: Document) -> None:
     normal = doc.styles["Normal"]
     set_style_fonts(normal, east_asia="宋体", size_pt=12, bold=False)
@@ -229,6 +250,18 @@ def ensure_fallback_styles(doc: Document) -> None:
     note.paragraph_format.first_line_indent = Cm(-0.74)
     set_note_spacing(note)
 
+    numbered_note = ensure_paragraph_style(doc, "3.2注-有编号注")
+    set_style_fonts(numbered_note, east_asia="宋体", size_pt=10.5, bold=False)
+    numbered_note.paragraph_format.left_indent = Cm(1.81)
+    numbered_note.paragraph_format.first_line_indent = Cm(-0.93)
+    set_numbered_note_spacing(numbered_note)
+
+    formula = ensure_paragraph_style(doc, "公式")
+    set_style_fonts(formula, east_asia="宋体", size_pt=12, bold=False)
+    formula.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    formula.paragraph_format.first_line_indent = Pt(0)
+    set_formula_spacing(formula)
+
     table_body = ensure_paragraph_style(doc, "表正文")
     set_style_fonts(table_body, east_asia="宋体", size_pt=10.5, bold=False)
     table_body.paragraph_format.first_line_indent = Pt(0)
@@ -245,13 +278,39 @@ def ensure_fallback_styles(doc: Document) -> None:
         "Heading 3": 1.27,
         "Heading 4": 1.524,
         "Heading 5": 1.778,
+        "Heading 6": 2.032,
     }
     for name, indent_cm in heading_indents.items():
-        style = doc.styles[name]
+        style = ensure_paragraph_style(doc, name)
         set_style_fonts(style, east_asia="黑体", size_pt=12, bold=False)
         style.paragraph_format.left_indent = Cm(indent_cm)
         style.paragraph_format.first_line_indent = Cm(-indent_cm)
         set_heading_spacing(style, name)
+
+    appendix_title = ensure_paragraph_style(doc, "附录标题")
+    set_style_fonts(appendix_title, east_asia="黑体", size_pt=14, bold=False)
+    appendix_title.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    appendix_title.paragraph_format.left_indent = Pt(0)
+    appendix_title.paragraph_format.first_line_indent = Pt(0)
+    set_standard_spacing(appendix_title)
+
+    for name, indent_cm in [
+        ("附录一级标题", 0.762),
+        ("附录二级标题", 1.0142361111111111),
+        ("附录三级标题", 1.27),
+    ]:
+        style = ensure_paragraph_style(doc, name)
+        set_style_fonts(style, east_asia="黑体", size_pt=12, bold=False)
+        style.paragraph_format.left_indent = Cm(indent_cm)
+        style.paragraph_format.first_line_indent = Cm(-indent_cm)
+        set_heading_spacing(style, "Heading 1" if name == "附录一级标题" else "Heading 2")
+
+    for level, indent_cm in [(1, 0), (2, 0.85), (3, 1.69), (4, 2.54)]:
+        style = ensure_paragraph_style(doc, f"TOC {level}")
+        set_style_fonts(style, east_asia="宋体", size_pt=12, bold=False)
+        style.paragraph_format.left_indent = Cm(indent_cm)
+        style.paragraph_format.first_line_indent = Pt(0)
+        set_toc_spacing(style)
 
     for name, left_cm, hanging_cm in [
         ("1.1一级列项-编号", 1.6474722222222222, -0.8008055555555555),
@@ -315,6 +374,24 @@ def list_style_for_text(text: str) -> str:
     if re.match(r"^[\-\uff0d\u2014]{1,2}\s*\S+", text):
         return "1.2一级列项-无编号"
     return "1.1一级列项-编号"
+
+
+def list_kind_for_text(text: str) -> str:
+    if re.match(r"^\d+\)\s*\S+|^[（(]\d+[）)]\s*\S+", text):
+        return "decimal"
+    if re.match(r"^[·•]\s*\S+", text):
+        return "bullet2"
+    if re.match(r"^[\-\uff0d\u2014]{1,2}\s*\S+", text):
+        return "dash"
+    return "letter"
+
+
+def is_formula_text(text: str) -> bool:
+    return bool(re.match(r"^\(?\d+\)?$", text) or re.search(r"公式\s*\(?\d+\)?", text))
+
+
+def is_appendix_title(text: str) -> bool:
+    return bool(re.match(r"^（?(资料性|规范性)）?$", text) or re.match(r"^附\s*录\s*[A-ZＡ-Ｚ]?", text))
 
 
 def existing_heading_number(text: str) -> bool:
@@ -519,6 +596,27 @@ def normalize_paragraph(paragraph: Paragraph, role: str, style_name: str | None 
         set_note_spacing(paragraph)
         for run in paragraph.runs:
             set_run_fonts(run, east_asia="宋体", size_pt=10.5, bold=False)
+    elif role == "numbered_note":
+        paragraph.style = "3.2注-有编号注"
+        paragraph.paragraph_format.left_indent = Cm(1.81)
+        paragraph.paragraph_format.first_line_indent = Cm(-0.93)
+        set_numbered_note_spacing(paragraph)
+        for run in paragraph.runs:
+            set_run_fonts(run, east_asia="宋体", size_pt=10.5, bold=False)
+    elif role == "formula":
+        paragraph.style = "公式"
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        paragraph.paragraph_format.first_line_indent = Pt(0)
+        set_formula_spacing(paragraph)
+        for run in paragraph.runs:
+            set_run_fonts(run, east_asia="宋体", size_pt=12, bold=False)
+    elif role == "appendix_title":
+        paragraph.style = "附录标题"
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        paragraph.paragraph_format.first_line_indent = Pt(0)
+        set_standard_spacing(paragraph)
+        for run in paragraph.runs:
+            set_run_fonts(run, east_asia="黑体", size_pt=14, bold=False)
     elif role == "caption":
         paragraph.style = "Caption"
         paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -537,7 +635,7 @@ def normalize_paragraph(paragraph: Paragraph, role: str, style_name: str | None 
         paragraph.paragraph_format.first_line_indent = Cm(1.13)
         set_standard_spacing(paragraph)
         for run in paragraph.runs:
-            set_run_fonts(run, east_asia="宋体", size_pt=12, bold=False)
+            set_run_fonts(run, east_asia="宋体", size_pt=12, bold=None)
 
 
 def set_cell_shading(cell, fill: str) -> None:
@@ -577,6 +675,7 @@ def new_report() -> dict:
         "inferred_lists": [],
         "automatic_numbers": [],
         "ambiguous_short_paragraphs": [],
+        "content_warnings": [],
         "tables_processed": 0,
         "non_text_objects": {},
         "risk_warnings": [],
@@ -615,6 +714,25 @@ def audit_document(doc: Document, row_height_cm: float, row_height_rule: str) ->
                             {"table": table_idx, "row": row_idx, "style": paragraph.style.name, "text": paragraph.text[:80]}
                         )
     return audit
+
+
+def collect_content_warnings(doc: Document) -> list[dict]:
+    texts = [paragraph.text.strip() for paragraph in doc.paragraphs if paragraph.text.strip()]
+    joined = "\n".join(texts)
+    warnings = []
+    if any(text in {"目次", "目录"} for text in texts):
+        warnings.append({"type": "toc", "message": "发现目录或目次，应确认目录层级缩进、页码和域更新状态。"})
+    if "引用文件" in joined or "依据文件" in joined:
+        warnings.append({"type": "references", "message": "发现引用文件或依据文件，应人工核对排序、标准号空格、正文引用对应关系。"})
+    if "术语" in joined or "缩略语" in joined:
+        warnings.append({"type": "terms", "message": "发现术语或缩略语章节，应人工核对术语定义和缩略语排序。"})
+    if "公式" in joined or any(re.match(r"^\(?\d+\)?$", text) for text in texts):
+        warnings.append({"type": "formula", "message": "发现公式或公式编号，应人工核对公式居中、编号右对齐和全文连续编号。"})
+    if any(text.startswith("附录") or re.match(r"^（?(资料性|规范性)）?$", text) for text in texts):
+        warnings.append({"type": "appendix", "message": "发现附录内容，应人工核对附录标题、附录编号、附录目录显示和页码。"})
+    if any("图" in text and "注" in text for text in texts) or any("脚注" in text for text in texts):
+        warnings.append({"type": "figure_table_notes", "message": "发现图注、表注或脚注相关内容，应人工核对其位置和注样式。"})
+    return warnings
 
 
 def scan_non_text_objects(src: Path) -> dict:
@@ -716,6 +834,14 @@ def write_markdown_report(report: dict, path: Path) -> None:
         for warning in risk_warnings:
             lines.append(f"- {warning}")
     lines.append("")
+    lines.append("## 内容型复核提示")
+    content_warnings = report.get("content_warnings", [])
+    if not content_warnings:
+        lines.append("- 无")
+    else:
+        for warning in content_warnings:
+            lines.append(f"- {warning}")
+    lines.append("")
     lines.append("## 审计问题")
     problem_keys = ["table_paragraphs_not_table_body", "table_rows_bad_height", "table_cells_may_clip", "markdown_residue"]
     has_problem = False
@@ -813,16 +939,30 @@ def convert_md(src: Path, doc: Document, report: dict, row_height_cm: float, row
             index += 1
             continue
         role = "note" if line.startswith(("**备注：**", "**编写提示：**", "备注：", "编写提示：")) else "body"
+        if line.startswith(("注1：", "注2：", "注3：", "注4：", "注5：")):
+            role = "numbered_note"
+        elif is_formula_text(line):
+            role = "formula"
+        elif is_appendix_title(line):
+            role = "appendix_title"
         if role == "body" and looks_like_list_item(line):
-            list_level = list_level_from_text(line)
-            style_name = "2.1二级列项-有编号" if list_level else "1.1一级列项-编号"
+            kind = list_kind_for_text(line)
+            list_level = 1 if kind in {"decimal", "bullet2"} else 0
+            if kind == "dash":
+                style_name = "1.2一级列项-无编号"
+            elif kind == "bullet2":
+                style_name = "2.2二级列项-无编号"
+            else:
+                style_name = "2.1二级列项-有编号" if list_level else "1.1一级列项-编号"
             paragraph = add_paragraph(doc, strip_list_marker(line), style_name, "list")
-            if list_level not in active_list_nums:
+            if kind in {"letter", "decimal"} and list_level not in active_list_nums:
                 abstract_key = "list_decimal_abstract" if list_level else "list_letter_abstract"
                 active_list_nums[list_level] = new_num_for_abstract(doc, numbering_ids[abstract_key])
-            apply_numbering(paragraph, active_list_nums[list_level], 0)
+            if kind in {"letter", "decimal"}:
+                apply_numbering(paragraph, active_list_nums[list_level], 0)
             report["inferred_lists"].append({"text": line, "source": "md-text"})
-            report["automatic_numbers"].append({"type": "list", "text": strip_list_marker(line), "source": "md-text"})
+            if kind in {"letter", "decimal"}:
+                report["automatic_numbers"].append({"type": "list", "text": strip_list_marker(line), "source": "md-text"})
         else:
             add_paragraph(doc, clean_note_prefix(line), role=role)
             active_list_nums = {}
@@ -848,6 +988,12 @@ def infer_docx_role(paragraph: Paragraph, strict_normalize: bool, report: dict) 
         return text, "Heading 2", "heading"
     if text.startswith(("备注：", "编写提示：", "【备注提示】", "【编写样例】")):
         return clean_note_prefix(text), None, "note"
+    if re.match(r"^注\s*\d+[：:]", text):
+        return text, None, "numbered_note"
+    if is_formula_text(text):
+        return text, "公式", "formula"
+    if is_appendix_title(text):
+        return text, "附录标题", "appendix_title"
     if re.match(r"^[图表]\s*\d+", text):
         return text, "Caption", "caption"
     if looks_like_list_item(text):
@@ -895,15 +1041,22 @@ def convert_docx(src: Path, doc: Document, row_height_cm: float, row_height_rule
                 seen_content = True
                 continue
             elif role == "list":
-                list_level = list_level_from_text(text, num_level)
+                kind = list_kind_for_text(text)
+                list_level = 1 if kind in {"decimal", "bullet2"} else int(num_level or 0)
                 text = strip_list_marker(text)
-                style = "2.1二级列项-有编号" if list_level else "1.1一级列项-编号"
+                if kind == "dash":
+                    style = "1.2一级列项-无编号"
+                elif kind == "bullet2":
+                    style = "2.2二级列项-无编号"
+                else:
+                    style = "2.1二级列项-有编号" if list_level else "1.1一级列项-编号"
                 paragraph = add_paragraph(doc, text, style, role)
-                if list_level not in active_list_nums:
+                if kind in {"letter", "decimal"} and list_level not in active_list_nums:
                     abstract_key = "list_decimal_abstract" if list_level else "list_letter_abstract"
                     active_list_nums[list_level] = new_num_for_abstract(doc, numbering_ids[abstract_key])
-                apply_numbering(paragraph, active_list_nums[list_level], 0)
-                report["automatic_numbers"].append({"type": "list", "text": text, "source": "docx-numbering" if num_id is not None else "docx-text"})
+                if kind in {"letter", "decimal"}:
+                    apply_numbering(paragraph, active_list_nums[list_level], 0)
+                    report["automatic_numbers"].append({"type": "list", "text": text, "source": "docx-numbering" if num_id is not None else "docx-text"})
                 seen_content = True
                 continue
             elif role == "heading" and existing_heading_number(text):
@@ -974,6 +1127,7 @@ def main() -> None:
         normalize_table(table, args.table_row_height_cm, args.table_row_height_rule)
 
     report["audit"] = audit_document(out_doc, args.table_row_height_cm, args.table_row_height_rule)
+    report["content_warnings"] = collect_content_warnings(out_doc)
     add_risk_warnings(report, args.table_row_height_rule)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     out_doc.save(args.output)
