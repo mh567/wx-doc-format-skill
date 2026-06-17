@@ -18,6 +18,7 @@ try:
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn
+    from docx.opc.constants import RELATIONSHIP_TYPE as RT
     from docx.shared import Cm, Pt, RGBColor
     from docx.table import Table
     from docx.text.paragraph import Paragraph
@@ -82,6 +83,14 @@ def iter_blocks(doc: Document):
             yield Paragraph(child, doc)
         elif child.tag == qn("w:tbl"):
             yield Table(child, doc)
+
+
+def paragraph_has_graphics(paragraph: Paragraph) -> bool:
+    return bool(
+        paragraph._p.findall(".//" + qn("w:drawing"))
+        or paragraph._p.findall(".//" + qn("w:pict"))
+        or paragraph._p.findall(".//" + qn("w:object"))
+    )
 
 
 def set_run_fonts(run, east_asia="宋体", ascii_font="Times New Roman", size_pt=12, bold=None) -> None:
@@ -444,6 +453,20 @@ def heading_level_from_style(style_name: str) -> int | None:
     return None
 
 
+def resolved_heading_level(style: str | None, num_level: int | None, text: str) -> int:
+    return heading_level_from_style(style or "") or heading_level_from_text(text) or ((num_level or 0) + 1)
+
+
+def heading_number_source(num_id: int | None, num_level: int | None, text: str) -> str:
+    if num_id is not None:
+        return "docx-numbering"
+    if existing_heading_number(text):
+        return "docx-text"
+    if num_level is not None:
+        return "docx-style-numbering"
+    return "docx-heading-style"
+
+
 def strip_list_marker(text: str) -> str:
     return re.sub(r"^([a-zA-Z]\)|\d+\)|[（(]\d+[）)]|[·•]|[\-\uff0d\u2014]{1,2})\s*", "", text, count=1)
 
@@ -700,6 +723,8 @@ def new_report() -> dict:
         "ambiguous_short_paragraphs": [],
         "content_warnings": [],
         "tables_processed": 0,
+        "graphic_paragraphs_preserved": 0,
+        "media_relationships_preserved": 0,
         "non_text_objects": {},
         "risk_warnings": [],
         "audit": {},
@@ -714,6 +739,7 @@ def audit_document(doc: Document, row_height_cm: float, row_height_rule: str) ->
         "table_rows_bad_height": [],
         "table_cells_may_clip": [],
         "markdown_residue": [],
+        "heading_paragraphs_without_numbering": [],
     }
     for idx, paragraph in enumerate(doc.paragraphs, 1):
         text = paragraph.text.strip()
@@ -721,6 +747,13 @@ def audit_document(doc: Document, row_height_cm: float, row_height_rule: str) ->
             continue
         if "**" in text or re.match(r"^#{1,6}\s+", text):
             audit["markdown_residue"].append({"paragraph": idx, "text": text[:120]})
+        style_name = paragraph.style.name if paragraph.style is not None else ""
+        if style_name.startswith("Heading"):
+            _, num_id = paragraph_num_info(paragraph)
+            if num_id is None:
+                audit["heading_paragraphs_without_numbering"].append(
+                    {"paragraph": idx, "style": style_name, "text": text[:120]}
+                )
     for table_idx, table in enumerate(doc.tables, 1):
         for row_idx, row in enumerate(table.rows, 1):
             if row.height is None or abs(row.height.cm - row_height_cm) > 0.02:
@@ -801,6 +834,17 @@ def scan_non_text_objects(src: Path) -> dict:
 def add_risk_warnings(report: dict, row_height_rule: str) -> None:
     non_text = report.get("non_text_objects", {})
     risky_objects = {key: value for key, value in non_text.items() if value}
+    source_media = int(non_text.get("media_files") or 0)
+    preserved_media = int(report.get("media_relationships_preserved") or 0)
+    if source_media > preserved_media:
+        report["risk_warnings"].append(
+            {
+                "type": "media_not_fully_preserved",
+                "message": "Source document contains media files that were not all preserved in the output.",
+                "source_media_files": source_media,
+                "preserved_media_relationships": preserved_media,
+            }
+        )
     if risky_objects:
         report["risk_warnings"].append(
             {
@@ -828,6 +872,8 @@ def write_markdown_report(report: dict, path: Path) -> None:
         f"- 段落数：{audit.get('paragraph_count', 0)}",
         f"- 表格数：{audit.get('table_count', 0)}",
         f"- 已处理表格数：{report.get('tables_processed', 0)}",
+        f"- 已保留图片段落数：{report.get('graphic_paragraphs_preserved', 0)}",
+        f"- 已保留媒体关系数：{report.get('media_relationships_preserved', 0)}",
         "",
     ])
     for title, key in [
@@ -866,7 +912,13 @@ def write_markdown_report(report: dict, path: Path) -> None:
             lines.append(f"- {warning}")
     lines.append("")
     lines.append("## 审计问题")
-    problem_keys = ["table_paragraphs_not_table_body", "table_rows_bad_height", "table_cells_may_clip", "markdown_residue"]
+    problem_keys = [
+        "table_paragraphs_not_table_body",
+        "table_rows_bad_height",
+        "table_cells_may_clip",
+        "markdown_residue",
+        "heading_paragraphs_without_numbering",
+    ]
     has_problem = False
     for key in problem_keys:
         values = audit.get(key, [])
@@ -1038,6 +1090,44 @@ def append_table_clone(doc: Document, table: Table) -> Table:
     return Table(new_el, doc)
 
 
+def clone_related_media_rels(src_paragraph: Paragraph, dst_doc: Document, new_el) -> int:
+    remapped: dict[str, str] = {}
+    rel_attrs = [qn("r:embed"), qn("r:link"), qn("r:id")]
+    media_count = 0
+    for element in new_el.iter():
+        for attr in rel_attrs:
+            old_rid = element.get(attr)
+            if old_rid is None or old_rid in remapped:
+                continue
+            rel = src_paragraph.part.rels.get(old_rid)
+            if rel is None:
+                continue
+            if rel.is_external:
+                new_rid = dst_doc.part.relate_to(rel.target_ref, rel.reltype, is_external=True)
+            else:
+                new_rid = dst_doc.part.relate_to(rel.target_part, rel.reltype)
+                if rel.reltype == RT.IMAGE:
+                    media_count += 1
+            remapped[old_rid] = new_rid
+        for attr in rel_attrs:
+            old_rid = element.get(attr)
+            if old_rid in remapped:
+                element.set(attr, remapped[old_rid])
+    return media_count
+
+
+def append_paragraph_clone(doc: Document, paragraph: Paragraph) -> tuple[Paragraph, int]:
+    body = doc.element.body
+    sect_pr = body[-1] if len(body) and body[-1].tag == qn("w:sectPr") else None
+    new_el = deepcopy(paragraph._p)
+    media_count = clone_related_media_rels(paragraph, doc, new_el)
+    if sect_pr is not None:
+        body.insert(len(body) - 1, new_el)
+    else:
+        body.append(new_el)
+    return Paragraph(new_el, doc), media_count
+
+
 def convert_docx(src: Path, doc: Document, row_height_cm: float, row_height_rule: str, strict_normalize: bool, report: dict, numbering_ids: dict) -> None:
     src_doc = Document(src)
     seen_content = False
@@ -1045,6 +1135,13 @@ def convert_docx(src: Path, doc: Document, row_height_cm: float, row_height_rule
     for block in iter_blocks(src_doc):
         if isinstance(block, Paragraph):
             text = block.text.strip()
+            if paragraph_has_graphics(block):
+                _, media_count = append_paragraph_clone(doc, block)
+                report["graphic_paragraphs_preserved"] += 1
+                report["media_relationships_preserved"] += media_count
+                active_list_nums = {}
+                seen_content = True
+                continue
             if not text:
                 continue
             if strict_normalize and not seen_content and looks_like_visual_heading(block):
@@ -1054,12 +1151,15 @@ def convert_docx(src: Path, doc: Document, row_height_cm: float, row_height_rule
                 continue
             num_level, num_id = paragraph_num_info(block)
             text, style, role = infer_docx_role(block, strict_normalize, report)
-            if role == "heading" and num_id is not None:
-                heading_level = heading_level_from_style(style or "") or ((num_level or 0) + 1)
+            if role == "heading":
+                heading_level = resolved_heading_level(style, num_level, text)
+                number_source = heading_number_source(num_id, num_level, text)
                 text = strip_heading_marker(text)
                 paragraph = add_paragraph(doc, text, style, role)
                 apply_numbering(paragraph, numbering_ids["heading"], heading_level - 1)
-                report["automatic_numbers"].append({"type": "heading", "text": text, "source": "docx-numbering"})
+                report["automatic_numbers"].append(
+                    {"type": "heading", "text": text, "level": heading_level, "source": number_source}
+                )
                 active_list_nums = {}
                 seen_content = True
                 continue
@@ -1080,15 +1180,6 @@ def convert_docx(src: Path, doc: Document, row_height_cm: float, row_height_rule
                 if kind in {"letter", "decimal"}:
                     apply_numbering(paragraph, active_list_nums[list_level], 0)
                     report["automatic_numbers"].append({"type": "list", "text": text, "source": "docx-numbering" if num_id is not None else "docx-text"})
-                seen_content = True
-                continue
-            elif role == "heading" and existing_heading_number(text):
-                heading_level = heading_level_from_style(style or "") or heading_level_from_text(text) or 1
-                text = strip_heading_marker(text)
-                paragraph = add_paragraph(doc, text, style, role)
-                apply_numbering(paragraph, numbering_ids["heading"], heading_level - 1)
-                report["automatic_numbers"].append({"type": "heading", "text": text, "source": "docx-text"})
-                active_list_nums = {}
                 seen_content = True
                 continue
             add_paragraph(doc, text, style, role)

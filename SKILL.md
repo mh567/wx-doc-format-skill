@@ -45,6 +45,8 @@ metadata:
    - 默认将源文件手工编号或自动编号转换为 Word 自动编号，保证标题显示章节号且正文文本中不重复写编号
    - DOCX 输入按原段落样式和标题文本推断标题层级
    - DOCX 输入若使用 Word 自动标题编号，应在输出文件中创建 Word 自动编号定义，并将编号挂到标题段落，标题正文文本中不写入编号
+   - DOCX 输入中，只要段落被判定为 `Heading 1` 到 `Heading 6`，即使源段落没有直接 `numId`、仅有标题样式或样式级 `ilvl`，输出也必须重新挂载标题自动编号；不能因为源样式编号不完整导致二级标题丢号
+   - 对“分层架构设计”“统一身份中心”“统一认证中心”等短标题类段落，应按标题层级编号处理，不能退化为无编号标题
    - 标题字体颜色应统一为黑色，避免继承 Word 内置 Heading 主题色
 9. 强规范化处理：
    - 默认启用 `--strict-normalize`
@@ -61,13 +63,17 @@ metadata:
    - Markdown 标准表格会转换为 Word 表格
    - DOCX 输入尽量复制原始表格 XML 后再规范化，保留合并单元格等结构
    - 统一表格样式、表正文、行高和垂直居中
-12. 生成审计报告：
+12. 图片和非文本对象处理：
+   - DOCX 输入中的内嵌图片段落必须克隆到输出文档，并重建 `document.xml.rels` 中的媒体关系，不能只复制文本和表格
+   - 报告中的 `graphic_paragraphs_preserved` 和 `media_relationships_preserved` 应与源文档图片数量对齐；若源文档含图片且输出包 `word/media/` 为空，视为转换失败
+   - 文本框、形状、SmartArt 等复杂对象仍需渲染复核；若无法完整重建，应进入风险提示
+13. 生成审计报告：
    - 建议使用 `--report report.json`
    - 建议同时使用 `--report-md report.md`
    - 报告包含推断标题、疑似视觉标题、推断列项、模糊短段落、表格处理数量、非文本对象统计、风险提示、内容型复核提示和审计结果
    - 自动化批处理可增加 `--fail-on-risk`，当源文件含图片、公式、页眉页脚、目录域、批注、修订等对象或固定表格行高可能截断文字时，脚本会生成文件和报告后返回失败码
-13. 如当前智能体具备 Word、LibreOffice 或文档渲染能力，应渲染页面并目视检查关键页。
-14. 最终只返回生成的 `.docx` 链接，除非用户要求中间产物。
+14. 如当前智能体具备 Word、LibreOffice 或文档渲染能力，应渲染页面并目视检查关键页。
+15. 最终只返回生成的 `.docx` 链接，除非用户要求中间产物。
 
 ## 命令示例
 
@@ -108,7 +114,8 @@ python scripts/format_document.py \
 ## 校验要点
 
 - 标题前不能出现两套章节编号。
-- 使用 Word 自动编号的源文件，转换后标题应保留可见章节号，如 `1`、`2.1`、`2.1.1`，且段落 XML 中应存在 `numPr` 自动编号属性。
+- 使用 Word 自动编号或标题样式的源文件，转换后所有 `Heading 1` 到 `Heading 6` 段落应保留可见章节号，如 `1`、`2.1`、`2.1.1`，且段落 XML 中应存在 `numPr` 自动编号属性。
+- JSON 报告中的 `audit.heading_paragraphs_without_numbering` 必须为空；若不为空，说明有标题样式段落未挂自动编号，应修复后重新转换。
 - 不应残留 Markdown 标记，如 `**备注：**`。
 - 标题字体颜色应为黑色，不能继承蓝色或主题色。
 - 自动列表应转换为 Word 自动列项编号，并套用 `1.1一级列项-编号` 或 `2.1二级列项-有编号` 等列项样式。
@@ -116,6 +123,7 @@ python scripts/format_document.py \
 - 查看 JSON 报告中的 `suspect_visual_headings` 和 `ambiguous_short_paragraphs`，必要时人工复核。
 - `audit.table_paragraphs_not_table_body`、`audit.table_rows_bad_height`、`audit.markdown_residue` 应为空。
 - 查看 `non_text_objects`，若图片、公式、文本框、目录域、页眉页脚、批注、修订等数量不为 0，应渲染复核。
+- 源文档含图片时，输出 `.docx` 的 `word/media/` 不能为空；报告中的 `media_relationships_preserved` 不应小于 `non_text_objects.media_files`。
 - 查看 `risk_warnings`。存在风险提示时，不能只按脚本成功作为交付依据。
 - 查看 `audit.table_cells_may_clip`。固定表格行高下若存在长单元格文本，应重点检查表格是否压缩或截断。
 - 渲染页中不得出现文字重叠、明显截断、空白异常页。
