@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from docx import Document
+from docx.oxml.ns import qn
 
 from format_document import (
     convert_docx,
@@ -16,6 +17,7 @@ from format_document import (
     existing_heading_number,
     heading_level_from_text,
     new_report,
+    new_num_for_abstract,
     paragraph_has_graphics,
     resolved_heading_level,
     scan_non_text_objects,
@@ -43,6 +45,17 @@ def test_chinese_number_marker_is_stripped():
 def test_heading_style_level_survives_without_num_id():
     assert resolved_heading_level("Heading 2", 1, "分层架构设计") == 2
     assert resolved_heading_level("Heading 2", None, "统一认证中心") == 2
+
+
+def test_new_list_numbering_instances_restart_at_one():
+    doc = Document()
+    numbering_ids = ensure_auto_numbering(doc)
+    num_id = new_num_for_abstract(doc, numbering_ids["list_letter_abstract"])
+    numbering = doc.part.numbering_part.element
+    num = next(element for element in numbering.findall(qn("w:num")) if element.get(qn("w:numId")) == str(num_id))
+    start = num.find(".//" + qn("w:startOverride"))
+    assert start is not None
+    assert start.get(qn("w:val")) == "1"
 
 
 def test_docx_image_paragraphs_are_preserved(tmp_path):

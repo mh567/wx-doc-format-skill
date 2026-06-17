@@ -54,6 +54,7 @@ metadata:
    - 对未设置标题样式但明显加粗、居中或字号较大的短段落，作为疑似标题处理并写入报告
    - 识别常见列项，如 `a)`、`1)`、`（1）`、中点、长横线列项，并套用列项兼容样式
    - DOCX 输入若使用 Word 自动列表编号，应在输出文件中创建 Word 自动编号定义，并将一级列表设置为 `a)`、`b)`，二级列表设置为 `1)`、`2)`，列项正文文本中不写入编号
+   - 每个小节、标题或正文说明后的有序列项必须重新从 `a)` 或 `1)` 开始；新建列表 `num` 时必须写入 `w:lvlOverride/w:startOverride=1`，避免 Word 渲染时跨小节延续编号
    - 识别一级无编号列项和二级无编号列项，分别套用 `1.2一级列项-无编号`、`2.2二级列项-无编号`
    - DOCX 输入会重建段落样式，减少原始缩进、字体、行距混乱对输出的影响
 10. 备注处理：
@@ -129,6 +130,7 @@ python scripts/format_document.py \
 - 不应残留 Markdown 标记，如 `**备注：**`。
 - 标题字体颜色应为黑色，不能继承蓝色或主题色。
 - 自动列表应转换为 Word 自动列项编号，并套用 `1.1一级列项-编号` 或 `2.1二级列项-有编号` 等列项样式。
+- 小节内有序列项应从 `a)` 或 `1)` 重新开始，不能沿用上一小节的 `g)`、`l)` 等编号；编号 XML 中新列表实例应包含 `w:startOverride w:val="1"`。
 - 表格段落样式应为 `表正文`，行高应为 `0.69厘米`。
 - 查看 JSON 报告中的 `suspect_visual_headings` 和 `ambiguous_short_paragraphs`，必要时人工复核。
 - `audit.table_paragraphs_not_table_body`、`audit.table_rows_bad_height`、`audit.markdown_residue` 应为空。

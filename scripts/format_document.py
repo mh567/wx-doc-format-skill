@@ -511,19 +511,26 @@ def append_level(parent, ilvl: int, num_fmt: str, lvl_text: str, left_twips: int
     parent.append(level)
 
 
-def append_num(numbering, abstract_num_id: int, num_id: int) -> None:
+def append_num(numbering, abstract_num_id: int, num_id: int, start_override: int | None = None) -> None:
     num = OxmlElement("w:num")
     num.set(qn("w:numId"), str(num_id))
     abstract_ref = OxmlElement("w:abstractNumId")
     abstract_ref.set(qn("w:val"), str(abstract_num_id))
     num.append(abstract_ref)
+    if start_override is not None:
+        lvl_override = OxmlElement("w:lvlOverride")
+        lvl_override.set(qn("w:ilvl"), "0")
+        start = OxmlElement("w:startOverride")
+        start.set(qn("w:val"), str(start_override))
+        lvl_override.append(start)
+        num.append(lvl_override)
     numbering.append(num)
 
 
 def new_num_for_abstract(doc: Document, abstract_num_id: int) -> int:
     numbering = doc.part.numbering_part.element
     num_id = next_numbering_id(numbering, "w:num", "w:numId")
-    append_num(numbering, abstract_num_id, num_id)
+    append_num(numbering, abstract_num_id, num_id, start_override=1)
     return num_id
 
 
