@@ -75,6 +75,16 @@ metadata:
 14. 如当前智能体具备 Word、LibreOffice 或文档渲染能力，应渲染页面并目视检查关键页。
 15. 最终只返回生成的 `.docx` 链接，除非用户要求中间产物。
 
+## 更新方式
+
+当用户要求更新本技能时，优先使用仓库内置更新脚本，让 GitHub 仓库 `mh567/wx-doc-format-skill` 成为默认来源：
+
+```bash
+python ~/.codex/skills/wx-doc-format/scripts/update_installed_skill.py
+```
+
+该脚本会下载 GitHub 最新版本、校验必要文件、备份当前安装目录、替换技能文件，并保留 `.venv`。更新后提示用户重启 Codex。若用户要求固定版本，可增加 `--ref vX.Y.Z`。
+
 ## 命令示例
 
 macOS 或受限 Python 环境首次准备最佳效果环境：

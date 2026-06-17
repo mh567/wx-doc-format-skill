@@ -35,6 +35,46 @@ python -m pip install -r requirements.txt
 
 If `lxml` import, signature, or dynamic library errors occur on macOS, rerun the bootstrap script to repair the isolated environment. For DOCX inputs, the main script can still use an internal emergency fallback when the isolated environment is unavailable.
 
+## Install
+
+Ask Codex:
+
+```text
+Install wx-doc-format from GitHub repo mh567/wx-doc-format-skill.
+```
+
+Codex should use the skill installer with this repository:
+
+```bash
+install-skill-from-github.py --repo mh567/wx-doc-format-skill --path .
+```
+
+Restart Codex after installation.
+
+## Update
+
+Ask Codex:
+
+```text
+Update my installed wx-doc-format skill from GitHub repo mh567/wx-doc-format-skill.
+```
+
+Codex should run the bundled updater from the installed skill directory:
+
+```bash
+python ~/.codex/skills/wx-doc-format/scripts/update_installed_skill.py
+```
+
+The updater downloads the latest `main` branch from GitHub, validates the required skill files, creates a backup under `~/.codex/skills/.skill-backups/`, replaces the installed skill files, and preserves `.venv`.
+
+To update from a release tag:
+
+```bash
+python ~/.codex/skills/wx-doc-format/scripts/update_installed_skill.py --ref v0.2.0
+```
+
+Restart Codex after updating.
+
 ## Usage
 
 ```bash
