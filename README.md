@@ -13,6 +13,7 @@
 - Creates Word automatic numbering for headings and lists so visible numbers are preserved without writing numbers into paragraph text.
 - Applies WX heading hanging indents, body first-line indent, list indents, table body style, and fixed table row height.
 - Generates JSON and Markdown audit reports.
+- Records the skill version, heading sequence, ordered-list restart groups, and media preservation ratio in audit reports.
 - Detects conversion risks such as images, drawings, fields, headers, footers, comments, tracked changes, and possible table clipping.
 
 ## Requirements
@@ -66,6 +67,7 @@ python ~/.codex/skills/wx-doc-format/scripts/update_installed_skill.py
 ```
 
 The updater downloads the latest `main` branch from GitHub, validates the required skill files, creates a backup under `~/.codex/skills/.skill-backups/`, replaces the installed skill files, and preserves `.venv`.
+It also prints the current installed version and source version from `VERSION`.
 
 To update from a release tag:
 

@@ -16,6 +16,13 @@ PRESERVE_NAMES = {".git", ".venv", "__pycache__"}
 SKIP_SUFFIXES = {".pyc", ".pyo"}
 
 
+def read_version(path: Path) -> str:
+    version_path = path / "VERSION"
+    if version_path.exists():
+        return version_path.read_text(encoding="utf-8").strip()
+    return "unknown"
+
+
 def should_skip(path: Path) -> bool:
     return path.name in PRESERVE_NAMES or path.suffix in SKIP_SUFFIXES
 
@@ -99,13 +106,18 @@ def main() -> None:
         tmp = Path(tmp_name)
         source = args.source_dir.expanduser().resolve() if args.source_dir else download_repo(args.repo, args.ref, tmp)
         validate_source(source)
+        current_version = read_version(dest)
+        source_version = read_version(source)
         if args.dry_run:
             print(f"Would update {dest} from {source}")
+            print(f"Current version: {current_version}")
+            print(f"Source version: {source_version}")
             return
         backup_dir = None if args.no_backup else backup_current(dest)
         remove_old_files(dest, source)
         copy_tree_contents(source, dest)
         print(f"Updated {dest} from {args.repo}@{args.ref}" if not args.source_dir else f"Updated {dest} from {source}")
+        print(f"Version: {current_version} -> {source_version}")
         if backup_dir is not None:
             print(f"Backup: {backup_dir}")
         print("Restart Codex to pick up the updated skill.")

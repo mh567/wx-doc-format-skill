@@ -77,6 +77,13 @@ LIST_PATTERNS = [
 ]
 
 
+def skill_version() -> str:
+    version_path = Path(__file__).resolve().parents[1] / "VERSION"
+    if version_path.exists():
+        return version_path.read_text(encoding="utf-8").strip()
+    return "unknown"
+
+
 def iter_blocks(doc: Document):
     for child in doc.element.body.iterchildren():
         if child.tag == qn("w:p"):
@@ -723,6 +730,7 @@ def normalize_table(table: Table, row_height_cm: float, row_height_rule: str) ->
 
 def new_report() -> dict:
     return {
+        "skill_version": skill_version(),
         "inferred_headings": [],
         "suspect_visual_headings": [],
         "inferred_lists": [],
@@ -738,16 +746,38 @@ def new_report() -> dict:
     }
 
 
+def paragraph_num_id(paragraph: Paragraph) -> str | None:
+    p_pr = paragraph._p.pPr
+    num_pr = p_pr.numPr if p_pr is not None and p_pr.numPr is not None else None
+    if num_pr is None or num_pr.numId is None or num_pr.numId.val is None:
+        return None
+    return str(num_pr.numId.val)
+
+
+def num_has_start_override(doc: Document, num_id: str) -> bool:
+    numbering = doc.part.numbering_part.element
+    for num in numbering.findall(qn("w:num")):
+        if num.get(qn("w:numId")) != num_id:
+            continue
+        start = num.find(".//" + qn("w:startOverride"))
+        return start is not None and start.get(qn("w:val")) == "1"
+    return False
+
+
 def audit_document(doc: Document, row_height_cm: float, row_height_rule: str) -> dict:
     audit = {
         "paragraph_count": len(doc.paragraphs),
         "table_count": len(doc.tables),
+        "heading_sequence": [],
+        "list_restart_groups": [],
         "table_paragraphs_not_table_body": [],
         "table_rows_bad_height": [],
         "table_cells_may_clip": [],
         "markdown_residue": [],
         "heading_paragraphs_without_numbering": [],
+        "ordered_list_nums_without_restart": [],
     }
+    seen_list_num_ids: set[str] = set()
     for idx, paragraph in enumerate(doc.paragraphs, 1):
         text = paragraph.text.strip()
         if not text:
@@ -756,11 +786,33 @@ def audit_document(doc: Document, row_height_cm: float, row_height_rule: str) ->
             audit["markdown_residue"].append({"paragraph": idx, "text": text[:120]})
         style_name = paragraph.style.name if paragraph.style is not None else ""
         if style_name.startswith("Heading"):
+            heading_level = heading_level_from_style(style_name)
             _, num_id = paragraph_num_info(paragraph)
+            audit["heading_sequence"].append(
+                {"paragraph": idx, "level": heading_level, "num_id": num_id, "text": text[:120]}
+            )
             if num_id is None:
                 audit["heading_paragraphs_without_numbering"].append(
                     {"paragraph": idx, "style": style_name, "text": text[:120]}
                 )
+        if "列项-编号" in style_name:
+            num_id_str = paragraph_num_id(paragraph)
+            if num_id_str is not None and num_id_str not in seen_list_num_ids:
+                seen_list_num_ids.add(num_id_str)
+                has_restart = num_has_start_override(doc, num_id_str)
+                audit["list_restart_groups"].append(
+                    {
+                        "paragraph": idx,
+                        "style": style_name,
+                        "num_id": num_id_str,
+                        "restart_at_one": has_restart,
+                        "text": text[:120],
+                    }
+                )
+                if not has_restart:
+                    audit["ordered_list_nums_without_restart"].append(
+                        {"paragraph": idx, "style": style_name, "num_id": num_id_str, "text": text[:120]}
+                    )
     for table_idx, table in enumerate(doc.tables, 1):
         for row_idx, row in enumerate(table.rows, 1):
             if row.height is None or abs(row.height.cm - row_height_cm) > 0.02:
@@ -843,6 +895,7 @@ def add_risk_warnings(report: dict, row_height_rule: str) -> None:
     risky_objects = {key: value for key, value in non_text.items() if value}
     source_media = int(non_text.get("media_files") or 0)
     preserved_media = int(report.get("media_relationships_preserved") or 0)
+    report["media_preservation_ratio"] = (preserved_media / source_media) if source_media else 1.0
     if source_media > preserved_media:
         report["risk_warnings"].append(
             {
@@ -869,6 +922,15 @@ def add_risk_warnings(report: dict, row_height_rule: str) -> None:
                 "count": len(clipped_cells),
             }
         )
+    list_without_restart = report.get("audit", {}).get("ordered_list_nums_without_restart", [])
+    if list_without_restart:
+        report["risk_warnings"].append(
+            {
+                "type": "ordered_list_restart",
+                "message": "Some ordered list numbering instances do not explicitly restart at 1.",
+                "count": len(list_without_restart),
+            }
+        )
 
 
 def write_markdown_report(report: dict, path: Path) -> None:
@@ -876,11 +938,13 @@ def write_markdown_report(report: dict, path: Path) -> None:
     audit = report.get("audit", {})
     lines.extend([
         "## 概览",
+        f"- Skill 版本：{report.get('skill_version', 'unknown')}",
         f"- 段落数：{audit.get('paragraph_count', 0)}",
         f"- 表格数：{audit.get('table_count', 0)}",
         f"- 已处理表格数：{report.get('tables_processed', 0)}",
         f"- 已保留图片段落数：{report.get('graphic_paragraphs_preserved', 0)}",
         f"- 已保留媒体关系数：{report.get('media_relationships_preserved', 0)}",
+        f"- 媒体保留比例：{report.get('media_preservation_ratio', 1.0):.2f}",
         "",
     ])
     for title, key in [
@@ -925,6 +989,7 @@ def write_markdown_report(report: dict, path: Path) -> None:
         "table_cells_may_clip",
         "markdown_residue",
         "heading_paragraphs_without_numbering",
+        "ordered_list_nums_without_restart",
     ]
     has_problem = False
     for key in problem_keys:

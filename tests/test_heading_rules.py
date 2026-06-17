@@ -11,6 +11,7 @@ from docx import Document
 from docx.oxml.ns import qn
 
 from format_document import (
+    audit_document,
     convert_docx,
     ensure_auto_numbering,
     ensure_fallback_styles,
@@ -23,6 +24,11 @@ from format_document import (
     scan_non_text_objects,
     strip_heading_marker,
 )
+from update_installed_skill import read_version
+
+
+def test_report_includes_skill_version():
+    assert new_report()["skill_version"] == (ROOT / "VERSION").read_text(encoding="utf-8").strip()
 
 
 def test_chinese_number_heading_is_level_one():
@@ -56,6 +62,32 @@ def test_new_list_numbering_instances_restart_at_one():
     start = num.find(".//" + qn("w:startOverride"))
     assert start is not None
     assert start.get(qn("w:val")) == "1"
+
+
+def test_audit_tracks_heading_sequence_and_list_restart_groups():
+    doc = Document()
+    ensure_fallback_styles(doc)
+    numbering_ids = ensure_auto_numbering(doc)
+    heading = doc.add_paragraph("测试章节", style="Heading 1")
+    from format_document import apply_numbering
+
+    apply_numbering(heading, numbering_ids["heading"], 0)
+    num_id = new_num_for_abstract(doc, numbering_ids["list_letter_abstract"])
+    item = doc.add_paragraph("测试列项", style="1.1一级列项-编号")
+    apply_numbering(item, num_id, 0)
+
+    audit = audit_document(doc, 0.69, "at-least")
+    assert audit["heading_sequence"][0]["text"] == "测试章节"
+    assert audit["list_restart_groups"][0]["restart_at_one"] is True
+    assert audit["ordered_list_nums_without_restart"] == []
+
+
+def test_updater_reads_version(tmp_path):
+    skill_dir = tmp_path / "skill"
+    skill_dir.mkdir()
+    (skill_dir / "VERSION").write_text("9.9.9\n", encoding="utf-8")
+    assert read_version(skill_dir) == "9.9.9"
+    assert read_version(tmp_path / "missing") == "unknown"
 
 
 def test_docx_image_paragraphs_are_preserved(tmp_path):
