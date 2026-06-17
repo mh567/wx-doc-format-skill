@@ -119,3 +119,16 @@ def test_docx_image_paragraphs_are_preserved(tmp_path):
     assert paragraph_has_graphics(Document(src_path).paragraphs[1])
     with zipfile.ZipFile(output_path) as zf:
         assert any(name.startswith("word/media/") for name in zf.namelist())
+
+
+def test_media_scan_ignores_zip_directory_entries(tmp_path):
+    docx_path = tmp_path / "source.docx"
+    with zipfile.ZipFile(docx_path, "w") as zf:
+        zf.writestr("word/media/", "")
+        zf.writestr("word/media/image1.png", b"png")
+        zf.writestr("word/document.xml", "<w:document><w:drawing/></w:document>")
+
+    counts = scan_non_text_objects(docx_path)
+
+    assert counts["media_files"] == 1
+    assert counts["drawings"] == 1

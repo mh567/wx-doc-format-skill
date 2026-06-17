@@ -871,7 +871,7 @@ def scan_non_text_objects(src: Path) -> dict:
         with zipfile.ZipFile(src) as zf:
             names = zf.namelist()
             xml_names = [name for name in names if name.startswith("word/") and name.endswith(".xml")]
-            counts["media_files"] = len([name for name in names if name.startswith("word/media/")])
+            counts["media_files"] = len([name for name in names if name.startswith("word/media/") and not name.endswith("/")])
             counts["headers"] = len([name for name in names if name.startswith("word/header") and name.endswith(".xml")])
             counts["footers"] = len([name for name in names if name.startswith("word/footer") and name.endswith(".xml")])
             for name in xml_names:
