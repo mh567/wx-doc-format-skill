@@ -121,6 +121,42 @@ def test_docx_image_paragraphs_are_preserved(tmp_path):
         assert any(name.startswith("word/media/") for name in zf.namelist())
 
 
+def test_heading_text_and_image_in_one_paragraph_are_split(tmp_path):
+    image_path = tmp_path / "tiny.png"
+    image_path.write_bytes(
+        base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+        )
+    )
+    src_path = tmp_path / "source.docx"
+    output_path = tmp_path / "output.docx"
+
+    src_doc = Document()
+    paragraph = src_doc.add_paragraph()
+    paragraph.add_run("11.1.1 全局视角")
+    paragraph.add_run().add_picture(str(image_path))
+    src_doc.save(src_path)
+
+    out_doc = Document()
+    ensure_fallback_styles(out_doc)
+    numbering_ids = ensure_auto_numbering(out_doc)
+    report = new_report()
+    report["non_text_objects"] = scan_non_text_objects(src_path)
+    convert_docx(src_path, out_doc, 0.69, "at-least", True, report, numbering_ids)
+    out_doc.save(output_path)
+
+    converted = Document(output_path)
+    assert converted.paragraphs[0].style.name == "Heading 3"
+    assert converted.paragraphs[0].text == "全局视角"
+    assert not paragraph_has_graphics(converted.paragraphs[0])
+    assert converted.paragraphs[1].text == ""
+    assert paragraph_has_graphics(converted.paragraphs[1])
+    assert report["mixed_text_graphic_paragraphs_split"] == [
+        {"text": "11.1.1 全局视角", "role": "heading", "level": 3}
+    ]
+    assert report["media_relationships_preserved"] == 1
+
+
 def test_media_scan_ignores_zip_directory_entries(tmp_path):
     docx_path = tmp_path / "source.docx"
     with zipfile.ZipFile(docx_path, "w") as zf:

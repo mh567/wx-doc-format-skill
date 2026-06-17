@@ -738,6 +738,7 @@ def new_report() -> dict:
         "ambiguous_short_paragraphs": [],
         "content_warnings": [],
         "tables_processed": 0,
+        "mixed_text_graphic_paragraphs_split": [],
         "graphic_paragraphs_preserved": 0,
         "media_relationships_preserved": 0,
         "non_text_objects": {},
@@ -942,6 +943,7 @@ def write_markdown_report(report: dict, path: Path) -> None:
         f"- 段落数：{audit.get('paragraph_count', 0)}",
         f"- 表格数：{audit.get('table_count', 0)}",
         f"- 已处理表格数：{report.get('tables_processed', 0)}",
+        f"- 已拆分文字图片混合段落数：{len(report.get('mixed_text_graphic_paragraphs_split', []))}",
         f"- 已保留图片段落数：{report.get('graphic_paragraphs_preserved', 0)}",
         f"- 已保留媒体关系数：{report.get('media_relationships_preserved', 0)}",
         f"- 媒体保留比例：{report.get('media_preservation_ratio', 1.0):.2f}",
@@ -952,6 +954,7 @@ def write_markdown_report(report: dict, path: Path) -> None:
         ("疑似视觉标题", "suspect_visual_headings"),
         ("推断列项", "inferred_lists"),
         ("自动编号", "automatic_numbers"),
+        ("已拆分文字图片混合段落", "mixed_text_graphic_paragraphs_split"),
         ("模糊短段落", "ambiguous_short_paragraphs"),
     ]:
         items = report.get(key, [])
@@ -1200,6 +1203,29 @@ def append_paragraph_clone(doc: Document, paragraph: Paragraph) -> tuple[Paragra
     return Paragraph(new_el, doc), media_count
 
 
+def element_has_graphics(element) -> bool:
+    return bool(
+        element.findall(".//" + qn("w:drawing"))
+        or element.findall(".//" + qn("w:pict"))
+        or element.findall(".//" + qn("w:object"))
+    )
+
+
+def append_graphics_only_paragraph_clone(doc: Document, paragraph: Paragraph) -> tuple[Paragraph, int]:
+    body = doc.element.body
+    sect_pr = body[-1] if len(body) and body[-1].tag == qn("w:sectPr") else None
+    new_el = deepcopy(paragraph._p)
+    for child in list(new_el):
+        if child.tag in {qn("w:r"), qn("w:hyperlink")} and not element_has_graphics(child):
+            new_el.remove(child)
+    media_count = clone_related_media_rels(paragraph, doc, new_el)
+    if sect_pr is not None:
+        body.insert(len(body) - 1, new_el)
+    else:
+        body.append(new_el)
+    return Paragraph(new_el, doc), media_count
+
+
 def convert_docx(src: Path, doc: Document, row_height_cm: float, row_height_rule: str, strict_normalize: bool, report: dict, numbering_ids: dict) -> None:
     src_doc = Document(src)
     seen_content = False
@@ -1208,6 +1234,27 @@ def convert_docx(src: Path, doc: Document, row_height_cm: float, row_height_rule
         if isinstance(block, Paragraph):
             text = block.text.strip()
             if paragraph_has_graphics(block):
+                if text:
+                    num_level, num_id = paragraph_num_info(block)
+                    inferred_text, style, role = infer_docx_role(block, strict_normalize, report)
+                    if role == "heading":
+                        heading_level = resolved_heading_level(style, num_level, inferred_text)
+                        number_source = heading_number_source(num_id, num_level, inferred_text)
+                        clean_heading = strip_heading_marker(inferred_text)
+                        paragraph = add_paragraph(doc, clean_heading, style, role)
+                        apply_numbering(paragraph, numbering_ids["heading"], heading_level - 1)
+                        _, media_count = append_graphics_only_paragraph_clone(doc, block)
+                        report["automatic_numbers"].append(
+                            {"type": "heading", "text": clean_heading, "level": heading_level, "source": number_source}
+                        )
+                        report["mixed_text_graphic_paragraphs_split"].append(
+                            {"text": inferred_text, "role": role, "level": heading_level}
+                        )
+                        report["graphic_paragraphs_preserved"] += 1
+                        report["media_relationships_preserved"] += media_count
+                        active_list_nums = {}
+                        seen_content = True
+                        continue
                 _, media_count = append_paragraph_clone(doc, block)
                 report["graphic_paragraphs_preserved"] += 1
                 report["media_relationships_preserved"] += media_count
