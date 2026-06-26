@@ -49,7 +49,10 @@ def test_numbered_decimal_heading_levels_still_work():
 def test_chinese_number_marker_is_stripped():
     assert strip_heading_marker("一、核心定位") == "核心定位"
     assert strip_heading_marker("十五、最后收尾备忘") == "最后收尾备忘"
+    assert strip_heading_marker("（一）智能体平台技术路线") == "智能体平台技术路线"
+    assert strip_heading_marker("(1) 数字括号标题") == "数字括号标题"
     assert existing_heading_number("一、核心定位")
+    assert existing_heading_number("（一）智能体平台技术路线")
 
 
 def test_heading_style_level_survives_without_num_id():

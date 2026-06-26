@@ -400,6 +400,7 @@ def strip_heading_marker(text: str) -> str:
     text = re.sub(r"^\d+(?:\.\d+)*\s+", "", text, count=1)
     text = re.sub(r"^第[一二三四五六七八九十百千万0-9]+[章节]\s*[:：、.\s]?", "", text, count=1)
     text = re.sub(r"^[一二三四五六七八九十]+[、.．]\s*", "", text, count=1)
+    text = re.sub(r"^[（(][一二三四五六七八九十0-9]+[）)]\s*", "", text, count=1)
     return text
 
 
@@ -440,6 +441,7 @@ def existing_heading_number(text: str) -> bool:
         re.match(r"^\d+(?:\.\d+)*\s+\S+", text)
         or re.match(r"^第[一二三四五六七八九十百千万0-9]+[章节]\s*[:：、.\s]?\S+", text)
         or re.match(r"^[一二三四五六七八九十]+[、.．]\s*\S+", text)
+        or re.match(r"^[（(][一二三四五六七八九十0-9]+[）)]\s*\S+", text)
     )
 
 
