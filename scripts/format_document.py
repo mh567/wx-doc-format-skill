@@ -386,6 +386,8 @@ def strip_manual_number(text: str) -> str:
 
 
 def heading_level_from_text(text: str) -> int | None:
+    if is_date_like_text(text) or is_caption_text(text) or is_toc_title(text):
+        return None
     for pattern, level in HEADING_PATTERNS:
         if pattern.match(text):
             return level
@@ -434,6 +436,27 @@ def is_formula_text(text: str) -> bool:
 
 def is_appendix_title(text: str) -> bool:
     return bool(re.match(r"^（?(资料性|规范性)）?$", text) or re.match(r"^附\s*录\s*[A-ZＡ-Ｚ]?", text))
+
+
+def is_date_like_text(text: str) -> bool:
+    return bool(re.match(r"^\d{4}\s*年(?:\s*\d{1,2}\s*月)?(?:\s*\d{1,2}\s*日)?$", text))
+
+
+def is_toc_title(text: str) -> bool:
+    compact = re.sub(r"\s+", "", text)
+    return compact in {"目录", "目次"}
+
+
+def is_caption_text(text: str) -> bool:
+    return bool(re.match(r"^[图表]\s*\d+(?:[-－.]\d+)*[\s　]+.+", text))
+
+
+def is_front_matter_text(paragraph: Paragraph, text: str) -> bool:
+    return bool(
+        is_date_like_text(text)
+        or is_toc_title(text)
+        or (paragraph.alignment == WD_ALIGN_PARAGRAPH.CENTER and len(text) <= 80)
+    )
 
 
 def existing_heading_number(text: str) -> bool:
@@ -623,6 +646,8 @@ def looks_like_visual_heading(paragraph: Paragraph) -> bool:
     text = paragraph.text.strip()
     if not text or len(text) > 40:
         return False
+    if is_date_like_text(text) or is_caption_text(text) or is_toc_title(text):
+        return False
     if text.endswith(("。", "；", ";")):
         return False
     mostly_bold, max_size = paragraph_direct_format_score(paragraph)
@@ -712,9 +737,36 @@ def set_cell_shading(cell, fill: str) -> None:
     shd.set(qn("w:fill"), fill)
 
 
+def set_table_autofit_to_window(table: Table) -> None:
+    table.autofit = True
+    tbl_pr = table._tbl.tblPr
+    tbl_w = tbl_pr.find(qn("w:tblW"))
+    if tbl_w is None:
+        tbl_w = OxmlElement("w:tblW")
+        tbl_pr.append(tbl_w)
+    tbl_w.set(qn("w:type"), "pct")
+    tbl_w.set(qn("w:w"), "5000")
+    tbl_layout = tbl_pr.find(qn("w:tblLayout"))
+    if tbl_layout is None:
+        tbl_layout = OxmlElement("w:tblLayout")
+        tbl_pr.append(tbl_layout)
+    tbl_layout.set(qn("w:type"), "autofit")
+    for cell in table._tbl.findall(".//" + qn("w:tc")):
+        tc_pr = cell.find(qn("w:tcPr"))
+        if tc_pr is None:
+            continue
+        tc_w = tc_pr.find(qn("w:tcW"))
+        if tc_w is not None:
+            tc_w.set(qn("w:type"), "auto")
+            tc_w.set(qn("w:w"), "0")
+        no_wrap = tc_pr.find(qn("w:noWrap"))
+        if no_wrap is not None:
+            tc_pr.remove(no_wrap)
+
+
 def normalize_table(table: Table, row_height_cm: float, row_height_rule: str) -> None:
     table.style = "Table Grid"
-    table.autofit = False
+    set_table_autofit_to_window(table)
     for ri, row in enumerate(table.rows):
         row.height = Cm(row_height_cm)
         row.height_rule = WD_ROW_HEIGHT_RULE.EXACTLY if row_height_rule == "exact" else WD_ROW_HEIGHT_RULE.AT_LEAST
@@ -1128,6 +1180,10 @@ def convert_md(src: Path, doc: Document, report: dict, row_height_cm: float, row
 def infer_docx_role(paragraph: Paragraph, strict_normalize: bool, report: dict) -> tuple[str, str | None, str]:
     text = paragraph.text.strip()
     style_name = paragraph.style.name if paragraph.style is not None else ""
+    if is_caption_text(text):
+        return text, "Caption", "caption"
+    if is_date_like_text(text) or is_toc_title(text):
+        return text, None, "body"
     if style_name == "文档标题":
         return text, "文档标题", "title"
     if style_name.startswith("Heading"):
@@ -1150,8 +1206,6 @@ def infer_docx_role(paragraph: Paragraph, strict_normalize: bool, report: dict) 
         return text, "公式", "formula"
     if is_appendix_title(text):
         return text, "附录标题", "appendix_title"
-    if re.match(r"^[图表]\s*\d+", text):
-        return text, "Caption", "caption"
     if looks_like_list_item(text):
         report["inferred_lists"].append({"text": text, "source": "docx-text"})
         return text, list_style_for_text(text), "list"
@@ -1206,7 +1260,24 @@ def append_paragraph_clone(doc: Document, paragraph: Paragraph) -> tuple[Paragra
         body.insert(len(body) - 1, new_el)
     else:
         body.append(new_el)
-    return Paragraph(new_el, doc), media_count
+    new_paragraph = Paragraph(new_el, doc)
+    if paragraph_has_graphics(new_paragraph):
+        normalize_graphics_paragraph(new_paragraph)
+    return new_paragraph, media_count
+
+
+def normalize_graphics_paragraph(paragraph: Paragraph) -> None:
+    p_pr = paragraph._p.pPr
+    if p_pr is not None:
+        paragraph._p.remove(p_pr)
+    paragraph.style = "Normal"
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    paragraph.paragraph_format.left_indent = Pt(0)
+    paragraph.paragraph_format.right_indent = Pt(0)
+    paragraph.paragraph_format.first_line_indent = Pt(0)
+    paragraph.paragraph_format.space_before = Pt(0)
+    paragraph.paragraph_format.space_after = Pt(0)
+    paragraph.paragraph_format.line_spacing = 1
 
 
 def element_has_graphics(element) -> bool:
@@ -1229,7 +1300,9 @@ def append_graphics_only_paragraph_clone(doc: Document, paragraph: Paragraph) ->
         body.insert(len(body) - 1, new_el)
     else:
         body.append(new_el)
-    return Paragraph(new_el, doc), media_count
+    new_paragraph = Paragraph(new_el, doc)
+    normalize_graphics_paragraph(new_paragraph)
+    return new_paragraph, media_count
 
 
 def emit_normalized_docx_text(
@@ -1282,6 +1355,7 @@ def emit_normalized_docx_text(
 def convert_docx(src: Path, doc: Document, row_height_cm: float, row_height_rule: str, strict_normalize: bool, report: dict, numbering_ids: dict) -> None:
     src_doc = Document(src)
     seen_content = False
+    structural_started = False
     active_list_nums: dict[int, int] = {}
     for block in iter_blocks(src_doc):
         if isinstance(block, Paragraph):
@@ -1312,6 +1386,10 @@ def convert_docx(src: Path, doc: Document, row_height_cm: float, row_height_rule
                 continue
             if not text:
                 continue
+            if strict_normalize and not structural_started and seen_content and is_front_matter_text(block, text):
+                add_paragraph(doc, text, role="body")
+                active_list_nums = {}
+                continue
             if strict_normalize and not seen_content and looks_like_visual_heading(block):
                 report["suspect_visual_headings"].append({"text": text, "assigned_level": "title"})
                 add_paragraph(doc, text, "文档标题", "title")
@@ -1322,6 +1400,8 @@ def convert_docx(src: Path, doc: Document, row_height_cm: float, row_height_rule
             active_list_nums = emit_normalized_docx_text(
                 doc, text, style, role, num_level, num_id, report, numbering_ids, active_list_nums
             )
+            if role == "heading":
+                structural_started = True
             seen_content = True
         else:
             new_table = append_table_clone(doc, block)

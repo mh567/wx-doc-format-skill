@@ -9,7 +9,10 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from docx import Document
 from docx.enum.table import WD_ROW_HEIGHT_RULE
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
+from docx.shared import Cm
 
 from format_document import (
     DEFAULT_TABLE_ROW_HEIGHT_CM,
@@ -20,6 +23,11 @@ from format_document import (
     ensure_fallback_styles,
     existing_heading_number,
     heading_level_from_text,
+    infer_docx_role,
+    is_caption_text,
+    is_date_like_text,
+    is_toc_title,
+    normalize_graphics_paragraph,
     new_report,
     new_num_for_abstract,
     normalize_table,
@@ -44,6 +52,14 @@ def test_numbered_decimal_heading_levels_still_work():
     assert heading_level_from_text("1 总则") == 1
     assert heading_level_from_text("1.1 总体架构") == 2
     assert heading_level_from_text("11.1.1 全局视角") == 3
+
+
+def test_date_and_caption_are_not_heading_markers():
+    assert is_date_like_text("2026 年 6 月")
+    assert is_toc_title("目  录")
+    assert is_caption_text("图 2-1　AI 安全能力中台总体逻辑架构")
+    assert heading_level_from_text("2026 年 6 月") is None
+    assert heading_level_from_text("图 2-1　AI 安全能力中台总体逻辑架构") is None
 
 
 def test_chinese_number_marker_is_stripped():
@@ -104,6 +120,79 @@ def test_default_table_row_height_rule_is_at_least():
     assert audit["table_cells_may_clip"] == []
 
 
+def test_table_autofits_to_window():
+    doc = Document()
+    ensure_fallback_styles(doc)
+    table = doc.add_table(rows=1, cols=1)
+
+    normalize_table(table, DEFAULT_TABLE_ROW_HEIGHT_CM, DEFAULT_TABLE_ROW_HEIGHT_RULE)
+
+    tbl_pr = table._tbl.tblPr
+    tbl_w = tbl_pr.find(qn("w:tblW"))
+    tbl_layout = tbl_pr.find(qn("w:tblLayout"))
+    tbl_grid = OxmlElement("w:tblGrid")
+    grid_col = OxmlElement("w:gridCol")
+    grid_col.set(qn("w:w"), "1200")
+    tbl_grid.append(grid_col)
+    table._tbl.append(tbl_grid)
+    tc_pr = table.cell(0, 0)._tc.get_or_add_tcPr()
+    tc_w = tc_pr.get_or_add_tcW()
+    tc_w.set(qn("w:type"), "dxa")
+    tc_w.set(qn("w:w"), "1200")
+    no_wrap = OxmlElement("w:noWrap")
+    tc_pr.append(no_wrap)
+
+    normalize_table(table, DEFAULT_TABLE_ROW_HEIGHT_CM, DEFAULT_TABLE_ROW_HEIGHT_RULE)
+
+    tbl_pr = table._tbl.tblPr
+    tbl_w = tbl_pr.find(qn("w:tblW"))
+    tbl_layout = tbl_pr.find(qn("w:tblLayout"))
+    tc_w = table.cell(0, 0)._tc.tcPr.find(qn("w:tcW"))
+    assert table.autofit is True
+    assert table._tbl.find(qn("w:tblGrid")) is not None
+    assert tbl_w is not None
+    assert tbl_w.get(qn("w:type")) == "pct"
+    assert tbl_w.get(qn("w:w")) == "5000"
+    assert tbl_layout is not None
+    assert tbl_layout.get(qn("w:type")) == "autofit"
+    assert tc_w is not None
+    assert tc_w.get(qn("w:type")) == "auto"
+    assert tc_w.get(qn("w:w")) == "0"
+    assert no_wrap.getparent() is None
+
+
+def test_graphics_paragraph_layout_is_cleared_and_centered():
+    doc = Document()
+    paragraph = doc.add_paragraph("placeholder")
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    paragraph.paragraph_format.left_indent = Cm(2)
+    paragraph.paragraph_format.first_line_indent = Cm(1)
+
+    normalize_graphics_paragraph(paragraph)
+
+    assert paragraph.style.name == "Normal"
+    assert paragraph.alignment == WD_ALIGN_PARAGRAPH.CENTER
+    p_pr = paragraph._p.pPr
+    assert p_pr.find(qn("w:numPr")) is None
+    ind = p_pr.find(qn("w:ind"))
+    assert ind is not None
+    assert ind.get(qn("w:left")) == "0"
+    assert ind.get(qn("w:firstLine")) == "0"
+
+
+def test_caption_role_precedes_visual_heading():
+    doc = Document()
+    ensure_fallback_styles(doc)
+    paragraph = doc.add_paragraph("图 2-1　AI 安全能力中台总体逻辑架构")
+    paragraph.alignment = 1
+
+    text, style, role = infer_docx_role(paragraph, True, new_report())
+
+    assert text == "图 2-1　AI 安全能力中台总体逻辑架构"
+    assert style == "Caption"
+    assert role == "caption"
+
+
 def test_updater_reads_version(tmp_path):
     skill_dir = tmp_path / "skill"
     skill_dir.mkdir()
@@ -125,6 +214,8 @@ def test_docx_image_paragraphs_are_preserved(tmp_path):
     src_doc = Document()
     src_doc.add_paragraph("1 总体定位", style="Heading 1")
     src_doc.add_picture(str(image_path))
+    src_doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.LEFT
+    src_doc.paragraphs[-1].paragraph_format.left_indent = Cm(2)
     src_doc.save(src_path)
 
     out_doc = Document()
@@ -137,7 +228,9 @@ def test_docx_image_paragraphs_are_preserved(tmp_path):
 
     assert report["graphic_paragraphs_preserved"] == 1
     assert report["media_relationships_preserved"] == 1
-    assert len(Document(output_path).inline_shapes) == 1
+    converted = Document(output_path)
+    assert len(converted.inline_shapes) == 1
+    assert converted.paragraphs[1].alignment == WD_ALIGN_PARAGRAPH.CENTER
     assert paragraph_has_graphics(Document(src_path).paragraphs[1])
     with zipfile.ZipFile(output_path) as zf:
         assert any(name.startswith("word/media/") for name in zf.namelist())
