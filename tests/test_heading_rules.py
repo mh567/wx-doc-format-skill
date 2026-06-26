@@ -8,9 +8,12 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from docx import Document
+from docx.enum.table import WD_ROW_HEIGHT_RULE
 from docx.oxml.ns import qn
 
 from format_document import (
+    DEFAULT_TABLE_ROW_HEIGHT_CM,
+    DEFAULT_TABLE_ROW_HEIGHT_RULE,
     audit_document,
     convert_docx,
     ensure_auto_numbering,
@@ -19,6 +22,7 @@ from format_document import (
     heading_level_from_text,
     new_report,
     new_num_for_abstract,
+    normalize_table,
     paragraph_has_graphics,
     resolved_heading_level,
     scan_non_text_objects,
@@ -80,6 +84,21 @@ def test_audit_tracks_heading_sequence_and_list_restart_groups():
     assert audit["heading_sequence"][0]["text"] == "测试章节"
     assert audit["list_restart_groups"][0]["restart_at_one"] is True
     assert audit["ordered_list_nums_without_restart"] == []
+
+
+def test_default_table_row_height_rule_is_at_least():
+    doc = Document()
+    ensure_fallback_styles(doc)
+    table = doc.add_table(rows=1, cols=1)
+    table.cell(0, 0).text = "这是一段较长的表格文字，用于验证默认最小行高允许单元格内容自然换行展示。"
+
+    normalize_table(table, DEFAULT_TABLE_ROW_HEIGHT_CM, DEFAULT_TABLE_ROW_HEIGHT_RULE)
+    audit = audit_document(doc, DEFAULT_TABLE_ROW_HEIGHT_CM, DEFAULT_TABLE_ROW_HEIGHT_RULE)
+
+    assert DEFAULT_TABLE_ROW_HEIGHT_RULE == "at-least"
+    assert table.rows[0].height_rule == WD_ROW_HEIGHT_RULE.AT_LEAST
+    assert audit["table_rows_bad_height"] == []
+    assert audit["table_cells_may_clip"] == []
 
 
 def test_updater_reads_version(tmp_path):

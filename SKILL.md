@@ -1,6 +1,6 @@
 ---
 name: wx-doc-format
-description: Use when the user says “wx文档格式” or asks to convert Markdown, DOCX, or Word documents into a WX-style formatted .docx. Designed for any agent with Python. Uses python-docx and lxml as the best-effect conversion path, includes a macOS bootstrap script for isolated lxml installation and signature repair, and includes an internal DOCX emergency fallback for dependency failures. Uses fixed scripts for repeatable formatting, built-in WX formatting rules, strict normalization, XML-level spacing constraints, Markdown table conversion, heading and list inference, note styles, table body style, fixed table row height, JSON and Markdown audit reports, and render-based verification.
+description: Use when the user says “wx文档格式” or asks to convert Markdown, DOCX, or Word documents into a WX-style formatted .docx. Designed for any agent with Python. Uses python-docx and lxml as the best-effect conversion path, includes a macOS bootstrap script for isolated lxml installation and signature repair, and includes an internal DOCX emergency fallback for dependency failures. Uses fixed scripts for repeatable formatting, built-in WX formatting rules, strict normalization, XML-level spacing constraints, Markdown table conversion, heading and list inference, note styles, table body style, minimum table row height, JSON and Markdown audit reports, and render-based verification.
 metadata:
   short-description: Convert MD or DOCX into WX Word format
 ---
@@ -18,7 +18,7 @@ metadata:
 - 正文标题 1 到 6：小四黑体，不加粗，1.25 倍行距，采用悬挂缩进。标题 1 左缩进 0.762 厘米、悬挂 0.762 厘米，标题 2 左缩进 1.014 厘米、悬挂 1.014 厘米，标题 3 左缩进 1.27 厘米、悬挂 1.27 厘米，标题 4 左缩进 1.524 厘米、悬挂 1.524 厘米，标题 5 左缩进 1.778 厘米、悬挂 1.778 厘米。一级标题段前、段后各 2.5 磅。
 - 图表标题：小四黑体，不加粗，单倍行距，段前、段后各 0.5 行，居中。
 - 表正文：小四宋体，可按内容密度缩小，但建议不小于小五；英文字母、数字和编号使用 Times New Roman；不缩进；表格内行距按最小值处理。
-- 表格：默认表格文字样式为 `表正文`，行高固定为 0.69 厘米。
+- 表格：默认表格文字样式为 `表正文`，行高最小值为 0.69 厘米，允许文字多行展示。
 - 注、图注、表注、脚注：五号宋体，字号比正文小一号；回行与注的内容文字对齐。无编号注段前空 0.79 厘米，悬挂缩进约 1.53 厘米；有编号注段前空 0.79 厘米，悬挂缩进约 1.81 厘米。
 - 列项：一级列项为 `a)`、`b)`；二级列项为 `1)`、`2)`；一级无编号列项为长横线；二级无编号列项为中点。一级有编号列项左缩进约 1.647 厘米、悬挂约 0.801 厘米，二级有编号列项左缩进约 2.443 厘米、悬挂约 0.750 厘米。列项一般不超过两级，不建议把列项作为下级标题。
 - 目录：目次使用小四宋体，1.25 倍行距，目录层级每级向后缩进两字符，定稿前应更新目录。
@@ -36,7 +36,7 @@ metadata:
 6. 运行 `scripts/format_document.py` 生成格式化 `.docx`。
 7. 表格默认执行：
    - 表格文字样式使用 `表正文`
-   - 表格行高固定为 `0.69厘米`
+   - 表格行高最小值为 `0.69厘米`
    - 可用 `--table-row-height-rule exact|at-least` 控制固定行高或最小行高
    - 表头可使用浅蓝底色，正文单元格左对齐，表头居中
 8. 标题处理：
@@ -74,7 +74,7 @@ metadata:
    - 建议使用 `--report report.json`
    - 建议同时使用 `--report-md report.md`
    - 报告包含 Skill 版本、推断标题、疑似视觉标题、推断列项、模糊短段落、表格处理数量、媒体保留比例、标题序列、列表重启组、非文本对象统计、风险提示、内容型复核提示和审计结果
-   - 自动化批处理可增加 `--fail-on-risk`，当源文件含图片、公式、页眉页脚、目录域、批注、修订等对象或固定表格行高可能截断文字时，脚本会生成文件和报告后返回失败码
+   - 自动化批处理可增加 `--fail-on-risk`，当源文件含图片、公式、页眉页脚、目录域、批注、修订等对象，或用户显式选择固定表格行高且可能截断文字时，脚本会生成文件和报告后返回失败码
 14. 如当前智能体具备 Word、LibreOffice 或文档渲染能力，应渲染页面并目视检查关键页。
 15. 最终只返回生成的 `.docx` 链接，除非用户要求中间产物。
 
@@ -136,14 +136,14 @@ python scripts/format_document.py \
 - 自动列表应转换为 Word 自动列项编号，并套用 `1.1一级列项-编号` 或 `2.1二级列项-有编号` 等列项样式。
 - 小节内有序列项应从 `a)` 或 `1)` 重新开始，不能沿用上一小节的 `g)`、`l)` 等编号；编号 XML 中新列表实例应包含 `w:startOverride w:val="1"`。
 - JSON 报告中的 `audit.ordered_list_nums_without_restart` 必须为空；`audit.list_restart_groups` 应列出每组有序列项的起点和 `restart_at_one` 状态。
-- 表格段落样式应为 `表正文`，行高应为 `0.69厘米`。
+- 表格段落样式应为 `表正文`，行高规则应为最小值，最小行高应为 `0.69厘米`。
 - 查看 JSON 报告中的 `suspect_visual_headings` 和 `ambiguous_short_paragraphs`，必要时人工复核。
 - `audit.table_paragraphs_not_table_body`、`audit.table_rows_bad_height`、`audit.markdown_residue` 应为空。
 - 查看 `non_text_objects`，若图片、公式、文本框、目录域、页眉页脚、批注、修订等数量不为 0，应渲染复核。
 - 源文档含图片时，输出 `.docx` 的 `word/media/` 不能为空；报告中的 `media_relationships_preserved` 不应小于 `non_text_objects.media_files`。
 - 报告中的 `media_preservation_ratio` 应为 `1.0`，除非报告明确说明未保留对象的风险。
 - 查看 `risk_warnings`。存在风险提示时，不能只按脚本成功作为交付依据。
-- 查看 `audit.table_cells_may_clip`。固定表格行高下若存在长单元格文本，应重点检查表格是否压缩或截断。
+- 查看 `audit.table_cells_may_clip`。用户显式选择固定表格行高时若存在长单元格文本，应重点检查表格是否压缩或截断。
 - 渲染页中不得出现文字重叠、明显截断、空白异常页。
 - 若源文件含有用户禁用句式或特殊写法，按当前对话要求同步清理。
 - 页眉页脚、页码分节、复杂目录域、附录自动编号等内容不由本脚本自动生成，需要人工复核或另行处理。

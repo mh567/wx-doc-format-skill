@@ -76,6 +76,9 @@ LIST_PATTERNS = [
     re.compile(r"^[\-\uff0d\u2014]{1,2}\s*\S+"),
 ]
 
+DEFAULT_TABLE_ROW_HEIGHT_CM = 0.69
+DEFAULT_TABLE_ROW_HEIGHT_RULE = "at-least"
+
 
 def skill_version() -> str:
     version_path = Path(__file__).resolve().parents[1] / "VERSION"
@@ -1319,8 +1322,8 @@ def main() -> None:
     parser.add_argument("--strict-normalize", action=argparse.BooleanOptionalAction, default=True, help="Infer headings and lists from text and direct formatting, then rebuild normalized output.")
     parser.add_argument("--report", type=Path, default=None, help="Optional JSON report path for inferred structures and audit results.")
     parser.add_argument("--report-md", type=Path, default=None, help="Optional Markdown report path for human-readable audit results.")
-    parser.add_argument("--table-row-height-cm", type=float, default=0.69)
-    parser.add_argument("--table-row-height-rule", choices=["exact", "at-least"], default="exact")
+    parser.add_argument("--table-row-height-cm", type=float, default=DEFAULT_TABLE_ROW_HEIGHT_CM)
+    parser.add_argument("--table-row-height-rule", choices=["exact", "at-least"], default=DEFAULT_TABLE_ROW_HEIGHT_RULE)
     parser.add_argument("--fail-on-risk", action="store_true", help="Exit with an error if conversion risk warnings are detected.")
     args = parser.parse_args()
 
