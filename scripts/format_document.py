@@ -741,6 +741,7 @@ def new_report() -> dict:
         "ambiguous_short_paragraphs": [],
         "content_warnings": [],
         "tables_processed": 0,
+        "semantic_object_splits": [],
         "mixed_text_graphic_paragraphs_split": [],
         "graphic_paragraphs_preserved": 0,
         "media_relationships_preserved": 0,
@@ -946,7 +947,7 @@ def write_markdown_report(report: dict, path: Path) -> None:
         f"- 段落数：{audit.get('paragraph_count', 0)}",
         f"- 表格数：{audit.get('table_count', 0)}",
         f"- 已处理表格数：{report.get('tables_processed', 0)}",
-        f"- 已拆分文字图片混合段落数：{len(report.get('mixed_text_graphic_paragraphs_split', []))}",
+        f"- 已拆分语义对象混合段落数：{len(report.get('semantic_object_splits', []))}",
         f"- 已保留图片段落数：{report.get('graphic_paragraphs_preserved', 0)}",
         f"- 已保留媒体关系数：{report.get('media_relationships_preserved', 0)}",
         f"- 媒体保留比例：{report.get('media_preservation_ratio', 1.0):.2f}",
@@ -957,7 +958,7 @@ def write_markdown_report(report: dict, path: Path) -> None:
         ("疑似视觉标题", "suspect_visual_headings"),
         ("推断列项", "inferred_lists"),
         ("自动编号", "automatic_numbers"),
-        ("已拆分文字图片混合段落", "mixed_text_graphic_paragraphs_split"),
+        ("已拆分语义对象混合段落", "semantic_object_splits"),
         ("模糊短段落", "ambiguous_short_paragraphs"),
     ]:
         items = report.get(key, [])
@@ -1229,6 +1230,53 @@ def append_graphics_only_paragraph_clone(doc: Document, paragraph: Paragraph) ->
     return Paragraph(new_el, doc), media_count
 
 
+def emit_normalized_docx_text(
+    doc: Document,
+    text: str,
+    style: str | None,
+    role: str,
+    num_level: int | None,
+    num_id: int | None,
+    report: dict,
+    numbering_ids: dict,
+    active_list_nums: dict[int, int],
+) -> dict[int, int]:
+    if role == "heading":
+        heading_level = resolved_heading_level(style, num_level, text)
+        number_source = heading_number_source(num_id, num_level, text)
+        clean_text = strip_heading_marker(text)
+        paragraph = add_paragraph(doc, clean_text, style, role)
+        apply_numbering(paragraph, numbering_ids["heading"], heading_level - 1)
+        report["automatic_numbers"].append(
+            {"type": "heading", "text": clean_text, "level": heading_level, "source": number_source}
+        )
+        return {}
+
+    if role == "list":
+        kind = list_kind_for_text(text)
+        list_level = 1 if kind in {"decimal", "bullet2"} else int(num_level or 0)
+        clean_text = strip_list_marker(text)
+        if kind == "dash":
+            style = "1.2一级列项-无编号"
+        elif kind == "bullet2":
+            style = "2.2二级列项-无编号"
+        else:
+            style = "2.1二级列项-有编号" if list_level else "1.1一级列项-编号"
+        paragraph = add_paragraph(doc, clean_text, style, role)
+        if kind in {"letter", "decimal"} and list_level not in active_list_nums:
+            abstract_key = "list_decimal_abstract" if list_level else "list_letter_abstract"
+            active_list_nums[list_level] = new_num_for_abstract(doc, numbering_ids[abstract_key])
+        if kind in {"letter", "decimal"}:
+            apply_numbering(paragraph, active_list_nums[list_level], 0)
+            report["automatic_numbers"].append(
+                {"type": "list", "text": clean_text, "source": "docx-numbering" if num_id is not None else "docx-text"}
+            )
+        return active_list_nums
+
+    add_paragraph(doc, text, style, role)
+    return {}
+
+
 def convert_docx(src: Path, doc: Document, row_height_cm: float, row_height_rule: str, strict_normalize: bool, report: dict, numbering_ids: dict) -> None:
     src_doc = Document(src)
     seen_content = False
@@ -1240,24 +1288,20 @@ def convert_docx(src: Path, doc: Document, row_height_cm: float, row_height_rule
                 if text:
                     num_level, num_id = paragraph_num_info(block)
                     inferred_text, style, role = infer_docx_role(block, strict_normalize, report)
+                    active_list_nums = emit_normalized_docx_text(
+                        doc, inferred_text, style, role, num_level, num_id, report, numbering_ids, active_list_nums
+                    )
+                    _, media_count = append_graphics_only_paragraph_clone(doc, block)
+                    split_record = {"text": inferred_text, "role": role}
                     if role == "heading":
-                        heading_level = resolved_heading_level(style, num_level, inferred_text)
-                        number_source = heading_number_source(num_id, num_level, inferred_text)
-                        clean_heading = strip_heading_marker(inferred_text)
-                        paragraph = add_paragraph(doc, clean_heading, style, role)
-                        apply_numbering(paragraph, numbering_ids["heading"], heading_level - 1)
-                        _, media_count = append_graphics_only_paragraph_clone(doc, block)
-                        report["automatic_numbers"].append(
-                            {"type": "heading", "text": clean_heading, "level": heading_level, "source": number_source}
-                        )
-                        report["mixed_text_graphic_paragraphs_split"].append(
-                            {"text": inferred_text, "role": role, "level": heading_level}
-                        )
-                        report["graphic_paragraphs_preserved"] += 1
-                        report["media_relationships_preserved"] += media_count
-                        active_list_nums = {}
-                        seen_content = True
-                        continue
+                        split_record["level"] = resolved_heading_level(style, num_level, inferred_text)
+                    report["semantic_object_splits"].append(split_record)
+                    report["mixed_text_graphic_paragraphs_split"].append(split_record)
+                    report["graphic_paragraphs_preserved"] += 1
+                    report["media_relationships_preserved"] += media_count
+                    active_list_nums = {}
+                    seen_content = True
+                    continue
                 _, media_count = append_paragraph_clone(doc, block)
                 report["graphic_paragraphs_preserved"] += 1
                 report["media_relationships_preserved"] += media_count
@@ -1273,39 +1317,9 @@ def convert_docx(src: Path, doc: Document, row_height_cm: float, row_height_rule
                 continue
             num_level, num_id = paragraph_num_info(block)
             text, style, role = infer_docx_role(block, strict_normalize, report)
-            if role == "heading":
-                heading_level = resolved_heading_level(style, num_level, text)
-                number_source = heading_number_source(num_id, num_level, text)
-                text = strip_heading_marker(text)
-                paragraph = add_paragraph(doc, text, style, role)
-                apply_numbering(paragraph, numbering_ids["heading"], heading_level - 1)
-                report["automatic_numbers"].append(
-                    {"type": "heading", "text": text, "level": heading_level, "source": number_source}
-                )
-                active_list_nums = {}
-                seen_content = True
-                continue
-            elif role == "list":
-                kind = list_kind_for_text(text)
-                list_level = 1 if kind in {"decimal", "bullet2"} else int(num_level or 0)
-                text = strip_list_marker(text)
-                if kind == "dash":
-                    style = "1.2一级列项-无编号"
-                elif kind == "bullet2":
-                    style = "2.2二级列项-无编号"
-                else:
-                    style = "2.1二级列项-有编号" if list_level else "1.1一级列项-编号"
-                paragraph = add_paragraph(doc, text, style, role)
-                if kind in {"letter", "decimal"} and list_level not in active_list_nums:
-                    abstract_key = "list_decimal_abstract" if list_level else "list_letter_abstract"
-                    active_list_nums[list_level] = new_num_for_abstract(doc, numbering_ids[abstract_key])
-                if kind in {"letter", "decimal"}:
-                    apply_numbering(paragraph, active_list_nums[list_level], 0)
-                    report["automatic_numbers"].append({"type": "list", "text": text, "source": "docx-numbering" if num_id is not None else "docx-text"})
-                seen_content = True
-                continue
-            add_paragraph(doc, text, style, role)
-            active_list_nums = {}
+            active_list_nums = emit_normalized_docx_text(
+                doc, text, style, role, num_level, num_id, report, numbering_ids, active_list_nums
+            )
             seen_content = True
         else:
             new_table = append_table_clone(doc, block)

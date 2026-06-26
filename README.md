@@ -10,6 +10,7 @@
 - Includes an internal DOCX emergency fallback for dependency failures.
 - Uses built-in WX document formatting rules.
 - Normalizes messy Word headings, body text, lists, notes, captions, and tables.
+- Uses semantic conversion invariants for role inference, object preservation, numbering rebuilds, safe defaults, and audit reports.
 - Creates Word automatic numbering for headings and lists so visible numbers are preserved without writing numbers into paragraph text.
 - Applies WX heading hanging indents, body first-line indent, list indents, table body style, and minimum table row height.
 - Generates JSON and Markdown audit reports.
