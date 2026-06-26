@@ -24,9 +24,13 @@ from format_document import (
     existing_heading_number,
     heading_level_from_text,
     infer_docx_role,
+    is_compact_function_heading_text,
+    is_compact_numbered_function_heading,
     is_caption_text,
     is_date_like_text,
     is_toc_title,
+    heading_hierarchy_warnings,
+    normalize_heading_style_level,
     normalize_graphics_paragraph,
     new_report,
     new_num_for_abstract,
@@ -35,6 +39,7 @@ from format_document import (
     paragraph_has_graphics,
     resolved_heading_level,
     scan_non_text_objects,
+    source_heading_level_shift,
     source_numbering_heading_level,
     strip_heading_marker,
 )
@@ -69,6 +74,8 @@ def test_chinese_number_marker_is_stripped():
     assert strip_heading_marker("十五、最后收尾备忘") == "最后收尾备忘"
     assert strip_heading_marker("（一）智能体平台技术路线") == "智能体平台技术路线"
     assert strip_heading_marker("(1) 数字括号标题") == "数字括号标题"
+    assert strip_heading_marker("1. 背景与目标") == "背景与目标"
+    assert strip_heading_marker("2.用户信息管理。") == "用户信息管理"
     assert existing_heading_number("一、核心定位")
     assert existing_heading_number("（一）智能体平台技术路线")
 
@@ -76,6 +83,18 @@ def test_chinese_number_marker_is_stripped():
 def test_heading_style_level_survives_without_num_id():
     assert resolved_heading_level("Heading 2", 1, "分层架构设计") == 2
     assert resolved_heading_level("Heading 2", None, "统一认证中心") == 2
+
+
+def test_source_heading_styles_shift_to_start_at_level_one():
+    doc = Document()
+    doc.add_paragraph("一级章节", style="Heading 2")
+    doc.add_paragraph("二级章节", style="Heading 3")
+
+    shift = source_heading_level_shift(doc)
+
+    assert shift == 1
+    assert normalize_heading_style_level("Heading 2", shift) == "Heading 1"
+    assert normalize_heading_style_level("Heading 3", shift) == "Heading 2"
 
 
 def add_test_numbering(doc, paragraph, num_id: int, abstract_id: int, num_fmt: str, lvl_text: str) -> None:
@@ -132,6 +151,24 @@ def test_decimal_source_numbering_short_heading_is_level_two():
     assert infer_docx_role(paragraph, True, new_report()) == ("目标架构图", "Heading 2", "heading")
 
 
+def test_decimal_source_numbering_compact_function_heading_is_level_three():
+    doc = Document()
+    paragraph = doc.add_paragraph("用户查询")
+    add_test_numbering(doc, paragraph, 103, 203, "decimal", "%1.")
+
+    assert is_compact_function_heading_text("用户查询")
+    assert source_numbering_heading_level(paragraph) == 3
+    assert infer_docx_role(paragraph, True, new_report()) == ("用户查询", "Heading 3", "heading")
+
+
+def test_compact_numbered_function_heading_is_level_three():
+    doc = Document()
+    paragraph = doc.add_paragraph("2.用户信息管理。")
+
+    assert is_compact_numbered_function_heading("2.用户信息管理。")
+    assert infer_docx_role(paragraph, True, new_report()) == ("2.用户信息管理。", "Heading 3", "heading")
+
+
 def test_new_list_numbering_instances_restart_at_one():
     doc = Document()
     numbering_ids = ensure_auto_numbering(doc)
@@ -159,6 +196,27 @@ def test_audit_tracks_heading_sequence_and_list_restart_groups():
     assert audit["heading_sequence"][0]["text"] == "测试章节"
     assert audit["list_restart_groups"][0]["restart_at_one"] is True
     assert audit["ordered_list_nums_without_restart"] == []
+    assert audit["heading_hierarchy_warnings"] == []
+
+
+def test_heading_hierarchy_warnings_detect_level_gaps():
+    warnings = heading_hierarchy_warnings(
+        [
+            {"paragraph": 2, "level": 2, "text": "起始二级标题"},
+            {"paragraph": 3, "level": 4, "text": "跳到四级标题"},
+        ]
+    )
+
+    assert warnings == [
+        {"type": "first_heading_below_level_one", "paragraph": 2, "level": 2, "text": "起始二级标题"},
+        {
+            "type": "heading_level_jump",
+            "paragraph": 3,
+            "previous_level": 2,
+            "level": 4,
+            "text": "跳到四级标题",
+        },
+    ]
 
 
 def test_default_table_row_height_rule_is_at_least():

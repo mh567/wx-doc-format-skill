@@ -378,11 +378,12 @@ def apply_page_setup(doc: Document) -> None:
 
 
 def strip_manual_number(text: str) -> str:
+    text = re.sub(r"^\d+(?:\.\d+)*[.．]\s*", "", text, count=1)
     text = re.sub(r"^\d+(?:\.\d+)*\s+", "", text, count=1)
     text = re.sub(r"^第[一二三四五六七八九十百千万0-9]+[章节]\s*[:：、.\s]?", "", text, count=1)
     text = re.sub(r"^[一二三四五六七八九十]+[、.．]\s*", "", text, count=1)
     text = re.sub(r"^[（(][一二三四五六七八九十]+[）)]\s*", "", text, count=1)
-    return text
+    return text.strip().rstrip("。．.")
 
 
 def heading_level_from_text(text: str) -> int | None:
@@ -398,12 +399,41 @@ def heading_style_for_level(level: int) -> str:
     return f"Heading {max(1, min(level, 5))}"
 
 
+def compact_heading_text(text: str) -> str:
+    return strip_heading_marker(text).lstrip("▲").strip().rstrip("。．.")
+
+
+def is_compact_function_heading_text(text: str) -> bool:
+    clean_text = compact_heading_text(text)
+    if not clean_text or len(clean_text) > 24:
+        return False
+    if re.search(r"[，,；;：:]", clean_text):
+        return False
+    if re.match(r"^(支持|要求|依据|基础属性|权限属性|联系属性|组织属性|岗位属性)", clean_text):
+        return False
+    return True
+
+
+def is_compact_numbered_function_heading(text: str) -> bool:
+    return bool(re.match(r"^\d+[.．]\S", text)) and is_compact_function_heading_text(text)
+
+
+def normalize_heading_style_level(style_name: str | None, level_shift: int = 0) -> str | None:
+    if not style_name:
+        return style_name
+    level = heading_level_from_style(style_name)
+    if level is None or level_shift <= 0:
+        return style_name
+    return heading_style_for_level(max(1, level - level_shift))
+
+
 def strip_heading_marker(text: str) -> str:
+    text = re.sub(r"^\d+(?:\.\d+)*[.．]\s*", "", text, count=1)
     text = re.sub(r"^\d+(?:\.\d+)*\s+", "", text, count=1)
     text = re.sub(r"^第[一二三四五六七八九十百千万0-9]+[章节]\s*[:：、.\s]?", "", text, count=1)
     text = re.sub(r"^[一二三四五六七八九十]+[、.．]\s*", "", text, count=1)
     text = re.sub(r"^[（(][一二三四五六七八九十0-9]+[）)]\s*", "", text, count=1)
-    return text
+    return text.strip().rstrip("。．.")
 
 
 def looks_like_list_item(text: str) -> bool:
@@ -512,15 +542,16 @@ def paragraph_numbering_descriptor(paragraph: Paragraph) -> tuple[str | None, st
 
 
 def source_numbering_heading_level(paragraph: Paragraph) -> int | None:
-    if not looks_like_visual_heading(paragraph):
-        return None
     num_fmt, lvl_text = paragraph_numbering_descriptor(paragraph)
     if not num_fmt or not lvl_text:
         return None
     if num_fmt in {"chineseCounting", "chineseCountingThousand", "ideographDigital"} and "、" in lvl_text:
-        return 1
+        return 1 if looks_like_visual_heading(paragraph) else None
     if num_fmt == "decimal" and re.fullmatch(r"%1[.．]", lvl_text):
-        return 2
+        if looks_like_visual_heading(paragraph):
+            return 2
+        if is_compact_function_heading_text(paragraph.text.strip()):
+            return 3
     return None
 
 
@@ -529,6 +560,18 @@ def heading_level_from_style(style_name: str) -> int | None:
     if match:
         return int(match.group(1))
     return None
+
+
+def source_heading_level_shift(doc: Document) -> int:
+    levels = []
+    for paragraph in doc.paragraphs:
+        style_name = paragraph.style.name if paragraph.style is not None else ""
+        level = heading_level_from_style(style_name)
+        if level is not None:
+            levels.append(level)
+    if not levels:
+        return 0
+    return max(0, min(levels) - 1)
 
 
 def resolved_heading_level(style: str | None, num_level: int | None, text: str) -> int:
@@ -866,11 +909,44 @@ def num_has_start_override(doc: Document, num_id: str) -> bool:
     return False
 
 
+def heading_hierarchy_warnings(heading_sequence: list[dict]) -> list[dict]:
+    warnings = []
+    if not heading_sequence:
+        return warnings
+    first = heading_sequence[0]
+    first_level = int(first.get("level") or 0)
+    if first_level > 1:
+        warnings.append(
+            {
+                "type": "first_heading_below_level_one",
+                "paragraph": first.get("paragraph"),
+                "level": first_level,
+                "text": first.get("text"),
+            }
+        )
+    previous_level = first_level
+    for heading in heading_sequence[1:]:
+        level = int(heading.get("level") or 0)
+        if previous_level and level > previous_level + 1:
+            warnings.append(
+                {
+                    "type": "heading_level_jump",
+                    "paragraph": heading.get("paragraph"),
+                    "previous_level": previous_level,
+                    "level": level,
+                    "text": heading.get("text"),
+                }
+            )
+        previous_level = level
+    return warnings
+
+
 def audit_document(doc: Document, row_height_cm: float, row_height_rule: str) -> dict:
     audit = {
         "paragraph_count": len(doc.paragraphs),
         "table_count": len(doc.tables),
         "heading_sequence": [],
+        "heading_hierarchy_warnings": [],
         "list_restart_groups": [],
         "table_paragraphs_not_table_body": [],
         "table_rows_bad_height": [],
@@ -930,6 +1006,7 @@ def audit_document(doc: Document, row_height_cm: float, row_height_rule: str) ->
                         audit["table_paragraphs_not_table_body"].append(
                             {"table": table_idx, "row": row_idx, "style": paragraph.style.name, "text": paragraph.text[:80]}
                         )
+    audit["heading_hierarchy_warnings"] = heading_hierarchy_warnings(audit["heading_sequence"])
     return audit
 
 
@@ -1033,6 +1110,15 @@ def add_risk_warnings(report: dict, row_height_rule: str) -> None:
                 "count": len(list_without_restart),
             }
         )
+    heading_warnings = report.get("audit", {}).get("heading_hierarchy_warnings", [])
+    if heading_warnings:
+        report["risk_warnings"].append(
+            {
+                "type": "heading_hierarchy",
+                "message": "Heading hierarchy may be inconsistent. Review inferred heading levels.",
+                "count": len(heading_warnings),
+            }
+        )
 
 
 def write_markdown_report(report: dict, path: Path) -> None:
@@ -1094,6 +1180,7 @@ def write_markdown_report(report: dict, path: Path) -> None:
         "markdown_residue",
         "heading_paragraphs_without_numbering",
         "ordered_list_nums_without_restart",
+        "heading_hierarchy_warnings",
     ]
     has_problem = False
     for key in problem_keys:
@@ -1238,6 +1325,9 @@ def infer_docx_role(paragraph: Paragraph, strict_normalize: bool, report: dict) 
     if inferred_level is not None:
         report["inferred_headings"].append({"text": text, "level": inferred_level, "source": "docx-text"})
         return text, heading_style_for_level(inferred_level), "heading"
+    if strict_normalize and is_compact_numbered_function_heading(text):
+        report["inferred_headings"].append({"text": text, "level": 3, "source": "docx-compact-numbered-function-heading"})
+        return text, "Heading 3", "heading"
     if strict_normalize:
         numbering_level = source_numbering_heading_level(paragraph)
         if numbering_level is not None:
@@ -1402,6 +1492,15 @@ def emit_normalized_docx_text(
 
 def convert_docx(src: Path, doc: Document, row_height_cm: float, row_height_rule: str, strict_normalize: bool, report: dict, numbering_ids: dict) -> None:
     src_doc = Document(src)
+    heading_level_shift = source_heading_level_shift(src_doc)
+    if heading_level_shift:
+        report["content_warnings"].append(
+            {
+                "type": "heading_level_shift",
+                "message": "源文档标题样式从非一级开始，已整体上移标题层级。",
+                "shift": heading_level_shift,
+            }
+        )
     seen_content = False
     structural_started = False
     active_list_nums: dict[int, int] = {}
@@ -1412,6 +1511,9 @@ def convert_docx(src: Path, doc: Document, row_height_cm: float, row_height_rule
                 if text:
                     num_level, num_id = paragraph_num_info(block)
                     inferred_text, style, role = infer_docx_role(block, strict_normalize, report)
+                    source_style = block.style.name if block.style is not None else ""
+                    if role == "heading" and heading_level_from_style(source_style) is not None:
+                        style = normalize_heading_style_level(style, heading_level_shift)
                     active_list_nums = emit_normalized_docx_text(
                         doc, inferred_text, style, role, num_level, num_id, report, numbering_ids, active_list_nums
                     )
@@ -1445,6 +1547,9 @@ def convert_docx(src: Path, doc: Document, row_height_cm: float, row_height_rule
                 continue
             num_level, num_id = paragraph_num_info(block)
             text, style, role = infer_docx_role(block, strict_normalize, report)
+            source_style = block.style.name if block.style is not None else ""
+            if role == "heading" and heading_level_from_style(source_style) is not None:
+                style = normalize_heading_style_level(style, heading_level_shift)
             active_list_nums = emit_normalized_docx_text(
                 doc, text, style, role, num_level, num_id, report, numbering_ids, active_list_nums
             )
