@@ -31,9 +31,11 @@ from format_document import (
     new_report,
     new_num_for_abstract,
     normalize_table,
+    paragraph_numbering_descriptor,
     paragraph_has_graphics,
     resolved_heading_level,
     scan_non_text_objects,
+    source_numbering_heading_level,
     strip_heading_marker,
 )
 from update_installed_skill import read_version
@@ -74,6 +76,60 @@ def test_chinese_number_marker_is_stripped():
 def test_heading_style_level_survives_without_num_id():
     assert resolved_heading_level("Heading 2", 1, "分层架构设计") == 2
     assert resolved_heading_level("Heading 2", None, "统一认证中心") == 2
+
+
+def add_test_numbering(doc, paragraph, num_id: int, abstract_id: int, num_fmt: str, lvl_text: str) -> None:
+    numbering = doc.part.numbering_part.element
+    abstract_num = OxmlElement("w:abstractNum")
+    abstract_num.set(qn("w:abstractNumId"), str(abstract_id))
+    level = OxmlElement("w:lvl")
+    level.set(qn("w:ilvl"), "0")
+    fmt = OxmlElement("w:numFmt")
+    fmt.set(qn("w:val"), num_fmt)
+    text = OxmlElement("w:lvlText")
+    text.set(qn("w:val"), lvl_text)
+    level.append(fmt)
+    level.append(text)
+    abstract_num.append(level)
+    numbering.append(abstract_num)
+    num = OxmlElement("w:num")
+    num.set(qn("w:numId"), str(num_id))
+    abstract_ref = OxmlElement("w:abstractNumId")
+    abstract_ref.set(qn("w:val"), str(abstract_id))
+    num.append(abstract_ref)
+    numbering.append(num)
+
+    p_pr = paragraph._p.get_or_add_pPr()
+    num_pr = OxmlElement("w:numPr")
+    ilvl = OxmlElement("w:ilvl")
+    ilvl.set(qn("w:val"), "0")
+    num_id_el = OxmlElement("w:numId")
+    num_id_el.set(qn("w:val"), str(num_id))
+    num_pr.append(ilvl)
+    num_pr.append(num_id_el)
+    p_pr.append(num_pr)
+
+
+def test_chinese_source_numbering_short_heading_is_level_one():
+    doc = Document()
+    paragraph = doc.add_paragraph()
+    paragraph.add_run("AI能力中台定位").bold = True
+    add_test_numbering(doc, paragraph, 101, 201, "chineseCounting", "%1、")
+
+    assert paragraph_numbering_descriptor(paragraph) == ("chineseCounting", "%1、")
+    assert source_numbering_heading_level(paragraph) == 1
+    assert infer_docx_role(paragraph, True, new_report()) == ("AI能力中台定位", "Heading 1", "heading")
+
+
+def test_decimal_source_numbering_short_heading_is_level_two():
+    doc = Document()
+    paragraph = doc.add_paragraph()
+    paragraph.add_run("目标架构图").bold = True
+    add_test_numbering(doc, paragraph, 102, 202, "decimal", "%1.")
+
+    assert paragraph_numbering_descriptor(paragraph) == ("decimal", "%1.")
+    assert source_numbering_heading_level(paragraph) == 2
+    assert infer_docx_role(paragraph, True, new_report()) == ("目标架构图", "Heading 2", "heading")
 
 
 def test_new_list_numbering_instances_restart_at_one():

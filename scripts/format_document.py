@@ -481,6 +481,49 @@ def paragraph_num_info(paragraph: Paragraph) -> tuple[int | None, int | None]:
     return ilvl, num_id
 
 
+def paragraph_numbering_descriptor(paragraph: Paragraph) -> tuple[str | None, str | None]:
+    ilvl, num_id = paragraph_num_info(paragraph)
+    if ilvl is None or num_id is None:
+        return None, None
+    numbering = paragraph.part.numbering_part.element
+    abstract_id = None
+    for num in numbering.findall(qn("w:num")):
+        if num.get(qn("w:numId")) != str(num_id):
+            continue
+        abstract_ref = num.find(qn("w:abstractNumId"))
+        if abstract_ref is not None:
+            abstract_id = abstract_ref.get(qn("w:val"))
+        break
+    if abstract_id is None:
+        return None, None
+    for abstract_num in numbering.findall(qn("w:abstractNum")):
+        if abstract_num.get(qn("w:abstractNumId")) != abstract_id:
+            continue
+        for level in abstract_num.findall(qn("w:lvl")):
+            if level.get(qn("w:ilvl")) != str(ilvl):
+                continue
+            num_fmt = level.find(qn("w:numFmt"))
+            lvl_text = level.find(qn("w:lvlText"))
+            return (
+                num_fmt.get(qn("w:val")) if num_fmt is not None else None,
+                lvl_text.get(qn("w:val")) if lvl_text is not None else None,
+            )
+    return None, None
+
+
+def source_numbering_heading_level(paragraph: Paragraph) -> int | None:
+    if not looks_like_visual_heading(paragraph):
+        return None
+    num_fmt, lvl_text = paragraph_numbering_descriptor(paragraph)
+    if not num_fmt or not lvl_text:
+        return None
+    if num_fmt in {"chineseCounting", "chineseCountingThousand", "ideographDigital"} and "、" in lvl_text:
+        return 1
+    if num_fmt == "decimal" and re.fullmatch(r"%1[.．]", lvl_text):
+        return 2
+    return None
+
+
 def heading_level_from_style(style_name: str) -> int | None:
     match = re.match(r"Heading\s+([1-6])$", style_name)
     if match:
@@ -1195,6 +1238,11 @@ def infer_docx_role(paragraph: Paragraph, strict_normalize: bool, report: dict) 
     if inferred_level is not None:
         report["inferred_headings"].append({"text": text, "level": inferred_level, "source": "docx-text"})
         return text, heading_style_for_level(inferred_level), "heading"
+    if strict_normalize:
+        numbering_level = source_numbering_heading_level(paragraph)
+        if numbering_level is not None:
+            report["inferred_headings"].append({"text": text, "level": numbering_level, "source": "docx-numbering-format"})
+            return text, heading_style_for_level(numbering_level), "heading"
     if strict_normalize and looks_like_visual_heading(paragraph):
         report["suspect_visual_headings"].append({"text": text, "assigned_level": 2})
         return text, "Heading 2", "heading"
