@@ -30,6 +30,7 @@ from format_document import (
     is_date_like_text,
     is_toc_title,
     heading_hierarchy_warnings,
+    looks_like_code_sample_table,
     normalize_heading_style_level,
     normalize_graphics_paragraph,
     new_report,
@@ -273,6 +274,21 @@ def test_table_autofits_to_window():
     assert tc_w.get(qn("w:type")) == "auto"
     assert tc_w.get(qn("w:w")) == "0"
     assert no_wrap.getparent() is None
+
+
+def test_code_sample_table_is_left_aligned():
+    doc = Document()
+    ensure_fallback_styles(doc)
+    table = doc.add_table(rows=1, cols=1)
+    cell = table.cell(0, 0)
+    cell.text = 'POST  /api/scim/v2/user/resetpsw\n<<Header>>\nContent-Type: application/json\n<<Body>>\n{\n  "userName": "zhangsan"\n}'
+
+    normalize_table(table, DEFAULT_TABLE_ROW_HEIGHT_CM, DEFAULT_TABLE_ROW_HEIGHT_RULE)
+    audit = audit_document(doc, DEFAULT_TABLE_ROW_HEIGHT_CM, DEFAULT_TABLE_ROW_HEIGHT_RULE)
+
+    assert looks_like_code_sample_table(table)
+    assert all(paragraph.alignment == WD_ALIGN_PARAGRAPH.LEFT for paragraph in cell.paragraphs if paragraph.text.strip())
+    assert audit["code_sample_table_alignment_issues"] == []
 
 
 def test_graphics_paragraph_layout_is_cleared_and_centered():

@@ -823,6 +823,13 @@ def set_cell_shading(cell, fill: str) -> None:
     shd.set(qn("w:fill"), fill)
 
 
+def clear_cell_shading(cell) -> None:
+    tc_pr = cell._tc.get_or_add_tcPr()
+    shd = tc_pr.find(qn("w:shd"))
+    if shd is not None:
+        tc_pr.remove(shd)
+
+
 def set_table_autofit_to_window(table: Table) -> None:
     table.autofit = True
     tbl_pr = table._tbl.tblPr
@@ -850,19 +857,64 @@ def set_table_autofit_to_window(table: Table) -> None:
             tc_pr.remove(no_wrap)
 
 
+def table_text_lines(table: Table) -> list[str]:
+    lines = []
+    for row in table.rows:
+        for cell in row.cells:
+            for paragraph in cell.paragraphs:
+                text = paragraph.text.strip()
+                if text:
+                    lines.append(text)
+    return lines
+
+
+def looks_like_code_sample_table(table: Table) -> bool:
+    if not table.rows:
+        return False
+    row_count = len(table.rows)
+    col_count = max((len(row.cells) for row in table.rows), default=0)
+    if row_count > 2 or col_count > 2:
+        return False
+    lines = table_text_lines(table)
+    if not lines:
+        return False
+    text = "\n".join(lines)
+    marker_patterns = [
+        r"<<\s*(Header|Body|Request|Response)\s*>>",
+        r"\b(GET|POST|PUT|PATCH|DELETE)\s+/",
+        r"\bHTTP/\d(?:\.\d)?\b",
+        r"\bContent-Type\s*:",
+        r"\bAuthorization\s*:",
+        r"^\s*[{\[]",
+        r"[}\]]\s*$",
+        r'"\w+"\s*:',
+        r"/api/",
+    ]
+    marker_hits = sum(1 for pattern in marker_patterns if re.search(pattern, text, re.IGNORECASE | re.MULTILINE))
+    code_like_lines = sum(
+        1
+        for line in lines
+        if re.search(r'^\s*[{}\[\],]|"\w+"\s*:|^\s*(GET|POST|PUT|PATCH|DELETE)\s+/', line, re.IGNORECASE)
+    )
+    return marker_hits >= 2 or (len(lines) >= 3 and code_like_lines >= 2)
+
+
 def normalize_table(table: Table, row_height_cm: float, row_height_rule: str) -> None:
     table.style = "Table Grid"
     set_table_autofit_to_window(table)
+    is_code_sample = looks_like_code_sample_table(table)
     for ri, row in enumerate(table.rows):
         row.height = Cm(row_height_cm)
         row.height_rule = WD_ROW_HEIGHT_RULE.EXACTLY if row_height_rule == "exact" else WD_ROW_HEIGHT_RULE.AT_LEAST
         for cell in row.cells:
             cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
-            if ri == 0:
+            if is_code_sample:
+                clear_cell_shading(cell)
+            elif ri == 0:
                 set_cell_shading(cell, "DDEBF7")
             for paragraph in cell.paragraphs:
                 paragraph.style = "表正文"
-                paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER if ri == 0 else WD_ALIGN_PARAGRAPH.LEFT
+                paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT if is_code_sample or ri > 0 else WD_ALIGN_PARAGRAPH.CENTER
                 paragraph.paragraph_format.first_line_indent = Pt(0)
                 set_table_body_spacing(paragraph)
                 for run in paragraph.runs:
@@ -951,6 +1003,7 @@ def audit_document(doc: Document, row_height_cm: float, row_height_rule: str) ->
         "table_paragraphs_not_table_body": [],
         "table_rows_bad_height": [],
         "table_cells_may_clip": [],
+        "code_sample_table_alignment_issues": [],
         "markdown_residue": [],
         "heading_paragraphs_without_numbering": [],
         "ordered_list_nums_without_restart": [],
@@ -992,6 +1045,7 @@ def audit_document(doc: Document, row_height_cm: float, row_height_rule: str) ->
                         {"paragraph": idx, "style": style_name, "num_id": num_id_str, "text": text[:120]}
                     )
     for table_idx, table in enumerate(doc.tables, 1):
+        is_code_sample = looks_like_code_sample_table(table)
         for row_idx, row in enumerate(table.rows, 1):
             if row.height is None or abs(row.height.cm - row_height_cm) > 0.02:
                 audit["table_rows_bad_height"].append({"table": table_idx, "row": row_idx})
@@ -1005,6 +1059,10 @@ def audit_document(doc: Document, row_height_cm: float, row_height_rule: str) ->
                     if paragraph.text.strip() and paragraph.style.name != "表正文":
                         audit["table_paragraphs_not_table_body"].append(
                             {"table": table_idx, "row": row_idx, "style": paragraph.style.name, "text": paragraph.text[:80]}
+                        )
+                    if is_code_sample and paragraph.text.strip() and paragraph.alignment == WD_ALIGN_PARAGRAPH.CENTER:
+                        audit["code_sample_table_alignment_issues"].append(
+                            {"table": table_idx, "row": row_idx, "text": paragraph.text[:120]}
                         )
     audit["heading_hierarchy_warnings"] = heading_hierarchy_warnings(audit["heading_sequence"])
     return audit
@@ -1177,6 +1235,7 @@ def write_markdown_report(report: dict, path: Path) -> None:
         "table_paragraphs_not_table_body",
         "table_rows_bad_height",
         "table_cells_may_clip",
+        "code_sample_table_alignment_issues",
         "markdown_residue",
         "heading_paragraphs_without_numbering",
         "ordered_list_nums_without_restart",
