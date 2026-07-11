@@ -436,12 +436,8 @@ def render_docx_direct(
                 report['captions_auto_generated'] = report['captions_auto_generated'] + 1
             
             new_table = append_table_clone(dst_doc, block)
-            if is_api_example:
-                # API example tables: left-align, keep original formatting
-                _set_template_table_properties(new_table, row_height_cm, row_height_rule, table_body_style=None)
-            else:
-                _table_body_style = style_from_profile(template_profile, "table_body", "表正文")
-                _set_template_table_properties(new_table, row_height_cm, row_height_rule, table_body_style=_table_body_style)
+            _table_body_style = style_from_profile(template_profile, "table_body", "表正文")
+            _set_template_table_properties(new_table, row_height_cm, row_height_rule, table_body_style=_table_body_style)
             report["tables_processed"] = report.get("tables_processed", 0) + 1
             last_was_caption = False
             active_list_nums = {}
