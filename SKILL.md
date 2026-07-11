@@ -90,17 +90,31 @@ python3 -m main \
 
 ## LLM 增强配置
 
-LLM 增强模式需要一个外部 LLM 调用命令。Agent 在执行增强模式前，需设置 `LLM_COMMAND` 环境变量，指向能从 stdin 读取 prompt 并输出结果到 stdout 的命令。
+用户选择 LLM 增强模式后，Agent 需自动检测当前环境可用的 LLM 工具，并通过 `--llm-command` 传入。
 
-优先级：
-1. `--llm-command` CLI 参数
-2. `LLM_COMMAND` 环境变量
-3. `ANTHROPIC_API_KEY` 环境变量（自动使用 Anthropic SDK）
-4. `OPENAI_API_KEY` 环境变量（自动使用 OpenAI SDK）
+检测逻辑（Agent 自行实现）：
 
-如果以上都未配置，LLM 增强会自动跳过（静默降级为普通模式）。
+1. 如果已设置 `ANTHROPIC_API_KEY` 或 `OPENAI_API_KEY` 环境变量 → 自动生效，无需额外配置
+2. 否则，扫描 `PATH` 中可用的 CLI 工具：
+   - `sgpt` → `--llm-command "sgpt"`
+   - `codex` → `--llm-command "codex exec"`
+   - 其他类似工具的调用命令
+3. 如果以上都没有 → 普通模式（LLM 增强自动跳过）
 
-Agent 可以使用自身的 LLM 能力，只要在执行转换前设置上述环境变量即可。
+示例（Agent 启动命令）：
+
+```bash
+# 自动检测到 sgpt
+python3 -m main --llm-command "sgpt" --llm-enhance all ...
+
+# 自动检测到 codex
+python3 -m main --llm-command "codex exec" --llm-enhance all ...
+
+# 有 API Key，无需 --llm-command
+python3 -m main --llm-enhance all ...
+```
+
+Agent 也可以将自身的 LLM 调用封装为一个可执行脚本，通过 `--llm-command` 传入。
 
 ## 样式合规不变量
 
