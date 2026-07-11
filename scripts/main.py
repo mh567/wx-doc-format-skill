@@ -41,6 +41,18 @@ from llm_enhancer import (
     should_enhance,
 )
 
+from llm_file_protocol import (
+    collect_phase_requests,
+    replay_phase_responses,
+    generate_run_id,
+    compute_source_sha256,
+    build_run_info,
+    write_requests_and_run,
+    read_run_info,
+    read_requests,
+    read_responses,
+)
+
 
 SKILL_VERSION = "0.7.0"
 DEFAULT_TABLE_ROW_HEIGHT_CM = 0.69
@@ -234,7 +246,7 @@ def _resolve_llm_call(args):
     return None
 
 
-def convert_md(src: Path, doc, report: dict, row_height_cm: float, row_height_rule: str, numbering_ids: dict, args=None) -> dict:
+def convert_md(src: Path, doc, report: dict, row_height_cm: float, row_height_rule: str, numbering_ids: dict, args=None, file_protocol_ctx=None) -> dict:
     source_model = parse_md_to_model(src, report, skill_version=skill_version)
     summarize_source_document_model(report, source_model)
 
@@ -246,18 +258,20 @@ def convert_md(src: Path, doc, report: dict, row_height_cm: float, row_height_ru
 
     # Phase A: block role review (before normalization)
     if should_enhance(report, "A", enhance_mode):
-        source_model = enhance_document_model(
+        source_model = _run_phase_enhancement(
             source_model, report, phase="A",
             llm_call=llm_call, hint=llm_hint,
+            file_protocol_ctx=file_protocol_ctx,
         )
 
     model = normalize_document_model(source_model, report)
 
     # Phase B: caption text generation via LLM (after normalization)
     if should_enhance(report, "B", enhance_mode):
-        model = enhance_document_model(
+        model = _run_phase_enhancement(
             model, report, phase="B",
             llm_call=llm_call, hint=llm_hint,
+            file_protocol_ctx=file_protocol_ctx,
         )
 
     render_document_model(
@@ -267,7 +281,7 @@ def convert_md(src: Path, doc, report: dict, row_height_cm: float, row_height_ru
     return {"source": source_model, "normalized": model}
 
 
-def convert_docx(src: Path, dst_doc, row_height_cm: float, row_height_rule: str, strict_normalize: bool, report: dict, numbering_ids: dict, args=None) -> dict:
+def convert_docx(src: Path, dst_doc, row_height_cm: float, row_height_rule: str, strict_normalize: bool, report: dict, numbering_ids: dict, args=None, file_protocol_ctx=None) -> dict:
     from docx.oxml.ns import qn as _qn
     from docx.text.paragraph import Paragraph
     from docx.table import Table
@@ -299,18 +313,20 @@ def convert_docx(src: Path, dst_doc, row_height_cm: float, row_height_rule: str,
     # Phase A: block role review (before normalization)
     applied_start = len(report.get("llm_enhancer", {}).get("applied", []))
     if should_enhance(report, "A", enhance_mode):
-        source_model = enhance_document_model(
+        source_model = _run_phase_enhancement(
             source_model, report, phase="A",
             llm_call=llm_call, hint=llm_hint,
+            file_protocol_ctx=file_protocol_ctx,
         )
 
     model = normalize_document_model(source_model, report)
 
     # Phase B: caption text generation via LLM (after normalization)
     if should_enhance(report, "B", enhance_mode):
-        model = enhance_document_model(
+        model = _run_phase_enhancement(
             model, report, phase="B",
             llm_call=llm_call, hint=llm_hint,
+            file_protocol_ctx=file_protocol_ctx,
         )
 
     # role_overrides for direct rendering path — extracted from Phase A applied decisions
@@ -487,10 +503,127 @@ def _open_template_renamed_media(template_path):
     return doc
 
 
+def _run_phase_enhancement(model, report, *, phase, llm_call, hint, file_protocol_ctx=None):
+    """Run enhancement for a phase — normal, generate, or resume.
+
+    * Normal mode: calls ``enhance_document_model`` with the real LLM callable.
+    * Generate mode: collects prompts into ``file_protocol_ctx["requests"]``,
+      returns model unchanged.
+    * Resume mode: replays saved responses through validate + apply.
+    """
+    if file_protocol_ctx is None:
+        return enhance_document_model(
+            model, report, phase=phase, llm_call=llm_call, hint=hint,
+        )
+
+    mode = file_protocol_ctx.get("mode")
+
+    if mode == "generate":
+        reqs = collect_phase_requests(model, report, phase=phase, hint=hint)
+        file_protocol_ctx.setdefault("requests", []).extend(reqs)
+        return model  # no LLM call in generate mode
+
+    if mode == "resume":
+        return replay_phase_responses(
+            model, report, phase=phase,
+            requests=file_protocol_ctx.get("requests", []),
+            responses=file_protocol_ctx.get("responses", []),
+            hint=hint,
+        )
+
+    return model
+
+
+def _run_generate_requests(args, report) -> None:
+    """Phase 1: parse source, build prompts, write files, stop."""
+    suffix = args.input.suffix.lower()
+    llm_hint = getattr(args, "llm_hint", None)
+
+    # ── Parse source ─────────────────────────────────────────────────
+    if suffix in {".md", ".markdown"}:
+        source_model = parse_md_to_model(
+            args.input, report, skill_version=skill_version,
+        )
+    elif suffix == ".docx":
+        from docx import Document as _Document
+        from docx.oxml.ns import qn as _qn
+        from docx.text.paragraph import Paragraph
+        from docx.table import Table
+        from docx_pipeline import infer_docx_role
+
+        src_doc = _Document(args.input)
+        source_model = parse_docx_to_model(
+            args.input, src_doc, True, 0,
+            skill_version=skill_version,
+            new_report=lambda: {},
+            iter_blocks=lambda d: (
+                Paragraph(child, d) if child.tag == _qn("w:p")
+                else Table(child, d)
+                for child in d.element.body.iterchildren()
+                if child.tag in (_qn("w:p"), _qn("w:tbl"))
+            ),
+            paragraph_class=Paragraph,
+            infer_docx_role=infer_docx_role,
+            looks_like_code_sample_table=looks_like_code_sample_table,
+            caption_pattern=None,
+        )
+    else:
+        raise SystemExit(f"Unsupported input type: {args.input.suffix}")
+
+    summarize_source_document_model(report, source_model)
+
+    # ── Collect Phase A requests ─────────────────────────────────────
+    all_requests: list[dict] = []
+    fp_ctx: dict = {"mode": "generate", "requests": all_requests}
+    enhance_mode = normalize_mode(getattr(args, "llm_enhance", "off"))
+
+    if should_enhance(report, "A", enhance_mode):
+        _run_phase_enhancement(
+            source_model, report, phase="A",
+            llm_call=None, hint=llm_hint,
+            file_protocol_ctx=fp_ctx,
+        )
+
+    # ── Normalize ────────────────────────────────────────────────────
+    model = normalize_document_model(source_model, report)
+
+    # ── Collect Phase B requests ─────────────────────────────────────
+    if should_enhance(report, "B", enhance_mode):
+        _run_phase_enhancement(
+            model, report, phase="B",
+            llm_call=None, hint=llm_hint,
+            file_protocol_ctx=fp_ctx,
+        )
+
+    # ── Write requests and run.json ──────────────────────────────────
+    run_id = generate_run_id()
+    source_sha256 = compute_source_sha256(args.input)
+    run_info = build_run_info(
+        run_id=run_id,
+        source_path=str(args.input),
+        source_sha256=source_sha256,
+        args={
+            "input": str(args.input),
+            "output": str(args.output),
+            "template": str(args.template) if args.template else None,
+            "llm_enhance": args.llm_enhance,
+            "llm_hint": args.llm_hint,
+            "strict_normalize": args.strict_normalize,
+            "table_row_height_cm": args.table_row_height_cm,
+            "table_row_height_rule": args.table_row_height_rule,
+        },
+        work_dir=str(args.generate_requests),
+    )
+    write_requests_and_run(fp_ctx["requests"], run_info, args.generate_requests)
+
+    print(f"Generated {len(fp_ctx['requests'])} LLM request(s) in {args.generate_requests.resolve()}")
+    print("Run with --resume <run.json> after processing llm_responses.jsonl.")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Convert MD or DOCX to template-formatted DOCX.")
-    parser.add_argument("--input", required=True, type=Path)
-    parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--input", type=Path, help="Source file (optional when --resume is used)")
+    parser.add_argument("--output", type=Path, help="Output .docx path (optional when --resume is used)")
     parser.add_argument("--template", type=Path, default=None, help="DOCX template driving styles and numbering.")
     parser.add_argument("--strict-normalize", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--report", type=Path, default=None)
@@ -532,7 +665,43 @@ def main() -> None:
             "expects a prompt file path."
         ),
     )
+    parser.add_argument(
+        "--generate-requests",
+        type=Path,
+        default=None,
+        help=(
+            "Generate LLM request files (llm_requests.jsonl + run.json) in DIR "
+            "and stop.  The agent processes the requests and writes "
+            "llm_responses.jsonl, then --resume continues."
+        ),
+    )
+    parser.add_argument(
+        "--resume",
+        type=Path,
+        default=None,
+        help=(
+            "Resume from a run.json file produced by --generate-requests. "
+            "Reads llm_responses.jsonl, validates integrity, and continues "
+            "the pipeline (enhance → validate → apply → render)."
+        ),
+    )
     args = parser.parse_args()
+
+    # ── Argument validation ─────────────────────────────────────────
+    if args.generate_requests and args.resume:
+        parser.error("--generate-requests and --resume are mutually exclusive")
+
+    if args.generate_requests and not args.input:
+        parser.error("--input is required when using --generate-requests")
+
+    if not args.resume and not args.generate_requests:
+        if not args.input:
+            parser.error("--input is required")
+        if not args.output:
+            parser.error("--output is required")
+
+    # Resume mode may pull input/output from run.json so we defer
+    # the required check until after the resume handler runs.
 
     # Backward compatibility: WX_DOC_LLM_ENHANCE env var → abc mode
     import os as _os
@@ -541,6 +710,35 @@ def main() -> None:
 
     # Normalize new capability names to legacy mode names
     args.llm_enhance = normalize_mode(args.llm_enhance)
+
+    # ── Handle --resume: load run.json and restore original CLI args ──
+    if args.resume:
+        run_info = read_run_info(args.resume)
+        run_args = run_info.get("args", {})
+        # Only fill in input/output/template from run.json if the user
+        # didn't provide them on the CLI (allows override).
+        if not args.input and "input" in run_args:
+            args.input = Path(run_args["input"])
+        if not args.output and "output" in run_args:
+            args.output = Path(run_args["output"])
+        if not args.template and run_args.get("template"):
+            args.template = Path(run_args["template"])
+        if "llm_enhance" in run_args:
+            args.llm_enhance = run_args["llm_enhance"]
+        if "llm_hint" in run_args and run_args["llm_hint"]:
+            args.llm_hint = run_args["llm_hint"]
+        if "strict_normalize" in run_args:
+            args.strict_normalize = run_args["strict_normalize"]
+        if "table_row_height_cm" in run_args:
+            args.table_row_height_cm = run_args["table_row_height_cm"]
+        if "table_row_height_rule" in run_args:
+            args.table_row_height_rule = run_args["table_row_height_rule"]
+
+    # After --resume resolution, verify required paths exist.
+    if args.resume and not args.input:
+        raise SystemExit("--resume: run.json does not contain 'input', provide --input on CLI")
+    if args.resume and not args.output:
+        raise SystemExit("--resume: run.json does not contain 'output', provide --output on CLI")
 
     global SKILL_VERSION
     SKILL_VERSION = _load_version()
@@ -579,12 +777,29 @@ def main() -> None:
     normalized_document_model = None
     suffix = args.input.suffix.lower()
 
+    # ── Phase 1: Generate LLM requests and stop ─────────────────────
+    if args.generate_requests:
+        _run_generate_requests(args, report)
+        return
+
+    # ── Phase 3: Resume — set up file protocol context ──────────────
+    file_protocol_ctx = None
+    if args.resume:
+        run_info = read_run_info(args.resume)
+        reqs = read_requests(Path(run_info["requests_path"]))
+        resps = read_responses(Path(run_info["responses_path"]))
+        file_protocol_ctx = {
+            "mode": "resume",
+            "requests": reqs,
+            "responses": resps,
+        }
+
     if suffix in {".md", ".markdown"}:
-        models = convert_md(args.input, out_doc, report, args.table_row_height_cm, args.table_row_height_rule, numbering_ids, args)
+        models = convert_md(args.input, out_doc, report, args.table_row_height_cm, args.table_row_height_rule, numbering_ids, args, file_protocol_ctx=file_protocol_ctx)
         source_document_model = models["source"]
         normalized_document_model = models["normalized"]
     elif suffix == ".docx":
-        models = convert_docx(args.input, out_doc, args.table_row_height_cm, args.table_row_height_rule, args.strict_normalize, report, numbering_ids, args)
+        models = convert_docx(args.input, out_doc, args.table_row_height_cm, args.table_row_height_rule, args.strict_normalize, report, numbering_ids, args, file_protocol_ctx=file_protocol_ctx)
         source_document_model = models["source"]
         normalized_document_model = models["normalized"]
     else:

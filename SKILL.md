@@ -90,31 +90,55 @@ python3 -m main \
 
 ## LLM 增强配置
 
-用户选择 LLM 增强模式后，Agent 需自动检测当前环境可用的 LLM 工具，并通过 `--llm-command` 传入。
+用户选择 LLM 增强模式后，Agent 需将自己的 LLM 能力传递给 `main.py`。推荐使用文件协议两步流程，Agent 无需设置环境变量即可完成 LLM 调用。
 
-检测逻辑（Agent 自行实现）：
-
-1. 如果已设置 `ANTHROPIC_API_KEY` 或 `OPENAI_API_KEY` 环境变量 → 自动生效，无需额外配置
-2. 否则，扫描 `PATH` 中可用的 CLI 工具：
-   - `sgpt` → `--llm-command "sgpt"`
-   - `codex` → `--llm-command "codex exec"`
-   - 其他类似工具的调用命令
-3. 如果以上都没有 → 普通模式（LLM 增强自动跳过）
-
-示例（Agent 启动命令）：
+### 方式一（推荐）：文件协议两步流程
 
 ```bash
-# 自动检测到 sgpt
-python3 -m main --llm-command "sgpt" --llm-enhance all ...
-
-# 自动检测到 codex
-python3 -m main --llm-command "codex exec" --llm-enhance all ...
-
-# 有 API Key，无需 --llm-command
-python3 -m main --llm-enhance all ...
+# Step 1: 解析文档，生成 LLM 请求文件
+python3 -m main \
+  --input source.docx \
+  --output output.docx \
+  --template assets/wx_template.docx \
+  --llm-enhance all \
+  --generate-requests .wx-doc-format/
 ```
 
-Agent 也可以将自身的 LLM 调用封装为一个可执行脚本，通过 `--llm-command` 传入。
+这将生成：
+
+- `.wx-doc-format/run.json` — 运行配置（源文件路径、CLI 参数等）
+- `.wx-doc-format/llm_requests.jsonl` — LLM 请求列表（每行包含 `request_id`、`phase`、`capability`、`prompt`、`input_hash`）
+
+Agent 读取 `llm_requests.jsonl`，逐行生成 `raw_response`（LLM 的 JSON patch 输出），写入 `llm_responses.jsonl` 后：
+
+```bash
+# Step 2: 恢复运行，验证并应用响应
+python3 -m main --resume .wx-doc-format/run.json
+```
+
+系统自动执行：
+
+1. 验证每个响应的 `input_hash` 完整性（防止提示词被篡改）
+2. 校验 JSON patch schema（`schema_version`、`phase`、`decisions` 结构）
+3. 校验每个 decision 的 `block_id`、`operation` 和目标类型
+4. 应用高置信度 patch 到文档模型
+5. 渲染最终输出
+
+### 方式二（兼容）：API Key
+
+设置 `ANTHROPIC_API_KEY` 或 `OPENAI_API_KEY` 环境变量，无需额外配置。
+
+### 方式三（兼容）：内置桥接脚本
+
+Skill 内置 `scripts/llm_bridge.py`。Agent 设置 `LLM_COMMAND` 环境变量后即可使用：
+
+```bash
+LLM_COMMAND="codex exec" python3 -m main \
+  --llm-command "python3 scripts/llm_bridge.py" \
+  --llm-enhance all ...
+```
+
+`LLM_COMMAND` 设为 Agent 的 LLM 调用命令（如 `codex exec`、`hermes llm-call`），桥接脚本自动中转 stdin/stdout。
 
 ## 样式合规不变量
 

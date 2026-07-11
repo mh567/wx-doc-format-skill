@@ -24,3 +24,5 @@ AGENTS.md
 CLAUDE.md
 wx-format
 scripts/update_installed_skill.py
+# exclude dev-only files
+docs/*
