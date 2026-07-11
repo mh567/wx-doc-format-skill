@@ -124,15 +124,80 @@ def _normalize_template_table(table, row_height_cm: float, row_height_rule: str)
     set_template_table_properties(table, row_height_cm, row_height_rule)
 
 
+def _llm_call_from_command(command: str):
+    """Build an LLM callable from a shell command template.
+
+    The command receives the prompt via stdin by default.  If the command
+    contains the ``{prompt_file}`` placeholder, the prompt is written to a
+    temporary file and the placeholder is replaced with its quoted path.
+
+    Returns a ``(prompt: str) -> str`` callable, or ``None`` if *command*
+    is empty.
+    """
+    import os as _os
+    import shlex
+    import subprocess
+    import tempfile
+
+    command = command.strip()
+    if not command:
+        return None
+
+    def _llm(prompt: str) -> str:
+        if "{prompt_file}" not in command:
+            r = subprocess.run(
+                command,
+                input=prompt,
+                text=True,
+                shell=True,
+                capture_output=True,
+                timeout=60,
+            )
+            if r.returncode != 0:
+                raise RuntimeError((r.stderr or r.stdout or "").strip())
+            return r.stdout or ""
+
+        prompt_path = None
+        try:
+            with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".prompt.txt", delete=False) as f:
+                f.write(prompt)
+                prompt_path = f.name
+            r = subprocess.run(
+                command.replace("{prompt_file}", shlex.quote(prompt_path)),
+                text=True,
+                shell=True,
+                capture_output=True,
+                timeout=60,
+            )
+            if r.returncode != 0:
+                raise RuntimeError((r.stderr or r.stdout or "").strip())
+            return r.stdout or ""
+        finally:
+            if prompt_path:
+                try:
+                    _os.unlink(prompt_path)
+                except OSError:
+                    pass
+
+    return _llm
+
+
 def _resolve_llm_call(args):
     """Auto-detect LLM backend for semantic enhancement.
 
     Returns a callable that accepts a prompt string and returns the LLM
     response, or None if no LLM backend is available.
     """
-    import os as _os, shutil, subprocess
+    import os as _os
 
-    # 1. Anthropic API
+    # 1. Explicit LLM command (--llm-command / LLM_COMMAND)
+    command = getattr(args, "llm_command", None) if args is not None else None
+    command = command or _os.environ.get("LLM_COMMAND")
+    command_call = _llm_call_from_command(command or "")
+    if command_call is not None:
+        return command_call
+
+    # 2. Anthropic API
     key = _os.environ.get("ANTHROPIC_API_KEY")
     if key:
         import anthropic
@@ -149,7 +214,7 @@ def _resolve_llm_call(args):
 
         return _llm
 
-    # 2. OpenAI API
+    # 3. OpenAI API
     key = _os.environ.get("OPENAI_API_KEY")
     if key:
         import openai
@@ -163,17 +228,6 @@ def _resolve_llm_call(args):
                 temperature=0,
             )
             return resp.choices[0].message.content or ""
-
-        return _llm
-
-    # 3. codex CLI (fallback)
-    codex = shutil.which("codex")
-    if codex:
-        def _llm(prompt: str) -> str:
-            r = subprocess.run([codex, "exec"], input=prompt.encode(),
-                               capture_output=True, timeout=60)
-            out = (r.stdout or b"") + (r.stderr or b"")
-            return out.decode("utf-8", errors="replace")
 
         return _llm
 
@@ -467,6 +521,16 @@ def main() -> None:
         type=str,
         default=None,
         help="Natural-language hint injected into LLM enhancement prompts"
+    )
+    parser.add_argument(
+        "--llm-command",
+        type=str,
+        default=None,
+        help=(
+            "Shell command used for LLM enhancement. The prompt is sent to stdin "
+            "and stdout is used as the response. Use {prompt_file} if the command "
+            "expects a prompt file path."
+        ),
     )
     args = parser.parse_args()
 

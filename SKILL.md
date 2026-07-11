@@ -88,6 +88,20 @@ python3 -m main \
 
 新增能力通过 `CapabilityConfig` 注册即可，无需修改核心调度逻辑。
 
+## LLM 增强配置
+
+LLM 增强模式需要一个外部 LLM 调用命令。Agent 在执行增强模式前，需设置 `LLM_COMMAND` 环境变量，指向能从 stdin 读取 prompt 并输出结果到 stdout 的命令。
+
+优先级：
+1. `--llm-command` CLI 参数
+2. `LLM_COMMAND` 环境变量
+3. `ANTHROPIC_API_KEY` 环境变量（自动使用 Anthropic SDK）
+4. `OPENAI_API_KEY` 环境变量（自动使用 OpenAI SDK）
+
+如果以上都未配置，LLM 增强会自动跳过（静默降级为普通模式）。
+
+Agent 可以使用自身的 LLM 能力，只要在执行转换前设置上述环境变量即可。
+
 ## 样式合规不变量
 
 - 输出文档只使用模板样式，`unexpected_styles` 必须为空
