@@ -48,8 +48,15 @@
 - TOC 样式 `toc 1/2/3` 加入审计白名单
 
 ### 8. LLM 增强模块
+<<<<<<< HEAD
 - `list_semantic_enhancer.py` 是纯函数接口，通过 `llm_call` 回调注入
 - `main.py` 中 `_auto_llm` 作为默认 fallback 自动探测 codex/sgpt/OpenAI/Anthropic
+=======
+- `llm_enhancer.py` 是核心模块，Phase A/B/C 三级增强
+- `list_semantic_enhancer.py` 是兼容包装，内部转调 llm_enhancer
+- Phase B/C 支持分片批处理，避免大文档超时
+- `--llm-enhance off/auto/a/ab/abc` CLI 控制
+>>>>>>> 68560d0 (dev: 修复 .gitignore，追踪 AGENTS.md 和 CLAUDE.md)
 
 ## 输出验证不变量
 
@@ -60,6 +67,16 @@
 - API 示例表格前无题注
 - 列表每章节重启，新 numId 带 `lvlOverride > startOverride`
 - 题注 run 文本为 `['表 ', '1', ' caption_text']` 或 `['图 ', '1', ' caption_text']`
+<<<<<<< HEAD
+=======
+- 表题注在表格上方，图题注在图片下方
+
+## 多 Agent 协作分工
+
+- Hermes = 总控：理解需求、分类任务、路由、管理任务状态/Git、验证结果
+- Codex = 规划/设计/审查：方案设计、架构、任务拆分、代码审查
+- Claude Code = 实现：按任务文件编码、测试、验证
+>>>>>>> 68560d0 (dev: 修复 .gitignore，追踪 AGENTS.md 和 CLAUDE.md)
 
 ## 常用命令
 
@@ -73,3 +90,12 @@ cd scripts && .venv/bin/python3 -m main \
 # 测试
 .venv/bin/python3 -m pytest tests/ -q
 ```
+<<<<<<< HEAD
+=======
+
+## 仓库管理
+
+- 公开仓库 `mh567/wx-doc-format-skill`（main，仅 skill 文件）
+- 私有仓库 `mh567/wx-doc-format-skill-dev`（main，含全部开发文件）
+- 本地 `main` → 公开仓库，`dev` → 私有仓库
+>>>>>>> 68560d0 (dev: 修复 .gitignore，追踪 AGENTS.md 和 CLAUDE.md)
