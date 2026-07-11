@@ -180,8 +180,6 @@ def finalize_template_tables(
     corrections = []
     from text_utils import looks_like_api_example_table as _looks_api
     table_body_style = resolved_style(profile, "table_body", "表正文")
-    note_style = resolved_style(profile, "note", "3.1注-无编号注")
-    numbered_note_style = resolved_style(profile, "numbered_note", "3.2注-有编号注")
     for table_index, table in enumerate(doc.tables, 1):
         set_table_autofit_to_window(table)
         is_code_sample = looks_like_code_sample_table(table)
@@ -199,29 +197,52 @@ def finalize_template_tables(
                     text = paragraph.text.strip()
                     if not text:
                         continue
-                    current_style = style_name(paragraph)
-                    if "注-" in current_style:
-                        target_style = numbered_note_style if ("3.2" in current_style or "有编号" in current_style) else note_style
-                    else:
-                        target_style = table_body_style
-                    if not is_api_example:
-                        set_style(
-                            paragraph,
-                            target_style,
-                            corrections,
-                            "table_cell_style_normalized",
-                            text,
-                        )
-                        # Clear run-level formatting so the style definition takes full effect.
-                        _KEEP = {qn('w:rStyle'), qn('w:lang'), qn('w:bCs'), qn('w:iCs')}
-                        for run in paragraph.runs:
-                            rpr = run._element.find(qn('w:rPr'))
-                            if rpr is None:
-                                continue
-                            for child in list(rpr):
-                                if child.tag not in _KEEP:
-                                    rpr.remove(child)
-                    paragraph.alignment = left_alignment if (is_code_sample or is_api_example or "注-" in current_style) else center_alignment
+                    set_style(
+                        paragraph,
+                        table_body_style,
+                        corrections,
+                        "table_cell_style_normalized",
+                        text,
+                    )
+                    # Clear run-level formatting so the style definition takes full effect.
+                    _KEEP = {qn('w:rStyle'), qn('w:lang'), qn('w:bCs'), qn('w:iCs')}
+                    for run in paragraph.runs:
+                        rpr = run._element.find(qn('w:rPr'))
+                        if rpr is None:
+                            continue
+                        for child in list(rpr):
+                            if child.tag not in _KEEP:
+                                rpr.remove(child)
+                    paragraph.alignment = left_alignment if (is_code_sample or is_api_example) else center_alignment
+    return corrections
+
+
+def add_table_borders(doc) -> list[dict]:
+    """Add full borders (all sides + internal) to every table in the document."""
+    corrections = []
+    for table_index, table in enumerate(doc.tables, 1):
+        tbl = table._tbl
+        tblPr = tbl.find(qn('w:tblPr'))
+        if tblPr is None:
+            tblPr = OxmlElement('w:tblPr')
+            tbl.insert(0, tblPr)
+
+        existing = tblPr.find(qn('w:tblBorders'))
+        if existing is not None:
+            tblPr.remove(existing)
+
+        borders = OxmlElement('w:tblBorders')
+        for border_name in ('top', 'left', 'bottom', 'right', 'insideH', 'insideV'):
+            border = OxmlElement(f'w:{border_name}')
+            border.set(qn('w:val'), 'single')
+            border.set(qn('w:sz'), '4')
+            border.set(qn('w:space'), '0')
+            border.set(qn('w:color'), '000000')
+            borders.append(border)
+
+        tblPr.append(borders)
+        corrections.append({"type": "table_borders_added", "table": table_index})
+
     return corrections
 
 
@@ -666,6 +687,7 @@ def apply_template_finalizer(
             looks_like_code_sample_table=looks_like_code_sample_table,
         )
     )
+    corrections.extend(add_table_borders(doc))
     return {
         "enabled": True,
         "corrections": corrections,
