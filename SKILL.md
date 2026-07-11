@@ -11,24 +11,9 @@ metadata:
 
 ## 一键安装
 
-根据你使用的 Agent 平台，复制对应指令即可：
+对任何支持 skill 的 Agent 说：
 
-**Codex CLI：**
-```
-Install wx-doc-format from GitHub repo mh567/wx-doc-format-skill.
-```
-
-**Claude Code：**
-```
-从 GitHub 仓库 mh567/wx-doc-format-skill 安装 skill wx-doc-format
-```
-
-**Hermes Agent：**
-```
-从 mh567/wx-doc-format-skill 安装 wx-doc-format skill
-```
-
-安装后运行 `scripts/update_installed_skill.py` 可升级到最新版本。
+> 从 GitHub 仓库 mh567/wx-doc-format-skill 安装 wx-doc-format skill
 
 ## 架构概览
 

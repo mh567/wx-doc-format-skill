@@ -11,15 +11,9 @@
 
 ## 一键安装
 
-**Codex CLI：**
-```
-Install wx-doc-format from GitHub repo mh567/wx-doc-format-skill.
-```
+对任何支持 skill 的 Agent 说：
 
-**Claude Code / Hermes / 其他 Agent：**
-```
-从 GitHub 仓库 mh567/wx-doc-format-skill 安装 wx-doc-format skill
-```
+> 从 GitHub 仓库 mh567/wx-doc-format-skill 安装 wx-doc-format skill
 
 ## 更新
 
