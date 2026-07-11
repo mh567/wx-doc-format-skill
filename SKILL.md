@@ -153,7 +153,6 @@ LLM_COMMAND="codex exec" python3 -m main \
 
 - Python 3.10+
 - python-docx、lxml
-- macOS：运行 `scripts/bootstrap_macos_lxml.sh` 创建隔离环境
 
 ## 已知边界
 
