@@ -23,3 +23,4 @@ docs/optimization-plan.md
 AGENTS.md
 CLAUDE.md
 wx-format
+scripts/update_installed_skill.py
