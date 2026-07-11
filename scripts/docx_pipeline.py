@@ -41,7 +41,7 @@ def infer_docx_role(paragraph, strict_normalize: bool, parse_report: dict) -> tu
     Step 1: parse DOCX paragraph into (text, style_name, role) for AST construction.
     """
     from text_utils import (
-        is_caption_text, is_date_like_text, is_toc_title,
+        is_caption_text, is_date_like_text, is_toc_title, is_toc_entry,
         looks_like_list_item, list_style_for_text, heading_level_from_text,
         heading_style_for_level, is_compact_numbered_function_heading,
         source_numbering_heading_level, looks_like_visual_heading,
@@ -52,6 +52,8 @@ def infer_docx_role(paragraph, strict_normalize: bool, parse_report: dict) -> tu
     text = paragraph.text.strip()
     style_name = paragraph.style.name if paragraph.style is not None else ""
 
+    if is_toc_entry(text):
+        return text, None, "skip"
     if is_caption_text(text):
         return text, "Caption", "caption"
     if is_date_like_text(text) or is_toc_title(text):
@@ -163,6 +165,8 @@ def parse_docx_to_model_simple(
             source_style = block.style.name if block.style is not None else ""
             num_level, num_id = paragraph_num_info(block)
             inferred_text, style, role = infer_docx_role(block, strict_normalize, parse_report) if text else ("", None, "body")
+            if role == "skip":
+                continue
             if role == "heading" and heading_level_from_style(source_style) is not None:
                 style = normalize_heading_style_level(style, heading_level_shift)
             source = source_record(

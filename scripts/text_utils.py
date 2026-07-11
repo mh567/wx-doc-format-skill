@@ -224,6 +224,13 @@ def is_toc_title(text: str) -> bool:
     return text.strip() in TOC_TITLES
 
 
+_TOC_ENTRY_RE = re.compile(r'[\t.·…]{1,}\d{1,4}$')
+def is_toc_entry(text: str) -> bool:
+    """Detect TOC entry paragraphs (title<tab/dots>page_number)."""
+    t = text.strip()
+    return len(t) < 200 and bool(_TOC_ENTRY_RE.search(t))
+
+
 def is_front_matter_text(paragraph, text: str) -> bool:
     style = paragraph.style.name if paragraph.style is not None else ""
     if style.startswith("Heading"):

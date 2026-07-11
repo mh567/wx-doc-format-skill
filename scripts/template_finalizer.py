@@ -103,6 +103,11 @@ def set_paragraph_lines(paragraph, lines: list[str]) -> None:
             paragraph.add_run(line)
 
 
+_APPENDIX_MARK_RE = re.compile(r"^附\s*录\s*([A-Z])\s*$")
+_APPENDIX_CLASSIFICATION_RE = re.compile(r"^[（(](规范性|资料性)[)）]$")
+_APPENDIX_CLASSIFICATION_TITLE_RE = re.compile(r"^[（(](规范性|资料性)[)）]\s*.+$")
+
+
 def finalize_appendix_structure(doc, profile: dict) -> list[dict]:
     corrections = []
     appendix_style = resolved_style(profile, "appendix_title", "附录标题")
@@ -110,7 +115,7 @@ def finalize_appendix_structure(doc, profile: dict) -> list[dict]:
     while index < len(doc.paragraphs):
         paragraph = doc.paragraphs[index]
         text = paragraph.text.strip()
-        match = re.match(r"^附\s*录\s*([A-Z])\s*$", text)
+        match = _APPENDIX_MARK_RE.match(text)
         if not match:
             index += 1
             continue
@@ -119,8 +124,9 @@ def finalize_appendix_structure(doc, profile: dict) -> list[dict]:
         next_two = doc.paragraphs[index + 2] if index + 2 < len(doc.paragraphs) else None
         next_one_text = next_one.text.strip() if next_one is not None else ""
         next_two_text = next_two.text.strip() if next_two is not None else ""
-        if re.match(r"^[（(](规范性|资料性)[)）]$", next_one_text) and next_two_text:
-            set_paragraph_lines(paragraph, [f"附  录  {letter}", next_one_text, next_two_text])
+        # Three-paragraph case: 附录A, (资料性), Title
+        if _APPENDIX_CLASSIFICATION_RE.match(next_one_text) and next_two_text:
+            set_paragraph_lines(paragraph, ["", next_one_text, next_two_text])
             set_style(paragraph, appendix_style, corrections, "appendix_title_style_normalized", paragraph.text)
             delete_paragraph(next_two)
             delete_paragraph(next_one)
@@ -134,10 +140,25 @@ def finalize_appendix_structure(doc, profile: dict) -> list[dict]:
             )
             index += 1
             continue
-        canonical = f"附  录  {letter}"
-        if text != canonical:
-            paragraph.text = canonical
-            corrections.append({"type": "appendix_title_spacing_normalized", "from": text, "to": canonical})
+
+        # Two-paragraph case: 附录A, (资料性)接口字段与处置命令约束
+        if _APPENDIX_CLASSIFICATION_TITLE_RE.match(next_one_text):
+            set_paragraph_lines(paragraph, ["", next_one_text])
+            set_style(paragraph, appendix_style, corrections, "appendix_title_style_normalized", paragraph.text)
+            delete_paragraph(next_one)
+            corrections.append(
+                {
+                    "type": "appendix_two_paragraph_header_merged",
+                    "letter": letter,
+                    "title": next_one_text[:120],
+                }
+            )
+            index += 1
+            continue
+
+        # Standalone appendix mark: clear text, auto-numbering handles display
+        paragraph.text = ""
+        corrections.append({"type": "appendix_title_prefix_removed", "from": text, "to": ""})
         set_style(paragraph, appendix_style, corrections, "appendix_title_style_normalized", paragraph.text)
         index += 1
     return corrections
