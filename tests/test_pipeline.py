@@ -29,10 +29,10 @@ from word_model_renderer import style_from_profile
 def _template_path() -> Path:
     """Find the template docx.  Looks in assets/ relative to repo root."""
     repo = Path(__file__).resolve().parents[1]
-    p = repo / "assets" / "技术文件格式及书写要求.docx"
+    p = repo / "assets" / "wx_template.docx"
     if p.exists():
         return p
-    p = repo / "技术文件格式及书写要求.docx"
+    p = repo / "wx_template.docx"
     if p.exists():
         return p
     raise FileNotFoundError("Template not found in assets/ or repo root")
