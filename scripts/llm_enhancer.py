@@ -111,8 +111,8 @@ def _resolve_llm_call(
         os.environ.get("LLM_MODEL", ""),
     )
 
-    # Dynamic timeout: max(30, block_count / 20)
-    timeout = max(30, int(block_count / 20)) if block_count > 0 else LLM_CALL_TIMEOUT
+    # Dynamic timeout: max(60, block_count * 2) seconds
+    timeout = max(60, block_count * 2) if block_count > 0 else LLM_CALL_TIMEOUT
     if report_enh is not None:
         report_enh.setdefault("llm_call_timeout", timeout)
         report_enh.setdefault("llm_call_block_count", block_count)
@@ -833,6 +833,9 @@ def _build_phase_b_prompt(
 
     lines = [
         "你是技术文件目录结构审查器。请检查标题层级是否连贯。",
+        "注意：连续同级标题（如 H2→H2→H2）是合法结构，不要认为缺少中间层级。",
+        "如果文档从文档标题直接过渡到某个层级（如 H2），该层级就是顶层章节标题，不需要提升。",
+        "只修正真实的层级错误（如 H2→H4 跳跃）和封面/元信息误判为标题。",
         "输出 JSON patch。不要根据文字好坏改写内容。不要创建新标题。",
         "如果封面、日期、版本、目录文字被识别为标题，应降级为 body。",
     ]
@@ -1622,11 +1625,19 @@ def build_role_overrides_from_docx(
         if tag.endswith(("}w:p", "}p")):
             para = Paragraph(child, src_doc)
             text = para.text.strip()
+
+            # Detect image-only paragraphs (empty text with graphics)
             if not text:
+                ns_qn = _qn
+                drawings = child.findall('.//' + ns_qn('w:drawing'))
+                if drawings:
+                    # Image-only paragraph: count for index alignment
+                    global_index += 1
                 continue
 
             style_name = (para.style.name or "").lower() if para.style else ""
             if "heading" in style_name or style_name.startswith("h"):
+                global_index += 1
                 if had_heading and current_sec["blocks"]:
                     sections.append(current_sec)
                 current_sec = {"heading_text": text, "blocks": []}
