@@ -4,8 +4,15 @@ __pycache__/
 .venv/
 .hermes/
 *.pdf
-.pytest_cache/
 wx_output/
 input/
 agents/
-wx-format
+.pytest_cache/
+docs/
+tasks/
+reviews/
+tests/
+scripts/anonymize_template.py
+scripts/bootstrap_macos_lxml.sh
+scripts/list_semantic_enhancer.py
+requirements.txt

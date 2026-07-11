@@ -90,34 +90,55 @@ python3 -m main \
 
 ## LLM 增强配置
 
-用户选择 LLM 增强模式后，Agent 需将自己的 LLM 能力传递给 `main.py`。方式：
+用户选择 LLM 增强模式后，Agent 需将自己的 LLM 能力传递给 `main.py`。推荐使用文件协议两步流程，Agent 无需设置环境变量即可完成 LLM 调用。
 
-### 优先：使用 API Key（无需 --llm-command）
-
-- 设置 `ANTHROPIC_API_KEY` 环境变量 → 自动使用 Claude
-- 设置 `OPENAI_API_KEY` 环境变量 → 自动使用 GPT
-
-### 其次：Agent 封装自己的 LLM 为命令
-
-Agent 创建一个临时脚本，将自身的 LLM 调用封装为标准接口：
-- 从 stdin 读取 prompt
-- 调用 Agent 自身的 LLM
-- 将结果输出到 stdout
-
-然后通过 `--llm-command` 传入：
+### 方式一（推荐）：文件协议两步流程
 
 ```bash
-python3 -m main --llm-command "python3 /tmp/agent_llm_bridge.py" --llm-enhance all ...
+# Step 1: 解析文档，生成 LLM 请求文件
+python3 -m main \
+  --input source.docx \
+  --output output.docx \
+  --template assets/wx_template.docx \
+  --llm-enhance all \
+  --generate-requests .wx-doc-format/
 ```
 
-### 接口约定
+这将生成：
 
-`--llm-command` 接受任意可执行命令，要求：
-- stdin → prompt 文本
-- stdout → LLM 响应
-- 退出码 0 表示成功
+- `.wx-doc-format/run.json` — 运行配置（源文件路径、CLI 参数等）
+- `.wx-doc-format/llm_requests.jsonl` — LLM 请求列表（每行包含 `request_id`、`phase`、`capability`、`prompt`、`input_hash`）
 
-支持 `{prompt_file}` 占位符（prompt 过长时写入临时文件）。
+Agent 读取 `llm_requests.jsonl`，逐行生成 `raw_response`（LLM 的 JSON patch 输出），写入 `llm_responses.jsonl` 后：
+
+```bash
+# Step 2: 恢复运行，验证并应用响应
+python3 -m main --resume .wx-doc-format/run.json
+```
+
+系统自动执行：
+
+1. 验证每个响应的 `input_hash` 完整性（防止提示词被篡改）
+2. 校验 JSON patch schema（`schema_version`、`phase`、`decisions` 结构）
+3. 校验每个 decision 的 `block_id`、`operation` 和目标类型
+4. 应用高置信度 patch 到文档模型
+5. 渲染最终输出
+
+### 方式二（兼容）：API Key
+
+设置 `ANTHROPIC_API_KEY` 或 `OPENAI_API_KEY` 环境变量，无需额外配置。
+
+### 方式三（兼容）：内置桥接脚本
+
+Skill 内置 `scripts/llm_bridge.py`。Agent 设置 `LLM_COMMAND` 环境变量后即可使用：
+
+```bash
+LLM_COMMAND="codex exec" python3 -m main \
+  --llm-command "python3 scripts/llm_bridge.py" \
+  --llm-enhance all ...
+```
+
+`LLM_COMMAND` 设为 Agent 的 LLM 调用命令（如 `codex exec`、`hermes llm-call`），桥接脚本自动中转 stdin/stdout。
 
 ## 样式合规不变量
 
@@ -132,7 +153,6 @@ python3 -m main --llm-command "python3 /tmp/agent_llm_bridge.py" --llm-enhance a
 
 - Python 3.10+
 - python-docx、lxml
-- macOS：运行 `scripts/bootstrap_macos_lxml.sh` 创建隔离环境
 
 ## 已知边界
 
