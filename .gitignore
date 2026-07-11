@@ -8,21 +8,11 @@ wx_output/
 input/
 agents/
 .pytest_cache/
-docs/benchmark-report.md
-scripts/run_bench.py
-scripts/run_benchmark.sh
-scripts/setup_benchmark_input.py
-scripts/benchmark.py
-scripts/run_bench_standalone.py
-scripts/format_docx_ooxml.py
-run_benchmark.sh
+docs/
 tasks/
 reviews/
-docs/benchmark-plan.md
-docs/optimization-plan.md
-AGENTS.md
-CLAUDE.md
-wx-format
-scripts/update_installed_skill.py
-# exclude dev-only files
-docs/*
+tests/
+scripts/anonymize_template.py
+scripts/bootstrap_macos_lxml.sh
+scripts/list_semantic_enhancer.py
+requirements.txt
