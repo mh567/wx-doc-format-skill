@@ -15,6 +15,8 @@ metadata:
 
 > 从 GitHub 仓库 mh567/wx-doc-format-skill 安装 wx-doc-format skill
 
+更新时重复上述指令即可，Agent 会自动比对版本并拉取最新代码。
+
 ## 架构概览
 
 ```
