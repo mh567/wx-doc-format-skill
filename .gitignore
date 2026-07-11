@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 .venv/
+.hermes/
 *.pdf
 wx_output/
 input/
@@ -21,3 +22,4 @@ docs/benchmark-plan.md
 docs/optimization-plan.md
 AGENTS.md
 CLAUDE.md
+wx-format
