@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TEMPLATE="${SCRIPT_DIR}/assets/技术文件格式及书写要求.docx"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+
+# ---- usage ----
+usage() {
+  echo "用法: wx-format <输入文件> [选项]"
+  echo ""
+  echo "  <输入文件>          .docx / .md 文件路径"
+  echo "  -o, --output <路径>  输出路径（默认：同目录 _wx.docx）"
+  echo "  -t, --template <路径> 模板（默认：内置模板）"
+  echo "  --no-strict           关闭强规范化"
+  echo "  --llm-enhance         启用 LLM 语义增强"
+  echo ""
+  echo "示例:"
+  echo "  wx-format 文档.docx"
+  echo "  wx-format 文档.md -o 输出.docx"
+  exit 1
+}
+
+# ---- parse args ----
+INPUT=""
+OUTPUT=""
+STRICT="--strict-normalize"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -o|--output) OUTPUT="$2"; shift 2 ;;
+    -t|--template) TEMPLATE="$2"; shift 2 ;;
+    --no-strict) STRICT="--no-strict-normalize"; shift ;;
+    --llm-enhance) export WX_DOC_LLM_ENHANCE=1; shift ;;
+    -h|--help) usage ;;
+    *) INPUT="$1"; shift ;;
+  esac
+done
+
+if [ -z "${INPUT}" ]; then usage; fi
+if [ ! -f "${INPUT}" ]; then echo "错误: 文件不存在: ${INPUT}"; exit 1; fi
+if [ ! -f "${TEMPLATE}" ]; then echo "错误: 模板不存在: ${TEMPLATE}"; exit 1; fi
+
+# ---- default output ----
+if [ -z "${OUTPUT}" ]; then
+  DIR="$(dirname "${INPUT}")"
+  NAME="$(basename "${INPUT}" | sed 's/\.[^.]*$//')"
+  OUTPUT="${DIR}/${NAME}_wx.docx"
+fi
+
+# ---- pick the right Python ----
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+if [ -x "${SCRIPT_DIR}/scripts/.venv/bin/python3" ]; then
+  PYTHON_BIN="${SCRIPT_DIR}/scripts/.venv/bin/python3"
+elif ! "${PYTHON_BIN}" -c "import docx, lxml" 2>/dev/null; then
+  echo "[wx-format] 缺少依赖，运行 bootstrap（仅首次）..."
+  "${SCRIPT_DIR}/scripts/bootstrap_macos_lxml.sh"
+  PYTHON_BIN="${SCRIPT_DIR}/.venv/bin/python3"
+fi
+
+# ---- run ----
+cd "${SCRIPT_DIR}/scripts"
+exec "${PYTHON_BIN}" -m main \
+  --input "${INPUT}" \
+  --output "${OUTPUT}" \
+  --template "${TEMPLATE}" \
+  ${STRICT}
