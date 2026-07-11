@@ -36,7 +36,6 @@ from template_profile import load_template_profile
 
 from llm_enhancer import (
     enhance_document_model,
-    build_role_overrides_from_docx,
     compute_suspicion_score,
     should_enhance,
 )
@@ -247,6 +246,7 @@ def convert_docx(src: Path, dst_doc, row_height_cm: float, row_height_rule: str,
     llm_hint = getattr(args, "llm_hint", None) if args is not None else None
 
     # Phase A: block role review (before normalization)
+    applied_start = len(report.get("llm_enhancer", {}).get("applied", []))
     if should_enhance(report, "A", enhance_mode):
         source_model = enhance_document_model(
             source_model, report, phase="A",
@@ -267,10 +267,13 @@ def convert_docx(src: Path, dst_doc, row_height_cm: float, row_height_rule: str,
             llm_call=llm_call, hint=llm_hint,
         )
 
-    # role_overrides for direct rendering path
-    role_overrides = build_role_overrides_from_docx(
-        src_doc, strict_normalize, llm_call=llm_call
-    ) if llm_call else None
+    # role_overrides for direct rendering path — extracted from Phase A applied decisions
+    phase_a_role_overrides: dict[int, str] = {}
+    if should_enhance(report, "A", enhance_mode):
+        phase_a_role_overrides = _extract_role_overrides_from_model(
+            model, report, applied_start=applied_start,
+        )
+    role_overrides = phase_a_role_overrides or None
 
     # Build heading_level_overrides and table_type_overrides from the
     # enhanced (Phase B / C) model.  The index position tracks model
@@ -357,6 +360,47 @@ def _extract_table_type_overrides_from_model(model: dict, report: dict) -> dict[
                       "table", "image", "appendix", "unknown"):
             if btype == "table" and block.get("id") in changed_table_ids:
                 overrides[idx] = block.get("table_type", "data")
+            idx += 1
+
+    return overrides
+
+
+def _extract_role_overrides_from_model(
+    model: dict,
+    report: dict,
+    *,
+    applied_start: int = 0,
+) -> dict[int, str]:
+    """从 Phase A 的 applied decisions 提取段落级别的 role_overrides。
+
+    只提取 retype 操作中与原始类型不同的映射，返回 ``{模型块索引: 新角色}``
+    用于 ``render_docx_direct`` 的段落实例化。
+    """
+    changed_roles: dict[str, str] = {}
+    applied = report.get("llm_enhancer", {}).get("applied", [])[applied_start:]
+
+    for dec in applied:
+        if dec.get("operation") != "retype":
+            continue
+        to_type = dec.get("to", {}).get("block_type", "")
+        from_type = dec.get("from", {}).get("block_type", "")
+        if to_type in {"heading", "body", "list_item", "caption"} and to_type != from_type:
+            bid = dec.get("block_id", "")
+            if bid:
+                changed_roles[bid] = to_type
+
+    if not changed_roles:
+        return {}
+
+    overrides: dict[int, str] = {}
+    idx = 0
+    for block in model.get("document", {}).get("blocks", []):
+        btype = block.get("block_type")
+        if btype in {"heading", "body", "list_item", "caption",
+                      "table", "image", "appendix", "unknown"}:
+            bid = block.get("id")
+            if bid in changed_roles:
+                overrides[idx] = changed_roles[bid]
             idx += 1
 
     return overrides
