@@ -13,11 +13,11 @@ usage() {
   echo "  -o, --output <路径>  输出路径（默认：同目录 _wx.docx）"
   echo "  -t, --template <路径> 模板（默认：内置模板）"
   echo "  --no-strict           关闭强规范化"
-  echo "  --llm-enhance         启用 LLM 语义增强"
+  echo "  --llm-enhance <模式>  LLM 增强（off/auto/a/ab/abc）"
   echo ""
   echo "示例:"
   echo "  wx-format 文档.docx"
-  echo "  wx-format 文档.md -o 输出.docx"
+  echo "  wx-format 文档.md -o 输出.docx --llm-enhance abc"
   exit 1
 }
 
@@ -25,13 +25,14 @@ usage() {
 INPUT=""
 OUTPUT=""
 STRICT="--strict-normalize"
+LLM_ENHANCE=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -o|--output) OUTPUT="$2"; shift 2 ;;
     -t|--template) TEMPLATE="$2"; shift 2 ;;
     --no-strict) STRICT="--no-strict-normalize"; shift ;;
-    --llm-enhance) export WX_DOC_LLM_ENHANCE=1; shift ;;
+    --llm-enhance) LLM_ENHANCE="--llm-enhance $2"; shift 2 ;;
     -h|--help) usage ;;
     *) INPUT="$1"; shift ;;
   esac
@@ -64,4 +65,5 @@ exec "${PYTHON_BIN}" -m main \
   --input "${INPUT}" \
   --output "${OUTPUT}" \
   --template "${TEMPLATE}" \
-  ${STRICT}
+  ${STRICT} \
+  ${LLM_ENHANCE}
