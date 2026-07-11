@@ -24,7 +24,6 @@ from llm_enhancer import (
     _build_phase_a_prompt,
     _build_phase_b_prompt,
     _collect_phase_b_sections,
-    _collect_phase_c_table_groups,
     _collect_suspicious_sections,
     _iter_batches,
     _prevalidate_patch_schema,
@@ -33,15 +32,22 @@ from llm_enhancer import (
     ALLOWED_OPS_BY_PHASE,
     LOW_CONFIDENCE_THRESHOLD,
     PATCH_SCHEMA_VERSION,
+    PHASE_B_CAPTION_BATCH_SIZE,
     PHASE_B_SECTION_BATCH_SIZE,
-    PHASE_C_TABLE_BATCH_SIZE,
     apply_patch_to_model,
-    build_role_overrides_from_docx,
     compute_suspicion_score,
     enhance_document_model,
     extract_json_object,
     should_enhance,
     validate_patch,
+    # New capability registry exports
+    CAPABILITY_REGISTRY,
+    _LEGACY_NAMES,
+    _PHASE_TO_CAPABILITY,
+    _resolve_capability,
+    _resolve_legacy_phase,
+    CapabilityConfig,
+    register_capability,
 )
 
 
@@ -401,10 +407,11 @@ class TestShouldEnhance:
         assert not should_enhance({}, "B", "off")
         assert not should_enhance({}, "C", "off")
 
-    def test_should_enhance_abc_returns_true_for_all_phases(self):
+    def test_should_enhance_abc_returns_true_for_a_and_b_only(self):
+        """abc mode now behaves like ab (Phase C removed)."""
         assert should_enhance({}, "A", "abc") is True
         assert should_enhance({}, "B", "abc") is True
-        assert should_enhance({}, "C", "abc") is True
+        assert should_enhance({}, "C", "abc") is False
 
     def test_should_enhance_a_returns_true_only_for_phase_a(self):
         assert should_enhance({}, "A", "a") is True
@@ -419,7 +426,7 @@ class TestShouldEnhance:
     def test_should_enhance_force_modes_work(self):
         assert should_enhance({}, "A", "force-a") is True
         assert should_enhance({}, "B", "force-a") is False
-        assert should_enhance({}, "C", "force-abc") is True
+        assert should_enhance({}, "C", "force-abc") is False  # Phase C removed
 
     def test_should_enhance_auto_low_suspicion(self):
         report = {
@@ -528,14 +535,18 @@ class TestEnhanceDocumentModel:
         )
         assert report["llm_enhancer"].get("original_hint") == "注意功能点列表识别"
 
-    def test_enhance_phase_c_allows_set_caption_text(self):
-        """Phase C now includes C1 capability (merged)."""
-        blocks = [_block("b0001", "caption", text="", _auto_generated=True)]
+    def test_enhance_phase_b_allows_set_caption_text(self):
+        """Phase B should allow set_caption_text for auto-generated captions."""
+        blocks = [
+            _block("b0001", "caption", text="", _auto_generated=True),
+            _block("b0002", "table", table_type="data",
+                   rows=[[{"text": "cell1"}]]),
+        ]
         model = make_minimal_model(blocks)
         report: dict = {}
         patch = {
             "schema_version": PATCH_SCHEMA_VERSION,
-            "phase": "C",
+            "phase": "B",
             "decisions": [{
                 "block_id": "b0001",
                 "operation": "set_caption_text",
@@ -545,11 +556,60 @@ class TestEnhanceDocumentModel:
             }],
         }
         result = enhance_document_model(
-            model, report, phase="C",
+            model, report, phase="B",
             llm_call=fake_llm(json.dumps(patch, ensure_ascii=False)),
         )
         assert result["document"]["blocks"][0]["text"] == "系统功能表"
         assert len(report["llm_enhancer"]["applied"]) == 1
+
+    def test_enhance_phase_b_rejects_set_table_type(self):
+        """Phase B should reject set_table_type (only set_caption_text allowed)."""
+        blocks = [_block("b0001", "caption", text="", _auto_generated=True)]
+        model = make_minimal_model(blocks)
+        report: dict = {}
+        patch = {
+            "schema_version": PATCH_SCHEMA_VERSION,
+            "phase": "B",
+            "decisions": [{
+                "block_id": "b0001",
+                "operation": "set_table_type",
+                "to": {"table_type": "data"},
+                "confidence": 0.95,
+                "reason": "data_table",
+            }],
+        }
+        result = enhance_document_model(
+            model, report, phase="B",
+            llm_call=fake_llm(json.dumps(patch, ensure_ascii=False)),
+        )
+        assert len(report["llm_enhancer"]["errors"]) >= 1
+        assert not report["llm_enhancer"]["applied"]
+
+    def test_enhance_phase_b_rejects_existing_caption(self):
+        """Phase B should not allow set_caption_text on non-auto-generated captions."""
+        blocks = [
+            _block("b0001", "caption", text="已有题注", caption_type="table"),
+        ]
+        model = make_minimal_model(blocks)
+        report: dict = {}
+        patch = {
+            "schema_version": PATCH_SCHEMA_VERSION,
+            "phase": "B",
+            "decisions": [{
+                "block_id": "b0001",
+                "operation": "set_caption_text",
+                "to": {"text": "不应被修改"},
+                "confidence": 0.95,
+                "reason": "caption_text_generated",
+            }],
+        }
+        result = enhance_document_model(
+            model, report, phase="B",
+            llm_call=fake_llm(json.dumps(patch, ensure_ascii=False)),
+        )
+        # The validation catches that this caption is not _auto_generated → error
+        assert len(report["llm_enhancer"]["errors"]) >= 1
+        assert not report["llm_enhancer"]["applied"]
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -659,69 +719,26 @@ class TestResolveLlmCall:
 
 
 # ═════════════════════════════════════════════════════════════════════
-#  ALLOWED_OPS_BY_PHASE  (C1 is merged into C)
+#  ALLOWED_OPS_BY_PHASE
 # ═════════════════════════════════════════════════════════════════════
 
 class TestAllowedOps:
-    def test_phase_c_includes_caption_text(self):
-        """After C+C1 merge, Phase C should include set_caption_text."""
-        assert "set_caption_text" in ALLOWED_OPS_BY_PHASE["C"]
+    def test_phase_b_only_allows_set_caption_text(self):
+        """Phase B should only allow set_caption_text."""
+        assert ALLOWED_OPS_BY_PHASE["B"] == {"set_caption_text"}
+
+    def test_phase_b_does_not_allow_retype_or_table_ops(self):
+        """Phase B should not allow retype, set_table_type, etc."""
+        assert "retype" not in ALLOWED_OPS_BY_PHASE["B"]
+        assert "set_table_type" not in ALLOWED_OPS_BY_PHASE["B"]
+        assert "set_header_rows" not in ALLOWED_OPS_BY_PHASE["B"]
+        assert "set_caption_type" not in ALLOWED_OPS_BY_PHASE["B"]
 
     def test_no_c1_phase_in_allowed_ops(self):
         """C1 should no longer be a separate phase entry."""
         assert "C1" not in ALLOWED_OPS_BY_PHASE
 
 
-# ═════════════════════════════════════════════════════════════════════
-#  build_role_overrides_from_docx — global index mapping
-# ═════════════════════════════════════════════════════════════════════
-
-class TestBuildRoleOverrides:
-    def test_build_role_overrides_uses_global_index(self):
-        """Overrides must map to document-global indices, not section-local.
-
-        Two sections each with ≥2 paragraphs; the fake LLM returns a
-        decision for *local* block_id "0" in every section.  With the
-        fix each section's first paragraph maps to its *global* index.
-        """
-        import io
-        from docx import Document as _Document
-
-        doc = _Document()
-        doc.add_paragraph("Section 1", style="Heading 1")
-        doc.add_paragraph("First para")    # global_index=1 (heading at 0)
-        doc.add_paragraph("Second para")   # global_index=2
-        doc.add_paragraph("Section 2", style="Heading 1")
-        doc.add_paragraph("Third para")    # global_index=4 (heading at 3)
-        doc.add_paragraph("Fourth para")   # global_index=5
-
-        # Use doc directly — save/load may lose style information.
-        src_doc = doc
-
-        patch = {
-            "schema_version": "1.0",
-            "phase": "A",
-            "decisions": [{
-                "block_id": "0",
-                "operation": "retype",
-                "from": {"block_type": "body"},
-                "to": {"block_type": "list_item", "level": 0,
-                        "list_type": "lower_letter_paren"},
-                "confidence": 0.85,
-                "reason": "test",
-            }],
-        }
-        _fake = lambda p: json.dumps(patch)
-
-        overrides = build_role_overrides_from_docx(src_doc, True, llm_call=_fake)
-
-        # With headings counted in global_index, first body paragraphs are at 1 and 4
-        assert 1 in overrides, "Section 1 first para (global 1) missing"
-        assert 4 in overrides, "Section 2 first para (global 4) missing"
-        assert len(overrides) == 2, (
-            f"Expected 2 overrides (global 1 and 4), got {len(overrides)} "
-            f"keys={sorted(overrides.keys())}"
-        )
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -791,19 +808,18 @@ class TestShouldEnhanceAutoModeGate:
         report["parse_report"] = {}
         assert not should_enhance(report, "A", "auto")
 
-    def test_auto_skips_bc_when_phase_a_low_modification(self):
-        """B/C in auto mode should skip when Phase A applied_rate < 0.05."""
+    def test_auto_skips_b_when_phase_a_low_modification(self):
+        """B in auto mode should skip when Phase A applied_rate < 0.05."""
         report = self._base_report()
         report["llm_enhancer"] = {"phase_a_applied_rate": 0.04}
         assert not should_enhance(report, "B", "auto")
-        assert not should_enhance(report, "C", "auto")
 
-    def test_auto_runs_bc_when_phase_a_high_modification(self):
-        """B/C in auto mode should run when Phase A applied_rate >= 0.05."""
+    def test_auto_runs_b_when_phase_a_high_modification(self):
+        """B in auto mode should run when Phase A applied_rate >= 0.05."""
         report = self._base_report()
         report["llm_enhancer"] = {"phase_a_applied_rate": 0.05}
         assert should_enhance(report, "B", "auto")
-        assert should_enhance(report, "C", "auto")
+        assert not should_enhance(report, "C", "auto")  # Phase C removed
 
     def test_auto_phase_a_skips_short_document(self):
         """Phase A in auto mode skips documents with < 5 blocks."""
@@ -881,7 +897,6 @@ class TestHintSanitization:
 class TestNewExports:
     def test_imported_constants(self):
         assert PHASE_B_SECTION_BATCH_SIZE == 20
-        assert PHASE_C_TABLE_BATCH_SIZE == 10
 
     def test_iter_batches(self):
         items = list(range(25))
@@ -921,29 +936,6 @@ class TestCollectPhaseBSections:
         assert len(sections) >= 1
 
 
-class TestCollectPhaseCTableGroups:
-    def test_collects_table_with_heading_and_captions(self):
-        blocks = [
-            _block("b0001", "heading", text="数据表", level=2),
-            _block("b0002", "caption", text="表1: 数据", caption_type="table"),
-            _block("b0003", "table", table_type="data", rows=[]),
-            _block("b0004", "caption", text="", _auto_generated=True),
-        ]
-        model = make_minimal_model(blocks)
-        groups = _collect_phase_c_table_groups(model)
-        assert len(groups) == 1
-        assert groups[0]["table_id"] == "b0003"
-        # Must include heading, preceding caption, table, following caption
-        group_bids = {b.get("id") for b in groups[0]["blocks"]}
-        assert "b0001" in group_bids  # heading
-        assert "b0002" in group_bids  # preceding caption
-        assert "b0003" in group_bids  # table
-        assert "b0004" in group_bids  # following caption
-
-    def test_no_table_returns_empty(self):
-        model = make_minimal_model([_block("b0001", "body")])
-        groups = _collect_phase_c_table_groups(model)
-        assert groups == []
 
 
 class TestPrevalidatePatchSchema:
@@ -1047,17 +1039,17 @@ class TestAppendPhaseSummary:
 
 
 class TestPhaseBMultiBatch:
-    def test_phase_b_calls_llm_multiple_times_for_many_sections(self):
-        """Phase B with >20 sections should call the LLM in multiple batches."""
+    def test_phase_b_calls_llm_multiple_times_for_many_captions(self):
+        """Phase B with >15 auto-generated captions should batch LLM calls."""
         blocks = []
-        for i in range(25):
+        for i in range(20):
             blocks.append(
-                _block(f"b{i*2:04d}", "heading",
-                       text=f"Section {i}", level=2)
+                _block(f"b{i*3:04d}", "caption", text="",
+                       _auto_generated=True, caption_type="table")
             )
             blocks.append(
-                _block(f"b{i*2+1:04d}", "list_item",
-                       text=f"Item {i}")
+                _block(f"b{i*3+1:04d}", "table", table_type="data",
+                       rows=[[{"text": "cell1"}], [{"text": "cell2"}]])
             )
         model = make_minimal_model(blocks)
         report: dict = {}
@@ -1078,52 +1070,34 @@ class TestPhaseBMultiBatch:
             llm_call=counting_llm,
         )
 
-        # 25 sections with batch size 20 → 2 batches
+        # 20 caption targets with batch size 15 → 2 batches
         assert call_count[0] == 2, (
-            f"Expected 2 LLM calls for 25 sections, got {call_count[0]}"
+            f"Expected 2 LLM calls for 20 caption targets, got {call_count[0]}"
         )
 
 
-class TestPhaseCMultiBatch:
-    def test_phase_c_calls_llm_multiple_times_for_many_tables(self):
-        """Phase C with >10 table groups should call the LLM in multiple
-        batches."""
-        blocks = []
-        for i in range(15):
-            blocks.append(
-                _block(f"b{i*3:04d}", "heading",
-                       text=f"Table Section {i}", level=2)
-            )
-            blocks.append(
-                _block(f"b{i*3+1:04d}", "table",
-                       table_type="unknown", rows=[])
-            )
-            blocks.append(
-                _block(f"b{i*3+2:04d}", "caption",
-                       text="", _auto_generated=True)
-            )
+class TestPhaseBEmptyTargets:
+    def test_phase_b_no_caption_targets_does_not_call_llm(self):
+        """Phase B with no auto-generated empty captions should skip."""
+        blocks = [
+            _block("b0001", "heading", text="章节一", level=2),
+            _block("b0002", "body", text="正文内容"),
+        ]
         model = make_minimal_model(blocks)
         report: dict = {}
-        patch = {
-            "schema_version": PATCH_SCHEMA_VERSION,
-            "phase": "C",
-            "decisions": [],
-        }
-
         call_count: list[int] = [0]
 
-        def counting_llm(prompt: str) -> str:
+        def never_called_llm(prompt: str) -> str:
             call_count[0] += 1
-            return json.dumps(patch, ensure_ascii=False)
+            return "{}"
 
         enhance_document_model(
-            model, report, phase="C",
-            llm_call=counting_llm,
+            model, report, phase="B",
+            llm_call=never_called_llm,
         )
 
-        # 15 table groups with batch size 10 → 2 batches
-        assert call_count[0] == 2, (
-            f"Expected 2 LLM calls for 15 table groups, "
+        assert call_count[0] == 0, (
+            f"Expected 0 LLM calls for no caption targets, "
             f"got {call_count[0]}"
         )
 
@@ -1132,8 +1106,9 @@ class TestPhaseMetricsPresence:
     def test_phase_metrics_on_success(self):
         """phase_metrics should exist after a successful Phase B batch."""
         blocks = [
-            _block("b0001", "heading", text="第一章", level=2),
-            _block("b0002", "body", text="正文内容"),
+            _block("b0001", "caption", text="", _auto_generated=True),
+            _block("b0002", "table", table_type="data",
+                   rows=[[{"text": "cell1"}]]),
         ]
         model = make_minimal_model(blocks)
         report: dict = {}
@@ -1163,8 +1138,9 @@ class TestPhaseMetricsPresence:
     def test_phase_metrics_on_error(self):
         """phase_metrics should exist even when LLM call fails."""
         blocks = [
-            _block("b0001", "heading", text="第一章", level=2),
-            _block("b0002", "body", text="正文内容"),
+            _block("b0001", "caption", text="", _auto_generated=True),
+            _block("b0002", "table", table_type="data",
+                   rows=[[{"text": "cell1"}]]),
         ]
         model = make_minimal_model(blocks)
         report: dict = {}
@@ -1190,14 +1166,14 @@ class TestPhaseBWithBatchContext:
     def test_phase_b_batch_meta_present_in_prompts(self):
         """Phase B batch prompts should include batch meta and be split."""
         blocks = []
-        for i in range(25):
+        for i in range(20):
             blocks.append(
-                _block(f"b{i*2:04d}", "heading",
-                       text=f"Section {i}", level=2)
+                _block(f"b{i*3:04d}", "caption", text="",
+                       _auto_generated=True, caption_type="table")
             )
             blocks.append(
-                _block(f"b{i*2+1:04d}", "list_item",
-                       text=f"Item {i}")
+                _block(f"b{i*3+1:04d}", "table", table_type="data",
+                       rows=[[{"text": f"cell_{i}"}]])
             )
         model = make_minimal_model(blocks)
         report: dict = {}
@@ -1214,7 +1190,7 @@ class TestPhaseBWithBatchContext:
 
         enh = report["llm_enhancer"]
         prompts = enh.get("prompts", [])
-        # 25 sections with batch size 20 → 2 prompts (batches)
+        # 20 caption targets with batch size 15 → 2 prompts (batches)
         assert len(prompts) == 2, (
             f"Expected 2 prompt entries for 2 batches, got {len(prompts)}"
         )
@@ -1236,6 +1212,20 @@ class TestPhaseAPromptFirstPrinciples:
              "level": None, "list_type": None, "caption_type": None,
              "text": text},
         ]}}
+
+    def test_section_field_in_description(self):
+        """Phase A prompt description should mention section/source fields."""
+        model = self.make_model()
+        prompt = _build_phase_a_prompt(model)
+        assert "所属章节" in prompt, (
+            "Phase A should mention 所属章节 in description"
+        )
+        assert "源 DOCX 样式" in prompt, (
+            "Phase A should mention 源 DOCX 样式"
+        )
+        assert "源语义角色" in prompt, (
+            "Phase A should mention 源语义角色"
+        )
 
     def test_task_description(self):
         """Phase A prompt should contain '规则结果审查器'."""
@@ -1285,64 +1275,477 @@ class TestPhaseAPromptFirstPrinciples:
         assert "正文误判" in prompt
 
 
-class TestPhaseBPromptFirstPrinciples:
-    """Phase B prompt must position the LLM as heading-level anomaly reviewer."""
+class TestPhaseAPromptListOptimization:
+    """Phase A prompt: list-optimization enhancements (section, source, rules)."""
 
-    def make_model(self) -> dict:
+    def make_sectioned_model(self) -> dict:
+        """Model with a heading, then body blocks with source info."""
         return {"document": {"blocks": [
-            {"id": "b0001", "block_type": "heading", "level": 1,
-             "text": "文档标题"},
-            {"id": "b0002", "block_type": "heading", "level": 2,
-             "text": "章节一"},
+            {"id": "b0001", "block_type": "heading", "role": "heading",
+             "level": 2, "list_type": None, "caption_type": None,
+             "text": "接口设计原则"},
+            {"id": "b0002", "block_type": "body", "role": "body",
+             "level": None, "list_type": None, "caption_type": None,
+             "text": "每个接口必须经过评审。",
+             "source": {"style": "Normal", "inferred_role": "body",
+                        "raw_text": "每个接口必须经过评审。"}},
+            {"id": "b0003", "block_type": "body", "role": "body",
+             "level": None, "list_type": None, "caption_type": None,
+             "text": "原则一：接口设计遵循 RESTful 规范。",
+             "source": {"style": "Normal", "inferred_role": "body",
+                        "raw_text": "原则一：接口设计遵循 RESTful 规范。"}},
         ]}}
 
-    def test_task_description(self):
-        """Phase B prompt should contain '标题层级异常审查器'."""
-        model = self.make_model()
-        prompt = _build_phase_b_prompt(model)
-        assert "标题层级异常审查器" in prompt, (
-            "Phase B should describe the LLM as 标题层级异常审查器"
+    def make_plain_model(self) -> dict:
+        """Minimal model (no source dict) — verify graceful fallback."""
+        return {"document": {"blocks": [
+            {"id": "b0001", "block_type": "body", "role": "body",
+             "level": None, "list_type": None, "caption_type": None,
+             "text": "some content"},
+        ]}}
+
+    def test_prompt_shows_section(self):
+        """The prompt should show section= for blocks after a heading."""
+        model = self.make_sectioned_model()
+        prompt = _build_phase_a_prompt(model)
+        assert "section=接口设计原则" in prompt, (
+            "Should show section= with the preceding heading text"
         )
 
-    def test_final_ast_emphasis(self):
-        """Phase B prompt should say '规则处理后的最终 AST 摘要'."""
-        model = self.make_model()
-        prompt = _build_phase_b_prompt(model)
-        assert "规则处理后" in prompt and "AST" in prompt
+    def test_prompt_shows_source_style(self):
+        """The prompt should show source_style=."""
+        model = self.make_sectioned_model()
+        prompt = _build_phase_a_prompt(model)
+        assert "source_style=Normal" in prompt, (
+            "Should show source_style=Normal for style=Normal blocks"
+        )
 
-    def test_consecutive_same_level_is_legal(self):
-        """Phase B should say consecutive same-level headings are legal."""
-        model = self.make_model()
-        prompt = _build_phase_b_prompt(model)
-        assert "连续同级标题" in prompt
+    def test_prompt_shows_source_role(self):
+        """The prompt should show source_role=."""
+        model = self.make_sectioned_model()
+        prompt = _build_phase_a_prompt(model)
+        assert "source_role=body" in prompt, (
+            "Should show source_role=body for inferred_role=body blocks"
+        )
 
-    def test_doc_title_to_h2_h3_legal(self):
-        """Phase B should say H2/H3 after document title is legal."""
-        model = self.make_model()
-        prompt = _build_phase_b_prompt(model)
-        assert "文档标题后直接进入" in prompt
+    def test_blocks_override_still_shows_section(self):
+        """When blocks_override is provided, section should still be correct."""
+        model = self.make_sectioned_model()
+        # Only show the first body block (b0002), not the heading
+        blocks_override = [model["document"]["blocks"][1]]
+        prompt = _build_phase_a_prompt(model, blocks_override=blocks_override)
+        assert "section=接口设计原则" in prompt, (
+            "blocks_override should still reference the preceding heading"
+        )
 
-    def test_empty_decisions_means_legal(self):
-        """Phase B should say empty decisions = heading structure is legal."""
-        model = self.make_model()
-        prompt = _build_phase_b_prompt(model)
-        assert "空 decisions 表示当前标题结构合法" in prompt
+    def test_no_source_fallback_to_dash(self):
+        """Blocks without source dict should show source_style=- source_role=-."""
+        model = self.make_plain_model()
+        prompt = _build_phase_a_prompt(model)
+        assert "source_style=-" in prompt
+        assert "source_role=-" in prompt
 
-    def test_prefer_adjust_level_over_retype(self):
-        """Phase B should prioritize adjust_level over retype."""
-        model = self.make_model()
-        prompt = _build_phase_b_prompt(model)
-        assert "优先使用 adjust_level" in prompt
+    def test_heading_source_style_rule(self):
+        """Heading source style keep rule should be present."""
+        prompt = _build_phase_a_prompt(self.make_plain_model())
+        assert "源 DOCX 样式为 Heading" in prompt
 
-    def test_heading_shows_prev_level(self):
-        """Phase B block listing should include previous heading level."""
-        model = self.make_model()
-        prompt = _build_phase_b_prompt(model)
-        # Second heading (H2) should show prev=H1
-        assert "prev=H1" in prompt
+    def test_source_style_list_normal_rule(self):
+        """List style / Normal style guidance should be present."""
+        prompt = _build_phase_a_prompt(self.make_plain_model())
+        assert "正常的长说明段落" in prompt
+        assert "优先判断为列表" in prompt
 
-    def test_default_current_level_correct(self):
-        """Phase B should say default current level is correct."""
-        model = self.make_model()
-        prompt = _build_phase_b_prompt(model)
-        assert "默认当前层级正确" in prompt
+    def test_description_rule_present(self):
+        """说明体保持 body rule should be present."""
+        prompt = _build_phase_a_prompt(self.make_plain_model())
+        assert "说明体保持 body" in prompt
+        assert "术语：" in prompt
+
+    def test_long_paragraph_rule_present(self):
+        """长段落保持 body rule should be present."""
+        prompt = _build_phase_a_prompt(self.make_plain_model())
+        assert "长段落保持 body" in prompt
+        assert "100 字" in prompt
+
+    def test_list_item_rule_present(self):
+        """列表体才转 list_item rule should be present."""
+        prompt = _build_phase_a_prompt(self.make_plain_model())
+        assert "列表体才转 list_item" in prompt
+
+
+class TestPhaseBPromptFirstPrinciples:
+    """Phase B prompt must position the LLM as caption text generator."""
+
+    def _make_caption_targets(self) -> list[dict]:
+        return [{
+            "block_id": "b0012",
+            "caption_type": "table",
+            "heading_text": "系统部署",
+            "preceding_texts": ["本节介绍部署架构。", "整体架构如下："],
+            "table_preview": "模块 | 说明 | 版本\n网关 | 统一入口 | 2.1",
+            "following_texts": ["具体配置请参考下文。"],
+        }]
+
+    def test_task_description(self):
+        """Phase B prompt should contain '题注生成器'."""
+        model = {"document": {"blocks": []}}
+        prompt = _build_phase_b_prompt(
+            model, targets_override=self._make_caption_targets(),
+        )
+        assert "题注生成器" in prompt, (
+            "Phase B should describe the LLM as 题注生成器"
+        )
+
+    def test_caption_text_length_limit(self):
+        """Phase B prompt should say captions must be ≤30 chars."""
+        model = {"document": {"blocks": []}}
+        prompt = _build_phase_b_prompt(
+            model, targets_override=self._make_caption_targets(),
+        )
+        assert "30" in prompt and "字" in prompt
+
+    def test_no_table_prefix_in_caption(self):
+        """Phase B prompt should say not to repeat 表/图 prefix."""
+        model = {"document": {"blocks": []}}
+        prompt = _build_phase_b_prompt(
+            model, targets_override=self._make_caption_targets(),
+        )
+        assert "前缀" in prompt and "表" in prompt
+
+    def test_no_table_type_ops(self):
+        """Phase B prompt should forbid set_table_type/set_header_rows."""
+        model = {"document": {"blocks": []}}
+        prompt = _build_phase_b_prompt(
+            model, targets_override=self._make_caption_targets(),
+        )
+        # The prompt *prohibits* these operations (includes the names in a
+        # prohibition sentence rather than omitting them).
+        assert "不允许" in prompt, "Should contain a prohibition clause"
+        assert "set_table_type" in prompt, (
+            "set_table_type should be mentioned in prohibition"
+        )
+        assert "set_header_rows" in prompt, (
+            "set_header_rows should be mentioned in prohibition"
+        )
+        assert "set_caption_type" in prompt, (
+            "set_caption_type should be mentioned in prohibition"
+        )
+
+    def test_only_set_caption_text_operation(self):
+        """Phase B prompt example should use set_caption_text."""
+        model = {"document": {"blocks": []}}
+        prompt = _build_phase_b_prompt(
+            model, targets_override=self._make_caption_targets(),
+        )
+        assert "set_caption_text" in prompt
+        # The JSON example in the prompt should only use set_caption_text,
+        # never the forbidden operations.
+        _example_start = prompt.find('"schema_version"')
+        _example_end = prompt.find('}\n', _example_start + 1) + 2 if _example_start >= 0 else -1
+        if _example_start >= 0 and _example_end > _example_start:
+            _example_section = prompt[_example_start:_example_end]
+            assert "set_caption_text" in _example_section
+            assert "set_table_type" not in _example_section
+            assert "set_caption_type" not in _example_section
+
+    def test_block_id_in_prompt(self):
+        """Phase B prompt should include the target block_id."""
+        model = {"document": {"blocks": []}}
+        prompt = _build_phase_b_prompt(
+            model, targets_override=self._make_caption_targets(),
+        )
+        assert "b0012" in prompt
+
+    def test_heading_text_in_prompt(self):
+        """Phase B prompt should include section heading."""
+        model = {"document": {"blocks": []}}
+        prompt = _build_phase_b_prompt(
+            model, targets_override=self._make_caption_targets(),
+        )
+        assert "系统部署" in prompt
+
+    def test_table_preview_in_prompt(self):
+        """Phase B prompt should include table preview rows."""
+        model = {"document": {"blocks": []}}
+        prompt = _build_phase_b_prompt(
+            model, targets_override=self._make_caption_targets(),
+        )
+        assert "网关" in prompt
+        assert "统一入口" in prompt
+
+    def test_no_targets_message(self):
+        """Phase B prompt should show a no-targets message when empty."""
+        model = {"document": {"blocks": []}}
+        prompt = _build_phase_b_prompt(
+            model, targets_override=[],
+        )
+        assert "无需生成题注的表格" in prompt
+
+    def test_batch_meta_present(self):
+        """Phase B prompt should include batch meta when provided."""
+        model = {"document": {"blocks": []}}
+        prompt = _build_phase_b_prompt(
+            model, targets_override=self._make_caption_targets(),
+            batch_meta={"batch_index": 1, "batch_count": 3},
+        )
+        assert "第 2/3 批" in prompt
+
+    def test_returns_json_only(self):
+        """Phase B prompt should instruct JSON-only output."""
+        model = {"document": {"blocks": []}}
+        prompt = _build_phase_b_prompt(
+            model, targets_override=self._make_caption_targets(),
+        )
+        assert "JSON" in prompt
+
+
+# ═════════════════════════════════════════════════════════════════════
+#  Capability Registry Tests
+# ═════════════════════════════════════════════════════════════════════
+
+class TestCapabilityRegistry:
+    def test_registry_has_capabilities(self):
+        """list_detect and caption_gen should be registered."""
+        assert "list_detect" in CAPABILITY_REGISTRY
+        assert "caption_gen" in CAPABILITY_REGISTRY
+
+    def test_capability_config_list_detect(self):
+        """list_detect config should match Phase A."""
+        desc = CAPABILITY_REGISTRY["list_detect"]
+        assert desc.allowed_ops == frozenset({"retype"})
+        assert desc.batching == "single"
+        assert desc.prevalidate is True
+
+    def test_capability_config_caption_gen(self):
+        """caption_gen config should match Phase B."""
+        desc = CAPABILITY_REGISTRY["caption_gen"]
+        assert desc.allowed_ops == frozenset({"set_caption_text"})
+        assert desc.batching == "by_targets"
+        assert desc.batch_size == PHASE_B_CAPTION_BATCH_SIZE
+        assert desc.prevalidate is True
+
+    def test_legacy_name_mapping(self):
+        """Legacy phase names should map correctly."""
+        assert _LEGACY_NAMES == {"list_detect": "A", "caption_gen": "B"}
+        assert _PHASE_TO_CAPABILITY == {"A": "list_detect", "B": "caption_gen"}
+
+    def test_resolve_capability(self):
+        """Resolve should work for both old and new names."""
+        assert _resolve_capability("A") == "list_detect"
+        assert _resolve_capability("B") == "caption_gen"
+        assert _resolve_capability("list_detect") == "list_detect"
+        assert _resolve_capability("caption_gen") == "caption_gen"
+        assert _resolve_capability("X") is None
+
+    def test_resolve_legacy_phase(self):
+        """Legacy phase resolution should map cap names to A/B."""
+        assert _resolve_legacy_phase("list_detect") == "A"
+        assert _resolve_legacy_phase("caption_gen") == "B"
+        assert _resolve_legacy_phase("A") == "A"
+        assert _resolve_legacy_phase("B") == "B"
+        assert _resolve_legacy_phase("X") == "X"
+
+    def test_allowed_ops_backward_compat(self):
+        """ALLOWED_OPS_BY_PHASE should still have A/B keys."""
+        assert ALLOWED_OPS_BY_PHASE["A"] == {"retype"}
+        assert ALLOWED_OPS_BY_PHASE["B"] == {"set_caption_text"}
+
+    def test_extensibility_register_fake_capability(self):
+        """A newly registered capability should work without if/elif."""
+        config = CapabilityConfig(
+            name="test_ext_fake",
+            allowed_ops={"fake_op"},
+            prompt_builder=lambda model, hint=None, **kw: "test prompt",
+            collector=lambda m, r: [{"item": "x"}],
+            batching="single",
+        )
+        was_already = "test_ext_fake" in CAPABILITY_REGISTRY
+        if not was_already:
+            register_capability(config)
+        assert "test_ext_fake" in CAPABILITY_REGISTRY
+        assert CAPABILITY_REGISTRY["test_ext_fake"].allowed_ops == {"fake_op"}
+
+
+# ═════════════════════════════════════════════════════════════════════
+#  Enhance with Capability Names
+# ═════════════════════════════════════════════════════════════════════
+
+class TestEnhanceWithCapabilityName:
+    def test_enhance_with_list_detect_name(self):
+        """Phase A operations should work when called with list_detect."""
+        blocks = [
+            _block("b0001", "body", text="第一项"),
+            _block("b0002", "body", text="第二项"),
+        ]
+        model = make_minimal_model(blocks)
+        report: dict = {}
+        patch = {
+            "schema_version": PATCH_SCHEMA_VERSION,
+            "phase": "A",
+            "decisions": [{
+                "block_id": "b0001",
+                "operation": "retype",
+                "from": {"block_type": "body"},
+                "to": {"block_type": "list_item", "level": 0,
+                        "list_type": "lower_letter_paren"},
+                "confidence": 0.85,
+                "reason": "consecutive_functional_points",
+            }],
+        }
+        result = enhance_document_model(
+            model, report, phase="list_detect",
+            llm_call=fake_llm(json.dumps(patch, ensure_ascii=False)),
+        )
+        assert result["document"]["blocks"][0]["block_type"] == "list_item"
+        assert len(report["llm_enhancer"]["applied"]) == 1
+
+    def test_enhance_with_caption_gen_name(self):
+        """Phase B operations should work when called with caption_gen."""
+        blocks = [
+            _block("b0001", "caption", text="", _auto_generated=True),
+            _block("b0002", "table", table_type="data",
+                   rows=[[{"text": "cell1"}]]),
+        ]
+        model = make_minimal_model(blocks)
+        report: dict = {}
+        patch = {
+            "schema_version": PATCH_SCHEMA_VERSION,
+            "phase": "B",
+            "decisions": [{
+                "block_id": "b0001",
+                "operation": "set_caption_text",
+                "to": {"text": "系统功能表"},
+                "confidence": 0.85,
+                "reason": "caption_text_generated",
+            }],
+        }
+        result = enhance_document_model(
+            model, report, phase="caption_gen",
+            llm_call=fake_llm(json.dumps(patch, ensure_ascii=False)),
+        )
+        assert result["document"]["blocks"][0]["text"] == "系统功能表"
+        assert len(report["llm_enhancer"]["applied"]) == 1
+
+    def test_legacy_name_still_works(self):
+        """Legacy phase A and B names should still work."""
+        blocks = [_block("b0001", "body", text="test")]
+        model = make_minimal_model(blocks)
+        report: dict = {}
+        patch = {
+            "schema_version": PATCH_SCHEMA_VERSION,
+            "phase": "A",
+            "decisions": [{
+                "block_id": "b0001",
+                "operation": "retype",
+                "to": {"block_type": "list_item", "level": 0,
+                        "list_type": "lower_letter_paren"},
+                "confidence": 0.85,
+            }],
+        }
+        result = enhance_document_model(
+            model, report, phase="A",
+            llm_call=fake_llm(json.dumps(patch, ensure_ascii=False)),
+        )
+        assert result["document"]["blocks"][0]["block_type"] == "list_item"
+
+    def test_unknown_capability_records_error(self):
+        """Unknown capability should record error."""
+        model = make_minimal_model()
+        report: dict = {}
+        result = enhance_document_model(
+            model, report, phase="nonexistent",
+            llm_call=fake_llm("{}"),
+        )
+        assert "llm_enhancer" in report
+        assert len(report["llm_enhancer"]["errors"]) >= 1
+        assert result is model
+
+    def test_caption_gen_empty_targets_skips_llm(self):
+        """caption_gen with no empty captions should skip LLM."""
+        blocks = [
+            _block("b0001", "heading", text="章节一", level=2),
+            _block("b0002", "body", text="正文内容"),
+        ]
+        model = make_minimal_model(blocks)
+        report: dict = {}
+        call_count: list[int] = [0]
+
+        def never_called_llm(prompt: str) -> str:
+            call_count[0] += 1
+            return "{}"
+
+        enhance_document_model(
+            model, report, phase="caption_gen",
+            llm_call=never_called_llm,
+        )
+        assert call_count[0] == 0
+        assert report["llm_enhancer"]["phase_metrics"][0]["status"] == "no_targets"
+
+    def test_caption_gen_multi_batch(self):
+        """caption_gen with many captions should batch LLM calls."""
+        blocks = []
+        for i in range(20):
+            blocks.append(
+                _block(f"b{i*3:04d}", "caption", text="",
+                       _auto_generated=True, caption_type="table")
+            )
+            blocks.append(
+                _block(f"b{i*3+1:04d}", "table", table_type="data",
+                       rows=[[{"text": "cell1"}], [{"text": "cell2"}]])
+            )
+        model = make_minimal_model(blocks)
+        report: dict = {}
+        patch = {
+            "schema_version": PATCH_SCHEMA_VERSION,
+            "phase": "B",
+            "decisions": [],
+        }
+        call_count: list[int] = [0]
+
+        def counting_llm(prompt: str) -> str:
+            call_count[0] += 1
+            return json.dumps(patch, ensure_ascii=False)
+
+        enhance_document_model(
+            model, report, phase="caption_gen",
+            llm_call=counting_llm,
+        )
+        assert call_count[0] == 2
+
+
+# ═════════════════════════════════════════════════════════════════════
+#  Should-Enhance New Modes
+# ═════════════════════════════════════════════════════════════════════
+
+class TestShouldEnhanceNewModes:
+    def test_b_mode(self):
+        """b mode should enable only Phase B."""
+        assert not should_enhance({}, "A", "b")
+        assert should_enhance({}, "B", "b")
+        assert not should_enhance({}, "C", "b")
+
+    def test_force_b_mode(self):
+        """force-b mode should enable only Phase B."""
+        assert not should_enhance({}, "A", "force-b")
+        assert should_enhance({}, "B", "force-b")
+
+    def test_legacy_modes_unchanged(self):
+        """Old modes (a, ab, abc) should work identically."""
+        assert should_enhance({}, "A", "a")
+        assert not should_enhance({}, "B", "a")
+        assert should_enhance({}, "A", "ab")
+        assert should_enhance({}, "B", "ab")
+        assert should_enhance({}, "C", "ab") is False
+        assert should_enhance({}, "A", "abc")
+        assert should_enhance({}, "B", "abc")
+        assert should_enhance({}, "C", "abc") is False
+
+    def test_capability_names_in_manual_modes(self):
+        """Capability names should work in manual mode."""
+        assert should_enhance({}, "list_detect", "a")
+        assert not should_enhance({}, "caption_gen", "a")
+        assert should_enhance({}, "caption_gen", "b")
+        assert not should_enhance({}, "list_detect", "b")
+        assert should_enhance({}, "list_detect", "ab")
+        assert should_enhance({}, "caption_gen", "ab")
