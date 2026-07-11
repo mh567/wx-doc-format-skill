@@ -21,6 +21,8 @@ from document_model import new_document_model
 from llm_enhancer import (
     _append_phase_summary,
     _apply_token_budget,
+    _build_phase_a_prompt,
+    _build_phase_b_prompt,
     _collect_phase_b_sections,
     _collect_phase_c_table_groups,
     _collect_suspicious_sections,
@@ -1219,3 +1221,128 @@ class TestPhaseBWithBatchContext:
         assert "batch" in prompts[0]
         assert prompts[0]["batch"] == 0
         assert prompts[1]["batch"] == 1
+
+
+# ═════════════════════════════════════════════════════════════════════
+#  Prompt keyword tests — first-principles refactor (TASK-FIX-004)
+# ═════════════════════════════════════════════════════════════════════
+
+class TestPhaseAPromptFirstPrinciples:
+    """Phase A prompt must position the LLM as rule-result reviewer."""
+
+    def make_model(self, text: str = "some content") -> dict:
+        return {"document": {"blocks": [
+            {"id": "b0001", "block_type": "body", "role": "body",
+             "level": None, "list_type": None, "caption_type": None,
+             "text": text},
+        ]}}
+
+    def test_task_description(self):
+        """Phase A prompt should contain '规则结果审查器'."""
+        model = self.make_model()
+        prompt = _build_phase_a_prompt(model)
+        assert "规则结果审查器" in prompt, (
+            "Phase A should describe the LLM as 规则结果审查器"
+        )
+
+    def test_empty_decisions(self):
+        """Phase A prompt should say empty decisions = rules are correct."""
+        model = self.make_model()
+        prompt = _build_phase_a_prompt(model)
+        assert "空 decisions 表示规则全部正确" in prompt, (
+            "Phase A should state that empty decisions = rules all correct"
+        )
+
+    def test_omit_block_means_accept(self):
+        """Phase A prompt should say omitting a block = accepting rule result."""
+        model = self.make_model()
+        prompt = _build_phase_a_prompt(model)
+        assert "省略" in prompt and "接受规则结果" in prompt, (
+            "Phase A should say omitting a block = accepting rule result"
+        )
+
+    def test_default_rule_correct(self):
+        """Phase A prompt should say default = rule correct."""
+        model = self.make_model()
+        prompt = _build_phase_a_prompt(model)
+        assert "默认规则判断正确" in prompt
+
+    def test_block_info_shows_rule_fields(self):
+        """Phase A block listing should include role/level/list_type/caption_type."""
+        model = self.make_model()
+        prompt = _build_phase_a_prompt(model)
+        # Lines should show role=... level=... list=... cap=...
+        assert "role=" in prompt and "level=" in prompt
+        assert "list=" in prompt and "cap=" in prompt
+
+    def test_focus_areas_present(self):
+        """Phase A should include focus areas for review."""
+        model = self.make_model()
+        prompt = _build_phase_a_prompt(model)
+        assert "连续 body 功能点列表" in prompt
+        assert "封面元信息误判" in prompt
+        assert "题注" in prompt and "误判" in prompt
+        assert "正文误判" in prompt
+
+
+class TestPhaseBPromptFirstPrinciples:
+    """Phase B prompt must position the LLM as heading-level anomaly reviewer."""
+
+    def make_model(self) -> dict:
+        return {"document": {"blocks": [
+            {"id": "b0001", "block_type": "heading", "level": 1,
+             "text": "文档标题"},
+            {"id": "b0002", "block_type": "heading", "level": 2,
+             "text": "章节一"},
+        ]}}
+
+    def test_task_description(self):
+        """Phase B prompt should contain '标题层级异常审查器'."""
+        model = self.make_model()
+        prompt = _build_phase_b_prompt(model)
+        assert "标题层级异常审查器" in prompt, (
+            "Phase B should describe the LLM as 标题层级异常审查器"
+        )
+
+    def test_final_ast_emphasis(self):
+        """Phase B prompt should say '规则处理后的最终 AST 摘要'."""
+        model = self.make_model()
+        prompt = _build_phase_b_prompt(model)
+        assert "规则处理后" in prompt and "AST" in prompt
+
+    def test_consecutive_same_level_is_legal(self):
+        """Phase B should say consecutive same-level headings are legal."""
+        model = self.make_model()
+        prompt = _build_phase_b_prompt(model)
+        assert "连续同级标题" in prompt
+
+    def test_doc_title_to_h2_h3_legal(self):
+        """Phase B should say H2/H3 after document title is legal."""
+        model = self.make_model()
+        prompt = _build_phase_b_prompt(model)
+        assert "文档标题后直接进入" in prompt
+
+    def test_empty_decisions_means_legal(self):
+        """Phase B should say empty decisions = heading structure is legal."""
+        model = self.make_model()
+        prompt = _build_phase_b_prompt(model)
+        assert "空 decisions 表示当前标题结构合法" in prompt
+
+    def test_prefer_adjust_level_over_retype(self):
+        """Phase B should prioritize adjust_level over retype."""
+        model = self.make_model()
+        prompt = _build_phase_b_prompt(model)
+        assert "优先使用 adjust_level" in prompt
+
+    def test_heading_shows_prev_level(self):
+        """Phase B block listing should include previous heading level."""
+        model = self.make_model()
+        prompt = _build_phase_b_prompt(model)
+        # Second heading (H2) should show prev=H1
+        assert "prev=H1" in prompt
+
+    def test_default_current_level_correct(self):
+        """Phase B should say default current level is correct."""
+        model = self.make_model()
+        prompt = _build_phase_b_prompt(model)
+        assert "默认当前层级正确" in prompt

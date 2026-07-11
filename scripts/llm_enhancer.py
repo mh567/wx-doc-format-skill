@@ -754,7 +754,11 @@ def _build_phase_a_prompt(
     *,
     blocks_override: list[dict] | None = None,
 ) -> str:
-    """Build the Phase A prompt for block role review.
+    """Build the Phase A prompt — rule-result reviewer.
+
+    The LLM acts as a *rule-result reviewer* (规则结果审查器): it is shown
+    what the deterministic rules decided and only flags cases where the
+    rule judgement is clearly wrong.
 
     When *blocks_override* is provided only those blocks are listed in
     the prompt; otherwise all blocks from *model* are used (incremental
@@ -766,18 +770,24 @@ def _build_phase_a_prompt(
         else model.get("document", {}).get("blocks", [])
     )
     lines = [
-        "你是文档结构审查器。请根据上下文判断段落角色。",
+        "你是规则结果审查器。默认规则判断正确，只修正明显误判。",
+        "每个 block 展示规则的 block_type、role、level、list_type、caption_type。",
         "只返回 JSON 对象，不要额外文字。",
-        "禁止新增、删除、合并段落。",
-        "优先保留规则判断，仅在上下文强烈支持时修改。",
         "",
         f"文档共有 {len(blocks)} 个 block：",
     ]
     for b in blocks:
         bid = b.get("id", "?")
         btype = b.get("block_type", "?")
+        role = b.get("role", "?")
+        level = b.get("level", "-")
+        list_type = b.get("list_type", "-")
+        cap_type = b.get("caption_type", "-")
         text = (b.get("text") or "")[:200].replace("\n", " ")
-        lines.append(f"  [{bid}] type={btype} | {text}")
+        lines.append(
+            f"  [{bid}] type={btype} role={role} level={level}"
+            f" list={list_type} cap={cap_type} | {text}"
+        )
 
     example = _format_patch_example({
         "schema_version": "1.0",
@@ -800,6 +810,16 @@ def _build_phase_a_prompt(
         "允许角色: heading, body, list_item, caption",
         "列表统一为 level=0, list_type=lower_letter_paren",
         "标题层级必须在 1 到 6。",
+        "",
+        "约束（必须遵守）:",
+        "默认规则判断正确；省略某个 block 表示接受规则结果。",
+        "decisions 只包含需要修改的项；空 decisions 表示规则全部正确。",
+        "不要对代码块、JSON 示例、普通说明句、引导句生成 list_item 或 caption。",
+        "重点审查以下场景：",
+        "  - 连续 body 功能点列表（应转为 list_item）",
+        "  - 封面元信息误判为 heading（如日期、版本号）",
+        "  - 题注（caption）误判为 body 或 heading",
+        "  - 正文误判为 heading（短句标题样式残留）",
     ])
 
     if hint:
@@ -814,7 +834,11 @@ def _build_phase_b_prompt(
     sections_override: list[dict] | None = None,
     batch_meta: dict | None = None,
 ) -> str:
-    """Build the Phase B prompt for section structure review.
+    """Build the Phase B prompt — heading-level anomaly reviewer.
+
+    The LLM acts as a *heading-level anomaly reviewer* (标题层级异常审查器):
+    given the rule-processed final AST, it only flags genuine heading-level
+    anomalies rather than re-evaluating the entire structure.
 
     Parameters
     ----------
@@ -832,12 +856,16 @@ def _build_phase_b_prompt(
         blocks = model.get("document", {}).get("blocks", [])
 
     lines = [
-        "你是技术文件目录结构审查器。请检查标题层级是否连贯。",
-        "注意：连续同级标题（如 H2→H2→H2）是合法结构，不要认为缺少中间层级。",
-        "如果文档从文档标题直接过渡到某个层级（如 H2），该层级就是顶层章节标题，不需要提升。",
-        "只修正真实的层级错误（如 H2→H4 跳跃）和封面/元信息误判为标题。",
-        "输出 JSON patch。不要根据文字好坏改写内容。不要创建新标题。",
-        "如果封面、日期、版本、目录文字被识别为标题，应降级为 body。",
+        "你是标题层级异常审查器。默认当前层级正确，只标记真实异常。",
+        "以下是规则处理后的最终 AST 摘要，标题已由规则分配层级。",
+        "",
+        "注意：",
+        "  - 连续同级标题（如 H2→H2→H2）是合法结构，不要认为缺少中间层级。",
+        "  - 文档标题后直接进入 H2 或 H3 完全合法。",
+        "  - 只修正真实的层级跳跃（如 H2→H4），",
+        "    以及封面/元信息误判为标题。",
+        "  - 输出 JSON patch。不要根据文字好坏改写内容。不要创建新标题。",
+        "  - 如果封面、日期、版本、目录文字被识别为标题，应降级为 body。",
     ]
     if batch_meta:
         batch_idx = batch_meta.get("batch_index", 0)
@@ -848,15 +876,18 @@ def _build_phase_b_prompt(
             lines.append(f"前序章节: {hpath}")
     lines.extend([
         "",
-        f"文档共有 {len(blocks)} 个 block：",
+        f"文档共有 {len(blocks)} 个 block（规则处理后 AST 摘要）：",
     ])
+    prev_level = None
     for b in blocks:
         bid = b.get("id", "?")
         btype = b.get("block_type", "?")
         text = (b.get("text") or "")[:200].replace("\n", " ")
         if btype == "heading":
             level = b.get("level", "?")
-            lines.append(f"  [{bid}] H{level} | {text}")
+            prev_str = f" prev=H{prev_level}" if prev_level is not None else ""
+            lines.append(f"  [{bid}] H{level}{prev_str} | {text}")
+            prev_level = level
         elif btype == "list_item":
             lines.append(f"  [{bid}] list  | {text}")
 
@@ -877,6 +908,10 @@ def _build_phase_b_prompt(
         "返回 JSON 对象，格式参考：",
         example,
         "",
+        "约束（必须遵守）:",
+        "默认当前层级正确；连续同级标题是合法结构。",
+        "空 decisions 表示当前标题结构合法。",
+        "优先使用 adjust_level 修正层级，只在明显误判标题时才用 retype。",
         "允许操作: retype (body↔heading), adjust_level, set_restart",
     ])
 
