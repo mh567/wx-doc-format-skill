@@ -37,6 +37,7 @@ from template_profile import load_template_profile
 from llm_enhancer import (
     enhance_document_model,
     compute_suspicion_score,
+    normalize_mode,
     should_enhance,
 )
 
@@ -185,6 +186,7 @@ def convert_md(src: Path, doc, report: dict, row_height_cm: float, row_height_ru
 
     # ── LLM Enhancement ──
     enhance_mode = getattr(args, "llm_enhance", "off") if args is not None else "off"
+    enhance_mode = normalize_mode(enhance_mode)
     llm_call = _resolve_llm_call(args) if enhance_mode != "off" else None
     llm_hint = getattr(args, "llm_hint", None) if args is not None else None
 
@@ -197,15 +199,10 @@ def convert_md(src: Path, doc, report: dict, row_height_cm: float, row_height_ru
 
     model = normalize_document_model(source_model, report)
 
-    # Phase B + C: structure and table enhancement (after normalization)
+    # Phase B: caption text generation via LLM (after normalization)
     if should_enhance(report, "B", enhance_mode):
         model = enhance_document_model(
             model, report, phase="B",
-            llm_call=llm_call, hint=llm_hint,
-        )
-    if should_enhance(report, "C", enhance_mode):
-        model = enhance_document_model(
-            model, report, phase="C",
             llm_call=llm_call, hint=llm_hint,
         )
 
@@ -255,15 +252,10 @@ def convert_docx(src: Path, dst_doc, row_height_cm: float, row_height_rule: str,
 
     model = normalize_document_model(source_model, report)
 
-    # Phase B + C: structure and table enhancement (after normalization)
+    # Phase B: caption text generation via LLM (after normalization)
     if should_enhance(report, "B", enhance_mode):
         model = enhance_document_model(
             model, report, phase="B",
-            llm_call=llm_call, hint=llm_hint,
-        )
-    if should_enhance(report, "C", enhance_mode):
-        model = enhance_document_model(
-            model, report, phase="C",
             llm_call=llm_call, hint=llm_hint,
         )
 
@@ -276,9 +268,9 @@ def convert_docx(src: Path, dst_doc, row_height_cm: float, row_height_rule: str,
     role_overrides = phase_a_role_overrides or None
 
     # Build heading_level_overrides and table_type_overrides from the
-    # enhanced (Phase B / C) model.  The index position tracks model
-    # block order which matches source-document iteration order for
-    # typical documents without empty-paragraph gaps.
+    # enhanced model.  The index position tracks model block order which
+    # matches source-document iteration order for typical documents
+    # without empty-paragraph gaps.
     heading_level_overrides = _extract_heading_level_overrides_from_model(model, report)
     table_type_overrides = _extract_table_type_overrides_from_model(model, report)
 
@@ -289,6 +281,7 @@ def convert_docx(src: Path, dst_doc, row_height_cm: float, row_height_rule: str,
         role_overrides=role_overrides,
         heading_level_overrides=heading_level_overrides,
         table_type_overrides=table_type_overrides,
+        model=model,
     )
     return {"source": source_model, "normalized": model}
 
@@ -336,10 +329,10 @@ def _extract_table_type_overrides_from_model(model: dict, report: dict) -> dict[
     """Build table_type_overrides from the enhanced model.
 
     Maps model-block position → table type string for tables that
-    Phase C changed (set_table_type).  See heading_level_overrides
+    were changed via set_table_type.  See heading_level_overrides
     for index-mapping caveats.
 
-    Returns an empty dict when there are no Phase C table changes.
+    Returns an empty dict when there are no table-type changes.
     """
     changed_table_ids: set[str] = set()
     for dec in report.get("llm_enhancer", {}).get("applied", []):
@@ -455,9 +448,19 @@ def main() -> None:
     parser.add_argument("--fail-on-risk", action="store_true")
     parser.add_argument(
         "--llm-enhance",
-        choices=["off", "auto", "a", "ab", "abc", "force-a", "force-ab", "force-abc"],
+        choices=[
+            "off", "auto",
+            "a", "b", "ab", "abc",
+            "force-a", "force-b", "force-ab", "force-abc",
+            "list_detect", "caption_gen", "all",
+        ],
         default="off",
-        help="LLM semantic enhancement level (default: off)"
+        help=(
+            "LLM enhancement level (default: off). "
+            "New names: list_detect / caption_gen / all (both). "
+            "Old names a/ab/abc still work. "
+            "abc/force-abc same as ab/force-ab"
+        ),
     )
     parser.add_argument(
         "--llm-hint",
@@ -471,6 +474,9 @@ def main() -> None:
     import os as _os
     if args.llm_enhance == "off" and _os.environ.get("WX_DOC_LLM_ENHANCE") == "1":
         args.llm_enhance = "abc"
+
+    # Normalize new capability names to legacy mode names
+    args.llm_enhance = normalize_mode(args.llm_enhance)
 
     global SKILL_VERSION
     SKILL_VERSION = _load_version()

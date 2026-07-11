@@ -260,6 +260,7 @@ def render_docx_direct(
     role_overrides: dict | None = None,
     heading_level_overrides: dict[int, int] | None = None,
     table_type_overrides: dict[int, str] | None = None,
+    model: dict | None = None,
 ) -> None:
     """
     Render a DOCX source directly by iterating blocks, using template styles only.
@@ -270,9 +271,29 @@ def render_docx_direct(
     # Pre-copy all media from source to destination with unique names
     _media_map = _precopy_source_media(src_doc, dst_doc)
     if _media_map:
-        report.setdefault("media_relationships_preserved", 
+        report.setdefault("media_relationships_preserved",
             report.get("media_relationships_preserved", 0) + len(_media_map))
 
+    # Build caption text map from model AST (replaces old caption_overrides
+    # parameter).  Phase B writes caption text directly into auto-generated
+    # caption blocks; the renderer reads them here.
+    _caption_overrides: dict[int, str] = {}
+    if model is not None:
+        _model_pending: str | None = None
+        _model_tbl_idx = 0
+        for _mb in model.get("document", {}).get("blocks", []):
+            _mbt = _mb.get("block_type")
+            if _mbt == "caption" and _mb.get("_auto_generated"):
+                _mtxt = (_mb.get("text") or "").strip()
+                if _mtxt:
+                    _model_pending = _mtxt
+            elif _mbt == "table":
+                _model_tbl_idx += 1
+                if _model_pending:
+                    _caption_overrides[_model_tbl_idx] = _model_pending
+                    _model_pending = None
+            else:
+                _model_pending = None
 
     if heading_shift:
         report.setdefault("content_warnings", []).append({
@@ -316,6 +337,7 @@ def render_docx_direct(
 
     last_was_caption = False
     _para_idx = 0
+    _table_idx = 0
     for block in _iter_blocks(src_doc):
         if isinstance(block, Paragraph):
             text = block.text.strip()
@@ -430,11 +452,15 @@ def render_docx_direct(
                 override_type = table_type_overrides[_para_idx]
                 is_api_example = (override_type == "code_sample")
             # Auto-insert table caption if the preceding paragraph wasn't one
+            _table_idx += 1
             if not last_was_caption:
-                _insert_seq_caption(dst_doc, 'table', ' ', template_profile=template_profile)
+                # Use LLM-generated caption text from model AST when available
+                cap_text = _caption_overrides.get(_table_idx, ' ')
+                _insert_seq_caption(dst_doc, 'table', cap_text,
+                                    template_profile=template_profile)
                 report.setdefault('captions_auto_generated', 0)
-                report['captions_auto_generated'] = report['captions_auto_generated'] + 1
-            
+                report['captions_auto_generated'] += 1
+
             new_table = append_table_clone(dst_doc, block)
             _table_body_style = style_from_profile(template_profile, "table_body", "表正文")
             _set_template_table_properties(new_table, row_height_cm, row_height_rule, table_body_style=_table_body_style)

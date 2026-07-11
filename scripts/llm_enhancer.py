@@ -16,17 +16,16 @@ import json
 import math
 import os
 import time
-from typing import Any, Callable
+from dataclasses import dataclass, field
+from typing import Any, Callable, Literal
 
 
 # ── Constants ──────────────────────────────────────────────────────────
 
-ALLOWED_OPS_BY_PHASE: dict[str, set[str]] = {
-    "A": {"retype"},
-    "B": {"retype", "adjust_level", "set_restart"},
-    "C": {"retype", "set_table_type", "set_header_rows", "set_caption_type",
-          "set_caption_text"},
-}
+# These are populated by _refresh_phase_exports().
+# Direct assignments are kept for backward-compatible import during
+# module initialisation; they are overwritten once the registry is ready.
+ALLOWED_OPS_BY_PHASE: dict[str, frozenset[str]] = {}
 
 VALID_BLOCK_TYPES = frozenset({
     "heading", "body", "list_item", "caption", "table", "image",
@@ -34,7 +33,7 @@ VALID_BLOCK_TYPES = frozenset({
 })
 
 PATCH_SCHEMA_VERSION = "1.0"
-PHASE_NAMES = frozenset({"A", "B", "C"})
+PHASE_NAMES = frozenset({"A", "B"})
 
 AUTO_TRIGGER_THRESHOLD = 0.15
 LOW_CONFIDENCE_THRESHOLD = 0.70
@@ -42,7 +41,7 @@ LOW_CONFIDENCE_THRESHOLD = 0.70
 LLM_CALL_TIMEOUT = 30  # seconds (base — dynamic in _resolve_llm_call)
 
 PHASE_B_SECTION_BATCH_SIZE = 20
-PHASE_C_TABLE_BATCH_SIZE = 10
+PHASE_B_CAPTION_BATCH_SIZE = 15
 
 # Weights for the 7-dimension suspicion score (must sum to 1.0).
 _SUSPICION_WEIGHTS: list[tuple[str, float]] = [
@@ -57,6 +56,118 @@ _SUSPICION_WEIGHTS: list[tuple[str, float]] = [
 
 # Module-level thread-pool for time-bounded LLM calls.
 _LLM_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 0c.  Capability Registry (Pluggable Architecture)
+# ═══════════════════════════════════════════════════════════════════════
+
+BatchStrategy = Literal["single", "by_targets", "by_sections"]
+
+
+@dataclass(frozen=True)
+class CapabilityConfig:
+    """Descriptor for an LLM enhancement capability.
+
+    Attributes
+    ----------
+    name:
+        Primary capability name (e.g. ``"list_detect"``, ``"caption_gen"``).
+    allowed_ops:
+        Set of operation strings this capability may emit.
+    prompt_builder:
+        Callable(model, hint=..., **kwargs) → prompt string.
+    collector:
+        Callable(model, report) → list of item dicts for batching.
+        Each item carries whatever ``prompt_builder`` needs.
+    batching:
+        Strategy name — determines how items are grouped.
+    batch_size:
+        Max items per batch (ignored for ``"single"``).
+    empty_status:
+        Status string in metrics when collector returns no items.
+    prevalidate:
+        Whether to run ``_prevalidate_patch_schema`` before validation.
+    prompt_preview_text:
+        Text recorded in ``prompts`` list when no batches exist.
+    after_phase:
+        Optional callback (model, report, enh_dict) after all batches.
+    """
+    name: str
+    allowed_ops: frozenset[str] = field(default_factory=frozenset)
+    prompt_builder: Callable = field(default=lambda *a, **kw: "")
+    collector: Callable = field(default=lambda m, r: [])
+    batching: BatchStrategy = "single"
+    batch_size: int | None = None
+    empty_status: str = "no_targets"
+    prevalidate: bool = False
+    prompt_preview_text: str | None = None
+    after_phase: Callable | None = None
+    prompt_args_builder: Callable | None = None
+
+
+CAPABILITY_REGISTRY: dict[str, CapabilityConfig] = {}
+
+# Legacy phase name → capability name (e.g. "A" → "list_detect")
+_PHASE_TO_CAPABILITY: dict[str, str] = {}
+# Capability name → legacy phase name (e.g. "list_detect" → "A")
+_LEGACY_NAMES: dict[str, str] = {}
+
+
+def register_capability(config: CapabilityConfig) -> CapabilityConfig:
+    """Register a capability (mutated in place if ``name`` already exists)."""
+    if config.name in CAPABILITY_REGISTRY:
+        raise ValueError(f"Duplicate capability {config.name!r}")
+    CAPABILITY_REGISTRY[config.name] = config
+    return config
+
+
+def _register_phase_alias(legacy_name: str, capability_name: str) -> None:
+    """Map a legacy phase name (``"A"``, ``"B"``) to a registry entry."""
+    if legacy_name in _PHASE_TO_CAPABILITY:
+        raise ValueError(f"Duplicate phase alias {legacy_name!r}")
+    if capability_name not in CAPABILITY_REGISTRY:
+        raise ValueError(f"Unknown capability {capability_name!r}")
+    _PHASE_TO_CAPABILITY[legacy_name] = capability_name
+    _LEGACY_NAMES[capability_name] = legacy_name
+
+
+def _resolve_capability(name: str) -> str | None:
+    """Resolve a phase or capability name to a registry key.
+
+    Returns ``None`` when neither an alias nor a registry key matches.
+    """
+    if name in CAPABILITY_REGISTRY:
+        return name
+    cap = _PHASE_TO_CAPABILITY.get(name)
+    if cap in CAPABILITY_REGISTRY:
+        return cap
+    return None
+
+
+def _resolve_legacy_phase(name: str) -> str:
+    """Map any input to a legacy phase name (A/B) for ``should_enhance``.
+
+    ``"list_detect"`` → ``"A"``, ``"A"`` → ``"A"``, unknowns pass through.
+    """
+    if name in _LEGACY_NAMES:
+        return _LEGACY_NAMES[name]
+    if name in _PHASE_TO_CAPABILITY:
+        return name  # already a legacy name
+    return name
+
+
+def _refresh_phase_exports() -> None:
+    """Derive backward-compatible module-level constants from the registry."""
+    global ALLOWED_OPS_BY_PHASE, _BUILD_PROMPT
+    ALLOWED_OPS_BY_PHASE = {}
+    _BUILD_PROMPT = {}
+    for legacy_name, cap_name in _PHASE_TO_CAPABILITY.items():
+        desc = CAPABILITY_REGISTRY.get(cap_name)
+        if desc is None:
+            continue
+        ALLOWED_OPS_BY_PHASE[legacy_name] = frozenset(desc.allowed_ops)
+        _BUILD_PROMPT[legacy_name] = desc.prompt_builder
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -93,7 +204,7 @@ def _resolve_llm_call(
     Parameters
     ----------
     phase:
-        One of ``"A"``, ``"B"``, ``"C"``.
+        One of ``"A"`` or ``"B"``.
     llm_call:
         The raw LLM callable.
     block_count:
@@ -131,13 +242,92 @@ def _resolve_llm_call(
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 0b.  Batch helpers for Phase B / C
+# 0b.  Batch helpers
 # ═══════════════════════════════════════════════════════════════════════
 
 
 def _iter_batches(items: list, size: int) -> list[list]:
     """Split *items* into batches of at most *size*."""
     return [items[i:i + size] for i in range(0, len(items), size)]
+
+
+def _make_phase_batches(desc: CapabilityConfig, items: list) -> list[list]:
+    """Group *items* into batches according to *desc.batching*.
+
+    ``"single"`` → one batch containing all items (wrapped in a list).
+    ``"by_targets"`` / ``"by_sections"`` → split by ``batch_size``.
+    """
+    if desc.batching == "single":
+        return [items]
+    if desc.batching in {"by_targets", "by_sections"}:
+        if not items:
+            return []
+        return _iter_batches(items, desc.batch_size or len(items))
+    raise ValueError(f"Unknown batching strategy {desc.batching!r}")
+
+
+def _prompt_args_for_list_detect(
+    desc: CapabilityConfig,
+    model: dict,
+    hint: str | None,
+    batch: list,
+    batch_idx: int,
+    batch_count: int,
+) -> dict:
+    """Build keyword arguments for the list_detect prompt_builder."""
+    payload = batch[0] if batch else {}
+    return dict(model=model, hint=hint,
+                blocks_override=payload.get("blocks_override"))
+
+
+def _prompt_args_for_caption_gen(
+    desc: CapabilityConfig,
+    model: dict,
+    hint: str | None,
+    batch: list,
+    batch_idx: int,
+    batch_count: int,
+) -> dict:
+    """Build keyword arguments for the caption_gen prompt_builder."""
+    targets = [item["targets"] for item in batch]
+    return dict(model=model, hint=hint,
+                targets_override=targets,
+                batch_meta={"batch_index": batch_idx,
+                            "batch_count": batch_count})
+
+
+def _build_prompt_for_batch(
+    desc: CapabilityConfig,
+    model: dict,
+    hint: str | None,
+    batch: list,
+    batch_idx: int,
+    batch_count: int,
+) -> str:
+    """Build a prompt for one batch, adapting arguments per capability.
+
+    When ``desc.prompt_args_builder`` is set, delegates argument assembly
+    to that builder, then calls ``desc.prompt_builder`` with the result.
+    Falls back to the legacy hard-coded dispatch for backward compat.
+    """
+    if desc.prompt_args_builder is not None:
+        kwargs = desc.prompt_args_builder(
+            desc, model, hint, batch, batch_idx, batch_count,
+        )
+        return desc.prompt_builder(**kwargs)
+
+    # Legacy fallback: by_targets strategy
+    if desc.batching == "by_targets":
+        targets = [item["targets"] for item in batch]
+        return desc.prompt_builder(
+            model,
+            hint=hint,
+            targets_override=targets,
+            batch_meta={"batch_index": batch_idx, "batch_count": batch_count},
+        )
+
+    # Fallback — pass items directly
+    return desc.prompt_builder(model, hint=hint, batch_items=batch)
 
 
 def _collect_phase_b_sections(model: dict) -> list[dict]:
@@ -163,36 +353,130 @@ def _collect_phase_b_sections(model: dict) -> list[dict]:
     return sections
 
 
-def _collect_phase_c_table_groups(model: dict) -> list[dict]:
-    """Collect table groups for Phase C batching.
+def _collect_caption_targets(model: dict) -> list[dict]:
+    """Collect auto-generated empty captions that need caption text.
 
-    Each group contains a table block, its nearest preceding heading,
-    and adjacent caption blocks.  Returns a list of dicts with keys
-    ``table_id`` and ``blocks``.
+    For each such caption, gathers surrounding context:
+    - nearest preceding heading (section title)
+    - preceding body / list_item texts
+    - table preview (first 3 rows of the associated table)
+    - following body / list_item texts
+
+    Returns a list of target dicts with keys:
+    ``block_id``, ``block``, ``caption_type``, ``heading_text``,
+    ``preceding_texts``, ``table_preview``, ``following_texts``.
+    Returns an empty list when no auto-generated empty captions exist.
     """
     blocks = model.get("document", {}).get("blocks", [])
-    groups: list[dict] = []
-    current_heading = None
-    for i, b in enumerate(blocks):
-        if b.get("block_type") == "heading":
-            current_heading = b
-        if b.get("block_type") == "table":
-            related: list[dict] = []
-            if current_heading is not None:
-                related.append(current_heading)
-            if i > 0 and blocks[i - 1].get("block_type") == "caption":
-                related.append(blocks[i - 1])
-            related.append(b)
-            if i + 1 < len(blocks) and blocks[i + 1].get("block_type") == "caption":
-                related.append(blocks[i + 1])
-            groups.append({"table_id": b.get("id"), "blocks": related})
-    return groups
+    targets: list[dict] = []
+    current_heading_text = ""
+    preceding_texts: list[str] = []
+
+    for i, block in enumerate(blocks):
+        btype = block.get("block_type")
+
+        if btype == "heading":
+            current_heading_text = (block.get("text") or "").strip()
+            preceding_texts = []
+
+        elif btype in ("body", "list_item"):
+            text = (block.get("text") or "").strip()
+            if text:
+                preceding_texts.append(text[:200])
+            if len(preceding_texts) > 5:
+                preceding_texts.pop(0)
+
+        elif btype == "table":
+            preceding_texts = []
+
+        elif btype == "caption":
+            auto_gen = block.get("_auto_generated", False)
+            text = (block.get("text") or "").strip()
+            if auto_gen and not text:
+                # Look ahead for the associated table block.
+                table_preview = ""
+                following_texts: list[str] = []
+                skip = False
+                for j in range(i + 1, min(i + 5, len(blocks))):
+                    nb = blocks[j]
+                    nbtype = nb.get("block_type")
+                    if nbtype == "table":
+                        tt = nb.get("table_type", "data")
+                        if tt in ("layout", "code_sample"):
+                            skip = True
+                            break
+                        rows = nb.get("rows", [])
+                        preview_parts = []
+                        for row in rows[:3]:
+                            cells = [c.get("text", "")[:40] for c in row]
+                            preview_parts.append(" | ".join(cells))
+                        table_preview = "\n".join(preview_parts)
+                        break
+                    elif nbtype in ("body", "list_item"):
+                        t = (nb.get("text") or "").strip()
+                        if t:
+                            following_texts.append(t[:200])
+                if skip:
+                    continue
+
+                targets.append({
+                    "block_id": block.get("id"),
+                    "block": block,
+                    "caption_type": block.get("caption_type", "table"),
+                    "heading_text": current_heading_text,
+                    "preceding_texts": preceding_texts[-3:],
+                    "table_preview": table_preview,
+                    "following_texts": following_texts[:2],
+                })
+
+            preceding_texts = []
+
+        else:
+            preceding_texts = []
+
+    return targets
+
+
+def _collect_list_detect_batches(model: dict, report: dict) -> list[dict]:
+    """Collector for the ``list_detect`` capability.
+
+    Returns a single-item list with ``{"blocks_override": ...}`` so the
+    batch system produces exactly one call.  When fewer than 3 blocks
+    are suspicious, ``blocks_override`` is ``None`` (full model shown).
+    """
+    sections = _collect_suspicious_sections(model, report)
+    filtered_blocks = []
+    for sec in sections:
+        filtered_blocks.extend(sec.get("blocks", []))
+    blocks_override = filtered_blocks if len(filtered_blocks) >= 3 else None
+    return [{"blocks_override": blocks_override}]
+
+
+def _collect_caption_gen_batches(model: dict, report: dict) -> list[dict]:
+    """Collector for the ``caption_gen`` capability.
+
+    Returns one item per caption target, each wrapped as
+    ``{"targets": <target_dict>}``.
+    """
+    targets = _collect_caption_targets(model)
+    return [{"targets": t} for t in targets]
+
+
+def _record_phase_a_applied_rate(
+    model: dict, report: dict, enh: dict,
+) -> None:
+    """After-phase hook for list_detect: compute applied rate."""
+    _applied = enh.get("applied", [])
+    _skipped = enh.get("skipped", [])
+    _total = len(_applied) + len(_skipped)
+    if _total > 0:
+        enh["phase_a_applied_rate"] = len(_applied) / _total
 
 
 def _prevalidate_patch_schema(
     patch: dict,
     phase: str,
-    allowed_ops: set[str],
+    allowed_ops: frozenset[str],
 ) -> list[dict]:
     """Structural pre-validation of a patch before ``validate_patch``.
 
@@ -424,7 +708,7 @@ def extract_json_object(raw: str) -> dict | None:
 # 2.  Patch Validation
 # ═══════════════════════════════════════════════════════════════════════
 
-def validate_patch(patch: dict, model: dict, allowed_ops: set[str]) -> list[dict]:
+def validate_patch(patch: dict, model: dict, allowed_ops: frozenset[str]) -> list[dict]:
     r"""Validate a *patch* object against *model*.
 
     Returns a **list of error dicts**; an empty list means the patch is
@@ -479,18 +763,29 @@ def validate_patch(patch: dict, model: dict, allowed_ops: set[str]) -> list[dict
     }
 
     # Pre-compute table types for caption validation: for each caption
-    # block find the preceding table block (if any) and record its type.
+    # block scan forward for the associated table block (same direction as
+    # _collect_caption_targets) and record its type.
+    # This correctly handles normalized caption-before-table order.
+    all_blocks = model.get("document", {}).get("blocks", [])
     table_type_for_caption: dict[str, str | None] = {}
-    last_table_type: str | None = None
-    for b in model.get("document", {}).get("blocks", []):
-        if b.get("block_type") == "table":
-            last_table_type = b.get("table_type", "data")
-        elif b.get("block_type") == "caption":
-            bid = b.get("id", "")
-            if bid:
-                table_type_for_caption[bid] = last_table_type
-        else:
-            last_table_type = None  # non-table resets
+    for i, b in enumerate(all_blocks):
+        if b.get("block_type") != "caption":
+            continue
+        bid = b.get("id", "")
+        if not bid:
+            continue
+        assoc_table_type: str | None = None
+        for j in range(i + 1, min(i + 5, len(all_blocks))):
+            nb = all_blocks[j]
+            nb_type = nb.get("block_type")
+            if nb_type == "table":
+                assoc_table_type = nb.get("table_type", "data")
+                break
+            elif nb_type in ("body", "list_item"):
+                continue  # intervening text, keep looking
+            else:
+                break  # heading or other block — stop
+        table_type_for_caption[bid] = assoc_table_type
 
     # ── Per-decision checks ──
     for idx, dec in enumerate(decisions):
@@ -769,9 +1064,23 @@ def _build_phase_a_prompt(
         if blocks_override is not None
         else model.get("document", {}).get("blocks", [])
     )
+
+    # Build section-by-id map from full model (not only displayed blocks)
+    # so every block shows the nearest preceding heading text.
+    all_blocks = model.get("document", {}).get("blocks", [])
+    section_by_id: dict[str, str] = {}
+    current_section = ""
+    for b in all_blocks:
+        bid = b.get("id", "")
+        if b.get("block_type") == "heading":
+            current_section = (b.get("text") or "")[:80].replace("\n", " ")
+        if bid:
+            section_by_id[bid] = current_section
+
     lines = [
         "你是规则结果审查器。默认规则判断正确，只修正明显误判。",
-        "每个 block 展示规则的 block_type、role、level、list_type、caption_type。",
+        "每个 block 展示所属章节、源 DOCX 样式、源语义角色"
+        "和规则的 block_type、role、level、list_type、caption_type。",
         "只返回 JSON 对象，不要额外文字。",
         "",
         f"文档共有 {len(blocks)} 个 block：",
@@ -784,8 +1093,13 @@ def _build_phase_a_prompt(
         list_type = b.get("list_type", "-")
         cap_type = b.get("caption_type", "-")
         text = (b.get("text") or "")[:200].replace("\n", " ")
+        section = section_by_id.get(bid, "")
+        source = b.get("source", {})
+        source_style = source.get("style", "-")
+        source_role = source.get("inferred_role", "-")
         lines.append(
-            f"  [{bid}] type={btype} role={role} level={level}"
+            f"  [{bid}] section={section} source_style={source_style}"
+            f" source_role={source_role} type={btype} role={role} level={level}"
             f" list={list_type} cap={cap_type} | {text}"
         )
 
@@ -815,6 +1129,15 @@ def _build_phase_a_prompt(
         "默认规则判断正确；省略某个 block 表示接受规则结果。",
         "decisions 只包含需要修改的项；空 decisions 表示规则全部正确。",
         "不要对代码块、JSON 示例、普通说明句、引导句生成 list_item 或 caption。",
+        "",
+        "source_style 与 source_role 辅助判断规则：",
+        "源 DOCX 样式为 Heading 的 block 必须保持 heading，除非它明显是封面日期、版本号等元信息。",
+        "源 DOCX 样式为 List 或带编号信息的短句可优先判断为列表；源样式为 Normal 的长说明段落应优先保持 body。",
+        "",
+        "说明体保持 body：形如“术语：说明文字”“属性名：说明文字”“原则名：长说明”的段落按正文处理。",
+        "长段落保持 body：超过 100 字且没有 a) 1) 1. • 等列表标记时，不要转为 list_item。",
+        "列表体才转 list_item：连续短句、平行结构、无冒号前缀，通常以 a) 1) 1. • 或短横线开头。",
+        "",
         "重点审查以下场景：",
         "  - 连续 body 功能点列表（应转为 list_item）",
         "  - 封面元信息误判为 heading（如日期、版本号）",
@@ -831,196 +1154,86 @@ def _build_phase_b_prompt(
     model: dict,
     hint: str | None = None,
     *,
-    sections_override: list[dict] | None = None,
+    targets_override: list[dict] | None = None,
     batch_meta: dict | None = None,
 ) -> str:
-    """Build the Phase B prompt — heading-level anomaly reviewer.
+    """Build the Phase B prompt — context-aware caption text generation.
 
-    The LLM acts as a *heading-level anomaly reviewer* (标题层级异常审查器):
-    given the rule-processed final AST, it only flags genuine heading-level
-    anomalies rather than re-evaluating the entire structure.
+    The LLM acts as a *technical-document caption generator* (技术文档题注生成器):
+    given context around each auto-generated empty caption, it produces concise
+    caption text.
 
     Parameters
     ----------
-    sections_override:
-        When provided, only blocks from these sections are listed.
+    targets_override:
+        When provided, only these caption targets are included in the prompt.
+        Each target should have keys from ``_collect_caption_targets``.
     batch_meta:
-        Optional dict with ``batch_index``, ``batch_count``, and
-        ``heading_path_summary`` for cross-batch context.
+        Optional dict with ``batch_index`` and ``batch_count`` for cross-batch
+        context.
     """
-    if sections_override is not None:
-        blocks: list[dict] = []
-        for sec in sections_override:
-            blocks.extend(sec.get("blocks", []))
+    if targets_override is not None:
+        targets = targets_override
     else:
-        blocks = model.get("document", {}).get("blocks", [])
+        targets = _collect_caption_targets(model)
 
     lines = [
-        "你是标题层级异常审查器。默认当前层级正确，只标记真实异常。",
-        "以下是规则处理后的最终 AST 摘要，标题已由规则分配层级。",
+        "你是技术文档题注生成器。以下列出需要生成题注的表格。",
+        "每个条目包含章节标题、前文、表格预览和后文内容。",
         "",
-        "注意：",
-        "  - 连续同级标题（如 H2→H2→H2）是合法结构，不要认为缺少中间层级。",
-        "  - 文档标题后直接进入 H2 或 H3 完全合法。",
-        "  - 只修正真实的层级跳跃（如 H2→H4），",
-        "    以及封面/元信息误判为标题。",
-        "  - 输出 JSON patch。不要根据文字好坏改写内容。不要创建新标题。",
-        "  - 如果封面、日期、版本、目录文字被识别为标题，应降级为 body。",
+        "规则：",
+        "1. 题注不超过30字，简洁准确",
+        "2. 不要重复表/图前缀（框架会自动添加）",
+        "3. 不改动已有题注（即有文字的caption）",
+        "4. 如果信息不足以生成有意义的题注，设为空字符串",
+        "5. 不允许生成set_table_type、set_header_rows、set_caption_type操作",
+        "6. 只返回JSON对象，不要额外文字",
+        "",
     ]
     if batch_meta:
         batch_idx = batch_meta.get("batch_index", 0)
         batch_cnt = batch_meta.get("batch_count", 1)
-        hpath = batch_meta.get("heading_path_summary", "")
         lines.append(f"批处理: 第 {batch_idx + 1}/{batch_cnt} 批")
-        if hpath:
-            lines.append(f"前序章节: {hpath}")
-    lines.extend([
-        "",
-        f"文档共有 {len(blocks)} 个 block（规则处理后 AST 摘要）：",
-    ])
-    prev_level = None
-    for b in blocks:
-        bid = b.get("id", "?")
-        btype = b.get("block_type", "?")
-        text = (b.get("text") or "")[:200].replace("\n", " ")
-        if btype == "heading":
-            level = b.get("level", "?")
-            prev_str = f" prev=H{prev_level}" if prev_level is not None else ""
-            lines.append(f"  [{bid}] H{level}{prev_str} | {text}")
-            prev_level = level
-        elif btype == "list_item":
-            lines.append(f"  [{bid}] list  | {text}")
+    lines.append("")
+
+    if not targets:
+        lines.append("（无需生成题注的表格）")
+    else:
+        for ti, tgt in enumerate(targets, 1):
+            lines.append(f"--- target {ti} ---")
+            lines.append(f"  block_id: {tgt.get('block_id', '?')}")
+            htext = tgt.get("heading_text", "") or "(无章节标题)"
+            lines.append(f"  章节标题: \"{htext}\"")
+            pre = tgt.get("preceding_texts", [])
+            if pre:
+                for pt in pre:
+                    lines.append(f"  前文: {pt[:120]}")
+            preview = tgt.get("table_preview", "")
+            if preview:
+                lines.append(f"  表格预览:")
+                for prow in preview.split("\n"):
+                    lines.append(f"    | {prow}")
+            fol = tgt.get("following_texts", [])
+            if fol:
+                for ft in fol:
+                    lines.append(f"  后文: {ft[:120]}")
+            lines.append("")
 
     example = _format_patch_example({
         "schema_version": "1.0",
         "phase": "B",
-        "decisions": [{
-            "block_id": "b0012",
-            "operation": "retype",
-            "from": {"block_type": "heading", "level": 2},
-            "to": {"block_type": "body"},
-            "confidence": 0.90,
-            "reason": "cover_metadata",
-        }],
-    })
-    lines.extend([
-        "",
-        "返回 JSON 对象，格式参考：",
-        example,
-        "",
-        "约束（必须遵守）:",
-        "默认当前层级正确；连续同级标题是合法结构。",
-        "空 decisions 表示当前标题结构合法。",
-        "优先使用 adjust_level 修正层级，只在明显误判标题时才用 retype。",
-        "允许操作: retype (body↔heading), adjust_level, set_restart",
-    ])
-
-    if hint:
-        lines.append(f"\n用户提示: \"{hint}\"")
-    return "\n".join(lines)
-
-
-def _build_phase_c_prompt(
-    model: dict,
-    hint: str | None = None,
-    *,
-    groups_override: list[dict] | None = None,
-) -> str:
-    """Build the merged Phase C + C1 prompt for table / caption review.
-
-    In a single LLM call the model is asked to determine table types,
-    header rows, caption types, **and** generate caption text for
-    ``_auto_generated`` empty captions.
-
-    When *groups_override* is provided only those table groups are
-    included in the prompt.
-    """
-    if groups_override is not None:
-        seen: set[str] = set()
-        blocks: list[dict] = []
-        for grp in groups_override:
-            for b in grp.get("blocks", []):
-                bid = b.get("id")
-                if bid and bid not in seen:
-                    seen.add(bid)
-                    blocks.append(b)
-    else:
-        blocks = model.get("document", {}).get("blocks", [])
-    lines = [
-        "你是技术文件表格语义审查器。判断表格类型和题注。",
-        "只返回 JSON 对象，不要额外文字。",
-        "",
-        "相关 block 列表：",
-    ]
-    has_auto_caption = False
-    for b in blocks:
-        bid = b.get("id", "?")
-        if b.get("block_type") == "table":
-            ttype = b.get("table_type", "?")
-            hrows = b.get("header_rows", 0)
-            rows = b.get("rows", [])
-            nrows = len(rows)
-            ncols = len(rows[0]) if rows else 0
-            preview = "\n".join(
-                " | ".join(c.get("text", "")[:30] for c in row)
-                for row in rows[:3]
-            )
-            lines.append(f"  [{bid}] table type={ttype} rows={nrows} cols={ncols} "
-                         f"header_rows={hrows}")
-            lines.append(f"    {preview}")
-        elif b.get("block_type") == "caption":
-            text = (b.get("text") or "")[:200].replace("\n", " ")
-            auto_gen = b.get("_auto_generated", False)
-            if auto_gen:
-                has_auto_caption = True
-                lines.append(f"  [{bid}] caption (auto-generated) | text={text!r}")
-            else:
-                lines.append(f"  [{bid}] caption | {text}")
-        elif b.get("block_type") == "heading":
-            text = (b.get("text") or "")[:200].replace("\n", " ")
-            lines.append(f"  [{bid}] heading | {text}")
-
-    # Examples covering both table-type ops and caption-text ops.
-    example = _format_patch_example({
-        "schema_version": "1.0",
-        "phase": "C",
         "decisions": [
             {
-                "block_id": "b0020",
-                "operation": "set_table_type",
-                "to": {"table_type": "data"},
-                "confidence": 0.95,
-                "reason": "data_table_headers",
-            },
-            {
-                "block_id": "b0021",
+                "block_id": "b0012",
                 "operation": "set_caption_text",
-                "to": {"text": "功能模块定义表"},
+                "to": {"text": "全球部署架构"},
                 "confidence": 0.85,
-                "reason": "caption_text_generated",
+                "reason": "context_caption_generated",
             },
         ],
     })
     lines.extend([
-        "",
-        "表格类型: data, code_sample, layout, unknown",
-        "data 表通常有表头，header_rows 通常为 1。",
-        "API 示例表通常是单格 JSON/HTTP/XML/Plain Text → code_sample。",
-        "layout 表用于排版，不应自动插入表题注。",
-    ])
-
-    if has_auto_caption:
-        lines.extend([
-            "",
-            "以下 caption 标记了 _auto_generated，需要为其生成题注文字：",
-            "题注要求简洁、准确，不超过 30 字。",
-            "不要重复'表'/'图'前缀（框架会自动添加）。",
-            "如果信息不足无法判断，对于 data 表返回空字符串。",
-        ])
-
-    lines.extend([
-        "",
-        "返回 JSON：",
+        "返回 JSON 格式（只允许 set_caption_text 操作）：",
         example,
     ])
 
@@ -1030,15 +1243,72 @@ def _build_phase_c_prompt(
 
 
 _BUILD_PROMPT: dict[str, Any] = {
-    "A": _build_phase_a_prompt,
-    "B": _build_phase_b_prompt,
-    "C": _build_phase_c_prompt,
+    # Populated by _refresh_phase_exports() after registration below.
 }
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 5.  Core Enhancement Entry Point
+# 5.  Capability Registration
 # ═══════════════════════════════════════════════════════════════════════
+
+register_capability(CapabilityConfig(
+    name="list_detect",
+    allowed_ops=frozenset({"retype"}),
+    prompt_builder=_build_phase_a_prompt,
+    collector=_collect_list_detect_batches,
+    batching="single",
+    prevalidate=True,
+    after_phase=_record_phase_a_applied_rate,
+    prompt_args_builder=_prompt_args_for_list_detect,
+))
+
+register_capability(CapabilityConfig(
+    name="caption_gen",
+    allowed_ops=frozenset({"set_caption_text"}),
+    prompt_builder=_build_phase_b_prompt,
+    collector=_collect_caption_gen_batches,
+    batching="by_targets",
+    batch_size=PHASE_B_CAPTION_BATCH_SIZE,
+    empty_status="no_targets",
+    prevalidate=True,
+    prompt_preview_text="(no caption targets)",
+    prompt_args_builder=_prompt_args_for_caption_gen,
+))
+
+_register_phase_alias("A", "list_detect")
+_register_phase_alias("B", "caption_gen")
+
+_refresh_phase_exports()
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 6.  Core Enhancement Entry Point  (registry-based dispatch)
+# ═══════════════════════════════════════════════════════════════════════
+
+def _make_metric(
+    phase: str,
+    batch_idx: int,
+    batch_count: int,
+    prompt_chars: int,
+    start: float,
+    status: str,
+    applied: int = 0,
+    skipped: int = 0,
+    batch_err: int = 0,
+) -> dict:
+    return {
+        "phase": phase,
+        "batch_index": batch_idx,
+        "batch_count": batch_count,
+        "prompt_chars": prompt_chars,
+        "estimated_tokens": math.ceil(prompt_chars / 4),
+        "wall_time_sec": round(time.perf_counter() - start, 3),
+        "status": status,
+        "applied_count": applied,
+        "skipped_count": skipped,
+        "error_count": batch_err,
+    }
+
 
 def enhance_document_model(
     model: dict,
@@ -1050,6 +1320,10 @@ def enhance_document_model(
 ) -> dict:
     """Run LLM enhancement for *phase* on document *model*.
 
+    Unified dispatcher: resolves *phase* via ``CAPABILITY_REGISTRY``
+    and runs the common collect → batch → call → validate → apply loop
+    using the registered ``CapabilityConfig``.
+
     Parameters
     ----------
     model:
@@ -1058,7 +1332,8 @@ def enhance_document_model(
         Mutable report dict.  Enhancement activity is written to
         ``report['llm_enhancer']``.
     phase:
-        One of ``"A"``, ``"B"``, ``"C"``.
+        Capability name (``"list_detect"``, ``"caption_gen"``) or
+        legacy phase name (``"A"``, ``"B"``).
     llm_call:
         A callable that accepts a prompt string and returns the LLM raw
         text.  When *None*, *model* is returned unchanged.
@@ -1095,93 +1370,124 @@ def enhance_document_model(
     if llm_call is None:
         return model
 
-    if phase not in PHASE_NAMES:
-        enh["errors"].append({"phase": phase,
-                               "message": f"Unknown phase {phase!r}"})
+    # ── Resolve capability from registry ──────────────────────────
+    cap_name = _resolve_capability(phase)
+    desc = CAPABILITY_REGISTRY.get(cap_name) if cap_name else None
+
+    if desc is None:
+        enh["errors"].append({
+            "phase": phase,
+            "message": f"Unknown phase/capability {phase!r}",
+        })
         return model
 
-    allowed_ops = ALLOWED_OPS_BY_PHASE.get(phase, set())
-    build_prompt = _BUILD_PROMPT.get(phase)
+    allowed_ops = desc.allowed_ops
 
-    if build_prompt is None:
-        enh["errors"].append({"phase": phase,
-                               "message": f"No prompt builder for phase {phase!r}"})
-        return model
+    # ── Collect items and build batches ───────────────────────────
+    items = desc.collector(model, report)
+    batches = _make_phase_batches(desc, items)
 
-    # ── Phase A: incremental enhancement, filtered sections ──
-    if phase == "A":
-        sections = _collect_suspicious_sections(model, report)
-        filtered_blocks: list[dict] = []
-        for sec in sections:
-            filtered_blocks.extend(sec.get("blocks", []))
-        blocks_override = filtered_blocks if len(filtered_blocks) >= 3 else None
-        prompt = _build_phase_a_prompt(
-            model, hint=hint, blocks_override=blocks_override,
+    if not batches:
+        enh.setdefault("prompts", []).append(
+            {"phase": phase, "text": desc.prompt_preview_text or "(no targets)"},
         )
+        _append_phase_summary(enh, phase)
+        enh.setdefault("phase_metrics", []).append({
+            "phase": phase, "batch_index": 0,
+            "batch_count": 1, "status": desc.empty_status,
+            "applied_count": 0, "skipped_count": 0, "error_count": 0,
+        })
+        return model
 
+    block_count = len(model.get("document", {}).get("blocks", []))
+    timed_call = _resolve_llm_call(
+        phase, llm_call, block_count=block_count, report_enh=enh,
+    )
+
+    batch_count = len(batches)
+
+    for batch_idx, batch in enumerate(batches):
+        prompt = _build_prompt_for_batch(
+            desc, model, hint, batch, batch_idx, batch_count,
+        )
         prompt = _apply_token_budget(prompt)
         enh.setdefault("prompts", []).append(
-            {"phase": phase, "text": prompt[:500]},
-        )
-
-        block_count = len(model.get("document", {}).get("blocks", []))
-        timed_call = _resolve_llm_call(
-            phase, llm_call, block_count=block_count, report_enh=enh,
+            {"phase": phase, "batch": batch_idx, "text": prompt[:500]},
         )
 
         prompt_chars = len(prompt)
         start = time.perf_counter()
 
-        def _metric(status, applied=0, skipped=0, batch_err=0):
-            return {
-                "phase": phase,
-                "batch_index": 0,
-                "batch_count": 1,
-                "prompt_chars": prompt_chars,
-                "estimated_tokens": math.ceil(prompt_chars / 4),
-                "wall_time_sec": round(
-                    time.perf_counter() - start, 3,
-                ),
-                "status": status,
-                "applied_count": applied,
-                "skipped_count": skipped,
-                "error_count": batch_err,
-            }
-
+        # ── Call LLM ──────────────────────────────────────────────
         try:
             raw = timed_call(prompt)
         except Exception as exc:
             enh["errors"].append({
-                "phase": phase, "message": f"LLM call failed: {exc}",
+                "phase": phase, "batch": batch_idx,
+                "message": f"LLM call failed: {exc}",
             })
-            _record_phase_metric(enh, _metric("error", batch_err=1))
-            return model
+            _record_phase_metric(
+                enh, _make_metric(phase, batch_idx, batch_count,
+                                  prompt_chars, start, "error", batch_err=1),
+            )
+            continue
 
         if not raw:
             enh["errors"].append({
-                "phase": phase, "message": "Empty LLM response",
+                "phase": phase, "batch": batch_idx,
+                "message": "Empty LLM response",
             })
             _record_phase_metric(
-                enh, _metric("empty_response", batch_err=1),
+                enh, _make_metric(phase, batch_idx, batch_count,
+                                  prompt_chars, start, "empty_response",
+                                  batch_err=1),
             )
-            return model
+            continue
 
+        # ── Extract JSON patch ────────────────────────────────────
         patch = extract_json_object(raw)
         if patch is None:
             enh["errors"].append({
-                "phase": phase,
+                "phase": phase, "batch": batch_idx,
                 "message": "Failed to parse JSON from LLM response",
                 "raw_preview": raw[:500],
             })
             _record_phase_metric(
-                enh, _metric("parse_error", batch_err=1),
+                enh, _make_metric(phase, batch_idx, batch_count,
+                                  prompt_chars, start, "parse_error",
+                                  batch_err=1),
             )
-            return model
+            continue
 
+        # ── Pre-validation (capability-specific) ──────────────────
+        if desc.prevalidate:
+            # Pass legacy phase name because LLM patches always use
+            # legacy phase identifiers ("A" / "B") in their patch JSON.
+            patch_phase = _resolve_legacy_phase(phase)
+            pre_errors = _prevalidate_patch_schema(
+                patch, patch_phase, allowed_ops,
+            )
+            if pre_errors:
+                enh["errors"].append({
+                    "phase": phase, "batch": batch_idx,
+                    "message": (
+                        f"Patch pre-validation failed"
+                        f" ({len(pre_errors)} error(s))"
+                    ),
+                    "pre_validation_errors": pre_errors,
+                })
+                _record_phase_metric(
+                    enh, _make_metric(phase, batch_idx, batch_count,
+                                      prompt_chars, start,
+                                      "pre_validation_error", batch_err=1),
+                )
+                continue
+
+        # ── Validation ───────────────────────────────────────────
         validation_errors = validate_patch(patch, model, allowed_ops)
         if validation_errors:
             enh["errors"].append({
-                "phase": phase,
+                "phase": phase, "batch": batch_idx,
                 "message": (
                     f"Patch validation failed"
                     f" ({len(validation_errors)} error(s))"
@@ -1189,320 +1495,34 @@ def enhance_document_model(
                 "validation_errors": validation_errors,
             })
             _record_phase_metric(
-                enh, _metric("validation_error", batch_err=1),
+                enh, _make_metric(phase, batch_idx, batch_count,
+                                  prompt_chars, start, "validation_error",
+                                  batch_err=1),
             )
-            return model
+            continue
 
+        # ── Apply ────────────────────────────────────────────────
         before_applied = len(enh.get("applied", []))
         before_skipped = len(enh.get("skipped", []))
         before_errors = len(enh.get("errors", []))
 
         apply_patch_to_model(model, patch, report)
-        _append_phase_summary(enh, phase)
 
-        _record_phase_metric(enh, _metric(
+        _record_phase_metric(enh, _make_metric(
+            phase, batch_idx, batch_count, prompt_chars, start,
             "ok",
             applied=len(enh.get("applied", [])) - before_applied,
             skipped=len(enh.get("skipped", [])) - before_skipped,
             batch_err=len(enh.get("errors", [])) - before_errors,
         ))
 
-        # Phase A applied rate (for auto-mode B/C gating)
-        _applied = enh.get("applied", [])
-        _skipped = enh.get("skipped", [])
-        _total_phase_a = len(_applied) + len(_skipped)
-        if _total_phase_a > 0:
-            enh["phase_a_applied_rate"] = len(_applied) / _total_phase_a
+    _append_phase_summary(enh, phase)
 
-        return model
+    # ── After-phase hook ─────────────────────────────────────────
+    if desc.after_phase:
+        desc.after_phase(model, report, enh)
 
-    # ── Phase B: batched section processing ──
-    if phase == "B":
-        sections = _collect_phase_b_sections(model)
-        batches = _iter_batches(sections, PHASE_B_SECTION_BATCH_SIZE)
-        batch_count = len(batches)
-
-        block_count = len(model.get("document", {}).get("blocks", []))
-        timed_call = _resolve_llm_call(
-            phase, llm_call, block_count=block_count, report_enh=enh,
-        )
-
-        # Track live heading state across batches (updated after each batch
-        # so the heading summary reflects post-application model state).
-        _live_heading_texts: list[str] = []
-
-        def _heading_path_summary(batch_idx: int) -> str:
-            if batch_idx == 0:
-                return ""
-            paths = _live_heading_texts[-10:]
-            return " → ".join(paths) if paths else ""
-
-        for batch_idx, batch_secs in enumerate(batches):
-            batch_meta_dict = {
-                "batch_index": batch_idx,
-                "batch_count": batch_count,
-                "heading_path_summary": _heading_path_summary(batch_idx),
-            }
-            prompt = _build_phase_b_prompt(
-                model, hint=hint,
-                sections_override=batch_secs,
-                batch_meta=batch_meta_dict,
-            )
-            prompt = _apply_token_budget(prompt)
-            enh.setdefault("prompts", []).append(
-                {"phase": phase, "batch": batch_idx,
-                 "text": prompt[:500]},
-            )
-
-            prompt_chars = len(prompt)
-            start = time.perf_counter()
-
-            def _metric(status, applied=0, skipped=0, batch_err=0):
-                return {
-                    "phase": phase,
-                    "batch_index": batch_idx,
-                    "batch_count": batch_count,
-                    "prompt_chars": prompt_chars,
-                    "estimated_tokens": math.ceil(prompt_chars / 4),
-                    "wall_time_sec": round(
-                        time.perf_counter() - start, 3,
-                    ),
-                    "status": status,
-                    "applied_count": applied,
-                    "skipped_count": skipped,
-                    "error_count": batch_err,
-                }
-
-            try:
-                raw = timed_call(prompt)
-            except Exception as exc:
-                enh["errors"].append({
-                    "phase": phase, "batch": batch_idx,
-                    "message": f"LLM call failed: {exc}",
-                })
-                _record_phase_metric(enh, _metric("error", batch_err=1))
-                continue
-
-            if not raw:
-                enh["errors"].append({
-                    "phase": phase, "batch": batch_idx,
-                    "message": "Empty LLM response",
-                })
-                _record_phase_metric(
-                    enh, _metric("empty_response", batch_err=1),
-                )
-                continue
-
-            patch = extract_json_object(raw)
-            if patch is None:
-                enh["errors"].append({
-                    "phase": phase, "batch": batch_idx,
-                    "message": "Failed to parse JSON",
-                    "raw_preview": raw[:500],
-                })
-                _record_phase_metric(
-                    enh, _metric("parse_error", batch_err=1),
-                )
-                continue
-
-            pre_errors = _prevalidate_patch_schema(
-                patch, phase, allowed_ops,
-            )
-            if pre_errors:
-                enh["errors"].append({
-                    "phase": phase, "batch": batch_idx,
-                    "message": (
-                        f"Patch pre-validation failed"
-                        f" ({len(pre_errors)} error(s))"
-                    ),
-                    "pre_validation_errors": pre_errors,
-                })
-                _record_phase_metric(
-                    enh, _metric("pre_validation_error", batch_err=1),
-                )
-                continue
-
-            validation_errors = validate_patch(
-                patch, model, allowed_ops,
-            )
-            if validation_errors:
-                enh["errors"].append({
-                    "phase": phase, "batch": batch_idx,
-                    "message": (
-                        f"Patch validation failed"
-                        f" ({len(validation_errors)} error(s))"
-                    ),
-                    "validation_errors": validation_errors,
-                })
-                _record_phase_metric(
-                    enh, _metric("validation_error", batch_err=1),
-                )
-                continue
-
-            before_applied = len(enh.get("applied", []))
-            before_skipped = len(enh.get("skipped", []))
-            before_errors = len(enh.get("errors", []))
-
-            apply_patch_to_model(model, patch, report)
-
-            # Rebuild live heading tracker from current model after each batch.
-            _live_heading_texts.clear()
-            for _b in model.get("document", {}).get("blocks", []):
-                if _b.get("block_type") == "heading":
-                    _ht = (_b.get("text") or "")[:60]
-                    if _ht:
-                        _live_heading_texts.append(_ht)
-
-            _record_phase_metric(enh, _metric(
-                "ok",
-                applied=len(enh.get("applied", [])) - before_applied,
-                skipped=len(enh.get("skipped", [])) - before_skipped,
-                batch_err=len(enh.get("errors", [])) - before_errors,
-            ))
-
-        _append_phase_summary(enh, phase)
-        return model
-
-    # ── Phase C: batched table group processing ──
-    if phase == "C":
-        table_groups = _collect_phase_c_table_groups(model)
-
-        # Fallback when no table groups: single full-model call
-        # (handles standalone captions without tables).
-        if not table_groups:
-            batches = [None]  # one batch → groups_override=None triggers full-model call
-        else:
-            batches = _iter_batches(table_groups, PHASE_C_TABLE_BATCH_SIZE)
-        batch_count = len(batches)
-
-        block_count = len(model.get("document", {}).get("blocks", []))
-        timed_call = _resolve_llm_call(
-            phase, llm_call, block_count=block_count, report_enh=enh,
-        )
-
-        for batch_idx, batch_groups in enumerate(batches):
-            prompt = _build_phase_c_prompt(
-                model, hint=hint,
-                groups_override=batch_groups,
-            )
-            prompt = _apply_token_budget(prompt)
-            enh.setdefault("prompts", []).append(
-                {"phase": phase, "batch": batch_idx,
-                 "text": prompt[:500]},
-            )
-
-            prompt_chars = len(prompt)
-            start = time.perf_counter()
-
-            def _metric(status, applied=0, skipped=0, batch_err=0):
-                return {
-                    "phase": phase,
-                    "batch_index": batch_idx,
-                    "batch_count": batch_count,
-                    "prompt_chars": prompt_chars,
-                    "estimated_tokens": math.ceil(prompt_chars / 4),
-                    "wall_time_sec": round(
-                        time.perf_counter() - start, 3,
-                    ),
-                    "status": status,
-                    "applied_count": applied,
-                    "skipped_count": skipped,
-                    "error_count": batch_err,
-                }
-
-            try:
-                raw = timed_call(prompt)
-            except Exception as exc:
-                enh["errors"].append({
-                    "phase": phase, "batch": batch_idx,
-                    "message": f"LLM call failed: {exc}",
-                })
-                _record_phase_metric(enh, _metric("error", batch_err=1))
-                continue
-
-            if not raw:
-                enh["errors"].append({
-                    "phase": phase, "batch": batch_idx,
-                    "message": "Empty LLM response",
-                })
-                _record_phase_metric(
-                    enh, _metric("empty_response", batch_err=1),
-                )
-                continue
-
-            patch = extract_json_object(raw)
-            if patch is None:
-                enh["errors"].append({
-                    "phase": phase, "batch": batch_idx,
-                    "message": "Failed to parse JSON",
-                    "raw_preview": raw[:500],
-                })
-                _record_phase_metric(
-                    enh, _metric("parse_error", batch_err=1),
-                )
-                continue
-
-            pre_errors = _prevalidate_patch_schema(
-                patch, phase, allowed_ops,
-            )
-            if pre_errors:
-                enh["errors"].append({
-                    "phase": phase, "batch": batch_idx,
-                    "message": (
-                        f"Patch pre-validation failed"
-                        f" ({len(pre_errors)} error(s))"
-                    ),
-                    "pre_validation_errors": pre_errors,
-                })
-                _record_phase_metric(
-                    enh, _metric("pre_validation_error", batch_err=1),
-                )
-                continue
-
-            validation_errors = validate_patch(
-                patch, model, allowed_ops,
-            )
-            if validation_errors:
-                enh["errors"].append({
-                    "phase": phase, "batch": batch_idx,
-                    "message": (
-                        f"Patch validation failed"
-                        f" ({len(validation_errors)} error(s))"
-                    ),
-                    "validation_errors": validation_errors,
-                })
-                _record_phase_metric(
-                    enh, _metric("validation_error", batch_err=1),
-                )
-                continue
-
-            before_applied = len(enh.get("applied", []))
-            before_skipped = len(enh.get("skipped", []))
-            before_errors = len(enh.get("errors", []))
-
-            apply_patch_to_model(model, patch, report)
-
-            _record_phase_metric(enh, _metric(
-                "ok",
-                applied=len(enh.get("applied", [])) - before_applied,
-                skipped=len(enh.get("skipped", [])) - before_skipped,
-                batch_err=len(enh.get("errors", [])) - before_errors,
-            ))
-
-        _append_phase_summary(enh, phase)
-        return model
-
-    # ── Fallback (should not reach here) ──
-    enh["errors"].append({
-        "phase": phase,
-        "message": f"No handler for phase {phase!r}",
-    })
     return model
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# 6.  Suspicion Score
-# ═══════════════════════════════════════════════════════════════════════
 
 def compute_suspicion_score(report: dict) -> float:
     """Compute a 0–1 *suspicion score* from the parse report.
@@ -1556,6 +1576,29 @@ def compute_suspicion_score(report: dict) -> float:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# 7b.  Mode Normalization
+# ═══════════════════════════════════════════════════════════════════════
+
+_ENHANCE_MODE_ALIASES: dict[str, str] = {
+    "list_detect": "a",
+    "caption_gen": "b",
+    "all": "ab",
+}
+
+
+def normalize_mode(mode: str) -> str:
+    """Normalize a user-supplied LLM enhancement mode to legacy values.
+
+    Accepts ``"list_detect"``, ``"caption_gen"``, ``"all"`` (new names),
+    as well as ``"a"``, ``"b"``, ``"ab"``, ``"abc"`` (legacy names),
+    plus their ``"force-"`` variants, and ``"auto"`` / ``"off"``.
+
+    Unknown modes are returned as-is.
+    """
+    return _ENHANCE_MODE_ALIASES.get(mode, mode)
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # 7.  Should-Enhance Decision
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -1568,25 +1611,32 @@ def should_enhance(report: dict, phase: str, mode: str) -> bool:
         Never enhance — returns ``False`` for every phase.
     ``"auto"``
         Only enhance if ``compute_suspicion_score(report) >= 0.15`` for
-        phase ``"A"``.  (Future tasks will add modification-rate gating
-        for B/C.)
-    ``"a"`` / ``"ab"`` / ``"abc"``
+        phase ``"A"``.
+    ``"a"`` / ``"b"`` / ``"ab"``
         Force-enable the named phases (bypass suspicion check).
-    ``"force-a"`` / ``"force-ab"`` / ``"force-abc"``
+        ``"abc"`` is accepted as an alias for ``"ab"`` (backward compat).
+    ``"force-a"`` / ``"force-b"`` / ``"force-ab"``
         Same as the non-*force* variants — reserved for future
         modification-rate gate override.
+        ``"force-abc"`` is accepted as an alias for ``"force-ab"``.
     """
+    # Resolve capability names (list_detect, caption_gen) to legacy phase
+    # names (A, B) for internal phase-comparison logic.
+    phase = _resolve_legacy_phase(phase)
+
     if mode == "off":
         return False
 
     # ── Manual / force modes ──
     force_map = {
         "a": {"A"},
+        "b": {"B"},
         "ab": {"A", "B"},
-        "abc": {"A", "B", "C"},
+        "abc": {"A", "B"},  # backward compat
         "force-a": {"A"},
+        "force-b": {"B"},
         "force-ab": {"A", "B"},
-        "force-abc": {"A", "B", "C"},
+        "force-abc": {"A", "B"},  # backward compat
     }
     if mode in force_map:
         return phase in force_map[mode]
@@ -1605,153 +1655,14 @@ def should_enhance(report: dict, phase: str, mode: str) -> bool:
             if not report.get("template_profile"):
                 return False
             return compute_suspicion_score(report) >= AUTO_TRIGGER_THRESHOLD
-        else:
-            # Phase B / C: gate on Phase A's applied modification rate.
+        elif phase == "B":
+            # Phase B: gate on Phase A's applied modification rate.
             llm_enhancer = report.get("llm_enhancer", {})
             applied_rate = llm_enhancer.get("phase_a_applied_rate", 0.0)
             return applied_rate >= 0.05
+        else:
+            # Unknown phase — never run.
+            return False
 
     return False
 
-
-# ═══════════════════════════════════════════════════════════════════════
-# 8.  Compatibility Wrapper  (list_semantic_enhancer bridge)
-# ═══════════════════════════════════════════════════════════════════════
-
-def build_role_overrides_from_docx(
-    src_doc,
-    strict_normalize: bool,
-    *,
-    llm_call: Callable[[str], str] | None = None,
-) -> dict[int, str]:
-    """Compatibility wrapper matching ``list_semantic_enhancer`` interface.
-
-    Iterates through a python-docx ``Document``, collects paragraphs per
-    section, and runs Phase A LLM enhancement to produce
-    ``{para_index: new_role}`` overrides.
-
-    Returns an empty dict when *llm_call* is ``None``.
-    """
-    if llm_call is None:
-        return {}
-
-    # Lazy imports (python-docx may not be installed in all environments)
-    from docx.oxml.ns import qn as _qn
-    from docx.text.paragraph import Paragraph
-
-    # ── Collect sections ──
-    sections: list[dict[str, Any]] = []
-    current_sec: dict[str, Any] = {"heading_text": "", "blocks": []}
-    had_heading = False
-    global_index = 0
-
-    for child in src_doc.element.body.iterchildren():
-        tag = child.tag
-
-        # Skip section-properties and other non-content elements
-        if tag.endswith(("}w:sectPr", "}sectPr")):
-            continue
-
-        if tag.endswith(("}w:tbl", "}tbl")):
-            current_sec["blocks"].append(("", "table", child, global_index))
-            global_index += 1
-            continue
-
-        if tag.endswith(("}w:p", "}p")):
-            para = Paragraph(child, src_doc)
-            text = para.text.strip()
-
-            # Detect image-only paragraphs (empty text with graphics)
-            if not text:
-                ns_qn = _qn
-                drawings = child.findall('.//' + ns_qn('w:drawing'))
-                if drawings:
-                    # Image-only paragraph: count for index alignment
-                    global_index += 1
-                continue
-
-            style_name = (para.style.name or "").lower() if para.style else ""
-            if "heading" in style_name or style_name.startswith("h"):
-                global_index += 1
-                if had_heading and current_sec["blocks"]:
-                    sections.append(current_sec)
-                current_sec = {"heading_text": text, "blocks": []}
-                had_heading = True
-                continue
-
-            role = "body"
-            current_sec["blocks"].append((text, role, child, global_index))
-            global_index += 1
-
-    if had_heading:
-        sections.append(current_sec)
-
-    # ── Per-section Phase A enhancement ──
-    overrides: dict[int, str] = {}
-
-    for sec in sections:
-        heading_text = sec["heading_text"] or "(no heading)"
-        paras = [{"text": t, "role": r, "global_index": gi}
-                 for t, r, _, gi in sec["blocks"]]
-        if len(paras) <= 1:
-            continue
-
-        lines = [
-            f"章节标题: \"{heading_text}\"",
-            "请重新判断每个段落的语义角色。",
-            "允许角色: heading, body, list_item, caption",
-            "列表统一为 level=0, list_type=lower_letter_paren",
-            "标题层级必须在 1 到 6。",
-            "",
-            "段落列表:",
-        ]
-        for idx, p in enumerate(paras):
-            lines.append(f"  [{idx}] role={p['role']} | {(p.get('text') or '')[:200]}")
-
-        example_patch = {
-            "schema_version": "1.0",
-            "phase": "A",
-            "decisions": [{
-                "block_id": str(idx),
-                "operation": "retype",
-                "from": {"block_type": "body"},
-                "to": {"block_type": "list_item", "level": 0,
-                        "list_type": "lower_letter_paren"},
-                "confidence": 0.85,
-                "reason": "consecutive_functional_points",
-            } for idx in range(min(len(paras), 3))],
-        }
-        lines.extend([
-            "",
-            "返回 JSON 对象，格式：",
-            json.dumps(example_patch, ensure_ascii=False, indent=2),
-        ])
-
-        try:
-            raw = llm_call("\n".join(lines))
-        except Exception:
-            continue
-
-        patch = extract_json_object(raw)
-        if patch is None:
-            continue
-
-        for dec in patch.get("decisions", []):
-            bid = dec.get("block_id")
-            conf = dec.get("confidence", 0.0)
-            if conf < LOW_CONFIDENCE_THRESHOLD:
-                continue
-            try:
-                idx_int = int(bid)
-            except (ValueError, TypeError):
-                continue
-            if 0 <= idx_int < len(paras):
-                new_role = dec.get("to", {}).get("block_type")
-                if new_role in ("heading", "body", "list_item", "caption"):
-                    # Use global_index, not section-local idx_int, so
-                    # the override key matches the source-paragraph
-                    # position used by render_docx_direct.
-                    global_para_idx = paras[idx_int]["global_index"]
-                    overrides[global_para_idx] = new_role
-
-    return overrides
