@@ -687,11 +687,11 @@ class TestBuildRoleOverrides:
 
         doc = _Document()
         doc.add_paragraph("Section 1", style="Heading 1")
-        doc.add_paragraph("First para")    # global_index=0
-        doc.add_paragraph("Second para")   # global_index=1
+        doc.add_paragraph("First para")    # global_index=1 (heading at 0)
+        doc.add_paragraph("Second para")   # global_index=2
         doc.add_paragraph("Section 2", style="Heading 1")
-        doc.add_paragraph("Third para")    # global_index=2
-        doc.add_paragraph("Fourth para")   # global_index=3
+        doc.add_paragraph("Third para")    # global_index=4 (heading at 3)
+        doc.add_paragraph("Fourth para")   # global_index=5
 
         # Use doc directly — save/load may lose style information.
         src_doc = doc
@@ -713,13 +713,11 @@ class TestBuildRoleOverrides:
 
         overrides = build_role_overrides_from_docx(src_doc, True, llm_call=_fake)
 
-        # Both sections' first paragraphs must appear with global indices
-        assert 0 in overrides, "Section 1 first para (global 0) missing"
-        assert 2 in overrides, "Section 2 first para (global 2) missing"
-        # Without the fix section 2 would overwrite section 1's entry
-        # at key 0, leaving only 1 entry.
+        # With headings counted in global_index, first body paragraphs are at 1 and 4
+        assert 1 in overrides, "Section 1 first para (global 1) missing"
+        assert 4 in overrides, "Section 2 first para (global 4) missing"
         assert len(overrides) == 2, (
-            f"Expected 2 overrides (global 0 and 2), got {len(overrides)} "
+            f"Expected 2 overrides (global 1 and 4), got {len(overrides)} "
             f"keys={sorted(overrides.keys())}"
         )
 

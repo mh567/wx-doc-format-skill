@@ -356,6 +356,7 @@ def render_docx_direct(
                     active_list_nums = {}
                     last_was_caption = False
                     seen_content = True
+                    _para_idx += 1
                     continue
 
                 _, media_count = _append_paragraph_clone_new(dst_doc, block, qn_fn=qn, image_reltype="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image", media_map=_media_map, paragraph_has_graphics_fn=paragraph_has_graphics, normalize_graphics_paragraph_fn=_normalize_graphics_paragraph_new)
@@ -472,7 +473,7 @@ def _handle_inferred(doc, text: str, style: str | None, role: str, report: dict,
         )
         return {}
 
-    if role == "list":
+    if role in ("list", "list_item"):
         kind = list_kind_for_text(text)
         from text_utils import strip_list_marker as _slm
         clean_text = _slm(text)
