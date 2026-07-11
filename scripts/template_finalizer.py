@@ -217,6 +217,53 @@ def finalize_template_tables(
     return corrections
 
 
+def normalize_table_indents_and_width(doc) -> list[dict]:
+    """清除表格缩进、设置宽度为自适应窗口、清除单元格段落缩进。
+
+    1. 移除 w:tblInd（表格左缩进），避免源文档缩进影响输出
+    2. 设置 w:tblW type=pct w=5000（100%页面宽度）
+    3. 清除所有单元格内段落的 w:ind（段落缩进）
+    """
+    corrections = []
+    for table_index, table in enumerate(doc.tables, 1):
+        tbl = table._tbl
+        tbl_pr = tbl.find(qn('w:tblPr'))
+        if tbl_pr is None:
+            tbl_pr = OxmlElement('w:tblPr')
+            tbl.insert(0, tbl_pr)
+
+        # 1. Remove w:tblInd (table left indentation)
+        tbl_ind = tbl_pr.find(qn('w:tblInd'))
+        if tbl_ind is not None:
+            tbl_pr.remove(tbl_ind)
+            corrections.append({"type": "tbl_ind_removed", "table": table_index})
+
+        # 2. Set w:tblW to 100% page width (type=pct, w=5000)
+        tbl_w = tbl_pr.find(qn('w:tblW'))
+        if tbl_w is None:
+            tbl_w = OxmlElement('w:tblW')
+            tbl_pr.append(tbl_w)
+        tbl_w.set(qn('w:type'), 'pct')
+        tbl_w.set(qn('w:w'), '5000')
+
+        # 3. Clear cell paragraph indentation (w:ind)
+        for row in table.rows:
+            for cell in row.cells:
+                for paragraph in cell.paragraphs:
+                    ppr = paragraph._element.find(qn('w:pPr'))
+                    if ppr is None:
+                        continue
+                    p_ind = ppr.find(qn('w:ind'))
+                    if p_ind is not None:
+                        ppr.remove(p_ind)
+                        corrections.append({
+                            "type": "cell_para_indent_removed",
+                            "table": table_index,
+                        })
+
+    return corrections
+
+
 def add_table_borders(doc) -> list[dict]:
     """Add full borders (all sides + internal) to every table in the document."""
     corrections = []
@@ -688,6 +735,7 @@ def apply_template_finalizer(
         )
     )
     corrections.extend(add_table_borders(doc))
+    corrections.extend(normalize_table_indents_and_width(doc))
     return {
         "enabled": True,
         "corrections": corrections,
