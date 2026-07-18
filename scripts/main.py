@@ -39,6 +39,13 @@ from toc_detector import (
     selected_source_positions,
 )
 from list_detector import analyze_docx_lists, audit_list_preservation
+from front_matter import (
+    analyze_front_matter,
+    audit_output_structure,
+    front_matter_source_positions,
+    inject_document_title,
+)
+from table_semantics import audit_model_table_semantics
 
 from llm_enhancer import (
     enhance_document_model,
@@ -285,6 +292,8 @@ def convert_md(src: Path, doc, report: dict, row_height_cm: float, row_height_ru
             file_protocol_ctx=file_protocol_ctx,
         )
 
+    report["table_semantics_audit"] = audit_model_table_semantics(model)
+
     render_document_model(
         model, doc, report, row_height_cm, row_height_rule, numbering_ids,
         template_profile=report.get("template_profile"),
@@ -316,7 +325,11 @@ def convert_docx(src: Path, dst_doc, row_height_cm: float, row_height_rule: str,
             for item in report.get("llm_enhancer", {}).get("applied", [])
         ) else "rules"
     ))
-    excluded_source_positions = selected_source_positions(toc_context)
+    front_matter_context = analyze_front_matter(src_doc, toc_context, src, report)
+    excluded_source_positions = (
+        selected_source_positions(toc_context)
+        | front_matter_source_positions(front_matter_context)
+    )
     numbering_context = analyze_docx_lists(
         src_doc,
         report,
@@ -340,6 +353,7 @@ def convert_docx(src: Path, dst_doc, row_height_cm: float, row_height_rule: str,
         numbering_context=numbering_context,
     )
     report["parse_report"] = source_model.get("parse_report", {})
+    source_model = inject_document_title(source_model, front_matter_context)
     summarize_source_document_model(report, source_model)
 
     # ── LLM Enhancement ──
@@ -361,6 +375,8 @@ def convert_docx(src: Path, dst_doc, row_height_cm: float, row_height_rule: str,
             llm_call=llm_call, hint=llm_hint,
             file_protocol_ctx=file_protocol_ctx,
         )
+
+    report["table_semantics_audit"] = audit_model_table_semantics(model)
 
     # role_overrides for direct rendering path — extracted from Phase A applied decisions
     phase_a_role_overrides: dict[int, str] = {}
@@ -387,7 +403,12 @@ def convert_docx(src: Path, dst_doc, row_height_cm: float, row_height_rule: str,
         model=model,
         excluded_source_positions=excluded_source_positions,
     )
-    return {"source": source_model, "normalized": model, "toc_context": toc_context}
+    return {
+        "source": source_model,
+        "normalized": model,
+        "toc_context": toc_context,
+        "front_matter_context": front_matter_context,
+    }
 
 
 def _extract_heading_level_overrides_from_model(model: dict, report: dict) -> dict[int, int]:
@@ -640,7 +661,18 @@ def _run_generate_requests(args, report) -> None:
             print(f"Generated {len(all_requests)} source-stage LLM request(s) in {args.generate_requests.resolve()}")
             print("Run with --resume <run.json> after processing llm_responses.jsonl.")
             return
-        excluded_source_positions = selected_source_positions(toc_context)
+        front_matter_context = analyze_front_matter(
+            src_doc, toc_context, args.input, report,
+        )
+        excluded_source_positions = (
+            selected_source_positions(toc_context)
+            | front_matter_source_positions(front_matter_context)
+        )
+        numbering_context = analyze_docx_lists(
+            src_doc,
+            report,
+            excluded_source_positions=excluded_source_positions,
+        )
         source_model = parse_docx_to_model(
             args.input, src_doc, True, 0,
             skill_version=skill_version,
@@ -656,7 +688,9 @@ def _run_generate_requests(args, report) -> None:
             looks_like_code_sample_table=looks_like_code_sample_table,
             caption_pattern=None,
             excluded_source_positions=excluded_source_positions,
+            numbering_context=numbering_context,
         )
+        source_model = inject_document_title(source_model, front_matter_context)
     else:
         raise SystemExit(f"Unsupported input type: {args.input.suffix}")
 
@@ -909,6 +943,9 @@ def main() -> None:
     report["toc_replacement_audit"] = audit_toc_replacement(
         out_doc,
         models.get("toc_context") if suffix == ".docx" else None,
+    )
+    report["output_structure_audit"] = audit_output_structure(
+        out_doc, template_profile,
     )
 
     rendered_model = build_document_model_from_output_wrapper(out_doc, args.input, report)

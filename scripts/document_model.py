@@ -17,7 +17,7 @@ BLOCK_TYPES = {
     "unknown",
 }
 
-TABLE_TYPES = {"data", "code_sample", "layout", "unknown"}
+TABLE_TYPES = {"data", "code_sample", "callout", "layout", "unknown"}
 LIST_TYPES = {"lower_letter_paren", "decimal_paren", "bullet_dot", "dash"}
 
 

@@ -161,6 +161,24 @@ def add_risk_warnings(report: dict, row_height_rule: str) -> None:
                 "warnings": template_layout_warnings,
             }
         )
+    output_structure = report.get("output_structure_audit", {})
+    if output_structure and not output_structure.get("passed", False):
+        report["risk_warnings"].append(
+            {
+                "type": "output_structure",
+                "message": "Output does not follow the canonical TOC, title, and body order.",
+                "issues": output_structure.get("issues", []),
+            }
+        )
+    table_semantics = report.get("table_semantics_audit", {})
+    if table_semantics and not table_semantics.get("passed", False):
+        report["risk_warnings"].append(
+            {
+                "type": "table_semantics",
+                "message": "Table semantics or caption eligibility audit found issues.",
+                "issues": table_semantics.get("issues", []),
+            }
+        )
 
 
 def write_markdown_report(report: dict, path: Path) -> None:
@@ -185,6 +203,8 @@ def write_markdown_report(report: dict, path: Path) -> None:
             f"- 中间结构问题数：{report.get('document_model_summary', {}).get('issue_count', 0)}",
             f"- 模板格式收口修复数：{len(template_finalizer.get('corrections', []))}",
             f"- 非模板样式数：{len(template_style_audit.get('unexpected_styles', []))}",
+            f"- 首部结构审计：{'passed' if report.get('output_structure_audit', {}).get('passed') else 'failed'}",
+            f"- 表格语义审计：{'passed' if report.get('table_semantics_audit', {}).get('passed') else 'failed'}",
             "",
         ]
     )

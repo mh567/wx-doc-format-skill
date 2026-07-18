@@ -27,7 +27,9 @@ class TableFormatPolicy:
 
 
 def table_role(table_type: str | None) -> str:
-    return "code_sample" if table_type == "code_sample" else "data"
+    if table_type in {"code_sample", "callout"}:
+        return str(table_type)
+    return "data"
 
 
 def build_table_policy(
@@ -45,7 +47,7 @@ def build_table_policy(
         paragraph_style=resolved.get("table_body", "表正文"),
         alignment=(
             WD_ALIGN_PARAGRAPH.LEFT
-            if table_role(role) == "code_sample"
+            if table_role(role) in {"code_sample", "callout"}
             else WD_ALIGN_PARAGRAPH.CENTER
         ),
         row_height_cm=row_height_cm,

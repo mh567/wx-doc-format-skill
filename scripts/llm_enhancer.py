@@ -19,6 +19,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal
 
+from table_semantics import table_caption_eligible
+
 
 # ── Constants ──────────────────────────────────────────────────────────
 
@@ -418,7 +420,7 @@ def _collect_caption_targets(model: dict) -> list[dict]:
                     nbtype = nb.get("block_type")
                     if nbtype == "table":
                         tt = nb.get("table_type", "data")
-                        if tt in ("layout", "code_sample"):
+                        if not table_caption_eligible(tt):
                             skip = True
                             break
                         rows = nb.get("rows", [])
@@ -924,10 +926,10 @@ def validate_patch(patch: dict, model: dict, allowed_ops: frozenset[str]) -> lis
                 # Check associated table type — layout/code_sample tables
                 # should not receive generated captions.
                 assoc_tt = table_type_for_caption.get(bid)
-                if assoc_tt in ("layout", "code_sample"):
+                if not table_caption_eligible(assoc_tt):
                     errors.append({
                         "decision_index": idx, "block_id": bid,
-                        "message": f"set_caption_text not allowed for {assoc_tt} tables",
+                        "message": f"set_caption_text not allowed for {assoc_tt or 'unknown'} tables",
                     })
 
         if op == "exclude_toc_region":

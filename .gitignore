@@ -20,6 +20,8 @@ tests/
 tests/*
 !tests/test_toc_regions.py
 !tests/test_list_numbering.py
+!tests/test_front_matter.py
+!tests/test_table_semantics.py
 scripts/anonymize_template.py
 scripts/bootstrap_macos_lxml.sh
 scripts/list_semantic_enhancer.py

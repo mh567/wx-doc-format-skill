@@ -24,7 +24,7 @@ from text_utils import (
     paragraph_num_info,
     resolved_heading_level,
     source_numbering_heading_level,
-    looks_like_code_sample_table, looks_like_api_example_table,
+    looks_like_code_sample_table,
     source_heading_level_shift,
     strip_list_marker,
 )
@@ -39,6 +39,7 @@ from list_style_mapping import (
     wx_numbering_abstract_key,
 )
 from table_formatting import normalize_table
+from table_semantics import classify_docx_table, table_caption_eligible
 from docx_pipeline import infer_docx_role
 
 
@@ -284,10 +285,12 @@ def render_docx_direct(
     # caption blocks; the renderer reads them here.
     _caption_overrides: dict[int, str] = {}
     _model_by_source_position: dict[int, dict] = {}
+    _authored_caption_table_positions: set[int] = set()
     if model is not None:
+        _model_blocks = model.get("document", {}).get("blocks", [])
         _model_pending: str | None = None
         _model_tbl_idx = 0
-        for _mb in model.get("document", {}).get("blocks", []):
+        for _model_index, _mb in enumerate(_model_blocks):
             _source_position = _mb.get("source", {}).get("source_position")
             if isinstance(_source_position, int):
                 _model_by_source_position[_source_position] = _mb
@@ -298,6 +301,16 @@ def render_docx_direct(
                     _model_pending = _mtxt
             elif _mbt == "table":
                 _model_tbl_idx += 1
+                if isinstance(_source_position, int):
+                    for _adjacent_index in (_model_index - 1, _model_index + 1):
+                        if not 0 <= _adjacent_index < len(_model_blocks):
+                            continue
+                        _adjacent = _model_blocks[_adjacent_index]
+                        if (
+                            _adjacent.get("block_type") == "caption"
+                            and not _adjacent.get("_auto_generated")
+                        ):
+                            _authored_caption_table_positions.add(_source_position)
                 if _model_pending:
                     _caption_overrides[_model_tbl_idx] = _model_pending
                     _model_pending = None
@@ -345,12 +358,32 @@ def render_docx_direct(
         except Exception:
             dst_doc.add_paragraph(text)
 
+    synthetic_title = next(
+        (
+            block for block in (model or {}).get("document", {}).get("blocks", [])
+            if block.get("block_type") == "heading"
+            and (block.get("role") == "title" or int(block.get("level") or 0) <= 0)
+        ),
+        None,
+    )
+    if synthetic_title is not None:
+        _add_styled(
+            str(synthetic_title.get("text") or "文档"),
+            style_from_profile(template_profile, "title", "文档标题"),
+            "title",
+        )
+        report["document_title_rendered"] = {
+            "text": synthetic_title.get("text"),
+            "source": synthetic_title.get("source", {}),
+        }
+        seen_content = True
+
     last_was_caption = False
     _para_idx = 0
     _table_idx = 0
     for source_position, block in enumerate(_iter_blocks(src_doc)):
         if source_position in excluded_source_positions:
-            report.setdefault("source_toc_render_exclusions", []).append(source_position)
+            report.setdefault("source_render_exclusions", []).append(source_position)
             continue
         if isinstance(block, Paragraph):
             text = block.text.strip()
@@ -476,6 +509,8 @@ def render_docx_direct(
                     else:
                         ct, cap_text = "table", inferred_text
                 _insert_seq_caption(dst_doc, ct, cap_text, template_profile=template_profile)
+            elif role == "title":
+                report.setdefault("source_title_render_exclusions", []).append(source_position)
             else:
                 _handle_inferred(
                     dst_doc, inferred_text, style, role, report,
@@ -492,17 +527,24 @@ def render_docx_direct(
             _para_idx += 1
 
         else:
-            is_api_example = looks_like_api_example_table(block)
+            source_semantics = classify_docx_table(
+                block,
+                multi_cell_code_sample=looks_like_code_sample_table(block),
+            )
+            table_type = source_semantics.table_type
             model_block = _model_by_source_position.get(source_position)
             if model_block is not None and model_block.get("block_type") == "table":
-                is_api_example = model_block.get("table_type") == "code_sample"
+                table_type = model_block.get("table_type", table_type)
             # Apply table type override from Phase C enhancement
             if model_block is None and table_type_overrides is not None and _para_idx in table_type_overrides:
-                override_type = table_type_overrides[_para_idx]
-                is_api_example = (override_type == "code_sample")
+                table_type = table_type_overrides[_para_idx]
             # Auto-insert table caption if the preceding paragraph wasn't one
             _table_idx += 1
-            if not last_was_caption:
+            if (
+                table_caption_eligible(table_type)
+                and not last_was_caption
+                and source_position not in _authored_caption_table_positions
+            ):
                 # Use LLM-generated caption text from model AST when available
                 cap_text = _caption_overrides.get(_table_idx, ' ')
                 _insert_seq_caption(dst_doc, 'table', cap_text,
@@ -516,7 +558,7 @@ def render_docx_direct(
                 template_profile,
                 row_height_cm,
                 row_height_rule,
-                role="code_sample" if is_api_example else "data",
+                role=table_type,
                 path=str(_table_idx),
             )
             report["tables_processed"] = report.get("tables_processed", 0) + 1
