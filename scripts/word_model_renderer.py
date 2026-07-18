@@ -4,6 +4,13 @@ from typing import Callable
 
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
+from table_formatting import normalize_table
+
+from list_style_mapping import (
+    normalize_wx_list_type,
+    wx_list_style_name,
+    wx_numbering_abstract_key,
+)
 
 def style_from_profile(template_profile: dict | None, role: str, fallback: str) -> str:
     if template_profile:
@@ -12,15 +19,7 @@ def style_from_profile(template_profile: dict | None, role: str, fallback: str) 
 
 
 def list_style_for_model(list_type: str, level: int, template_profile: dict | None = None) -> str:
-    if list_type == "decimal_paren":
-        return style_from_profile(template_profile, "list_decimal", "2.1二级列项-有编号")
-    if list_type == "bullet_dot":
-        return style_from_profile(template_profile, "list_bullet", "2.2二级列项-无编号")
-    if list_type == "dash":
-        return style_from_profile(template_profile, "list_dash", "1.2一级列项-无编号")
-    if level:
-        return style_from_profile(template_profile, "list_decimal", "2.1二级列项-有编号")
-    return style_from_profile(template_profile, "list_letter", "1.1一级列项-编号")
+    return wx_list_style_name(list_type, level, template_profile)
 
 
 def _new_list_num(doc, abstract_num_id: int) -> int:
@@ -135,7 +134,9 @@ def render_document_model(
         elif block_type == "list_item":
             text = block.get("text", "")
             level = int(block.get("level") or 0)
-            list_type = block.get("list_type", "lower_letter_paren")
+            list_type = normalize_wx_list_type(
+                block.get("list_type", "lower_letter_paren"), level,
+            )
             restart = block.get("restart", False)
             style_name = list_style_for_model(list_type, level, template_profile)
 
@@ -147,10 +148,11 @@ def render_document_model(
             # Only numbered lists need manual numId management for restart.
             # Key by (level, list_type) so that letter‑style and decimal‑style
             # lists maintain independent numbering within the same section.
-            if list_type in {"lower_letter_paren", "decimal_paren"}:
-                list_key = (0, "lower_letter_paren")
+            abstract_key = wx_numbering_abstract_key(list_type, level)
+            if abstract_key is not None:
+                list_key = (level, list_type)
                 if restart or list_key not in active_list_nums:
-                    aid = numbering_ids.get("list_letter_abstract")
+                    aid = numbering_ids.get(abstract_key)
                     if aid is not None:
                         active_list_nums[list_key] = _new_list_num(doc, aid)
                 nid = active_list_nums.get(list_key)
@@ -173,14 +175,14 @@ def render_document_model(
                     for ci in range(col_count):
                         text = row_data[ci].get("text", "") if ci < len(row_data) else ""
                         table.rows[ri].cells[ci].text = text
-                        for cell_p in table.rows[ri].cells[ci].paragraphs:
-                            try:
-                                cell_p.style = style_from_profile(template_profile, "table_body", "表正文")
-                            except Exception:
-                                pass
-                # Apply table formatting rules
-                from text_utils import set_template_table_properties as _sttp
-                _sttp(table, row_height_cm, row_height_rule)
+                normalize_table(
+                    table,
+                    template_profile,
+                    row_height_cm,
+                    row_height_rule,
+                    role=block.get("table_type", "data"),
+                    path=str(len(doc.tables)),
+                )
             active_list_nums = {}
 
         # --- Appendix ---
@@ -222,5 +224,3 @@ def render_document_model(
             except Exception:
                 doc.add_paragraph(block.get("text", ""))
             active_list_nums = {}
-
-

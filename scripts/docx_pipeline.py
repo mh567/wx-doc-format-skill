@@ -31,11 +31,17 @@ from document_model import (
     table_block,
 )
 from md_pipeline import model_list_type_for_kind
+from list_style_mapping import wx_list_style_name
 
 
 
 
-def infer_docx_role(paragraph, strict_normalize: bool, parse_report: dict) -> tuple[str, str | None, str]:
+def infer_docx_role(
+    paragraph,
+    strict_normalize: bool,
+    parse_report: dict,
+    numbering: dict | None = None,
+) -> tuple[str, str | None, str]:
     """
     Determine the semantic role of a DOCX paragraph based on style and text patterns.
     Step 1: parse DOCX paragraph into (text, style_name, role) for AST construction.
@@ -71,6 +77,26 @@ def infer_docx_role(paragraph, strict_normalize: bool, parse_report: dict) -> tu
         if _stripped in _api_labels:
             return text, None, "body"
         return text, style_name, "heading"
+    if numbering and numbering.get("status") == "detected":
+        parse_report.setdefault("inferred_lists", []).append({
+            "text": text,
+            "source": "docx-numbering",
+            "source_position": numbering.get("source_position"),
+            "num_id": numbering.get("num_id"),
+            "confidence": numbering.get("confidence"),
+        })
+        list_style = wx_list_style_name(
+            numbering.get("list_type"),
+            int(numbering.get("ilvl") or 0),
+        )
+        return text, list_style, "list"
+    if numbering and numbering.get("status") == "ambiguous":
+        parse_report.setdefault("ambiguous_numbered_paragraphs", []).append({
+            "text": text,
+            "source_position": numbering.get("source_position"),
+            "num_id": numbering.get("num_id"),
+            "evidence": numbering.get("evidence", []),
+        })
     if style_name == "List Paragraph" or "列项" in style_name:
         parse_report.setdefault("inferred_lists", []).append({"text": text, "source": "docx-style"})
         list_style = style_name if "列项" in style_name else "1.1一级列项-编号"
@@ -142,6 +168,8 @@ def parse_docx_to_model_simple(
     infer_docx_role: Callable,
     looks_like_code_sample_table: Callable,
     caption_pattern,
+    excluded_source_positions: set[int] | None = None,
+    numbering_context: dict[int, dict] | None = None,
 ) -> dict:
     model = new_document_model(src, "docx", skill_version())
     parse_report = new_report()
@@ -157,14 +185,23 @@ def parse_docx_to_model_simple(
     def reset_lists() -> None:
         active_list_levels.clear()
 
-    for block in iter_blocks(src_doc):
+    excluded_source_positions = excluded_source_positions or set()
+    numbering_context = numbering_context or {}
+
+    for source_position, block in enumerate(iter_blocks(src_doc)):
+        if source_position in excluded_source_positions:
+            parse_report.setdefault("excluded_source_blocks", []).append(source_position)
+            continue
         if isinstance(block, paragraph_class):
             text = block.text.strip()
             if not text and not paragraph_has_graphics(block):
                 continue
             source_style = block.style.name if block.style is not None else ""
             num_level, num_id = paragraph_num_info(block)
-            inferred_text, style, role = infer_docx_role(block, strict_normalize, parse_report) if text else ("", None, "body")
+            numbering = numbering_context.get(source_position)
+            inferred_text, style, role = infer_docx_role(
+                block, strict_normalize, parse_report, numbering,
+            ) if text else ("", None, "body")
             if role == "skip":
                 continue
             if role == "heading" and heading_level_from_style(source_style) is not None:
@@ -174,8 +211,10 @@ def parse_docx_to_model_simple(
                 style=source_style,
                 num_id=num_id,
                 ilvl=num_level,
+                source_position=source_position,
                 inferred_role=role,
                 inferred_style=style,
+                numbering=numbering,
             )
             if paragraph_has_graphics(block):
                 if text:
@@ -192,8 +231,9 @@ def parse_docx_to_model_simple(
                         )
                     elif role == "list":
                         kind = list_kind_for_text(inferred_text)
-                        lst_level = list_level_from_text(inferred_text)
-                        restart = lst_level not in active_list_levels
+                        lst_level = int(numbering.get("ilvl", 0)) if numbering else list_level_from_text(inferred_text)
+                        restart = bool(numbering.get("restart")) if numbering else lst_level not in active_list_levels
+                        list_type = numbering.get("list_type") if numbering else model_list_type_for_kind(kind)
                         active_list_levels.add(lst_level)
                         append_block(
                             model,
@@ -201,7 +241,7 @@ def parse_docx_to_model_simple(
                                 next_id(),
                                 strip_list_marker(inferred_text),
                                 lst_level,
-                                model_list_type_for_kind(kind),
+                                list_type,
                                 restart=restart,
                                 source=source_record(**source, had_mixed_graphic=True),
                             ),
@@ -238,8 +278,9 @@ def parse_docx_to_model_simple(
                 reset_lists()
             elif role == "list":
                 kind = list_kind_for_text(inferred_text)
-                lst_level = list_level_from_text(inferred_text)
-                restart = lst_level not in active_list_levels
+                lst_level = int(numbering.get("ilvl", 0)) if numbering else list_level_from_text(inferred_text)
+                restart = bool(numbering.get("restart")) if numbering else lst_level not in active_list_levels
+                list_type = numbering.get("list_type") if numbering else model_list_type_for_kind(kind)
                 active_list_levels.add(lst_level)
                 append_block(
                     model,
@@ -247,7 +288,7 @@ def parse_docx_to_model_simple(
                         next_id(),
                         strip_list_marker(inferred_text),
                         lst_level,
-                        model_list_type_for_kind(kind),
+                        list_type,
                         restart=restart,
                         source=source,
                     ),
@@ -290,7 +331,11 @@ def parse_docx_to_model_simple(
                 if ct != "unknown" and caption_text:
                     append_block(
                         model,
-                        caption_block(next_id(), caption_text, ct, label=label, raw_number=raw_number),
+                        caption_block(
+                            next_id(), caption_text, ct,
+                            label=label, raw_number=raw_number,
+                            source=source_record(source_position=source_position),
+                        ),
                     )
                     reset_lists()
                     continue
@@ -300,7 +345,10 @@ def parse_docx_to_model_simple(
             rows = table_rows_for_model(block, table_type, header_rows)
             append_block(
                 model,
-                table_block(next_id(), table_type, rows, header_rows=header_rows),
+                table_block(
+                    next_id(), table_type, rows, header_rows=header_rows,
+                    source=source_record(source_position=source_position),
+                ),
             )
             reset_lists()
 
@@ -331,6 +379,8 @@ def parse_docx_to_model(
     clean_note_prefix: Callable = None,
     looks_like_code_sample_table: Callable,
     caption_pattern,
+    excluded_source_positions: set[int] | None = None,
+    numbering_context: dict[int, dict] | None = None,
 ) -> dict:
     """Compatibility wrapper that delegates to parse_docx_to_model_simple.
     Ignores injected utility functions since they are now imported directly from text_utils."""
@@ -343,4 +393,6 @@ def parse_docx_to_model(
         infer_docx_role=infer_docx_role,
         looks_like_code_sample_table=looks_like_code_sample_table,
         caption_pattern=caption_pattern,
+        excluded_source_positions=excluded_source_positions,
+        numbering_context=numbering_context,
     )

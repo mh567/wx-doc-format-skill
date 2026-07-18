@@ -33,7 +33,7 @@ VALID_BLOCK_TYPES = frozenset({
 })
 
 PATCH_SCHEMA_VERSION = "1.0"
-PHASE_NAMES = frozenset({"A", "B"})
+PHASE_NAMES = frozenset({"S", "A", "B"})
 
 AUTO_TRIGGER_THRESHOLD = 0.15
 LOW_CONFIDENCE_THRESHOLD = 0.70
@@ -296,6 +296,22 @@ def _prompt_args_for_caption_gen(
                             "batch_count": batch_count})
 
 
+def _prompt_args_for_toc_region_review(
+    desc: CapabilityConfig,
+    model: dict,
+    hint: str | None,
+    batch: list,
+    batch_idx: int,
+    batch_count: int,
+) -> dict:
+    return dict(
+        model=model,
+        hint=hint,
+        candidates_override=batch,
+        batch_meta={"batch_index": batch_idx, "batch_count": batch_count},
+    )
+
+
 def _build_prompt_for_batch(
     desc: CapabilityConfig,
     model: dict,
@@ -462,6 +478,23 @@ def _collect_caption_gen_batches(model: dict, report: dict) -> list[dict]:
     return [{"targets": t} for t in targets]
 
 
+def _collect_toc_region_review_batches(model: dict, report: dict) -> list[dict]:
+    source_context = model.get("source_context", {})
+    if source_context.get("toc_status") != "ambiguous":
+        return []
+    return [
+        candidate
+        for candidate in model.get("document", {}).get("blocks", [])
+        if candidate.get("role") == "toc_candidate" and not candidate.get("selected")
+    ]
+
+
+def _record_toc_region_review_outcome(model: dict, report: dict, enh: dict) -> None:
+    from toc_detector import finalize_toc_selection
+
+    finalize_toc_selection(model, report, method="llm")
+
+
 def _record_phase_a_applied_rate(
     model: dict, report: dict, enh: dict,
 ) -> None:
@@ -621,6 +654,7 @@ def _collect_suspicious_sections(
         _get_count("suspect_visual_headings", parse_report)
         + _get_count("ambiguous_short_paragraphs", parse_report)
         + _get_count("inferred_headings", parse_report)
+        + _get_count("ambiguous_numbered_paragraphs", parse_report)
     )
     if total_suspicious == 0:
         return sections
@@ -643,6 +677,9 @@ def _collect_suspicious_sections(
         # Body that looks like a heading (suspect_visual_headings /
         # inferred_headings signal)
         source = b.get("source", {})
+        numbering = source.get("numbering", {})
+        if numbering.get("status") == "ambiguous":
+            suspicious_ids.add(bid)
         if source.get("is_compact_heading") or b.get("_inferred"):
             suspicious_ids.add(bid)
 
@@ -787,6 +824,17 @@ def validate_patch(patch: dict, model: dict, allowed_ops: frozenset[str]) -> lis
                 break  # heading or other block — stop
         table_type_for_caption[bid] = assoc_table_type
 
+    toc_exclusion_count = sum(
+        1 for decision in decisions
+        if isinstance(decision, dict)
+        and decision.get("operation") == "exclude_toc_region"
+    )
+    if toc_exclusion_count > 1:
+        errors.append({
+            "field": "decisions",
+            "message": "Only one exclude_toc_region decision is allowed",
+        })
+
     # ── Per-decision checks ──
     for idx, dec in enumerate(decisions):
         if not isinstance(dec, dict):
@@ -828,6 +876,28 @@ def validate_patch(patch: dict, model: dict, allowed_ops: frozenset[str]) -> lis
                     "decision_index": idx, "block_id": bid,
                     "message": f"Invalid target block_type {to_type!r}",
                 })
+            target = blocks_by_id.get(bid, {})
+            source = target.get("source", {})
+            source_style = str(source.get("style") or "")
+            numbering = source.get("numbering", {})
+            if to_type == "list_item" and source_style.startswith("Heading"):
+                errors.append({
+                    "decision_index": idx, "block_id": bid,
+                    "message": "Heading source styles cannot be retyped as list_item",
+                })
+            if to_type == "list_item" and numbering.get("status") == "ignored":
+                errors.append({
+                    "decision_index": idx, "block_id": bid,
+                    "message": "Ignored OOXML numbering cannot be retyped as list_item",
+                })
+            if to_type == "list_item" and numbering.get("status") == "ambiguous":
+                expected_level = int(numbering.get("ilvl") or 0)
+                expected_type = numbering.get("list_type")
+                if to_.get("level") != expected_level or to_.get("list_type") != expected_type:
+                    errors.append({
+                        "decision_index": idx, "block_id": bid,
+                        "message": "Ambiguous OOXML list candidates must preserve level and list_type",
+                    })
 
         # confidence must be numeric when present
         conf = dec.get("confidence")
@@ -858,6 +928,36 @@ def validate_patch(patch: dict, model: dict, allowed_ops: frozenset[str]) -> lis
                     errors.append({
                         "decision_index": idx, "block_id": bid,
                         "message": f"set_caption_text not allowed for {assoc_tt} tables",
+                    })
+
+        if op == "exclude_toc_region":
+            target = blocks_by_id.get(bid)
+            to_ = dec.get("to")
+            if not target or target.get("role") != "toc_candidate":
+                errors.append({
+                    "decision_index": idx, "block_id": bid,
+                    "message": "exclude_toc_region only allowed on toc_candidate blocks",
+                })
+            elif not isinstance(to_, dict):
+                errors.append({
+                    "decision_index": idx, "block_id": bid,
+                    "message": "exclude_toc_region requires a 'to' object",
+                })
+            else:
+                expected = {
+                    "candidate_id": target.get("candidate_id"),
+                    "start_source_position": target.get("start_source_position"),
+                    "end_source_position": target.get("end_source_position"),
+                }
+                if set(to_) != set(expected):
+                    errors.append({
+                        "decision_index": idx, "block_id": bid,
+                        "message": "exclude_toc_region 'to' fields must exactly match the candidate schema",
+                    })
+                elif any(to_.get(key) != value for key, value in expected.items()):
+                    errors.append({
+                        "decision_index": idx, "block_id": bid,
+                        "message": "exclude_toc_region cannot change candidate identity or boundaries",
                     })
 
     return errors
@@ -942,6 +1042,9 @@ def _apply_operation(block: dict, decision: dict) -> None:
         block["caption_type"] = to_.get("caption_type", "table")
     elif op == "set_caption_text":
         block["text"] = to_.get("text", "")
+    elif op == "exclude_toc_region":
+        block["selected"] = True
+        block["selection_method"] = "llm"
 
 
 def _ensure_enhancer_report(report: dict) -> dict:
@@ -1043,6 +1146,64 @@ def _format_patch_example(patch: dict) -> str:
     return json.dumps(patch, ensure_ascii=False, indent=2)
 
 
+def _build_toc_region_review_prompt(
+    model: dict,
+    *,
+    hint: str | None = None,
+    candidates_override: list[dict] | None = None,
+    batch_meta: dict | None = None,
+) -> str:
+    candidates = candidates_override or []
+    payload = [
+        {
+            "block_id": candidate.get("id"),
+            "candidate_id": candidate.get("candidate_id"),
+            "title": candidate.get("text"),
+            "start_source_position": candidate.get("start_source_position"),
+            "end_source_position": candidate.get("end_source_position"),
+            "rule_confidence": candidate.get("confidence"),
+            "evidence": candidate.get("evidence", []),
+            "entry_preview": candidate.get("entry_preview", []),
+            "repeated_heading_count": candidate.get("repeated_heading_count", 0),
+        }
+        for candidate in candidates
+    ]
+    example_candidate = payload[0] if payload else {
+        "block_id": "toc_candidate_1",
+        "candidate_id": "toc_candidate_1",
+        "start_source_position": 8,
+        "end_source_position": 18,
+    }
+    example = _format_patch_example({
+        "schema_version": PATCH_SCHEMA_VERSION,
+        "phase": "S",
+        "decisions": [{
+            "block_id": example_candidate["block_id"],
+            "operation": "exclude_toc_region",
+            "to": {
+                "candidate_id": example_candidate["candidate_id"],
+                "start_source_position": example_candidate["start_source_position"],
+                "end_source_position": example_candidate["end_source_position"],
+            },
+            "confidence": 0.90,
+            "reason": "候选区间是原文档主目录，后续正文包含重复的真实标题。",
+        }],
+    })
+    lines = [
+        "你负责复核 DOCX 源文档中的主目录候选区间。",
+        "只能选择下列候选，不能扩展起止位置，不能修改文字，不能删除候选外内容。",
+        "若证据不足，返回空 decisions。每份文档最多选择一个候选。",
+        "判断重点：目录标题、目录项聚集、页码或分页边界、后续正文标题重复、Word TOC 域。",
+        "候选 JSON：",
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        "返回 JSON，唯一允许的 operation 是 exclude_toc_region：",
+        example,
+    ]
+    if hint:
+        lines.append(f'用户提示: "{hint}"')
+    return "\n".join(lines)
+
+
 def _build_phase_a_prompt(
     model: dict,
     hint: str | None = None,
@@ -1097,10 +1258,20 @@ def _build_phase_a_prompt(
         source = b.get("source", {})
         source_style = source.get("style", "-")
         source_role = source.get("inferred_role", "-")
+        numbering = source.get("numbering", {})
+        numbering_summary = "-"
+        if numbering:
+            numbering_summary = (
+                f"status={numbering.get('status')} numId={numbering.get('num_id')}"
+                f" ilvl={numbering.get('ilvl')} numFmt={numbering.get('num_fmt')}"
+                f" lvlText={numbering.get('lvl_text')}"
+                f" sourceType={numbering.get('source_list_type')}"
+                f" wxSuggested={numbering.get('list_type')}"
+            )
         lines.append(
             f"  [{bid}] section={section} source_style={source_style}"
             f" source_role={source_role} type={btype} role={role} level={level}"
-            f" list={list_type} cap={cap_type} | {text}"
+            f" list={list_type} cap={cap_type} numbering=({numbering_summary}) | {text}"
         )
 
     example = _format_patch_example({
@@ -1122,7 +1293,8 @@ def _build_phase_a_prompt(
         example,
         "",
         "允许角色: heading, body, list_item, caption",
-        "列表统一为 level=0, list_type=lower_letter_paren",
+        "带有 ambiguous OOXML numbering 的候选必须使用建议的 ilvl 和 wxSuggested list_type。",
+        "缺少 OOXML numbering 的语义列表默认使用 level=0, list_type=lower_letter_paren。",
         "标题层级必须在 1 到 6。",
         "",
         "约束（必须遵守）:",
@@ -1133,6 +1305,7 @@ def _build_phase_a_prompt(
         "source_style 与 source_role 辅助判断规则：",
         "源 DOCX 样式为 Heading 的 block 必须保持 heading，除非它明显是封面日期、版本号等元信息。",
         "源 DOCX 样式为 List 或带编号信息的短句可优先判断为列表；源样式为 Normal 的长说明段落应优先保持 body。",
+        "numbering status=ignored 的 block 不得转为 list_item。",
         "",
         "说明体保持 body：形如“术语：说明文字”“属性名：说明文字”“原则名：长说明”的段落按正文处理。",
         "长段落保持 body：超过 100 字且没有 a) 1) 1. • 等列表标记时，不要转为 list_item。",
@@ -1252,6 +1425,20 @@ _BUILD_PROMPT: dict[str, Any] = {
 # ═══════════════════════════════════════════════════════════════════════
 
 register_capability(CapabilityConfig(
+    name="toc_region_review",
+    allowed_ops=frozenset({"exclude_toc_region"}),
+    prompt_builder=_build_toc_region_review_prompt,
+    collector=_collect_toc_region_review_batches,
+    batching="by_targets",
+    batch_size=12,
+    empty_status="no_ambiguous_toc",
+    prevalidate=True,
+    prompt_preview_text="(no ambiguous TOC candidates)",
+    after_phase=_record_toc_region_review_outcome,
+    prompt_args_builder=_prompt_args_for_toc_region_review,
+))
+
+register_capability(CapabilityConfig(
     name="list_detect",
     allowed_ops=frozenset({"retype"}),
     prompt_builder=_build_phase_a_prompt,
@@ -1275,6 +1462,7 @@ register_capability(CapabilityConfig(
     prompt_args_builder=_prompt_args_for_caption_gen,
 ))
 
+_register_phase_alias("S", "toc_region_review")
 _register_phase_alias("A", "list_detect")
 _register_phase_alias("B", "caption_gen")
 
@@ -1580,9 +1768,10 @@ def compute_suspicion_score(report: dict) -> float:
 # ═══════════════════════════════════════════════════════════════════════
 
 _ENHANCE_MODE_ALIASES: dict[str, str] = {
+    "toc_region_review": "s",
     "list_detect": "a",
     "caption_gen": "b",
-    "all": "ab",
+    "all": "sab",
 }
 
 
@@ -1629,12 +1818,20 @@ def should_enhance(report: dict, phase: str, mode: str) -> bool:
 
     # ── Manual / force modes ──
     force_map = {
+        "s": {"S"},
         "a": {"A"},
         "b": {"B"},
+        "sa": {"S", "A"},
+        "sb": {"S", "B"},
+        "sab": {"S", "A", "B"},
         "ab": {"A", "B"},
         "abc": {"A", "B"},  # backward compat
+        "force-s": {"S"},
         "force-a": {"A"},
         "force-b": {"B"},
+        "force-sa": {"S", "A"},
+        "force-sb": {"S", "B"},
+        "force-sab": {"S", "A", "B"},
         "force-ab": {"A", "B"},
         "force-abc": {"A", "B"},  # backward compat
     }
@@ -1646,6 +1843,8 @@ def should_enhance(report: dict, phase: str, mode: str) -> bool:
         summary = report.get("source_document_model_summary", {})
         block_count = summary.get("block_count", 0) or 0
 
+        if phase == "S":
+            return report.get("source_toc", {}).get("status") == "ambiguous"
         if phase == "A":
             # Short documents with few blocks are likely clean.
             if block_count < 5:
@@ -1665,4 +1864,3 @@ def should_enhance(report: dict, phase: str, mode: str) -> bool:
             return False
 
     return False
-

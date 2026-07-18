@@ -1,11 +1,14 @@
 """File-based LLM protocol: serialise prompts to JSONL and replay responses.
 
-Supports a two-phase workflow:
+Supports a staged workflow:
 
 1. **Generate** (``--generate-requests DIR``):
    Parse document, build all prompts, write ``llm_requests.jsonl`` + ``run.json``, stop.
 
-2. **Resume** (``--resume RUN_JSON``):
+2. **Resume source review** (``--resume RUN_JSON``), when needed:
+   Apply TOC-region decisions and append downstream AST requests.
+
+3. **Resume AST enhancement** (``--resume RUN_JSON``):
    Read ``llm_responses.jsonl``, verify integrity (``input_hash``), validate each
    patch against the document model, apply approved patches, render final output.
 """
@@ -322,8 +325,8 @@ def replay_phase_responses(
     report:
         Mutable report dict — enhancement activity is recorded here.
     phase:
-        Capability name (``"list_detect"``, ``"caption_gen"``) or legacy
-        phase name (``"A"``, ``"B"``).
+        Capability name (``"toc_region_review"``, ``"list_detect"``,
+        ``"caption_gen"``) or legacy phase name (``"S"``, ``"A"``, ``"B"``).
     requests:
         List of request dicts from ``llm_requests.jsonl``.
     responses:

@@ -15,6 +15,7 @@ from text_utils import (
     strip_list_marker,
 )
 from document_model import validate_document_model
+from list_style_mapping import normalize_wx_list_type
 
 
 def _model_list_type_for_kind(kind: str) -> str:
@@ -56,6 +57,7 @@ def normalize_document_model_simple(
 
         if block_type == "body":
             source_role = block.get("source", {}).get("role")
+            source_numbering = block.get("source", {}).get("numbering", {})
             if source_role in {"note", "numbered_note", "formula"} and block.get("role") != source_role:
                 block["role"] = source_role
                 repairs.append({"block": index, "type": "body_role_promoted", "role": source_role})
@@ -85,7 +87,18 @@ def normalize_document_model_simple(
                 active_list_signatures.clear()
                 repairs.append({"block": index, "type": "body_retyped_as_heading", "level": inferred_level})
                 continue
-            if looks_like_list_item(text):
+            if source_numbering.get("status") == "detected":
+                block["block_type"] = "list_item"
+                block["level"] = int(source_numbering.get("ilvl") or 0)
+                block["list_type"] = source_numbering.get("list_type", "decimal_paren")
+                block["restart"] = bool(source_numbering.get("restart"))
+                repairs.append({
+                    "block": index,
+                    "type": "body_retyped_from_source_numbering",
+                    "list_type": block["list_type"],
+                })
+                block_type = "list_item"
+            elif looks_like_list_item(text):
                 kind = list_kind_for_text(text)
                 lst_level = 1 if kind in {"decimal", "bullet2"} else 0
                 block["block_type"] = "list_item"
@@ -128,8 +141,19 @@ def normalize_document_model_simple(
                 kind = list_kind_for_text(original_text)
                 block["list_type"] = _model_list_type_for_kind(kind)
                 repairs.append({"block": index, "type": "list_type_normalized", "list_type": block["list_type"]})
-            signature = (int(block.get("level") or 0), str(block.get("list_type") or ""))
-            should_restart = signature not in active_list_signatures
+            level = int(block.get("level") or 0)
+            wx_list_type = normalize_wx_list_type(block.get("list_type"), level)
+            if block.get("list_type") != wx_list_type:
+                block["list_type"] = wx_list_type
+                repairs.append({
+                    "block": index,
+                    "type": "list_type_aligned_to_wx_level",
+                    "level": level,
+                    "list_type": wx_list_type,
+                })
+            signature = (level, str(block.get("list_type") or ""))
+            source_numbering = block.get("source", {}).get("numbering", {})
+            should_restart = bool(source_numbering.get("restart")) or signature not in active_list_signatures
             if bool(block.get("restart")) != should_restart:
                 block["restart"] = should_restart
                 repairs.append({"block": index, "type": "list_restart_normalized", "restart": should_restart})

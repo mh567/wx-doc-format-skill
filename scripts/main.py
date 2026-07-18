@@ -27,12 +27,18 @@ from word_model_renderer import (
     render_document_model,
     style_from_profile,
 )
-from text_utils import set_template_table_properties
 from docx_render import render_docx_direct
 from audit import audit_document, collect_content_warnings
 from reporting import new_report, add_risk_warnings, write_markdown_report
 from template_finalizer import apply_template_finalizer
 from template_profile import load_template_profile
+from toc_detector import (
+    audit_toc_replacement,
+    detect_toc_regions,
+    finalize_toc_selection,
+    selected_source_positions,
+)
+from list_detector import analyze_docx_lists, audit_list_preservation
 
 from llm_enhancer import (
     enhance_document_model,
@@ -117,7 +123,14 @@ def build_document_model_from_output_wrapper(doc, source_path: Path, report: dic
     return build_document_model_from_output(doc, source_path, report)
 
 
-def audit_document_wrapper(doc, row_height_cm: float, row_height_rule: str) -> dict:
+def audit_document_wrapper(
+    doc,
+    row_height_cm: float,
+    row_height_rule: str,
+    *,
+    template_profile: dict | None = None,
+    table_roles: list[str] | None = None,
+) -> dict:
     from text_utils import heading_level_from_style as _hls, strip_heading_marker as _shm, paragraph_num_info as _pni
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     from docx.oxml.ns import qn
@@ -129,11 +142,9 @@ def audit_document_wrapper(doc, row_height_cm: float, row_height_rule: str) -> d
         looks_like_code_sample_table=looks_like_code_sample_table,
         qn=qn,
         center_alignment=WD_ALIGN_PARAGRAPH.CENTER,
+        template_profile=template_profile,
+        table_roles=table_roles,
     )
-
-
-def _normalize_template_table(table, row_height_cm: float, row_height_rule: str) -> None:
-    set_template_table_properties(table, row_height_cm, row_height_rule)
 
 
 def _llm_call_from_command(command: str):
@@ -288,6 +299,29 @@ def convert_docx(src: Path, dst_doc, row_height_cm: float, row_height_rule: str,
     from docx_pipeline import infer_docx_role
 
     src_doc = Document(src)
+    toc_context = detect_toc_regions(src_doc, report)
+    enhance_mode = normalize_mode(getattr(args, "llm_enhance", "off")) if args is not None else "off"
+    llm_call = _resolve_llm_call(args) if enhance_mode != "off" else None
+    llm_hint = getattr(args, "llm_hint", None) if args is not None else None
+
+    if should_enhance(report, "S", enhance_mode):
+        toc_context = _run_phase_enhancement(
+            toc_context, report, phase="S",
+            llm_call=llm_call, hint=llm_hint,
+            file_protocol_ctx=file_protocol_ctx,
+        )
+    finalize_toc_selection(toc_context, report, method=(
+        "llm" if any(
+            item.get("operation") == "exclude_toc_region"
+            for item in report.get("llm_enhancer", {}).get("applied", [])
+        ) else "rules"
+    ))
+    excluded_source_positions = selected_source_positions(toc_context)
+    numbering_context = analyze_docx_lists(
+        src_doc,
+        report,
+        excluded_source_positions=excluded_source_positions,
+    )
     source_model = parse_docx_to_model(
         src, src_doc, strict_normalize, 0,
         skill_version=skill_version,
@@ -302,14 +336,13 @@ def convert_docx(src: Path, dst_doc, row_height_cm: float, row_height_rule: str,
         infer_docx_role=infer_docx_role,
         looks_like_code_sample_table=looks_like_code_sample_table,
         caption_pattern=None,
+        excluded_source_positions=excluded_source_positions,
+        numbering_context=numbering_context,
     )
+    report["parse_report"] = source_model.get("parse_report", {})
     summarize_source_document_model(report, source_model)
 
     # ── LLM Enhancement ──
-    enhance_mode = getattr(args, "llm_enhance", "off") if args is not None else "off"
-    llm_call = _resolve_llm_call(args) if enhance_mode != "off" else None
-    llm_hint = getattr(args, "llm_hint", None) if args is not None else None
-
     # Phase A: block role review (before normalization)
     applied_start = len(report.get("llm_enhancer", {}).get("applied", []))
     if should_enhance(report, "A", enhance_mode):
@@ -352,8 +385,9 @@ def convert_docx(src: Path, dst_doc, row_height_cm: float, row_height_rule: str,
         heading_level_overrides=heading_level_overrides,
         table_type_overrides=table_type_overrides,
         model=model,
+        excluded_source_positions=excluded_source_positions,
     )
-    return {"source": source_model, "normalized": model}
+    return {"source": source_model, "normalized": model, "toc_context": toc_context}
 
 
 def _extract_heading_level_overrides_from_model(model: dict, report: dict) -> dict[int, int]:
@@ -524,6 +558,19 @@ def _run_phase_enhancement(model, report, *, phase, llm_call, hint, file_protoco
         return model  # no LLM call in generate mode
 
     if mode == "resume":
+        from llm_enhancer import _resolve_legacy_phase
+
+        request_phase = _resolve_legacy_phase(phase)
+        phase_requests = [
+            request for request in file_protocol_ctx.get("requests", [])
+            if request.get("phase") == request_phase
+        ]
+        if not phase_requests:
+            reqs = collect_phase_requests(model, report, phase=phase, hint=hint)
+            if reqs:
+                file_protocol_ctx.setdefault("requests", []).extend(reqs)
+                file_protocol_ctx.setdefault("new_requests", []).extend(reqs)
+            return model
         return replay_phase_responses(
             model, report, phase=phase,
             requests=file_protocol_ctx.get("requests", []),
@@ -534,10 +581,39 @@ def _run_phase_enhancement(model, report, *, phase, llm_call, hint, file_protoco
     return model
 
 
+def _write_protocol_requests(args, requests: list[dict], *, request_stage: str) -> dict:
+    run_id = generate_run_id()
+    source_sha256 = compute_source_sha256(args.input)
+    run_info = build_run_info(
+        run_id=run_id,
+        source_path=str(args.input),
+        source_sha256=source_sha256,
+        args={
+            "input": str(args.input),
+            "output": str(args.output),
+            "template": str(args.template) if args.template else None,
+            "llm_enhance": args.llm_enhance,
+            "llm_hint": args.llm_hint,
+            "strict_normalize": args.strict_normalize,
+            "table_row_height_cm": args.table_row_height_cm,
+            "table_row_height_rule": args.table_row_height_rule,
+        },
+        work_dir=str(args.generate_requests),
+    )
+    run_info["request_stage"] = request_stage
+    write_requests_and_run(requests, run_info, args.generate_requests)
+    return run_info
+
+
 def _run_generate_requests(args, report) -> None:
     """Phase 1: parse source, build prompts, write files, stop."""
     suffix = args.input.suffix.lower()
     llm_hint = getattr(args, "llm_hint", None)
+    all_requests: list[dict] = []
+    fp_ctx: dict = {"mode": "generate", "requests": all_requests}
+    enhance_mode = normalize_mode(getattr(args, "llm_enhance", "off"))
+    toc_context = None
+    excluded_source_positions: set[int] = set()
 
     # ── Parse source ─────────────────────────────────────────────────
     if suffix in {".md", ".markdown"}:
@@ -552,6 +628,19 @@ def _run_generate_requests(args, report) -> None:
         from docx_pipeline import infer_docx_role
 
         src_doc = _Document(args.input)
+        toc_context = detect_toc_regions(src_doc, report)
+        if should_enhance(report, "S", enhance_mode):
+            _run_phase_enhancement(
+                toc_context, report, phase="S",
+                llm_call=None, hint=llm_hint,
+                file_protocol_ctx=fp_ctx,
+            )
+        if all_requests:
+            _write_protocol_requests(args, all_requests, request_stage="source")
+            print(f"Generated {len(all_requests)} source-stage LLM request(s) in {args.generate_requests.resolve()}")
+            print("Run with --resume <run.json> after processing llm_responses.jsonl.")
+            return
+        excluded_source_positions = selected_source_positions(toc_context)
         source_model = parse_docx_to_model(
             args.input, src_doc, True, 0,
             skill_version=skill_version,
@@ -566,6 +655,7 @@ def _run_generate_requests(args, report) -> None:
             infer_docx_role=infer_docx_role,
             looks_like_code_sample_table=looks_like_code_sample_table,
             caption_pattern=None,
+            excluded_source_positions=excluded_source_positions,
         )
     else:
         raise SystemExit(f"Unsupported input type: {args.input.suffix}")
@@ -573,10 +663,6 @@ def _run_generate_requests(args, report) -> None:
     summarize_source_document_model(report, source_model)
 
     # ── Collect Phase A requests ─────────────────────────────────────
-    all_requests: list[dict] = []
-    fp_ctx: dict = {"mode": "generate", "requests": all_requests}
-    enhance_mode = normalize_mode(getattr(args, "llm_enhance", "off"))
-
     if should_enhance(report, "A", enhance_mode):
         _run_phase_enhancement(
             source_model, report, phase="A",
@@ -596,25 +682,7 @@ def _run_generate_requests(args, report) -> None:
         )
 
     # ── Write requests and run.json ──────────────────────────────────
-    run_id = generate_run_id()
-    source_sha256 = compute_source_sha256(args.input)
-    run_info = build_run_info(
-        run_id=run_id,
-        source_path=str(args.input),
-        source_sha256=source_sha256,
-        args={
-            "input": str(args.input),
-            "output": str(args.output),
-            "template": str(args.template) if args.template else None,
-            "llm_enhance": args.llm_enhance,
-            "llm_hint": args.llm_hint,
-            "strict_normalize": args.strict_normalize,
-            "table_row_height_cm": args.table_row_height_cm,
-            "table_row_height_rule": args.table_row_height_rule,
-        },
-        work_dir=str(args.generate_requests),
-    )
-    write_requests_and_run(fp_ctx["requests"], run_info, args.generate_requests)
+    _write_protocol_requests(args, fp_ctx["requests"], request_stage="ast")
 
     print(f"Generated {len(fp_ctx['requests'])} LLM request(s) in {args.generate_requests.resolve()}")
     print("Run with --resume <run.json> after processing llm_responses.jsonl.")
@@ -637,16 +705,17 @@ def main() -> None:
         "--llm-enhance",
         choices=[
             "off", "auto",
-            "a", "b", "ab", "abc",
-            "force-a", "force-b", "force-ab", "force-abc",
-            "list_detect", "caption_gen", "all",
+            "s", "a", "b", "sa", "sb", "ab", "sab", "abc",
+            "force-s", "force-a", "force-b", "force-sa", "force-sb",
+            "force-ab", "force-sab", "force-abc",
+            "toc_region_review", "list_detect", "caption_gen", "all",
         ],
         default="off",
         help=(
             "LLM enhancement level (default: off). "
-            "New names: list_detect / caption_gen / all (both). "
-            "Old names a/ab/abc still work. "
-            "abc/force-abc same as ab/force-ab"
+            "New names: toc_region_review / list_detect / caption_gen / all. "
+            "Legacy phase names remain supported. "
+            "abc/force-abc are aliases for ab/force-ab."
         ),
     )
     parser.add_argument(
@@ -767,6 +836,7 @@ def main() -> None:
             "resolved_styles": template_profile.get("resolved_styles", {}),
             "missing_roles": template_profile.get("missing_roles", []),
             "numbering_ids": template_profile.get("numbering_ids", {}),
+            "table_style": template_profile.get("table_style", {}),
         }
     else:
         out_doc = Document()
@@ -805,6 +875,21 @@ def main() -> None:
     else:
         raise SystemExit(f"Unsupported input type: {args.input.suffix}")
 
+    if file_protocol_ctx and file_protocol_ctx.get("new_requests"):
+        run_info["request_stage"] = "ast"
+        request_dir = Path(run_info["requests_path"]).parent
+        write_requests_and_run(
+            file_protocol_ctx.get("requests", []),
+            run_info,
+            request_dir,
+        )
+        print(
+            f"Generated {len(file_protocol_ctx['new_requests'])} downstream "
+            f"LLM request(s) in {request_dir.resolve()}"
+        )
+        print("Complete the new responses, then run --resume again.")
+        return
+
     # Apply template finalizer (format script rules as format check/fix)
     report["template_finalizer"] = apply_template_finalizer(
         out_doc, template_profile,
@@ -815,6 +900,15 @@ def main() -> None:
         center_alignment=WD_ALIGN_PARAGRAPH.CENTER,
         set_table_autofit_to_window=set_table_autofit_to_window,
         looks_like_code_sample_table=looks_like_code_sample_table,
+        table_roles=[
+            block.get("table_type", "data")
+            for block in (normalized_document_model or {}).get("document", {}).get("blocks", [])
+            if block.get("block_type") == "table"
+        ],
+    )
+    report["toc_replacement_audit"] = audit_toc_replacement(
+        out_doc,
+        models.get("toc_context") if suffix == ".docx" else None,
     )
 
     rendered_model = build_document_model_from_output_wrapper(out_doc, args.input, report)
@@ -825,7 +919,24 @@ def main() -> None:
         report["document_model_summary"] = summarize_document_model(normalized_document_model)
         report["document_model_issues"] = validate_document_model(normalized_document_model)
     report["document_model_diff"] = compare_document_models(normalized_document_model or source_document_model, rendered_model)
-    report["audit"] = audit_document_wrapper(out_doc, args.table_row_height_cm, args.table_row_height_rule)
+    final_table_roles = [
+        block.get("table_type", "data")
+        for block in (normalized_document_model or {}).get("document", {}).get("blocks", [])
+        if block.get("block_type") == "table"
+    ]
+    report["audit"] = audit_document_wrapper(
+        out_doc,
+        args.table_row_height_cm,
+        args.table_row_height_rule,
+        template_profile=template_profile,
+        table_roles=final_table_roles,
+    )
+    report["list_preservation_audit"] = audit_list_preservation(
+        out_doc,
+        normalized_document_model,
+        report.get("source_lists"),
+        template_profile,
+    )
     report["content_warnings"] = collect_content_warnings(out_doc)
     add_risk_warnings(report, args.table_row_height_rule)
 

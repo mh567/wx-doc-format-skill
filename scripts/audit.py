@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import re
 
+from table_formatting import audit_document_tables
+
 
 def _style_has_numbering(doc, style_name: str) -> bool:
     """Return True if the style definition binds to a numbering definition."""
@@ -33,6 +35,16 @@ def paragraph_num_id(paragraph) -> str | None:
     if num_pr is None or num_pr.numId is None or num_pr.numId.val is None:
         return None
     return str(num_pr.numId.val)
+
+
+def _is_ordered_list_style(style_name: str) -> bool:
+    """Recognize template and common Word ordered-list style names."""
+    normalized = style_name.casefold().replace(" ", "")
+    if normalized.startswith("listnumber"):
+        return True
+    if "列项" not in style_name:
+        return False
+    return "编号" in style_name or "有编号" in style_name
 
 
 def num_has_start_override(doc, num_id: str, qn) -> bool:
@@ -88,6 +100,8 @@ def audit_document(
     looks_like_code_sample_table,
     qn,
     center_alignment,
+    template_profile: dict | None = None,
+    table_roles: list[str] | None = None,
 ) -> dict:
     audit = {
         "paragraph_count": len(doc.paragraphs),
@@ -129,7 +143,7 @@ def audit_document(
                 audit["heading_text_still_has_manual_number"].append(
                     {"paragraph": idx, "style": style_name, "text": text[:120]}
                 )
-        if "列项-编号" in style_name:
+        if _is_ordered_list_style(style_name):
             num_id_str = paragraph_num_id(paragraph)
             if num_id_str is not None and num_id_str not in seen_list_num_ids:
                 seen_list_num_ids.add(num_id_str)
@@ -168,6 +182,13 @@ def audit_document(
                             {"table": table_idx, "row": row_idx, "text": paragraph.text[:120]}
                         )
     audit["heading_hierarchy_warnings"] = heading_hierarchy_warnings(audit["heading_sequence"])
+    audit["table_format_contract"] = audit_document_tables(
+        doc,
+        template_profile,
+        row_height_cm,
+        row_height_rule,
+        table_roles=table_roles,
+    )
     return audit
 
 

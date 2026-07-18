@@ -82,6 +82,34 @@ def read_style_profiles(styles_xml: bytes) -> dict[str, dict]:
     return {"styles": styles, "by_key": by_key}
 
 
+def read_table_style_profile(styles: dict[str, dict], document_xml: bytes) -> dict:
+    table_styles = [style for style in styles.values() if style.get("type") == "table"]
+    selected = next(
+        (style for style in table_styles if normalize_style_name(style["name"]) == "tablegrid"),
+        next((style for style in table_styles if style.get("name") != "Normal Table"), None),
+    )
+    if not selected:
+        return {}
+    root = etree.fromstring(document_xml)
+    tbl_look = {}
+    for table in root.findall(".//w:tbl", NS):
+        tbl_pr = child(table, "tblPr")
+        if value(child(tbl_pr, "tblStyle")) != selected["style_id"]:
+            continue
+        look = child(tbl_pr, "tblLook")
+        if look is not None:
+            tbl_look = {
+                etree.QName(key).localname: val
+                for key, val in look.attrib.items()
+            }
+        break
+    return {
+        "name": selected["name"],
+        "style_id": selected["style_id"],
+        "tbl_look": tbl_look,
+    }
+
+
 def read_numbering_profile(numbering_xml: bytes) -> dict:
     root = etree.fromstring(numbering_xml)
     num_to_abstract = {}
@@ -153,11 +181,13 @@ def load_template_profile(template_path: Path | str) -> dict:
     with ZipFile(template) as zf:
         styles_data = read_style_profiles(zf.read("word/styles.xml"))
         numbering_data = read_numbering_profile(zf.read("word/numbering.xml")) if "word/numbering.xml" in zf.namelist() else {}
+        table_style = read_table_style_profile(styles_data["styles"], zf.read("word/document.xml"))
     profile = {
         "path": str(template),
         "styles": styles_data["styles"],
         "by_key": styles_data["by_key"],
         "numbering": numbering_data,
+        "table_style": table_style,
         "resolved_styles": {},
         "missing_roles": [],
     }

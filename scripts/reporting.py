@@ -65,6 +65,20 @@ def add_risk_warnings(report: dict, row_height_rule: str) -> None:
                 "count": len(clipped_cells),
             }
         )
+    table_contract = report.get("audit", {}).get("table_format_contract", {})
+    if table_contract and not table_contract.get("passed", False):
+        issue_count = sum(
+            len(value)
+            for key, value in table_contract.items()
+            if (key.endswith("issues") or key == "invalid_table_styles") and isinstance(value, list)
+        )
+        report["risk_warnings"].append(
+            {
+                "type": "table_format_contract",
+                "message": "Rendered tables contain formatting that overrides the WX table contract.",
+                "count": issue_count,
+            }
+        )
     list_without_restart = report.get("audit", {}).get("ordered_list_nums_without_restart", [])
     if list_without_restart:
         report["risk_warnings"].append(
@@ -249,5 +263,16 @@ def write_markdown_report(report: dict, path: Path) -> None:
             lines.append("")
     if not has_problem:
         lines.append("- 未发现结构化审计问题")
+    lines.append("")
+    table_contract = audit.get("table_format_contract", {})
+    lines.append("## 表格格式合同")
+    lines.append(f"- 是否通过：{table_contract.get('passed', False)}")
+    lines.append(f"- 表格数：{table_contract.get('table_count', 0)}")
+    lines.append(f"- 行数：{table_contract.get('row_count', 0)}")
+    lines.append(f"- 单元格数：{table_contract.get('cell_count', 0)}")
+    lines.append(f"- 段落数：{table_contract.get('paragraph_count', 0)}")
+    for key, values in table_contract.items():
+        if (key.endswith("issues") or key == "invalid_table_styles") and values:
+            lines.append(f"- {key}：{values[:20]}")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")

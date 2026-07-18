@@ -1,20 +1,20 @@
 ---
 name: wx-doc-format
-description: Convert Markdown or DOCX documents into WX template-formatted .docx. Three-stage pipeline (parse → normalize → render) with optional LLM enhancement for list detection and caption generation.
+description: Convert Markdown or DOCX documents into WX template-formatted .docx. Source TOC replacement plus a three-stage pipeline (parse → normalize → render), with optional LLM enhancement for ambiguous TOC review, list detection, and caption generation.
 metadata:
   short-description: Convert MD/DOCX to template-formatted DOCX
 ---
 
 # WX 文档格式
 
-将 Markdown 或 DOCX 文档转换为模板格式的 Word (.docx) 文档。三段式流水线（解析 → 规范化 → 模板渲染），输出样式严格来自模板。支持可选的 LLM 语义增强，自动识别功能点列表、生成表格题注。
+将 Markdown 或 DOCX 文档转换为模板格式的 Word (.docx) 文档。DOCX 先识别并逻辑排除源目录，再预分析 Word OOXML 编号，随后进入解析、规范化和模板渲染流水线。输出样式严格来自模板。可选 LLM 能力用于模糊目录候选、模糊编号候选、语义列表和表格题注处理。
 
 ## 使用方式
 
 当用户要求转换文档时，Agent 必须先弹出两个选项供用户选择：
 
-1. **普通模式**（默认）— 纯规则转换，不调用 LLM
-2. **LLM 增强模式** — 启用功能点列表识别和题注生成
+1. **普通模式**（默认）：纯规则转换，不调用 LLM
+2. **LLM 增强模式**：增加模糊目录复核、功能点列表识别和题注生成
 
 用户选择后直接执行对应模式，无需额外确认。
 
@@ -32,20 +32,31 @@ metadata:
 输入 (MD / DOCX)
   │
   ▼
+DOCX 源目录预处理
+  │  toc_detector.py：确定性检测与候选边界
+  │  toc_region_review：仅复核模糊候选（LLM 增强模式）
+  ▼
+DOCX 编号预分析
+  │  list_detector.py：源编号定义、层级、连续组与保护角色
+  │  list_style_mapping.py：AST 层级到 WX 列表样式的统一映射
+  │  list_detect：复核模糊编号候选（LLM 增强模式）
+  ▼
 Step 1: 解析为 source AST
   │  scripts/md_pipeline.py / docx_pipeline.py
   │
   ▼
 Step 2: 规范化 + LLM 增强（可选）
-  │  model_normalization.py — 清理手工编号、重定型、表格角色修正
-  │  llm_enhancer.py — Capability 插拔架构：
-  │    • list_detect — 功能点列表识别
-  │    • caption_gen — 无题注表格自动生成题注文字
+  │  model_normalization.py：清理手工编号、重定型、表格角色修正
+  │  llm_enhancer.py：Capability 插拔架构：
+  │    • toc_region_review：模糊源目录候选复核
+  │    • list_detect：功能点列表识别
+  │    • caption_gen：无题注表格自动生成题注文字
   │
   ▼
 Step 3: 模板驱动渲染
-  │  template_finalizer.py — 格式收口、表格全框线、附录合并
-  │  audit.py — 输出审计
+  │  template_finalizer.py：格式收口、表格全框线、附录合并
+  │  table_formatting.py：表格五层格式合同与幂等规范化
+  │  audit.py：输出审计
   │
   ▼
 输出: 样式合规的 .docx + JSON 报告
@@ -60,8 +71,11 @@ python3 -m main \
   --output output.docx \
   --template template.docx
 
-# LLM 增强（功能点列表 + 题注生成）
+# LLM 增强（模糊目录复核 + 功能点列表 + 题注生成）
 --llm-enhance all
+
+# 仅模糊目录复核
+--llm-enhance toc_region_review
 
 # 仅列表识别
 --llm-enhance list_detect
@@ -81,18 +95,31 @@ python3 -m main \
 
 | 能力 | CLI | 说明 |
 |------|-----|------|
-| `list_detect` | `--llm-enhance list_detect` | 识别规则遗漏的功能点列表段落 |
+| `toc_region_review` | `--llm-enhance toc_region_review` | 从确定性检测器给出的模糊候选中选择完整目录区间 |
+| `list_detect` | `--llm-enhance list_detect` | 复核模糊 Word 编号候选，并识别缺少编号结构的语义列表 |
 | `caption_gen` | `--llm-enhance caption_gen` | 根据上下文为无题注表格生成简短题注 |
-| `all` | `--llm-enhance all` | 两者都启用 |
+| `all` | `--llm-enhance all` | 启用全部三项能力 |
 | `off` | 默认 | 纯规则，不调用 LLM |
 
 新增能力通过 `CapabilityConfig` 注册即可，无需修改核心调度逻辑。
 
+### 列表处理边界
+
+- 普通模式读取 `numId`、`abstractNumId`、`ilvl`、`numFmt`、`lvlText` 和起始值。
+- 有效编号定义还需列表样式、连续同组段落或可见列表标记作为高置信度证据。
+- Heading、Title、Caption、TOC、目录、题注、注释和公式样式属于保护角色。
+- 孤立的普通样式编号段落作为模糊候选保留正文，并在报告中记录。
+- 源 `numFmt` 和 `lvlText` 保存在 `source.numbering`，不直接决定 WX 一级、二级样式。
+- AST `level=0` 的有序列表使用 `1.1一级列项-编号`，更深层有序列表使用 `2.1二级列项-有编号`。
+- AST `level=0` 的无序列表使用 `1.2一级列项-无编号`，更深层无序列表使用 `2.2二级列项-无编号`。
+- LLM 对模糊 OOXML 候选只能确认预分析建议的层级和 WX 目标列表类型，不能改变原文或编号边界。
+- 直接渲染通过稳定 `source_position` 使用规范化 AST 的最终列表角色，避免重复推断。
+
 ## LLM 增强配置
 
-用户选择 LLM 增强模式后，Agent 需将自己的 LLM 能力传递给 `main.py`。推荐使用文件协议两步流程，Agent 无需设置环境变量即可完成 LLM 调用。
+用户选择 LLM 增强模式后，Agent 需将自己的 LLM 能力传递给 `main.py`。推荐使用文件协议分阶段流程，Agent 无需设置环境变量即可完成 LLM 调用。
 
-### 方式一（推荐）：文件协议两步流程
+### 方式一（推荐）：文件协议分阶段流程
 
 ```bash
 # Step 1: 解析文档，生成 LLM 请求文件
@@ -106,8 +133,8 @@ python3 -m main \
 
 这将生成：
 
-- `.wx-doc-format/run.json` — 运行配置（源文件路径、CLI 参数等）
-- `.wx-doc-format/llm_requests.jsonl` — LLM 请求列表（每行包含 `request_id`、`phase`、`capability`、`prompt`、`input_hash`）
+- `.wx-doc-format/run.json`：运行配置（源文件路径、CLI 参数等）
+- `.wx-doc-format/llm_requests.jsonl`：LLM 请求列表（每行包含 `request_id`、`phase`、`capability`、`prompt`、`input_hash`）
 
 Agent 读取 `llm_requests.jsonl`，逐行生成 `raw_response`（LLM 的 JSON patch 输出），写入 `llm_responses.jsonl` 后：
 
@@ -123,6 +150,8 @@ python3 -m main --resume .wx-doc-format/run.json
 3. 校验每个 decision 的 `block_id`、`operation` 和目标类型
 4. 应用高置信度 patch 到文档模型
 5. 渲染最终输出
+
+当存在模糊目录候选时，首次恢复会应用 `toc_region_review` 响应，然后追加 AST 阶段请求。Agent 补全新请求的响应后再恢复一次。高置信度目录会直接进入 AST 阶段。
 
 ### 方式二（兼容）：API Key
 
@@ -143,9 +172,15 @@ LLM_COMMAND="codex exec" python3 -m main \
 ## 样式合规不变量
 
 - 输出文档只使用模板样式，`unexpected_styles` 必须为空
+- 输出只包含一个 WX 主目录域，原目录不在正文重复
 - 标题文本不含手工编号
 - 列表每章节重启
+- 高置信度源列表、AST 列表和输出列表数量一致
+- AST 列表层级与最终 WX 列表样式一致
 - 表格单元格全部为 `表正文`
+- 表格行保持 0.69 cm 最小行高和 `atLeast`
+- 表格段落不保留覆盖模板的源间距、行距、缩进或字符直接格式
+- 表格使用模板中的有效表格样式 ID，重复规范化不产生变化
 - 题注使用 SEQ 域代码（`SEQ Table` / `SEQ Figure`）
 - 所有表格统一添加全框线
 
