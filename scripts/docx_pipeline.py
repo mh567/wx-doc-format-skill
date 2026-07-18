@@ -258,10 +258,8 @@ def parse_docx_to_model_simple(
                         )
                     reset_lists()
                     continue
-                if role in {"image", None}:
-                    append_block(model, image_block(next_id(), alt_text="", source=source))
-                    reset_lists()
-                    continue
+                append_block(model, image_block(next_id(), alt_text="", source=source))
+                reset_lists()
                 continue
             if not text:
                 continue

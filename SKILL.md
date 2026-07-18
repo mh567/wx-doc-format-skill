@@ -53,6 +53,7 @@ Step 1: 解析为 source AST
   ▼
 Step 2: 规范化 + LLM 增强（可选）
   │  model_normalization.py：清理手工编号、重定型、表格角色修正
+  │  caption_placement.py：题注关联、表上图下位置收口与成品审计
   │  llm_enhancer.py：Capability 插拔架构：
   │    • toc_region_review：模糊源目录候选复核
   │    • list_detect：功能点列表识别
@@ -189,7 +190,10 @@ LLM_COMMAND="codex exec" python3 -m main \
 - 表格段落不保留覆盖模板的源间距、行距、缩进或字符直接格式
 - 表格使用模板中的有效表格样式 ID，重复规范化不产生变化
 - 单单元格自然语言说明框使用 `callout`，接口报文使用 `code_sample`，两者均不自动生成题注
+- 多列接口清单根据稳定表头和行列关系使用 `data`，只在 JSON、XML、HTTP 或命令等报文证据主导时使用 `code_sample`
 - 只有 `data` 表允许自动生成题注，源文档已有人工题注继续保留
+- 表题注紧邻对应表格上方，图题注紧邻对应图片下方
+- 题注存在双向歧义、重复关联或孤立情况时保留原位置并输出风险，不执行猜测性移动
 - 题注使用 SEQ 域代码（`SEQ Table` / `SEQ Figure`）
 - 所有表格统一添加全框线
 

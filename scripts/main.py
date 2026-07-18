@@ -46,6 +46,7 @@ from front_matter import (
     inject_document_title,
 )
 from table_semantics import audit_model_table_semantics
+from caption_placement import audit_model_caption_placement, audit_rendered_caption_placement
 
 from llm_enhancer import (
     enhance_document_model,
@@ -293,6 +294,7 @@ def convert_md(src: Path, doc, report: dict, row_height_cm: float, row_height_ru
         )
 
     report["table_semantics_audit"] = audit_model_table_semantics(model)
+    report["caption_placement_model_audit"] = audit_model_caption_placement(model)
 
     render_document_model(
         model, doc, report, row_height_cm, row_height_rule, numbering_ids,
@@ -377,6 +379,7 @@ def convert_docx(src: Path, dst_doc, row_height_cm: float, row_height_rule: str,
         )
 
     report["table_semantics_audit"] = audit_model_table_semantics(model)
+    report["caption_placement_model_audit"] = audit_model_caption_placement(model)
 
     # role_overrides for direct rendering path — extracted from Phase A applied decisions
     phase_a_role_overrides: dict[int, str] = {}
@@ -947,6 +950,7 @@ def main() -> None:
     report["output_structure_audit"] = audit_output_structure(
         out_doc, template_profile,
     )
+    report["caption_placement_audit"] = audit_rendered_caption_placement(out_doc)
 
     rendered_model = build_document_model_from_output_wrapper(out_doc, args.input, report)
     report["rendered_document_model_summary"] = report.get("document_model_summary", {})

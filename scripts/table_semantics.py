@@ -76,6 +76,25 @@ def _looks_like_code_payload(text: str) -> bool:
     return False
 
 
+def _multi_cell_code_payload_evidence(cells: list[Any]) -> tuple[bool, tuple[str, ...]]:
+    texts = [cell.text.strip() for cell in cells if cell.text.strip()]
+    if not texts:
+        return False, ()
+    payloads = [text for text in texts if _looks_like_code_payload(text)]
+    if not payloads:
+        return False, ()
+    payload_ratio = len(payloads) / len(texts)
+    longest_payload = max(len(text) for text in payloads)
+    dominant = payload_ratio >= 0.25 or longest_payload >= 80
+    evidence = (
+        "multiple_visual_cells",
+        "code_payload_content",
+        f"payload_cells:{len(payloads)}",
+        f"payload_ratio:{payload_ratio:.2f}",
+    )
+    return dominant, evidence
+
+
 def classify_docx_table(
     table,
     *,
@@ -84,17 +103,21 @@ def classify_docx_table(
     cells = unique_table_cells(table)
     visual_cell_count = len(cells)
     if visual_cell_count != 1:
-        table_type = "code_sample" if multi_cell_code_sample else "data"
+        code_sample, code_evidence = _multi_cell_code_payload_evidence(cells)
+        table_type = "code_sample" if code_sample else "data"
+        evidence = code_evidence if code_sample else (
+            "multiple_visual_cells",
+            "relational_table_shape",
+        )
+        if multi_cell_code_sample and not code_sample:
+            evidence = (*evidence, "legacy_header_signal_rejected_without_payload")
         return TableSemantics(
             table_type=table_type,
             header_rows=0 if table_type == "code_sample" else 1,
             visual_cell_count=visual_cell_count,
             caption_eligible=table_caption_eligible(table_type),
-            confidence=0.9 if table_type == "code_sample" else 1.0,
-            evidence=(
-                "multiple_visual_cells",
-                "legacy_code_sample_evidence" if table_type == "code_sample" else "relational_table_shape",
-            ),
+            confidence=0.95 if table_type == "code_sample" else 1.0,
+            evidence=evidence,
         )
 
     cell = cells[0]
@@ -152,11 +175,13 @@ def audit_model_table_semantics(model: dict | None) -> dict[str, Any]:
         counts[table_type] = counts.get(table_type, 0) + 1
         eligible = table_caption_eligible(table_type)
         adjacent_captions = []
-        for candidate_index in (index - 1, index + 1):
-            if 0 <= candidate_index < len(blocks):
-                candidate = blocks[candidate_index]
-                if candidate.get("block_type") == "caption":
-                    adjacent_captions.append(candidate)
+        if index > 0:
+            candidate = blocks[index - 1]
+            if (
+                candidate.get("block_type") == "caption"
+                and candidate.get("caption_type") in {"table", "unknown", None}
+            ):
+                adjacent_captions.append(candidate)
         auto_captions = [item for item in adjacent_captions if item.get("_auto_generated")]
         source_semantics = block.get("source", {}).get("table_semantics", {})
         record = {
@@ -182,6 +207,14 @@ def audit_model_table_semantics(model: dict | None) -> dict[str, Any]:
                 "type": "data_table_missing_caption",
                 "block_id": block.get("id"),
             })
+        if index + 1 < len(blocks) and blocks[index + 1].get("block_type") == "caption":
+            candidate = blocks[index + 1]
+            if candidate.get("caption_type") in {"table", "unknown", None}:
+                issues.append({
+                    "type": "table_caption_below_table",
+                    "block_id": block.get("id"),
+                    "caption_id": candidate.get("id"),
+                })
         if table_type == "unknown":
             issues.append({
                 "type": "unknown_table_semantics",

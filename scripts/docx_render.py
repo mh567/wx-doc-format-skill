@@ -280,42 +280,37 @@ def render_docx_direct(
         report.setdefault("media_relationships_preserved",
             report.get("media_relationships_preserved", 0) + len(_media_map))
 
-    # Build caption text map from model AST (replaces old caption_overrides
-    # parameter).  Phase B writes caption text directly into auto-generated
-    # caption blocks; the renderer reads them here.
-    _caption_overrides: dict[int, str] = {}
     _model_by_source_position: dict[int, dict] = {}
-    _authored_caption_table_positions: set[int] = set()
+    _captions_before_source_position: dict[int, dict] = {}
+    _captions_after_source_position: dict[int, dict] = {}
+    _suppressed_caption_source_positions: set[int] = set()
     if model is not None:
         _model_blocks = model.get("document", {}).get("blocks", [])
-        _model_pending: str | None = None
-        _model_tbl_idx = 0
-        for _model_index, _mb in enumerate(_model_blocks):
+        _model_objects = {
+            str(item.get("id")): item
+            for item in _model_blocks
+            if item.get("block_type") in {"table", "image"}
+            or item.get("source", {}).get("had_mixed_graphic")
+        }
+        for _mb in _model_blocks:
             _source_position = _mb.get("source", {}).get("source_position")
             if isinstance(_source_position, int):
                 _model_by_source_position[_source_position] = _mb
-            _mbt = _mb.get("block_type")
-            if _mbt == "caption" and _mb.get("_auto_generated"):
-                _mtxt = (_mb.get("text") or "").strip()
-                if _mtxt:
-                    _model_pending = _mtxt
-            elif _mbt == "table":
-                _model_tbl_idx += 1
-                if isinstance(_source_position, int):
-                    for _adjacent_index in (_model_index - 1, _model_index + 1):
-                        if not 0 <= _adjacent_index < len(_model_blocks):
-                            continue
-                        _adjacent = _model_blocks[_adjacent_index]
-                        if (
-                            _adjacent.get("block_type") == "caption"
-                            and not _adjacent.get("_auto_generated")
-                        ):
-                            _authored_caption_table_positions.add(_source_position)
-                if _model_pending:
-                    _caption_overrides[_model_tbl_idx] = _model_pending
-                    _model_pending = None
+        for _caption in _model_blocks:
+            if _caption.get("block_type") != "caption":
+                continue
+            association = _caption.get("association") or {}
+            target = _model_objects.get(str(association.get("object_id") or ""))
+            target_position = (target or {}).get("source", {}).get("source_position")
+            if not isinstance(target_position, int):
+                continue
+            if association.get("required_placement") == "after":
+                _captions_after_source_position[target_position] = _caption
             else:
-                _model_pending = None
+                _captions_before_source_position[target_position] = _caption
+            caption_position = _caption.get("source", {}).get("source_position")
+            if isinstance(caption_position, int):
+                _suppressed_caption_source_positions.add(caption_position)
 
     if heading_shift:
         report.setdefault("content_warnings", []).append({
@@ -358,6 +353,21 @@ def render_docx_direct(
         except Exception:
             dst_doc.add_paragraph(text)
 
+    def _emit_model_caption(caption: dict) -> None:
+        caption_type = str(caption.get("caption_type") or "table")
+        caption_text = str(caption.get("text") or "")
+        _insert_seq_caption(
+            dst_doc,
+            "figure" if caption_type == "figure" else "table",
+            caption_text,
+            template_profile=template_profile,
+        )
+        report.setdefault("captions_rendered_from_model", 0)
+        report["captions_rendered_from_model"] += 1
+        if caption.get("_auto_generated"):
+            report.setdefault("captions_auto_generated", 0)
+            report["captions_auto_generated"] += 1
+
     synthetic_title = next(
         (
             block for block in (model or {}).get("document", {}).get("blocks", [])
@@ -388,6 +398,10 @@ def render_docx_direct(
         if isinstance(block, Paragraph):
             text = block.text.strip()
             model_block = _model_by_source_position.get(source_position)
+
+            if source_position in _suppressed_caption_source_positions:
+                report.setdefault("source_caption_render_exclusions", []).append(source_position)
+                continue
 
             if paragraph_has_graphics(block):
                 if text:
@@ -438,6 +452,9 @@ def render_docx_direct(
                     report.setdefault("mixed_text_graphic_paragraphs_split", []).append(split_record)
                     report["graphic_paragraphs_preserved"] = report.get("graphic_paragraphs_preserved", 0) + 1
                     report["media_relationships_preserved"] = report.get("media_relationships_preserved", 0) + media_count
+                    positioned_caption = _captions_after_source_position.get(source_position)
+                    if positioned_caption is not None:
+                        _emit_model_caption(positioned_caption)
                     active_list_nums = {}
                     last_was_caption = False
                     seen_content = True
@@ -447,6 +464,9 @@ def render_docx_direct(
                 _, media_count = _append_paragraph_clone_new(dst_doc, block, qn_fn=qn, image_reltype="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image", media_map=_media_map, paragraph_has_graphics_fn=paragraph_has_graphics, normalize_graphics_paragraph_fn=_normalize_graphics_paragraph_new)
                 report["graphic_paragraphs_preserved"] = report.get("graphic_paragraphs_preserved", 0) + 1
                 report["media_relationships_preserved"] = report.get("media_relationships_preserved", 0) + media_count
+                positioned_caption = _captions_after_source_position.get(source_position)
+                if positioned_caption is not None:
+                    _emit_model_caption(positioned_caption)
                 active_list_nums = {}
                 last_was_caption = False
                 seen_content = True
@@ -538,17 +558,14 @@ def render_docx_direct(
             # Apply table type override from Phase C enhancement
             if model_block is None and table_type_overrides is not None and _para_idx in table_type_overrides:
                 table_type = table_type_overrides[_para_idx]
-            # Auto-insert table caption if the preceding paragraph wasn't one
             _table_idx += 1
-            if (
-                table_caption_eligible(table_type)
-                and not last_was_caption
-                and source_position not in _authored_caption_table_positions
-            ):
-                # Use LLM-generated caption text from model AST when available
-                cap_text = _caption_overrides.get(_table_idx, ' ')
-                _insert_seq_caption(dst_doc, 'table', cap_text,
-                                    template_profile=template_profile)
+            positioned_caption = _captions_before_source_position.get(source_position)
+            if positioned_caption is not None:
+                _emit_model_caption(positioned_caption)
+            elif model is None and table_caption_eligible(table_type) and not last_was_caption:
+                _insert_seq_caption(
+                    dst_doc, "table", " ", template_profile=template_profile,
+                )
                 report.setdefault('captions_auto_generated', 0)
                 report['captions_auto_generated'] += 1
 
