@@ -179,6 +179,18 @@ def add_risk_warnings(report: dict, row_height_rule: str) -> None:
                 "issues": table_semantics.get("issues", []),
             }
         )
+    caption_model = report.get("caption_placement_model_audit", {})
+    caption_output = report.get("caption_placement_audit", {})
+    caption_issues = list(caption_model.get("issues", [])) + list(caption_output.get("issues", []))
+    if caption_issues:
+        report["risk_warnings"].append(
+            {
+                "type": "caption_placement",
+                "message": "Caption association or placement violates the WX document contract.",
+                "count": len(caption_issues),
+                "issues": caption_issues,
+            }
+        )
 
 
 def write_markdown_report(report: dict, path: Path) -> None:
@@ -205,6 +217,7 @@ def write_markdown_report(report: dict, path: Path) -> None:
             f"- 非模板样式数：{len(template_style_audit.get('unexpected_styles', []))}",
             f"- 首部结构审计：{'passed' if report.get('output_structure_audit', {}).get('passed') else 'failed'}",
             f"- 表格语义审计：{'passed' if report.get('table_semantics_audit', {}).get('passed') else 'failed'}",
+            f"- 题注位置审计：{'passed' if report.get('caption_placement_audit', {}).get('passed') else 'failed'}",
             "",
         ]
     )

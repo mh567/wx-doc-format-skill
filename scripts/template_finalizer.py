@@ -577,9 +577,12 @@ def apply_template_finalizer(
         row_height_rule,
         table_roles=table_roles,
     ))
+    from caption_placement import audit_rendered_caption_placement
+
     return {
         "enabled": True,
         "corrections": corrections,
         "style_audit": audit_template_styles(doc, profile),
         "layout_audit": audit_toc_and_page_layout(doc),
+        "caption_placement_audit": audit_rendered_caption_placement(doc),
     }

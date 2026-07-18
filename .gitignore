@@ -22,6 +22,7 @@ tests/*
 !tests/test_list_numbering.py
 !tests/test_front_matter.py
 !tests/test_table_semantics.py
+!tests/test_caption_placement.py
 scripts/anonymize_template.py
 scripts/bootstrap_macos_lxml.sh
 scripts/list_semantic_enhancer.py

@@ -66,6 +66,39 @@ def test_single_cell_code_payload_is_code_sample() -> None:
     assert result.caption_eligible is False
 
 
+def test_structured_interface_catalog_is_data_table() -> None:
+    doc = Document()
+    table = doc.add_table(rows=3, cols=3)
+    values = [
+        ("序号", "接口名称", "接口能力"),
+        ("1", "SDK_Init", "SDK初始化"),
+        ("2", "Capture", "采集指纹"),
+    ]
+    for row, row_values in zip(table.rows, values):
+        for cell, value in zip(row.cells, row_values):
+            cell.text = value
+
+    result = classify_docx_table(table, multi_cell_code_sample=True)
+
+    assert result.table_type == "data"
+    assert result.caption_eligible is True
+    assert "legacy_header_signal_rejected_without_payload" in result.evidence
+
+
+def test_multi_cell_payload_example_remains_code_sample() -> None:
+    doc = Document()
+    table = doc.add_table(rows=2, cols=2)
+    table.cell(0, 0).text = "请求示例"
+    table.cell(0, 1).text = "说明"
+    table.cell(1, 0).text = 'POST /api/auth\nContent-Type: application/json\n{"user":"demo","fingerprint":"abcdef"}'
+    table.cell(1, 1).text = "登录请求"
+
+    result = classify_docx_table(table, multi_cell_code_sample=True)
+
+    assert result.table_type == "code_sample"
+    assert result.caption_eligible is False
+
+
 def test_single_merged_visual_cell_uses_unique_tc_count() -> None:
     doc = Document()
     table = doc.add_table(rows=1, cols=2)

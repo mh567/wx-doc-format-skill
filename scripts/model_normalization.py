@@ -16,7 +16,7 @@ from text_utils import (
 )
 from document_model import validate_document_model
 from list_style_mapping import normalize_wx_list_type
-from table_semantics import table_caption_eligible
+from caption_placement import normalize_caption_placement
 
 
 def _model_list_type_for_kind(kind: str) -> str:
@@ -272,34 +272,7 @@ def normalize_document_model_simple(
             rblock["restart"] = ri == short_runs[0]
             repairs.append({"block": ri + 1, "type": "short_para_retyped_as_list_item", "text": rblock.get("text", "")})
 
-    # Ensure every table has a preceding caption (tables: caption above, figures: caption below).
-    blocks = model.get("document", {}).get("blocks", [])
-    insert_indexes = []
-    for bi in range(len(blocks)):
-        if (
-            blocks[bi].get("block_type") == "table"
-            and table_caption_eligible(blocks[bi].get("table_type"))
-        ):
-            next_bi = bi + 1
-            next_is_caption = next_bi < len(blocks) and blocks[next_bi].get("block_type") == "caption"
-            prev_is_caption = bi > 0 and blocks[bi - 1].get("block_type") == "caption"
-            if not next_is_caption and not prev_is_caption:
-                insert_indexes.append(bi)
-    for bi in reversed(insert_indexes):
-        from document_model import caption_block
-        table_type = blocks[bi].get("table_type", "data")
-        caption_type = "table"
-        label = "表"
-        new_caption = caption_block(
-            f"b{bi * 10 + 9999:04d}",
-            "",
-            caption_type,
-            label=label,
-            raw_number=None,
-        )
-        new_caption["_auto_generated"] = True
-        blocks.insert(bi, new_caption)  # caption ABOVE table
-        repairs.append({"block": bi, "type": "caption_auto_generated_for_table", "table_type": table_type})
+    normalize_caption_placement(model, repairs)
 
     issues = validate_document_model(model)
     report["model_normalization_repairs"] = repairs
