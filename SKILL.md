@@ -73,7 +73,7 @@ Step 3: 模板驱动渲染
 
 ```bash
 # 基础用法
-python3 -m main \
+python3 scripts/main.py \
   --input source.docx \
   --output output.docx \
   --template template.docx
@@ -130,7 +130,7 @@ python3 -m main \
 
 ```bash
 # Step 1: 解析文档，生成 LLM 请求文件
-python3 -m main \
+python3 scripts/main.py \
   --input source.docx \
   --output output.docx \
   --template assets/wx_template.docx \
@@ -147,7 +147,7 @@ Agent 读取 `llm_requests.jsonl`，逐行生成 `raw_response`（LLM 的 JSON p
 
 ```bash
 # Step 2: 恢复运行，验证并应用响应
-python3 -m main --resume .wx-doc-format/run.json
+python3 scripts/main.py --resume .wx-doc-format/run.json
 ```
 
 系统自动执行：
@@ -164,17 +164,17 @@ python3 -m main --resume .wx-doc-format/run.json
 
 设置 `ANTHROPIC_API_KEY` 或 `OPENAI_API_KEY` 环境变量，无需额外配置。
 
-### 方式三（兼容）：内置桥接脚本
+### 方式三（兼容）：外部 LLM 命令
 
-Skill 内置 `scripts/llm_bridge.py`。Agent 设置 `LLM_COMMAND` 环境变量后即可使用：
+通过 `--llm-command` 或 `LLM_COMMAND` 传入外部 LLM 调用命令。该命令应从标准输入读取 prompt，并将响应写入标准输出：
 
 ```bash
-LLM_COMMAND="codex exec" python3 -m main \
-  --llm-command "python3 scripts/llm_bridge.py" \
+python3 scripts/main.py \
+  --llm-command "your-llm-command" \
   --llm-enhance all ...
 ```
 
-`LLM_COMMAND` 设为 Agent 的 LLM 调用命令（如 `codex exec`、`hermes llm-call`），桥接脚本自动中转 stdin/stdout。
+如果外部命令需要读取文件，可在命令中使用 `{prompt_file}` 占位符。
 
 ## 样式合规不变量
 
