@@ -32,6 +32,7 @@ from document_model import (
 )
 from md_pipeline import model_list_type_for_kind
 from list_style_mapping import wx_list_style_name
+from table_semantics import classify_docx_table
 
 
 
@@ -264,7 +265,15 @@ def parse_docx_to_model_simple(
                 continue
             if not text:
                 continue
-            if role == "heading":
+            if role == "title":
+                append_block(
+                    model,
+                    heading_block(
+                        next_id(), inferred_text, 0, role="title", source=source,
+                    ),
+                )
+                reset_lists()
+            elif role == "heading":
                 heading_level = resolved_heading_level(style, num_level, inferred_text)
                 append_block(
                     model,
@@ -339,15 +348,21 @@ def parse_docx_to_model_simple(
                     )
                     reset_lists()
                     continue
-            is_code = looks_like_code_sample_table(block)
-            table_type = "code_sample" if is_code else "data"
-            header_rows = 0 if is_code else 1
+            semantics = classify_docx_table(
+                block,
+                multi_cell_code_sample=looks_like_code_sample_table(block),
+            )
+            table_type = semantics.table_type
+            header_rows = semantics.header_rows
             rows = table_rows_for_model(block, table_type, header_rows)
             append_block(
                 model,
                 table_block(
                     next_id(), table_type, rows, header_rows=header_rows,
-                    source=source_record(source_position=source_position),
+                    source=source_record(
+                        source_position=source_position,
+                        table_semantics=semantics.as_source_record(),
+                    ),
                 ),
             )
             reset_lists()

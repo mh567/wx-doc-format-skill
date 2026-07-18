@@ -16,6 +16,7 @@ from text_utils import (
 )
 from document_model import validate_document_model
 from list_style_mapping import normalize_wx_list_type
+from table_semantics import table_caption_eligible
 
 
 def _model_list_type_for_kind(kind: str) -> str:
@@ -177,16 +178,31 @@ def normalize_document_model_simple(
                     block["text"] = clean_text
                     repairs.append({"block": index, "type": "caption_prefix_removed", "from": caption_text, "to": clean_text})
         elif block_type == "table":
-            if block.get("table_type") == "code_sample" and block.get("header_rows") != 0:
+            table_type = block.get("table_type", "unknown")
+            if table_type in {"code_sample", "callout", "layout"} and block.get("header_rows") != 0:
                 block["header_rows"] = 0
-                repairs.append({"block": index, "type": "code_sample_header_rows_zero"})
-            if block.get("table_type") == "code_sample":
+                repairs.append({
+                    "block": index,
+                    "type": "non_data_table_header_rows_zero",
+                    "table_type": table_type,
+                })
+            if table_type == "code_sample":
                 for row in block.get("rows", []):
                     for cell in row:
                         if cell.get("cell_role") != "code":
                             cell["cell_role"] = "code"
                             repairs.append({"block": index, "type": "code_sample_cell_role_code"})
-            elif block.get("table_type") == "data":
+            elif table_type in {"callout", "layout"}:
+                for row in block.get("rows", []):
+                    for cell in row:
+                        if cell.get("cell_role") != "body":
+                            cell["cell_role"] = "body"
+                            repairs.append({
+                                "block": index,
+                                "type": "content_container_cell_role_body",
+                                "table_type": table_type,
+                            })
+            elif table_type == "data":
                 header_rows = int(block.get("header_rows") or 0)
                 for row_index, row in enumerate(block.get("rows", [])):
                     expected_role = "header" if row_index < header_rows else "body"
@@ -260,7 +276,10 @@ def normalize_document_model_simple(
     blocks = model.get("document", {}).get("blocks", [])
     insert_indexes = []
     for bi in range(len(blocks)):
-        if blocks[bi].get("block_type") == "table":
+        if (
+            blocks[bi].get("block_type") == "table"
+            and table_caption_eligible(blocks[bi].get("table_type"))
+        ):
             next_bi = bi + 1
             next_is_caption = next_bi < len(blocks) and blocks[next_bi].get("block_type") == "caption"
             prev_is_caption = bi > 0 and blocks[bi - 1].get("block_type") == "caption"

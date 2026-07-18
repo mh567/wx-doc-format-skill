@@ -267,7 +267,7 @@ def audit_toc_and_page_layout(doc) -> dict:
         warnings.append(
             {
                 "type": "single_section_page_numbering",
-                "message": "当前文档只有一个节，若需要封面/目录/正文不同页码格式，应在 Word/WPS 中复核分节页码。",
+                "message": "当前文档只有一个节，若需要目录与正文使用不同页码格式，应在 Word/WPS 中复核分节页码。",
             }
         )
     return {"toc_like_paragraphs": toc_like, "sections": sections, "warnings": warnings}
@@ -330,35 +330,6 @@ def _resolve_font_for_style(profile: dict, style_name: str) -> dict:
     if "文档标题" in style_name:
         return dict(_STYLE_FONT_FALLBACK["文档标题"])
     return dict(_STYLE_FONT_FALLBACK["body"])
-
-
-def remove_api_example_captions(doc) -> list[dict]:
-    """Delete Caption paragraphs that precede API-example (single-cell JSON/HTTP) tables."""
-    from text_utils import looks_like_api_example_table as _is_api
-    corrections = []
-    body = doc.element.body
-    to_remove = []
-    for i, child in enumerate(body):
-        if not child.tag.endswith(('}w:tbl', '}tbl')):
-            continue
-        from docx.table import Table
-        table = Table(child, doc)
-        if not _is_api(table):
-            continue
-        # Look backwards for a Caption paragraph
-        for j in range(i - 1, -1, -1):
-            prev = body[j]
-            if not prev.tag.endswith(('}w:p', '}p')):
-                continue
-            from docx.text.paragraph import Paragraph
-            pp = Paragraph(prev, doc)
-            if 'Caption' in (pp.style.name or ''):
-                to_remove.append(prev)
-            break
-    for el in to_remove:
-        body.remove(el)
-        corrections.append({'type': 'api_example_caption_removed'})
-    return corrections
 
 
 def finalize_run_fonts(doc, profile: dict) -> list[dict]:
@@ -598,7 +569,6 @@ def apply_template_finalizer(
     corrections.extend(finalize_appendix_structure(doc, profile))
     corrections.extend(apply_paragraph_style_aliases(doc, profile))
     corrections.extend(normalize_caption_prefixes(doc))
-    corrections.extend(remove_api_example_captions(doc))
     corrections.extend(finalize_run_fonts(doc, profile))
     corrections.extend(normalize_document_tables(
         doc,

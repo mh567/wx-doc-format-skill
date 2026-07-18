@@ -1,13 +1,13 @@
 ---
 name: wx-doc-format
-description: Convert Markdown or DOCX documents into WX template-formatted .docx. Source TOC replacement plus a three-stage pipeline (parse → normalize → render), with optional LLM enhancement for ambiguous TOC review, list detection, and caption generation.
+description: Convert Markdown or DOCX documents into WX template-formatted .docx. Removes source covers, places a generated TOC first, normalizes one document title, classifies data tables and single-cell content containers, and runs a three-stage pipeline (parse → normalize → render), with optional LLM enhancement for ambiguous TOC review, list detection, and eligible data-table caption generation.
 metadata:
   short-description: Convert MD/DOCX to template-formatted DOCX
 ---
 
 # WX 文档格式
 
-将 Markdown 或 DOCX 文档转换为模板格式的 Word (.docx) 文档。DOCX 先识别并逻辑排除源目录，再预分析 Word OOXML 编号，随后进入解析、规范化和模板渲染流水线。输出样式严格来自模板。可选 LLM 能力用于模糊目录候选、模糊编号候选、语义列表和表格题注处理。
+将 Markdown 或 DOCX 文档转换为模板格式的 Word (.docx) 文档。DOCX 先识别源封面与源目录，移除封面并提取唯一文档标题，再预分析 Word OOXML 编号，随后进入解析、规范化和模板渲染流水线。输出固定以唯一主目录开头，分页后从文档标题和正文开始。可选 LLM 能力用于模糊目录候选、模糊编号候选、语义列表和表格题注处理。
 
 ## 使用方式
 
@@ -36,10 +36,16 @@ DOCX 源目录预处理
   │  toc_detector.py：确定性检测与候选边界
   │  toc_region_review：仅复核模糊候选（LLM 增强模式）
   ▼
+DOCX 首部规范化
+  │  front_matter.py：封面边界、标题提取、统一排除和顺序审计
+  ▼
 DOCX 编号预分析
   │  list_detector.py：源编号定义、层级、连续组与保护角色
   │  list_style_mapping.py：AST 层级到 WX 列表样式的统一映射
   │  list_detect：复核模糊编号候选（LLM 增强模式）
+  ▼
+DOCX 表格语义分类
+  │  table_semantics.py：data、code_sample、callout、layout 与题注准入
   ▼
 Step 1: 解析为 source AST
   │  scripts/md_pipeline.py / docx_pipeline.py
@@ -173,6 +179,7 @@ LLM_COMMAND="codex exec" python3 -m main \
 
 - 输出文档只使用模板样式，`unexpected_styles` 必须为空
 - 输出只包含一个 WX 主目录域，原目录不在正文重复
+- 输出不保留源封面，顶层顺序固定为主目录、分页、唯一文档标题、正文
 - 标题文本不含手工编号
 - 列表每章节重启
 - 高置信度源列表、AST 列表和输出列表数量一致
@@ -181,6 +188,8 @@ LLM_COMMAND="codex exec" python3 -m main \
 - 表格行保持 0.69 cm 最小行高和 `atLeast`
 - 表格段落不保留覆盖模板的源间距、行距、缩进或字符直接格式
 - 表格使用模板中的有效表格样式 ID，重复规范化不产生变化
+- 单单元格自然语言说明框使用 `callout`，接口报文使用 `code_sample`，两者均不自动生成题注
+- 只有 `data` 表允许自动生成题注，源文档已有人工题注继续保留
 - 题注使用 SEQ 域代码（`SEQ Table` / `SEQ Figure`）
 - 所有表格统一添加全框线
 
