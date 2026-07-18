@@ -5,6 +5,7 @@ from typing import Callable
 from docx.shared import Pt
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
+from table_formatting import normalize_document_tables
 
 
 def normalized_name(name: str | None) -> str:
@@ -161,135 +162,6 @@ def finalize_appendix_structure(doc, profile: dict) -> list[dict]:
         corrections.append({"type": "appendix_title_prefix_removed", "from": text, "to": ""})
         set_style(paragraph, appendix_style, corrections, "appendix_title_style_normalized", paragraph.text)
         index += 1
-    return corrections
-
-
-def finalize_template_tables(
-    doc,
-    profile: dict,
-    row_height_cm: float,
-    row_height_rule: str,
-    *,
-    row_height_rule_enum,
-    cm,
-    left_alignment,
-    center_alignment,
-    set_table_autofit_to_window: Callable,
-    looks_like_code_sample_table: Callable,
-) -> list[dict]:
-    corrections = []
-    from text_utils import looks_like_api_example_table as _looks_api
-    table_body_style = resolved_style(profile, "table_body", "表正文")
-    for table_index, table in enumerate(doc.tables, 1):
-        set_table_autofit_to_window(table)
-        is_code_sample = looks_like_code_sample_table(table)
-        is_api_example = _looks_api(table)
-        for row_index, row in enumerate(table.rows, 1):
-            target_rule = row_height_rule_enum.AT_LEAST if row_height_rule == "at-least" else row_height_rule_enum.EXACTLY
-            if row.height_rule != target_rule:
-                row.height_rule = target_rule
-                corrections.append({"type": "table_row_height_rule_normalized", "table": table_index, "row": row_index})
-            if row.height is None or abs(row.height.cm - row_height_cm) > 0.02:
-                row.height = cm(row_height_cm)
-                corrections.append({"type": "table_row_height_normalized", "table": table_index, "row": row_index})
-            for cell in row.cells:
-                for paragraph in cell.paragraphs:
-                    text = paragraph.text.strip()
-                    if not text:
-                        continue
-                    set_style(
-                        paragraph,
-                        table_body_style,
-                        corrections,
-                        "table_cell_style_normalized",
-                        text,
-                    )
-                    # Clear run-level formatting so the style definition takes full effect.
-                    _KEEP = {qn('w:rStyle'), qn('w:lang'), qn('w:bCs'), qn('w:iCs')}
-                    for run in paragraph.runs:
-                        rpr = run._element.find(qn('w:rPr'))
-                        if rpr is None:
-                            continue
-                        for child in list(rpr):
-                            if child.tag not in _KEEP:
-                                rpr.remove(child)
-                    paragraph.alignment = left_alignment if (is_code_sample or is_api_example) else center_alignment
-    return corrections
-
-
-def normalize_table_indents_and_width(doc) -> list[dict]:
-    """清除表格缩进、设置宽度为自适应窗口、清除单元格段落缩进。
-
-    1. 移除 w:tblInd（表格左缩进），避免源文档缩进影响输出
-    2. 设置 w:tblW type=pct w=5000（100%页面宽度）
-    3. 清除所有单元格内段落的 w:ind（段落缩进）
-    """
-    corrections = []
-    for table_index, table in enumerate(doc.tables, 1):
-        tbl = table._tbl
-        tbl_pr = tbl.find(qn('w:tblPr'))
-        if tbl_pr is None:
-            tbl_pr = OxmlElement('w:tblPr')
-            tbl.insert(0, tbl_pr)
-
-        # 1. Remove w:tblInd (table left indentation)
-        tbl_ind = tbl_pr.find(qn('w:tblInd'))
-        if tbl_ind is not None:
-            tbl_pr.remove(tbl_ind)
-            corrections.append({"type": "tbl_ind_removed", "table": table_index})
-
-        # 2. Set w:tblW to 100% page width (type=pct, w=5000)
-        tbl_w = tbl_pr.find(qn('w:tblW'))
-        if tbl_w is None:
-            tbl_w = OxmlElement('w:tblW')
-            tbl_pr.append(tbl_w)
-        tbl_w.set(qn('w:type'), 'pct')
-        tbl_w.set(qn('w:w'), '5000')
-
-        # 3. Clear cell paragraph indentation (w:ind)
-        for row in table.rows:
-            for cell in row.cells:
-                for paragraph in cell.paragraphs:
-                    ppr = paragraph._element.find(qn('w:pPr'))
-                    if ppr is None:
-                        continue
-                    p_ind = ppr.find(qn('w:ind'))
-                    if p_ind is not None:
-                        ppr.remove(p_ind)
-                        corrections.append({
-                            "type": "cell_para_indent_removed",
-                            "table": table_index,
-                        })
-
-    return corrections
-
-
-def add_table_borders(doc) -> list[dict]:
-    """Add full borders (all sides + internal) to every table in the document."""
-    corrections = []
-    for table_index, table in enumerate(doc.tables, 1):
-        tbl = table._tbl
-        tblPr = tbl.find(qn('w:tblPr'))
-        if tblPr is None:
-            tblPr = OxmlElement('w:tblPr')
-            tbl.insert(0, tblPr)
-
-        existing = tblPr.find(qn('w:tblBorders'))
-        if existing is not None:
-            tblPr.remove(existing)
-
-        borders = OxmlElement('w:tblBorders')
-        for border_name in ('top', 'left', 'bottom', 'right', 'insideH', 'insideV'):
-            border = OxmlElement(f'w:{border_name}')
-            border.set(qn('w:val'), 'single')
-            border.set(qn('w:sz'), '4')
-            border.set(qn('w:space'), '0')
-            border.set(qn('w:color'), '000000')
-            borders.append(border)
-
-        tblPr.append(borders)
-        corrections.append({"type": "table_borders_added", "table": table_index})
-
     return corrections
 
 
@@ -695,7 +567,14 @@ def insert_table_of_contents(doc, profile: dict) -> dict:
     r_pb.append(br)
     p_toc._element.append(r_pb)
 
-    return {"toc_inserted": True, "levels": max_level}
+    settings = doc.settings.element
+    update_fields = settings.find(_qn("w:updateFields"))
+    if update_fields is None:
+        update_fields = _Oxml("w:updateFields")
+        settings.append(update_fields)
+    update_fields.set(_qn("w:val"), "true")
+
+    return {"toc_inserted": True, "levels": max_level, "update_fields_on_open": True}
 
 
 def apply_template_finalizer(
@@ -710,6 +589,7 @@ def apply_template_finalizer(
     center_alignment,
     set_table_autofit_to_window: Callable,
     looks_like_code_sample_table: Callable,
+    table_roles: list[str] | None = None,
 ) -> dict:
     if not profile:
         return {"enabled": False, "corrections": [], "style_audit": {}, "layout_audit": {}}
@@ -720,22 +600,13 @@ def apply_template_finalizer(
     corrections.extend(normalize_caption_prefixes(doc))
     corrections.extend(remove_api_example_captions(doc))
     corrections.extend(finalize_run_fonts(doc, profile))
-    corrections.extend(
-        finalize_template_tables(
-            doc,
-            profile,
-            row_height_cm,
-            row_height_rule,
-            row_height_rule_enum=row_height_rule_enum,
-            cm=cm,
-            left_alignment=left_alignment,
-            center_alignment=center_alignment,
-            set_table_autofit_to_window=set_table_autofit_to_window,
-            looks_like_code_sample_table=looks_like_code_sample_table,
-        )
-    )
-    corrections.extend(add_table_borders(doc))
-    corrections.extend(normalize_table_indents_and_width(doc))
+    corrections.extend(normalize_document_tables(
+        doc,
+        profile,
+        row_height_cm,
+        row_height_rule,
+        table_roles=table_roles,
+    ))
     return {
         "enabled": True,
         "corrections": corrections,

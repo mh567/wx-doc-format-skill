@@ -30,11 +30,15 @@ from text_utils import (
 )
 from word_model_renderer import (
     style_from_profile,
-    list_style_for_model,
     _new_list_num,
     _set_list_numbering,
 )
-from text_utils import set_template_table_properties as _set_template_table_properties
+from list_style_mapping import (
+    normalize_wx_list_type,
+    wx_list_style_name,
+    wx_numbering_abstract_key,
+)
+from table_formatting import normalize_table
 from docx_pipeline import infer_docx_role
 
 
@@ -261,6 +265,7 @@ def render_docx_direct(
     heading_level_overrides: dict[int, int] | None = None,
     table_type_overrides: dict[int, str] | None = None,
     model: dict | None = None,
+    excluded_source_positions: set[int] | None = None,
 ) -> None:
     """
     Render a DOCX source directly by iterating blocks, using template styles only.
@@ -278,10 +283,14 @@ def render_docx_direct(
     # parameter).  Phase B writes caption text directly into auto-generated
     # caption blocks; the renderer reads them here.
     _caption_overrides: dict[int, str] = {}
+    _model_by_source_position: dict[int, dict] = {}
     if model is not None:
         _model_pending: str | None = None
         _model_tbl_idx = 0
         for _mb in model.get("document", {}).get("blocks", []):
+            _source_position = _mb.get("source", {}).get("source_position")
+            if isinstance(_source_position, int):
+                _model_by_source_position[_source_position] = _mb
             _mbt = _mb.get("block_type")
             if _mbt == "caption" and _mb.get("_auto_generated"):
                 _mtxt = (_mb.get("text") or "").strip()
@@ -305,6 +314,7 @@ def render_docx_direct(
     active_list_nums: dict[int, int] = {}
     seen_content = False
     structural_started = False
+    excluded_source_positions = excluded_source_positions or set()
 
     def _iter_blocks(d):
         for child in d.element.body.iterchildren():
@@ -338,20 +348,35 @@ def render_docx_direct(
     last_was_caption = False
     _para_idx = 0
     _table_idx = 0
-    for block in _iter_blocks(src_doc):
+    for source_position, block in enumerate(_iter_blocks(src_doc)):
+        if source_position in excluded_source_positions:
+            report.setdefault("source_toc_render_exclusions", []).append(source_position)
+            continue
         if isinstance(block, Paragraph):
             text = block.text.strip()
+            model_block = _model_by_source_position.get(source_position)
 
             if paragraph_has_graphics(block):
                 if text:
                     inferred_text, style, role = infer_docx_role(block, strict_normalize, report)
-                    if role_overrides is not None and _para_idx in role_overrides:
+                    list_meta = None
+                    if model_block is not None:
+                        model_type = model_block.get("block_type")
+                        if model_type in {"heading", "body", "list_item", "caption"}:
+                            role = model_type
+                        if model_type == "list_item":
+                            inferred_text = model_block.get("text", inferred_text)
+                            list_meta = model_block
+                        elif model_type == "heading":
+                            inferred_text = model_block.get("text", inferred_text)
+                            style = heading_style_for_level(int(model_block.get("level") or 1))
+                    if model_block is None and role_overrides is not None and _para_idx in role_overrides:
                         role = role_overrides[_para_idx]
                     source_style = block.style.name if block.style is not None else ""
                     if role == "heading" and heading_level_from_style(source_style) is not None:
                         style = normalize_heading_style_level(style, heading_shift)
                     # Apply heading level override from Phase B enhancement
-                    if (role == "heading"
+                    if (model_block is None and role == "heading"
                             and heading_level_overrides is not None
                             and _para_idx in heading_level_overrides):
                         override_level = heading_level_overrides[_para_idx]
@@ -366,7 +391,12 @@ def render_docx_direct(
                                 ct, cap_text = "table", inferred_text
                         _insert_seq_caption(dst_doc, ct, cap_text, template_profile=template_profile)
                     else:
-                        _handle_inferred(dst_doc, inferred_text, style, role, report, numbering_ids, active_list_nums, template_profile=template_profile)
+                        _handle_inferred(
+                            dst_doc, inferred_text, style, role, report,
+                            numbering_ids, active_list_nums,
+                            template_profile=template_profile,
+                            list_meta=list_meta,
+                        )
                     _, media_count = _append_graphics_only_paragraph_clone_new(dst_doc, block, qn_fn=qn, image_reltype="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image", media_map=_media_map, normalize_graphics_paragraph_fn=_normalize_graphics_paragraph_new)
                     split_record = {"text": inferred_text, "role": role}
                     if role == "heading":
@@ -412,14 +442,25 @@ def render_docx_direct(
                 continue
 
             inferred_text, style, role = infer_docx_role(block, strict_normalize, report)
-            if role_overrides is not None and _para_idx in role_overrides:
+            list_meta = None
+            if model_block is not None:
+                model_type = model_block.get("block_type")
+                if model_type in {"heading", "body", "list_item", "caption"}:
+                    role = model_type
+                if model_type == "list_item":
+                    inferred_text = model_block.get("text", inferred_text)
+                    list_meta = model_block
+                elif model_type == "heading":
+                    inferred_text = model_block.get("text", inferred_text)
+                    style = heading_style_for_level(int(model_block.get("level") or 1))
+            if model_block is None and role_overrides is not None and _para_idx in role_overrides:
                 role = role_overrides[_para_idx]
             source_style = block.style.name if block.style is not None else ""
             if role == "heading" and heading_level_from_style(source_style) is not None:
                 style = normalize_heading_style_level(style, heading_shift)
 
             # Apply heading level override from Phase B enhancement
-            if (role == "heading"
+            if (model_block is None and role == "heading"
                     and heading_level_overrides is not None
                     and _para_idx in heading_level_overrides):
                 override_level = heading_level_overrides[_para_idx]
@@ -436,7 +477,12 @@ def render_docx_direct(
                         ct, cap_text = "table", inferred_text
                 _insert_seq_caption(dst_doc, ct, cap_text, template_profile=template_profile)
             else:
-                _handle_inferred(dst_doc, inferred_text, style, role, report, numbering_ids, active_list_nums, template_profile=template_profile)
+                _handle_inferred(
+                    dst_doc, inferred_text, style, role, report,
+                    numbering_ids, active_list_nums,
+                    template_profile=template_profile,
+                    list_meta=list_meta,
+                )
 
             last_was_caption = (role == "caption")
             if role == "heading":
@@ -447,8 +493,11 @@ def render_docx_direct(
 
         else:
             is_api_example = looks_like_api_example_table(block)
+            model_block = _model_by_source_position.get(source_position)
+            if model_block is not None and model_block.get("block_type") == "table":
+                is_api_example = model_block.get("table_type") == "code_sample"
             # Apply table type override from Phase C enhancement
-            if table_type_overrides is not None and _para_idx in table_type_overrides:
+            if model_block is None and table_type_overrides is not None and _para_idx in table_type_overrides:
                 override_type = table_type_overrides[_para_idx]
                 is_api_example = (override_type == "code_sample")
             # Auto-insert table caption if the preceding paragraph wasn't one
@@ -462,8 +511,14 @@ def render_docx_direct(
                 report['captions_auto_generated'] += 1
 
             new_table = append_table_clone(dst_doc, block)
-            _table_body_style = style_from_profile(template_profile, "table_body", "表正文")
-            _set_template_table_properties(new_table, row_height_cm, row_height_rule, table_body_style=_table_body_style)
+            normalize_table(
+                new_table,
+                template_profile,
+                row_height_cm,
+                row_height_rule,
+                role="code_sample" if is_api_example else "data",
+                path=str(_table_idx),
+            )
             report["tables_processed"] = report.get("tables_processed", 0) + 1
             last_was_caption = False
             active_list_nums = {}
@@ -471,7 +526,18 @@ def render_docx_direct(
             _para_idx += 1
 
 
-def _handle_inferred(doc, text: str, style: str | None, role: str, report: dict, numbering_ids: dict, active_list_nums: dict, *, template_profile: dict | None = None) -> dict:
+def _handle_inferred(
+    doc,
+    text: str,
+    style: str | None,
+    role: str,
+    report: dict,
+    numbering_ids: dict,
+    active_list_nums: dict,
+    *,
+    template_profile: dict | None = None,
+    list_meta: dict | None = None,
+) -> dict:
     """Apply inferred paragraph to doc using template styles."""
     if role == "heading":
         heading_level = resolved_heading_level(style, None, text)
@@ -497,18 +563,30 @@ def _handle_inferred(doc, text: str, style: str | None, role: str, report: dict,
 
     if role in ("list", "list_item"):
         kind = list_kind_for_text(text)
+        list_type = (list_meta or {}).get("list_type")
+        if list_type is None:
+            list_type = {
+                "letter": "lower_letter_paren",
+                "decimal": "decimal_paren",
+                "bullet2": "bullet_dot",
+                "dash": "dash",
+            }.get(kind, "lower_letter_paren")
+        level = int((list_meta or {}).get("level") or 0)
+        list_type = normalize_wx_list_type(list_type, level)
+        restart = bool((list_meta or {}).get("restart"))
         from text_utils import strip_list_marker as _slm
         clean_text = _slm(text)
-        style_name = list_style_for_text(text)
+        style_name = wx_list_style_name(list_type, level, template_profile)
         try:
             doc.add_paragraph(clean_text, style=style_name)
         except Exception:
             doc.add_paragraph(clean_text)
 
-        if kind in {"letter", "decimal"}:
-            list_key = (0, "letter")  # every section starts from primary (letter) list
-            if list_key not in active_list_nums:
-                aid = numbering_ids.get("list_letter_abstract")
+        abstract_key = wx_numbering_abstract_key(list_type, level)
+        if abstract_key is not None:
+            list_key = (level, list_type)
+            if restart or list_key not in active_list_nums:
+                aid = numbering_ids.get(abstract_key)
                 if aid is not None:
                     active_list_nums[list_key] = _new_list_num(doc, aid)
             nid = active_list_nums.get(list_key)
@@ -532,7 +610,15 @@ def _handle_inferred(doc, text: str, style: str | None, role: str, report: dict,
                 ilvl_el.set(qn("w:val"), "0")
                 num_pr.append(ilvl_el)
             report.setdefault("automatic_numbers", []).append(
-                {"type": "list", "text": clean_text, "source": "docx-render"}
+                {
+                    "type": "list",
+                    "text": clean_text,
+                    "source": "docx-render",
+                    "list_type": list_type,
+                    "level": level,
+                    "restart": restart,
+                    "source_position": (list_meta or {}).get("source", {}).get("source_position"),
+                }
             )
         return active_list_nums
 

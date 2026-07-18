@@ -647,55 +647,10 @@ def set_table_autofit_to_window(table) -> None:
 
 def set_template_table_properties(table, row_height_cm: float, row_height_rule: str,
                                      table_body_style: str | None = None) -> None:
-    """Set table-level row height, autofit, and cell paragraph styles."""
-    from docx.shared import Cm
-    from docx.enum.table import WD_ROW_HEIGHT_RULE
-    from docx.oxml import OxmlElement
-    from docx.oxml.ns import qn
+    """Compatibility wrapper around the canonical table normalizer."""
+    from table_formatting import normalize_table
 
-    for row in table.rows:
-        try:
-            row.height = Cm(row_height_cm)
-            row.height_rule = WD_ROW_HEIGHT_RULE.AT_LEAST if row_height_rule == "at-least" else WD_ROW_HEIGHT_RULE.EXACTLY
-        except Exception:
-            pass
-
-    # Apply table_body style to all cell paragraphs and strip all
-    # run-level formatting so the style definition takes full effect.
+    profile = None
     if table_body_style:
-        _KEEP_TAGS = {
-            qn('w:rStyle'),
-            qn('w:lang'),
-            qn('w:bCs'),
-            qn('w:iCs'),
-        }
-        for row in table.rows:
-            for cell in row.cells:
-                for paragraph in cell.paragraphs:
-                    try:
-                        paragraph.style = table_body_style
-                    except Exception:
-                        pass
-                    # Strip directly from XML element (some table-run
-                    # proxies may not reflect changes through python-docx).
-                    for r_elem in paragraph._element.findall(qn('w:r')):
-                        rpr = r_elem.find(qn('w:rPr'))
-                        if rpr is None:
-                            continue
-                        doomed = [c for c in rpr if c.tag not in _KEEP_TAGS]
-
-                        for c in doomed:
-                            rpr.remove(c)
-
-
-    try:
-        tbl_pr = table._tbl.tblPr
-        if tbl_pr is not None:
-            tbl_w = tbl_pr.find(qn("w:tblW"))
-            if tbl_w is None:
-                tbl_w = OxmlElement("w:tblW")
-                tbl_pr.append(tbl_w)
-            tbl_w.set(qn("w:type"), "pct")
-            tbl_w.set(qn("w:w"), "5000")
-    except Exception:
-        pass
+        profile = {"resolved_styles": {"table_body": table_body_style}}
+    normalize_table(table, profile, row_height_cm, row_height_rule)
