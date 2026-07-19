@@ -30,6 +30,8 @@ def new_report(skill_version: str) -> dict:
         "source_document_model_issues": [],
         "template_finalizer": {},
         "audit": {},
+        "review_packet": {},
+        "review_loop": {},
     }
 
 
@@ -264,6 +266,19 @@ def write_markdown_report(report: dict, path: Path) -> None:
     else:
         for warning in risk_warnings:
             lines.append(f"- {warning}")
+    lines.append("")
+    lines.append("## 增强模式审计闭环")
+    review = report.get("review_loop", {})
+    packet = report.get("review_packet", {})
+    lines.append(f"- 状态：{review.get('status', 'not_requested')}")
+    lines.append(f"- 是否触发：{review.get('triggered', False)}")
+    lines.append(f"- 执行轮数：{review.get('rounds', 0)}")
+    lines.append(f"- 可修复审计项：{packet.get('repairable_count', 0)}")
+    if review.get("before_score"):
+        lines.append(f"- 修复前评分：{review.get('before_score')}")
+        lines.append(f"- 修复后评分：{review.get('after_score')}")
+    if review.get("reason"):
+        lines.append(f"- 处置原因：{review.get('reason')}")
     lines.append("")
     lines.append("## 内容型复核提示")
     content_warnings = report.get("content_warnings", [])

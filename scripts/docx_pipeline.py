@@ -51,6 +51,7 @@ def infer_docx_role(
         is_caption_text, is_date_like_text, is_toc_title, is_toc_entry,
         looks_like_list_item, list_style_for_text, heading_level_from_text,
         heading_style_for_level, is_compact_numbered_function_heading,
+        hierarchical_heading_level_from_text,
         source_numbering_heading_level, looks_like_visual_heading,
         clean_note_prefix, is_formula_text, is_appendix_title,
     )
@@ -78,6 +79,19 @@ def infer_docx_role(
         if _stripped in _api_labels:
             return text, None, "body"
         return text, style_name, "heading"
+
+    # A dotted Arabic section marker is a complete semantic token.  Resolve it
+    # before Word numbering, list styles, and visible list markers so ``6.3``
+    # can never be consumed as the list marker ``6.``.
+    hierarchical_level = hierarchical_heading_level_from_text(text)
+    if hierarchical_level is not None:
+        parse_report.setdefault("inferred_headings", []).append({
+            "text": text,
+            "level": hierarchical_level,
+            "source": "docx-hierarchical-text",
+        })
+        return text, heading_style_for_level(hierarchical_level), "heading"
+
     if numbering and numbering.get("status") == "detected":
         parse_report.setdefault("inferred_lists", []).append({
             "text": text,
@@ -98,10 +112,19 @@ def infer_docx_role(
             "num_id": numbering.get("num_id"),
             "evidence": numbering.get("evidence", []),
         })
-    if style_name == "List Paragraph" or "列项" in style_name:
+    list_style = style_name == "List Paragraph" or "列项" in style_name
+    numbering_status = numbering.get("status") if numbering else None
+    if list_style and numbering_status == "ignored":
+        parse_report.setdefault("suppressed_list_style_conflicts", []).append({
+            "text": text,
+            "style": style_name,
+            "source_position": numbering.get("source_position"),
+            "evidence": numbering.get("evidence", []),
+        })
+    elif list_style:
         parse_report.setdefault("inferred_lists", []).append({"text": text, "source": "docx-style"})
-        list_style = style_name if "列项" in style_name else "1.1一级列项-编号"
-        return text, list_style, "list"
+        target_style = style_name if "列项" in style_name else "1.1一级列项-编号"
+        return text, target_style, "list"
 
     if looks_like_list_item(text):
         parse_report.setdefault("inferred_lists", []).append({"text": text, "source": "docx-text"})

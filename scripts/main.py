@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 import json
 import sys
 from pathlib import Path
@@ -47,6 +48,12 @@ from front_matter import (
 )
 from table_semantics import audit_model_table_semantics
 from caption_placement import audit_model_caption_placement, audit_rendered_caption_placement
+from review_loop import (
+    accepted_candidate,
+    build_review_packet,
+    collect_audit_findings,
+    unknown_pattern_packet,
+)
 
 from llm_enhancer import (
     enhance_document_model,
@@ -65,6 +72,8 @@ from llm_file_protocol import (
     read_run_info,
     read_requests,
     read_responses,
+    ProtocolError,
+    verify_source_snapshot,
 )
 
 
@@ -153,6 +162,125 @@ def audit_document_wrapper(
         template_profile=template_profile,
         table_roles=table_roles,
     )
+
+
+def _fresh_output_document(args, template_profile):
+    if args.template is not None:
+        doc = _open_template_renamed_media(args.template)
+        clear_document_body(doc)
+    else:
+        doc = Document()
+        ensure_fallback_style_setup(doc)
+    return doc
+
+
+def _cleanup_template_copy(doc) -> None:
+    path = getattr(doc, "_tmpl_path", None)
+    if not path:
+        return
+    try:
+        import os
+        os.unlink(path)
+    except Exception:
+        pass
+
+
+def _finalize_and_audit_output(
+    out_doc,
+    report: dict,
+    *,
+    args,
+    template_profile,
+    normalized_model: dict | None,
+    source_model: dict | None,
+    models: dict,
+) -> None:
+    report["template_finalizer"] = apply_template_finalizer(
+        out_doc, template_profile,
+        args.table_row_height_cm, args.table_row_height_rule,
+        row_height_rule_enum=WD_ROW_HEIGHT_RULE,
+        cm=Cm,
+        left_alignment=WD_ALIGN_PARAGRAPH.LEFT,
+        center_alignment=WD_ALIGN_PARAGRAPH.CENTER,
+        set_table_autofit_to_window=set_table_autofit_to_window,
+        looks_like_code_sample_table=looks_like_code_sample_table,
+        table_roles=[
+            block.get("table_type", "data")
+            for block in (normalized_model or {}).get("document", {}).get("blocks", [])
+            if block.get("block_type") == "table"
+        ],
+    )
+    suffix = args.input.suffix.lower()
+    report["toc_replacement_audit"] = audit_toc_replacement(
+        out_doc,
+        models.get("toc_context") if suffix == ".docx" else None,
+    )
+    report["output_structure_audit"] = audit_output_structure(out_doc, template_profile)
+    report["caption_placement_audit"] = audit_rendered_caption_placement(out_doc)
+
+    rendered_model = build_document_model_from_output_wrapper(out_doc, args.input, report)
+    report["rendered_document_model_summary"] = report.get("document_model_summary", {})
+    report["rendered_document_model_issues"] = report.get("document_model_issues", [])
+    if normalized_model is not None:
+        report["document_model_summary"] = summarize_document_model(normalized_model)
+        report["document_model_issues"] = validate_document_model(normalized_model)
+    report["document_model_diff"] = compare_document_models(
+        normalized_model or source_model, rendered_model,
+    )
+    final_table_roles = [
+        block.get("table_type", "data")
+        for block in (normalized_model or {}).get("document", {}).get("blocks", [])
+        if block.get("block_type") == "table"
+    ]
+    report["audit"] = audit_document_wrapper(
+        out_doc,
+        args.table_row_height_cm,
+        args.table_row_height_rule,
+        template_profile=template_profile,
+        table_roles=final_table_roles,
+    )
+    report["list_preservation_audit"] = audit_list_preservation(
+        out_doc,
+        normalized_model,
+        report.get("source_lists"),
+        template_profile,
+    )
+    report["content_warnings"] = collect_content_warnings(out_doc)
+    report["risk_warnings"] = []
+    add_risk_warnings(report, args.table_row_height_rule)
+
+
+def _render_review_candidate(
+    args,
+    model: dict,
+    report: dict,
+    *,
+    template_profile,
+    numbering_ids: dict,
+    models: dict,
+):
+    out_doc = _fresh_output_document(args, template_profile)
+    suffix = args.input.suffix.lower()
+    if suffix in {".md", ".markdown"}:
+        render_document_model(
+            model, out_doc, report,
+            args.table_row_height_cm, args.table_row_height_rule, numbering_ids,
+            template_profile=report.get("template_profile"),
+        )
+    else:
+        src_doc = Document(args.input)
+        render_docx_direct(
+            src_doc, out_doc, report,
+            args.table_row_height_cm, args.table_row_height_rule, numbering_ids,
+            template_profile=report.get("template_profile"),
+            strict_normalize=args.strict_normalize,
+            role_overrides=_extract_role_overrides_from_model(model, report) or None,
+            heading_level_overrides=_extract_heading_level_overrides_from_model(model, report),
+            table_type_overrides=_extract_table_type_overrides_from_model(model, report),
+            model=model,
+            excluded_source_positions=models.get("excluded_source_positions", set()),
+        )
+    return out_doc
 
 
 def _llm_call_from_command(command: str):
@@ -411,6 +539,7 @@ def convert_docx(src: Path, dst_doc, row_height_cm: float, row_height_rule: str,
         "normalized": model,
         "toc_context": toc_context,
         "front_matter_context": front_matter_context,
+        "excluded_source_positions": excluded_source_positions,
     }
 
 
@@ -616,6 +745,11 @@ def _write_protocol_requests(args, requests: list[dict], *, request_stage: str) 
             "input": str(args.input),
             "output": str(args.output),
             "template": str(args.template) if args.template else None,
+            "report": str(args.report) if args.report else None,
+            "report_md": str(args.report_md) if args.report_md else None,
+            "ast": str(args.ast) if args.ast else None,
+            "source_ast": str(args.source_ast) if args.source_ast else None,
+            "fail_on_risk": bool(args.fail_on_risk),
             "llm_enhance": args.llm_enhance,
             "llm_hint": args.llm_hint,
             "strict_normalize": args.strict_normalize,
@@ -742,17 +876,18 @@ def main() -> None:
         "--llm-enhance",
         choices=[
             "off", "auto",
-            "s", "a", "b", "sa", "sb", "ab", "sab", "abc",
-            "force-s", "force-a", "force-b", "force-sa", "force-sb",
-            "force-ab", "force-sab", "force-abc",
-            "toc_region_review", "list_detect", "caption_gen", "all",
+            "s", "a", "b", "c", "sa", "sb", "sc", "ab", "ac", "bc",
+            "sab", "sac", "sbc", "abc", "sabc",
+            "force-s", "force-a", "force-b", "force-c", "force-sa", "force-sb", "force-sc",
+            "force-ab", "force-ac", "force-bc", "force-sab", "force-sac", "force-sbc",
+            "force-abc", "force-sabc",
+            "toc_region_review", "list_detect", "caption_gen", "document_review", "all",
         ],
         default="off",
         help=(
             "LLM enhancement level (default: off). "
-            "New names: toc_region_review / list_detect / caption_gen / all. "
-            "Legacy phase names remain supported. "
-            "abc/force-abc are aliases for ab/force-ab."
+            "New names: toc_region_review / list_detect / caption_gen / document_review / all. "
+            "Compact phase combinations remain supported."
         ),
     )
     parser.add_argument(
@@ -829,6 +964,16 @@ def main() -> None:
             args.output = Path(run_args["output"])
         if not args.template and run_args.get("template"):
             args.template = Path(run_args["template"])
+        if not args.report and run_args.get("report"):
+            args.report = Path(run_args["report"])
+        if not args.report_md and run_args.get("report_md"):
+            args.report_md = Path(run_args["report_md"])
+        if not args.ast and run_args.get("ast"):
+            args.ast = Path(run_args["ast"])
+        if not args.source_ast and run_args.get("source_ast"):
+            args.source_ast = Path(run_args["source_ast"])
+        if "fail_on_risk" in run_args:
+            args.fail_on_risk = bool(run_args["fail_on_risk"])
         if "llm_enhance" in run_args:
             args.llm_enhance = run_args["llm_enhance"]
         if "llm_hint" in run_args and run_args["llm_hint"]:
@@ -845,6 +990,11 @@ def main() -> None:
         raise SystemExit("--resume: run.json does not contain 'input', provide --input on CLI")
     if args.resume and not args.output:
         raise SystemExit("--resume: run.json does not contain 'output', provide --output on CLI")
+    if args.resume:
+        try:
+            verify_source_snapshot(args.input, str(run_info.get("source_sha256") or ""))
+        except ProtocolError as exc:
+            raise SystemExit(f"--resume: {exc}") from exc
 
     global SKILL_VERSION
     SKILL_VERSION = _load_version()
@@ -927,68 +1077,140 @@ def main() -> None:
         print("Complete the new responses, then run --resume again.")
         return
 
-    # Apply template finalizer (format script rules as format check/fix)
-    report["template_finalizer"] = apply_template_finalizer(
-        out_doc, template_profile,
-        args.table_row_height_cm, args.table_row_height_rule,
-        row_height_rule_enum=WD_ROW_HEIGHT_RULE,
-        cm=Cm,
-        left_alignment=WD_ALIGN_PARAGRAPH.LEFT,
-        center_alignment=WD_ALIGN_PARAGRAPH.CENTER,
-        set_table_autofit_to_window=set_table_autofit_to_window,
-        looks_like_code_sample_table=looks_like_code_sample_table,
-        table_roles=[
-            block.get("table_type", "data")
-            for block in (normalized_document_model or {}).get("document", {}).get("blocks", [])
-            if block.get("block_type") == "table"
-        ],
-    )
-    report["toc_replacement_audit"] = audit_toc_replacement(
-        out_doc,
-        models.get("toc_context") if suffix == ".docx" else None,
-    )
-    report["output_structure_audit"] = audit_output_structure(
-        out_doc, template_profile,
-    )
-    report["caption_placement_audit"] = audit_rendered_caption_placement(out_doc)
-
-    rendered_model = build_document_model_from_output_wrapper(out_doc, args.input, report)
-    report["rendered_document_model_summary"] = report.get("document_model_summary", {})
-    report["rendered_document_model_issues"] = report.get("document_model_issues", [])
-
-    if normalized_document_model is not None:
-        report["document_model_summary"] = summarize_document_model(normalized_document_model)
-        report["document_model_issues"] = validate_document_model(normalized_document_model)
-    report["document_model_diff"] = compare_document_models(normalized_document_model or source_document_model, rendered_model)
-    final_table_roles = [
-        block.get("table_type", "data")
-        for block in (normalized_document_model or {}).get("document", {}).get("blocks", [])
-        if block.get("block_type") == "table"
-    ]
-    report["audit"] = audit_document_wrapper(
-        out_doc,
-        args.table_row_height_cm,
-        args.table_row_height_rule,
+    _finalize_and_audit_output(
+        out_doc, report,
+        args=args,
         template_profile=template_profile,
-        table_roles=final_table_roles,
+        normalized_model=normalized_document_model,
+        source_model=source_document_model,
+        models=models,
     )
-    report["list_preservation_audit"] = audit_list_preservation(
-        out_doc,
-        normalized_document_model,
-        report.get("source_lists"),
-        template_profile,
-    )
-    report["content_warnings"] = collect_content_warnings(out_doc)
-    add_risk_warnings(report, args.table_row_height_rule)
+
+    # Post-audit semantic review. Every mutation is applied to a cloned AST,
+    # rendered into a fresh document, and accepted only after full re-audit.
+    enhance_mode = normalize_mode(getattr(args, "llm_enhance", "off"))
+    report["review_packet"] = build_review_packet(report, normalized_document_model or {})
+    review_state = {
+        "enabled": should_enhance(report, "C", enhance_mode),
+        "triggered": False,
+        "status": "not_requested",
+        "rounds": 0,
+        "repairable_findings": report["review_packet"].get("repairable_count", 0),
+    }
+    report["review_loop"] = review_state
+
+    if review_state["enabled"] and not review_state["repairable_findings"]:
+        review_state["status"] = "no_repairable_findings"
+
+    if (
+        review_state["enabled"]
+        and review_state["repairable_findings"]
+        and normalized_document_model is not None
+    ):
+        review_state["triggered"] = True
+        review_state["status"] = "reviewing"
+        baseline_report = deepcopy(report)
+        baseline_model = deepcopy(normalized_document_model)
+        candidate_report = deepcopy(report)
+        candidate_model = deepcopy(normalized_document_model)
+        before_applied = len(candidate_report.get("llm_enhancer", {}).get("applied", []))
+        llm_call = _resolve_llm_call(args) if file_protocol_ctx is None else None
+        candidate_model = _run_phase_enhancement(
+            candidate_model, candidate_report, phase="C",
+            llm_call=llm_call, hint=getattr(args, "llm_hint", None),
+            file_protocol_ctx=file_protocol_ctx,
+        )
+
+        if file_protocol_ctx and file_protocol_ctx.get("new_requests"):
+            run_info["request_stage"] = "review"
+            request_dir = Path(run_info["requests_path"]).parent
+            write_requests_and_run(
+                file_protocol_ctx.get("requests", []), run_info, request_dir,
+            )
+            print(
+                f"Generated {len(file_protocol_ctx['new_requests'])} post-audit "
+                f"LLM review request(s) in {request_dir.resolve()}"
+            )
+            print("Complete the new responses, then run --resume again.")
+            _cleanup_template_copy(out_doc)
+            return
+
+        applied = candidate_report.get("llm_enhancer", {}).get("applied", [])[before_applied:]
+        review_state["decisions"] = applied
+        if applied:
+            review_state["rounds"] = 1
+            candidate_doc = None
+            try:
+                candidate_model = normalize_document_model(candidate_model, candidate_report)
+                candidate_report["table_semantics_audit"] = audit_model_table_semantics(candidate_model)
+                candidate_report["caption_placement_model_audit"] = audit_model_caption_placement(candidate_model)
+                candidate_doc = _render_review_candidate(
+                    args, candidate_model, candidate_report,
+                    template_profile=template_profile,
+                    numbering_ids=numbering_ids,
+                    models=models,
+                )
+                _finalize_and_audit_output(
+                    candidate_doc, candidate_report,
+                    args=args,
+                    template_profile=template_profile,
+                    normalized_model=candidate_model,
+                    source_model=source_document_model,
+                    models=models,
+                )
+                accepted, reason, comparison = accepted_candidate(
+                    baseline_report, candidate_report, baseline_model, candidate_model,
+                    decisions=applied,
+                )
+            except Exception as exc:
+                accepted = False
+                reason = "candidate_pipeline_error"
+                comparison = {
+                    "candidate_error": {
+                        "type": type(exc).__name__,
+                        "message": str(exc),
+                    }
+                }
+            review_state.update({
+                "status": "accepted" if accepted else "rolled_back",
+                "accepted": accepted,
+                "reason": reason,
+                **comparison,
+            })
+            if accepted and candidate_doc is not None:
+                candidate_report["review_packet"] = build_review_packet(
+                    candidate_report, candidate_model,
+                )
+                _cleanup_template_copy(out_doc)
+                out_doc = candidate_doc
+                report = candidate_report
+                normalized_document_model = candidate_model
+                report["review_loop"] = review_state
+            else:
+                if candidate_doc is not None:
+                    _cleanup_template_copy(candidate_doc)
+                report["review_loop"] = review_state
+        else:
+            has_backend = llm_call is not None or file_protocol_ctx is not None
+            review_state["status"] = "no_changes" if has_backend else "no_backend"
+
+    remaining_findings = collect_audit_findings(report, normalized_document_model or {})
+    if remaining_findings:
+        report["unknown_pattern_packet"] = unknown_pattern_packet(
+            report,
+            normalized_document_model or {},
+            input_hash=compute_source_sha256(args.input),
+        )
+    if report.get("review_loop", {}).get("status") == "rolled_back":
+        report.setdefault("risk_warnings", []).append({
+            "type": "document_review_rolled_back",
+            "message": "Post-audit semantic repair was rejected and the baseline document was restored.",
+            "reason": report["review_loop"].get("reason"),
+        })
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     out_doc.save(args.output)
-    if hasattr(out_doc, '_tmpl_path'):
-        try:
-            import os
-            os.unlink(out_doc._tmpl_path)
-        except Exception:
-            pass
+    _cleanup_template_copy(out_doc)
 
     if args.ast is not None and normalized_document_model is not None:
         args.ast.parent.mkdir(parents=True, exist_ok=True)

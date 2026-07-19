@@ -15,7 +15,6 @@ reviews/
 task_plan.md
 findings.md
 progress.md
-tests/
 scripts/anonymize_template.py
 scripts/bootstrap_macos_lxml.sh
 scripts/list_semantic_enhancer.py

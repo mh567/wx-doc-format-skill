@@ -1,20 +1,20 @@
 ---
 name: wx-doc-format
-description: Convert Markdown or DOCX documents into WX template-formatted .docx. Removes source covers, places a generated TOC first, normalizes one document title, classifies data tables and single-cell content containers, and runs a three-stage pipeline (parse → normalize → render), with optional LLM enhancement for ambiguous TOC review, list detection, and eligible data-table caption generation.
+description: Convert Markdown or DOCX documents into WX template-formatted .docx. Removes source covers, places a generated TOC first, normalizes one document title, classifies data tables and single-cell content containers, and runs a three-stage pipeline (parse → normalize → render), with optional LLM enhancement for ambiguous TOC review, list detection, eligible data-table caption generation, and bounded post-audit semantic repair.
 metadata:
   short-description: Convert MD/DOCX to template-formatted DOCX
 ---
 
 # WX 文档格式
 
-将 Markdown 或 DOCX 文档转换为模板格式的 Word (.docx) 文档。DOCX 先识别源封面与源目录，移除封面并提取唯一文档标题，再预分析 Word OOXML 编号，随后进入解析、规范化和模板渲染流水线。输出固定以唯一主目录开头，分页后从文档标题和正文开始。可选 LLM 能力用于模糊目录候选、模糊编号候选、语义列表和表格题注处理。
+将 Markdown 或 DOCX 文档转换为模板格式的 Word (.docx) 文档。DOCX 先识别源封面与源目录，移除封面并提取唯一文档标题，再预分析 Word OOXML 编号，随后进入解析、规范化和模板渲染流水线。输出固定以唯一主目录开头，分页后从文档标题和正文开始。可选 LLM 能力用于模糊目录候选、模糊编号候选、语义列表、表格题注和审计后语义复核。
 
 ## 使用方式
 
 当用户要求转换文档时，Agent 必须先弹出两个选项供用户选择：
 
 1. **普通模式**（默认）：纯规则转换，不调用 LLM
-2. **LLM 增强模式**：增加模糊目录复核、功能点列表识别和题注生成
+2. **LLM 增强模式**：增加模糊目录复核、功能点列表识别、题注生成和审计后受限复核
 
 用户选择后直接执行对应模式，无需额外确认。
 
@@ -64,6 +64,8 @@ Step 3: 模板驱动渲染
   │  template_finalizer.py：格式收口、表格全框线、附录合并
   │  table_formatting.py：表格五层格式合同与幂等规范化
   │  audit.py：输出审计
+  │  review_loop.py：AuditFinding、ReviewPacket、候选复审、接受与回滚
+  │  document_review：只处理审计点名的可修复语义问题
   │
   ▼
 输出: 样式合规的 .docx + JSON 报告
@@ -78,7 +80,7 @@ python3 scripts/main.py \
   --output output.docx \
   --template template.docx
 
-# LLM 增强（模糊目录复核 + 功能点列表 + 题注生成）
+# LLM 增强（模糊目录复核 + 功能点列表 + 题注生成 + 审计闭环）
 --llm-enhance all
 
 # 仅模糊目录复核
@@ -89,6 +91,9 @@ python3 scripts/main.py \
 
 # 仅题注生成
 --llm-enhance caption_gen
+
+# 仅审计后文档复核
+--llm-enhance document_review
 
 # 导出 AST 调试
 --ast model.json
@@ -105,15 +110,19 @@ python3 scripts/main.py \
 | `toc_region_review` | `--llm-enhance toc_region_review` | 从确定性检测器给出的模糊候选中选择完整目录区间 |
 | `list_detect` | `--llm-enhance list_detect` | 复核模糊 Word 编号候选，并识别缺少编号结构的语义列表 |
 | `caption_gen` | `--llm-enhance caption_gen` | 根据上下文为无题注表格生成简短题注 |
-| `all` | `--llm-enhance all` | 启用全部三项能力 |
+| `document_review` | `--llm-enhance document_review` | 首次完整审计后复核可修复语义问题，复审失败时自动回滚 |
+| `all` | `--llm-enhance all` | 启用全部四项能力 |
 | `off` | 默认 | 纯规则，不调用 LLM |
 
 新增能力通过 `CapabilityConfig` 注册即可，无需修改核心调度逻辑。
 
 ### 列表处理边界
 
-- 普通模式读取 `numId`、`abstractNumId`、`ilvl`、`numFmt`、`lvlText` 和起始值。
-- 有效编号定义还需列表样式、连续同组段落或可见列表标记作为高置信度证据。
+- 普通模式读取 `numId`、`abstractNumId`、`ilvl`、`numFmt`、`lvlText`、起始值和 `startOverride`。
+- 完整的多级章节号优先识别为标题，单级列表标记不得部分剔除章节号。
+- 有效编号定义还需列表样式、连续编号序列或可见列表标记作为高置信度证据。
+- 逻辑连续序列可跨 `numId` 重建，前提是起始值、编号格式、标记模板、层级、样式和源位置同时连续。
+- 无效编号定义会抑制残留列表样式，避免孤立正文被样式名强制转为列表。
 - Heading、Title、Caption、TOC、目录、题注、注释和公式样式属于保护角色。
 - 孤立的普通样式编号段落作为模糊候选保留正文，并在报告中记录。
 - 源 `numFmt` 和 `lvlText` 保存在 `source.numbering`，不直接决定 WX 一级、二级样式。
@@ -152,13 +161,24 @@ python3 scripts/main.py --resume .wx-doc-format/run.json
 
 系统自动执行：
 
-1. 验证每个响应的 `input_hash` 完整性（防止提示词被篡改）
-2. 校验 JSON patch schema（`schema_version`、`phase`、`decisions` 结构）
-3. 校验每个 decision 的 `block_id`、`operation` 和目标类型
-4. 应用高置信度 patch 到文档模型
-5. 渲染最终输出
+1. 核对当前源文件与生成请求时记录的 `source_sha256`
+2. 重算请求哈希，并验证每个响应必填的 `input_hash`
+3. 校验 JSON patch schema，以及每个 operation 的字段、类型、枚举和范围
+4. 校验每个 decision 的 `block_id`、审计 finding、允许操作和原始值快照
+5. 应用高置信度 patch 到候选文档模型
+6. 渲染并复审候选输出
 
-当存在模糊目录候选时，首次恢复会应用 `toc_region_review` 响应，然后追加 AST 阶段请求。Agent 补全新请求的响应后再恢复一次。高置信度目录会直接进入 AST 阶段。
+当存在模糊目录候选时，首次恢复会应用 `toc_region_review` 响应，然后追加 AST 阶段请求。完成 AST 阶段后，系统先临时渲染并执行完整审计；若存在可修复语义问题，会追加 `document_review` 请求。Agent 补全新请求并再次恢复后，系统重新渲染和复审，仅接受审计评分严格改善且内容保持完整的结果。
+
+### 审计闭环边界
+
+- `document_review` 只接收结构化 `ReviewPacket`，其中包含稳定块 ID、局部上下文、审计证据和允许操作。
+- 只有置信度不低于 0.85 且命中可修复审计项的结构修改可以进入候选 AST。
+- 候选 AST 必须重新规范化、渲染并执行全量审计；出现内容变化、新增高风险问题或评分未改善时自动回滚。
+- 每个被修改块对应的目标 finding 必须消失，未命中的块不得发生语义字段变化。
+- 候选规范化、渲染或复审发生异常时保留基线文档，并在报告中记录回滚原因。
+- 原文删除、原文改写、任意块移动、模板修改、样式修改和未授权块修改都会被拒绝。
+- 无法安全修复的问题写入报告中的 `unknown_pattern_packet`，运行期不会自动修改 Skill 代码。
 
 ### 方式二（兼容）：API Key
 
@@ -196,6 +216,7 @@ python3 scripts/main.py \
 - 题注存在双向歧义、重复关联或孤立情况时保留原位置并输出风险，不执行猜测性移动
 - 题注使用 SEQ 域代码（`SEQ Table` / `SEQ Figure`）
 - 所有表格统一添加全框线
+- 审计闭环接受的候选结果必须严格改善审计评分，并保持正文、表格内容和媒体引用完整
 
 ## 使用要求
 

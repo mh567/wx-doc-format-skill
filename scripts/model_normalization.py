@@ -6,6 +6,7 @@ from typing import Callable
 from text_utils import (
     clean_note_prefix,
     heading_level_from_text,
+    hierarchical_heading_level_from_text,
     is_appendix_title,
     is_caption_text,
     is_formula_text,
@@ -55,6 +56,46 @@ def normalize_document_model_simple(
     for index, block in enumerate(model.get("document", {}).get("blocks", []), 1):
         block_type = block.get("block_type")
         text = str(block.get("text") or block.get("title") or "")
+        source = block.get("source", {})
+        raw_text = str(source.get("raw_text") or text).strip()
+
+        if block_type == "list_item":
+            hierarchical_level = hierarchical_heading_level_from_text(raw_text)
+            if hierarchical_level is not None:
+                block["block_type"] = "heading"
+                block["role"] = "heading"
+                block["level"] = hierarchical_level
+                block["text"] = strip_heading_marker(raw_text)
+                block["numbering"] = {"mode": "auto"}
+                block.pop("list_type", None)
+                block.pop("restart", None)
+                block_type = "heading"
+                text = block["text"]
+                repairs.append({
+                    "block": index,
+                    "type": "list_item_retyped_as_hierarchical_heading",
+                    "level": hierarchical_level,
+                })
+            else:
+                source_numbering = source.get("numbering", {})
+                invalid_style_only_list = (
+                    source.get("inferred_role") == "list"
+                    and source_numbering.get("status") == "ignored"
+                    and not looks_like_list_item(raw_text)
+                )
+                if invalid_style_only_list:
+                    block["block_type"] = "body"
+                    block["text"] = raw_text
+                    block.pop("level", None)
+                    block.pop("list_type", None)
+                    block.pop("restart", None)
+                    block_type = "body"
+                    text = raw_text
+                    repairs.append({
+                        "block": index,
+                        "type": "invalid_list_style_retyped_as_body",
+                        "evidence": source_numbering.get("evidence", []),
+                    })
 
         if block_type == "body":
             source_role = block.get("source", {}).get("role")
@@ -78,7 +119,7 @@ def normalize_document_model_simple(
                 active_list_signatures.clear()
                 repairs.append({"block": index, "type": "body_retyped_as_appendix"})
                 continue
-            inferred_level = heading_level_from_text(text)
+            inferred_level = hierarchical_heading_level_from_text(text)
             if inferred_level is not None:
                 block["block_type"] = "heading"
                 block["role"] = "heading"
@@ -109,6 +150,16 @@ def normalize_document_model_simple(
                 block["restart"] = False
                 repairs.append({"block": index, "type": "body_retyped_as_list_item", "list_type": block["list_type"]})
                 block_type = "list_item"
+            elif heading_level_from_text(text) is not None:
+                inferred_level = int(heading_level_from_text(text) or 1)
+                block["block_type"] = "heading"
+                block["role"] = "heading"
+                block["level"] = inferred_level
+                block["text"] = strip_heading_marker(text)
+                block["numbering"] = {"mode": "auto"}
+                active_list_signatures.clear()
+                repairs.append({"block": index, "type": "body_retyped_as_heading", "level": inferred_level})
+                continue
             elif is_caption_text(text):
                 block["block_type"] = "caption"
                 block["caption_type"] = "unknown"
