@@ -33,8 +33,28 @@ from document_model import (
 from md_pipeline import model_list_type_for_kind
 from list_style_mapping import wx_list_style_name
 from table_semantics import classify_docx_table
+from unordered_lists import annotate_unordered_candidates, paragraph_layout_evidence
+from list_group_detection import annotate_semantic_list_groups
 
 
+
+
+def _docx_list_shape(
+    text: str,
+    source_style: str,
+    numbering: dict | None,
+) -> tuple[int, str]:
+    if numbering:
+        return (
+            int(numbering.get("ilvl", 0)),
+            numbering.get("list_type", "lower_letter_paren"),
+        )
+    if "1.2一级列项-无编号" in source_style:
+        return 0, "dash"
+    if "2.2二级列项-无编号" in source_style:
+        return 1, "bullet_dot"
+    kind = list_kind_for_text(text)
+    return list_level_from_text(text), model_list_type_for_kind(kind)
 
 
 def infer_docx_role(
@@ -239,6 +259,7 @@ def parse_docx_to_model_simple(
                 inferred_role=role,
                 inferred_style=style,
                 numbering=numbering,
+                layout=paragraph_layout_evidence(block),
             )
             if paragraph_has_graphics(block):
                 if text:
@@ -254,10 +275,10 @@ def parse_docx_to_model_simple(
                             ),
                         )
                     elif role == "list":
-                        kind = list_kind_for_text(inferred_text)
-                        lst_level = int(numbering.get("ilvl", 0)) if numbering else list_level_from_text(inferred_text)
+                        lst_level, list_type = _docx_list_shape(
+                            inferred_text, source_style, numbering,
+                        )
                         restart = bool(numbering.get("restart")) if numbering else lst_level not in active_list_levels
-                        list_type = numbering.get("list_type") if numbering else model_list_type_for_kind(kind)
                         active_list_levels.add(lst_level)
                         append_block(
                             model,
@@ -307,10 +328,10 @@ def parse_docx_to_model_simple(
                 )
                 reset_lists()
             elif role == "list":
-                kind = list_kind_for_text(inferred_text)
-                lst_level = int(numbering.get("ilvl", 0)) if numbering else list_level_from_text(inferred_text)
+                lst_level, list_type = _docx_list_shape(
+                    inferred_text, source_style, numbering,
+                )
                 restart = bool(numbering.get("restart")) if numbering else lst_level not in active_list_levels
-                list_type = numbering.get("list_type") if numbering else model_list_type_for_kind(kind)
                 active_list_levels.add(lst_level)
                 append_block(
                     model,
@@ -388,6 +409,8 @@ def parse_docx_to_model_simple(
             )
             reset_lists()
 
+    annotate_unordered_candidates(model, parse_report)
+    annotate_semantic_list_groups(model, parse_report)
     model["parse_report"] = parse_report
     return model
 

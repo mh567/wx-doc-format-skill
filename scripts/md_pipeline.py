@@ -23,6 +23,8 @@ from document_model import (
     source_record,
     table_block,
 )
+from unordered_lists import annotate_unordered_candidates
+from list_group_detection import annotate_semantic_list_groups
 
 
 def is_md_table_start(lines: list[str], index: int) -> bool:
@@ -115,7 +117,10 @@ def parse_md_to_model(
 
     index = 0
     while index < len(lines):
-        line = lines[index].strip()
+        raw_line = lines[index]
+        line = raw_line.strip()
+        leading_columns = len(raw_line) - len(raw_line.lstrip(" \t"))
+        source_layout = {"left_twips": leading_columns * 120}
         if not line:
             index += 1
             continue
@@ -213,7 +218,11 @@ def parse_md_to_model(
                     lst_level,
                     model_list_type_for_kind(kind),
                     restart=restart,
-                    source=source_record(raw_text=line, format="md_list_item"),
+                    source=source_record(
+                        raw_text=line,
+                        format="md_list_item",
+                        layout=source_layout,
+                    ),
                 ),
             )
             report["inferred_lists"].append({"text": line, "source": "md-text"})
@@ -228,7 +237,12 @@ def parse_md_to_model(
                 body_block(
                     next_id(),
                     clean_note_prefix(line),
-                    source=source_record(raw_text=line, role=role, format="md_text"),
+                    source=source_record(
+                        raw_text=line,
+                        role=role,
+                        format="md_text",
+                        layout=source_layout,
+                    ),
                 ),
             )
             reset_lists()
@@ -237,4 +251,6 @@ def parse_md_to_model(
     # Record unstyled paragraph count for suspicion scoring
     parse_report["unstyled_paragraphs"] = unstyled_count
 
+    annotate_unordered_candidates(model, parse_report)
+    annotate_semantic_list_groups(model, parse_report)
     return model

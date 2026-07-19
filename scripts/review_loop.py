@@ -167,6 +167,29 @@ def collect_audit_findings(report: dict, model: dict | None) -> list[dict[str, A
                 allowed_ops=ops,
             ))
 
+    semantic_groups = report.get("parse_report", {}).get("semantic_list_groups", [])
+    for group_index, group in enumerate(semantic_groups):
+        if group.get("status") != "review":
+            continue
+        for item_index, raw_block_id in enumerate(group.get("item_block_ids", [])):
+            block_id = str(raw_block_id or "") or None
+            block = blocks.get(block_id or "", {})
+            if block.get("block_type") != "body":
+                continue
+            issue = {
+                "type": "unresolved_parallel_group",
+                "message": "并列内容组需要语义复核。",
+                **group,
+            }
+            findings.append(_finding(
+                f"semantic_list_group:{group_index}:{item_index}", issue,
+                severity="medium",
+                category="semantic",
+                repairable=True,
+                block_id=block_id,
+                allowed_ops={"retype"},
+            ))
+
     audit = report.get("audit", {})
     heading_text_ids: dict[str, list[str]] = {}
     for block in ordered_blocks:
@@ -400,6 +423,7 @@ def validate_review_patch(patch: dict, model: dict, report: dict) -> list[dict[s
                     "list_item_unknown_type": {"list_item"},
                     "isolated_ast_list_items": {"body", "heading"},
                     "protected_role_conflicts": {"body", "heading", "caption"},
+                    "unresolved_parallel_group": {"list_item"},
                 }.get(issue_type, set()))
             if destination not in allowed_destinations:
                 errors.append({

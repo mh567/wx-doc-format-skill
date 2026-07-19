@@ -688,6 +688,8 @@ def _collect_suspicious_sections(
         + _get_count("ambiguous_short_paragraphs", parse_report)
         + _get_count("inferred_headings", parse_report)
         + _get_count("ambiguous_numbered_paragraphs", parse_report)
+        + _get_count("ambiguous_unordered_paragraphs", parse_report)
+        + _get_count("semantic_list_groups", parse_report)
     )
     if total_suspicious == 0:
         return sections
@@ -711,6 +713,10 @@ def _collect_suspicious_sections(
         # inferred_headings signal)
         source = b.get("source", {})
         numbering = source.get("numbering", {})
+        if source.get("unordered_candidate"):
+            suspicious_ids.add(bid)
+        if source.get("list_group_candidate", {}).get("status") == "review":
+            suspicious_ids.add(bid)
         if numbering.get("status") == "ambiguous":
             suspicious_ids.add(bid)
         if source.get("is_compact_heading") or b.get("_inferred"):
@@ -937,6 +943,35 @@ def validate_patch(patch: dict, model: dict, allowed_ops: frozenset[str]) -> lis
                         "decision_index": idx, "block_id": bid,
                         "message": "Ambiguous OOXML list candidates must preserve level and list_type",
                     })
+            unordered_candidate = source.get("unordered_candidate", {})
+            if (
+                to_type == "list_item"
+                and unordered_candidate
+                and to_.get("list_type") not in {"dash", "bullet_dot"}
+            ):
+                errors.append({
+                    "decision_index": idx,
+                    "block_id": bid,
+                    "message": "Unordered-marker candidates must use an unordered list_type",
+                })
+            list_group = source.get("list_group_candidate", {})
+            protected_family = list_group.get("family_source") in {
+                "source_ordered", "source_unordered",
+                "visible_ordered_marker", "visible_unordered_marker",
+                "named_ordered_style", "named_unordered_style",
+            }
+            if to_type == "list_item" and list_group and protected_family:
+                expected_family = list_group.get("family")
+                actual_family = (
+                    "unordered" if to_.get("list_type") in {"dash", "bullet_dot"}
+                    else "ordered"
+                )
+                if actual_family != expected_family:
+                    errors.append({
+                        "decision_index": idx,
+                        "block_id": bid,
+                        "message": "High-confidence list family evidence must be preserved",
+                    })
 
             allowed_retype_fields = {
                 "heading": {"block_type", "level"},
@@ -1100,6 +1135,44 @@ def validate_patch(patch: dict, model: dict, allowed_ops: frozenset[str]) -> lis
                         "decision_index": idx, "block_id": bid,
                         "message": "exclude_toc_region cannot change candidate identity or boundaries",
                     })
+
+    group_decisions: dict[str, list[dict[str, Any]]] = {}
+    for decision in decisions:
+        if not isinstance(decision, dict) or decision.get("operation") != "retype":
+            continue
+        block = blocks_by_id.get(str(decision.get("block_id") or ""), {})
+        group = block.get("source", {}).get("list_group_candidate", {})
+        group_id = str(group.get("group_id") or "")
+        if group_id and decision.get("to", {}).get("block_type") == "list_item":
+            group_decisions.setdefault(group_id, []).append(decision)
+    for group_id, member_decisions in group_decisions.items():
+        first_block = blocks_by_id.get(str(member_decisions[0].get("block_id") or ""), {})
+        group = first_block.get("source", {}).get("list_group_candidate", {})
+        expected_ids = {
+            str(block_id) for block_id in group.get("item_block_ids", [])
+            if blocks_by_id.get(str(block_id), {}).get("block_type") == "body"
+        }
+        actual_ids = {str(decision.get("block_id")) for decision in member_decisions}
+        if actual_ids != expected_ids:
+            errors.append({
+                "field": "decisions",
+                "group_id": group_id,
+                "message": "Semantic list groups must be retyped atomically",
+                "expected_block_ids": sorted(expected_ids),
+                "actual_block_ids": sorted(actual_ids),
+            })
+        targets = [decision.get("to", {}) for decision in member_decisions]
+        families = {
+            "unordered" if target.get("list_type") in {"dash", "bullet_dot"} else "ordered"
+            for target in targets
+        }
+        levels = {target.get("level") for target in targets}
+        if len(families) > 1 or len(levels) > 1:
+            errors.append({
+                "field": "decisions",
+                "group_id": group_id,
+                "message": "Semantic list group members must use one family and level",
+            })
 
     return errors
 
@@ -1400,6 +1473,8 @@ def _build_phase_a_prompt(
         source_style = source.get("style", "-")
         source_role = source.get("inferred_role", "-")
         numbering = source.get("numbering", {})
+        unordered_candidate = source.get("unordered_candidate", {})
+        list_group = source.get("list_group_candidate", {})
         numbering_summary = "-"
         if numbering:
             numbering_summary = (
@@ -1409,10 +1484,32 @@ def _build_phase_a_prompt(
                 f" sourceType={numbering.get('source_list_type')}"
                 f" wxSuggested={numbering.get('list_type')}"
             )
+        unordered_summary = "-"
+        if unordered_candidate:
+            unordered_summary = (
+                f"marker={unordered_candidate.get('marker')}"
+                f" unicode={unordered_candidate.get('unicode_name')}"
+                f" repeated={unordered_candidate.get('section_marker_count')}"
+                f" layout={unordered_candidate.get('layout', {})}"
+            )
+        group_summary = "-"
+        if list_group:
+            group_summary = (
+                f"id={list_group.get('group_id')}"
+                f" status={list_group.get('status')}"
+                f" items={list_group.get('item_block_ids')}"
+                f" groupConfidence={list_group.get('group_confidence')}"
+                f" family={list_group.get('family')}"
+                f" familySource={list_group.get('family_source')}"
+                f" familyConfidence={list_group.get('family_confidence')}"
+                f" evidence={list_group.get('evidence', [])}"
+                f" conflicts={list_group.get('conflicts', [])}"
+            )
         lines.append(
             f"  [{bid}] section={section} source_style={source_style}"
             f" source_role={source_role} type={btype} role={role} level={level}"
-            f" list={list_type} cap={cap_type} numbering=({numbering_summary}) | {text}"
+            f" list={list_type} cap={cap_type} numbering=({numbering_summary})"
+            f" unordered=({unordered_summary}) group=({group_summary}) | {text}"
         )
 
     example = _format_patch_example({
@@ -1435,7 +1532,13 @@ def _build_phase_a_prompt(
         "",
         "允许角色: heading, body, list_item, caption",
         "带有 ambiguous OOXML numbering 的候选必须使用建议的 ilvl 和 wxSuggested list_type。",
-        "缺少 OOXML numbering 的语义列表默认使用 level=0, list_type=lower_letter_paren。",
+        "缺少 OOXML numbering 时，先判断列表家族。具有明确先后顺序的步骤使用有序列表，平行功能点使用无序列表。",
+        "unordered 中出现任意 marker、Unicode 名称和重复次数时，应结合缩进、相邻段落和章节语义判断，不能只依赖圆点或方块枚举。",
+        "原始无序项目符号只提供列表类别证据。当前章节的最外层使用 level=0, list_type=dash；有效父项下的子层使用 level>=1, list_type=bullet_dot。",
+        "group 中相同 group_id 的候选必须作为完整组审查，结合 anchor、item_block_ids、evidence 和 conflicts 判断成员边界。",
+        "familySource=semantic_default_ordered 时，可以根据整组语义改为有序或无序；高置信度源类别证据必须保留。",
+        "引导关系、冒号和短标签均为软证据，不能要求固定引导词，也不能要求每个条目都采用标签加冒号结构。",
+        "无父项的孤立深层列表要提升到 level=0。原始圆点、方块、菱形或其他符号不决定最终层级。",
         "标题层级必须在 1 到 6。",
         "",
         "约束（必须遵守）:",
@@ -1449,8 +1552,8 @@ def _build_phase_a_prompt(
         "numbering status=ignored 的 block 不得转为 list_item。",
         "",
         "说明体保持 body：形如“术语：说明文字”“属性名：说明文字”“原则名：长说明”的段落按正文处理。",
-        "长段落保持 body：超过 100 字且没有 a) 1) 1. • 等列表标记时，不要转为 list_item。",
-        "列表体才转 list_item：连续短句、平行结构、无冒号前缀，通常以 a) 1) 1. • 或短横线开头。",
+        "长段落保持 body：超过 100 字且没有编号、项目符号、缩进或平行结构证据时，不要转为 list_item。",
+        "连续短句、平行结构、重复前导符号或稳定悬挂缩进可转为 list_item。未知符号候选仍需上下文支持。",
         "",
         "重点审查以下场景：",
         "  - 连续 body 功能点列表（应转为 list_item）",
@@ -1953,6 +2056,19 @@ def compute_suspicion_score(report: dict) -> float:
 
     suspect_visual_headings = _signal(parse_report.get("suspect_visual_headings", 0))
     ambiguous_short_paragraphs = _signal(parse_report.get("ambiguous_short_paragraphs", 0))
+    ambiguous_unordered_paragraphs = _signal(
+        parse_report.get("ambiguous_unordered_paragraphs", 0)
+    )
+    semantic_group_items = sum(
+        len(group.get("item_block_ids", []))
+        for group in parse_report.get("semantic_list_groups", [])
+        if isinstance(group, dict) and group.get("status") == "review"
+    )
+    ambiguous_short_paragraphs = max(
+        ambiguous_short_paragraphs,
+        ambiguous_unordered_paragraphs,
+        semantic_group_items,
+    )
     inferred_headings = _signal(parse_report.get("inferred_headings", 0))
     inferred_lists = _signal(parse_report.get("inferred_lists", 0))
     unstyled_paragraphs = _signal(parse_report.get("unstyled_paragraphs", 0))

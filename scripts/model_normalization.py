@@ -18,6 +18,8 @@ from text_utils import (
 from document_model import validate_document_model
 from list_style_mapping import normalize_wx_list_type
 from caption_placement import normalize_caption_placement
+from unordered_lists import normalize_unordered_hierarchy
+from list_group_detection import apply_semantic_list_groups
 
 
 def _model_list_type_for_kind(kind: str) -> str:
@@ -52,6 +54,7 @@ def normalize_document_model_simple(
     model = deepcopy(source_model)
     repairs = []
     active_list_signatures: set[tuple[int, str]] = set()
+    apply_semantic_list_groups(model, repairs)
 
     for index, block in enumerate(model.get("document", {}).get("blocks", []), 1):
         block_type = block.get("block_type")
@@ -268,61 +271,7 @@ def normalize_document_model_simple(
                 block["row_height_rule"] = "atLeast"
                 repairs.append({"block": index, "type": "table_row_height_rule_at_least"})
 
-    # ── F4: Infer lists from consecutive short body paragraphs ──
-    blocks = model.get("document", {}).get("blocks", [])
-    short_runs: list[int] = []
-    for bi, block in enumerate(blocks):
-        text = str(block.get("text", "") or "")
-        is_short_body = (
-            block.get("block_type") == "body"
-            and not block.get("source", {}).get("role") in ("list_item", "note", "numbered_note", "formula", "appendix_title")
-            and 15 <= len(text) <= 30
-            and not text.endswith(("。", "；", ";", "，", ","))
-            and not looks_like_list_item(text)
-        )
-        if is_short_body:
-            if short_runs:
-                prev_text = str(blocks[short_runs[-1]].get("text", ""))
-                prev_len = len(prev_text)
-                curr_len = len(text)
-                max_len = max(prev_len, curr_len)
-                min_len = min(prev_len, curr_len)
-                similar = min_len > 0 and (max_len - min_len) / max_len < 0.5
-            else:
-                similar = True
-            if similar:
-                short_runs.append(bi)
-                continue
-            # Run broken — flush previous if long enough
-            if len(short_runs) >= 3:
-                for ri in short_runs:
-                    rblock = blocks[ri]
-                    rblock["block_type"] = "list_item"
-                    rblock["level"] = 0
-                    rblock["list_type"] = "lower_letter_paren"
-                    rblock["restart"] = len(short_runs) == len(blocks) or ri == short_runs[0]
-                    repairs.append({"block": ri + 1, "type": "short_para_retyped_as_list_item", "text": rblock.get("text", "")})
-            short_runs = [bi]
-        else:
-            if len(short_runs) >= 3:
-                for ri in short_runs:
-                    rblock = blocks[ri]
-                    rblock["block_type"] = "list_item"
-                    rblock["level"] = 0
-                    rblock["list_type"] = "lower_letter_paren"
-                    rblock["restart"] = ri == short_runs[0]
-                    repairs.append({"block": ri + 1, "type": "short_para_retyped_as_list_item", "text": rblock.get("text", "")})
-            short_runs = []
-    # End-of-blocks flush
-    if len(short_runs) >= 3:
-        for ri in short_runs:
-            rblock = blocks[ri]
-            rblock["block_type"] = "list_item"
-            rblock["level"] = 0
-            rblock["list_type"] = "lower_letter_paren"
-            rblock["restart"] = ri == short_runs[0]
-            repairs.append({"block": ri + 1, "type": "short_para_retyped_as_list_item", "text": rblock.get("text", "")})
-
+    normalize_unordered_hierarchy(model, repairs)
     normalize_caption_placement(model, repairs)
 
     issues = validate_document_model(model)

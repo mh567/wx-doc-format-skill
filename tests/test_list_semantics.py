@@ -7,6 +7,7 @@ from docx import Document
 from docx.enum.style import WD_STYLE_TYPE
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
+from docx.shared import Twips
 
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
@@ -41,6 +42,25 @@ def _add_single_level_abstract(doc: Document, abstract_id: int) -> None:
     level.append(num_fmt)
     lvl_text = OxmlElement("w:lvlText")
     lvl_text.set(qn("w:val"), "%1.")
+    level.append(lvl_text)
+    abstract.append(level)
+    root.insert(0, abstract)
+
+
+def _add_bullet_abstract(doc: Document, abstract_id: int, marker: str = "•") -> None:
+    root = doc.part.numbering_part.element
+    abstract = OxmlElement("w:abstractNum")
+    abstract.set(qn("w:abstractNumId"), str(abstract_id))
+    level = OxmlElement("w:lvl")
+    level.set(qn("w:ilvl"), "0")
+    start = OxmlElement("w:start")
+    start.set(qn("w:val"), "1")
+    level.append(start)
+    num_fmt = OxmlElement("w:numFmt")
+    num_fmt.set(qn("w:val"), "bullet")
+    level.append(num_fmt)
+    lvl_text = OxmlElement("w:lvlText")
+    lvl_text.set(qn("w:val"), marker)
     level.append(lvl_text)
     abstract.append(level)
     root.insert(0, abstract)
@@ -196,6 +216,46 @@ def test_cross_num_id_merge_requires_visible_sequence_continuity() -> None:
     assert groups[0] != groups[2]
     assert restarts == [True, False, True, False]
     assert report["source_lists"]["cross_num_id_group_count"] == 0
+
+
+def test_fragmented_bullet_num_ids_are_reconstructed_by_structure() -> None:
+    doc = Document()
+    abstract_id = 120
+    _add_bullet_abstract(doc, abstract_id)
+    for num_id in range(120, 125):
+        _add_num(doc, num_id, abstract_id, 1)
+        paragraph = doc.add_paragraph(f"并列角色{num_id}")
+        paragraph.paragraph_format.left_indent = Twips(420)
+        _set_direct_num(paragraph, num_id)
+    report: dict = {}
+
+    descriptors = analyze_docx_lists(doc, report)
+    items = [descriptors[index] for index in sorted(descriptors)]
+
+    assert all(item["status"] == "detected" for item in items)
+    assert all(item["group_size"] == 5 for item in items)
+    assert all(item["source_list_type"] == "bullet_dot" for item in items)
+    assert [item["restart"] for item in items] == [True, False, False, False, False]
+    assert report["source_lists"]["cross_num_id_group_count"] == 1
+    assert "structural_bullet_continuity" in items[0]["evidence"]
+
+
+def test_fragmented_bullets_do_not_cross_layout_boundary() -> None:
+    doc = Document()
+    abstract_id = 130
+    _add_bullet_abstract(doc, abstract_id)
+    for num_id, left in ((130, 0), (131, 720)):
+        _add_num(doc, num_id, abstract_id, 1)
+        paragraph = doc.add_paragraph(f"分组{num_id}")
+        paragraph.paragraph_format.left_indent = Twips(left)
+        _set_direct_num(paragraph, num_id)
+    report: dict = {}
+
+    descriptors = analyze_docx_lists(doc, report)
+
+    assert descriptors[0]["group_id"] != descriptors[1]["group_id"]
+    assert descriptors[0]["status"] == "ambiguous"
+    assert descriptors[1]["status"] == "ambiguous"
 
 
 def test_normalization_repairs_legacy_role_conflicts() -> None:
