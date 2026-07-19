@@ -23,6 +23,9 @@ tests/*
 !tests/test_front_matter.py
 !tests/test_table_semantics.py
 !tests/test_caption_placement.py
+!tests/test_list_semantics.py
+!tests/test_review_loop.py
+!tests/test_table_formatting.py
 scripts/anonymize_template.py
 scripts/bootstrap_macos_lxml.sh
 scripts/list_semantic_enhancer.py

@@ -9,6 +9,7 @@ descriptors remain available to the registered ``list_detect`` capability.
 from __future__ import annotations
 
 from collections import Counter
+import re
 from typing import Any
 
 from docx.oxml.ns import qn
@@ -22,6 +23,7 @@ _LIST_FORMATS = {
     "decimal", "decimalZero", "lowerLetter", "upperLetter",
     "lowerRoman", "upperRoman", "bullet",
 }
+_ORDERED_LIST_FORMATS = _LIST_FORMATS - {"bullet"}
 _PROTECTED_STYLES = {"caption", "题注", "文档标题", "title"}
 
 
@@ -73,13 +75,37 @@ def _paragraph_num_info(paragraph: Paragraph) -> tuple[int | None, int | None, s
     return None, None, "none"
 
 
-def _numbering_maps(doc) -> tuple[dict[int, int], dict[int, dict[int, dict[str, Any]]]]:
+def _level_values(level) -> dict[str, Any]:
+    def value(tag: str) -> str | None:
+        child = level.find(qn(tag))
+        return child.get(qn("w:val")) if child is not None else None
+
+    try:
+        start = int(value("w:start") or 1)
+    except (TypeError, ValueError):
+        start = 1
+    return {
+        "num_fmt": value("w:numFmt"),
+        "lvl_text": value("w:lvlText"),
+        "p_style": value("w:pStyle"),
+        "start": start,
+    }
+
+
+def _numbering_maps(
+    doc,
+) -> tuple[
+    dict[int, int],
+    dict[int, dict[int, dict[str, Any]]],
+    dict[int, dict[int, dict[str, Any]]],
+]:
     num_to_abstract: dict[int, int] = {}
     abstract_levels: dict[int, dict[int, dict[str, Any]]] = {}
+    num_level_overrides: dict[int, dict[int, dict[str, Any]]] = {}
     try:
         root = doc.part.numbering_part.element
     except Exception:
-        return num_to_abstract, abstract_levels
+        return num_to_abstract, abstract_levels, num_level_overrides
 
     for num in root.findall(qn("w:num")):
         try:
@@ -87,6 +113,32 @@ def _numbering_maps(doc) -> tuple[dict[int, int], dict[int, dict[int, dict[str, 
             abstract = num.find(qn("w:abstractNumId"))
             if abstract is not None:
                 num_to_abstract[num_id] = int(abstract.get(qn("w:val")))
+            overrides: dict[int, dict[str, Any]] = {}
+            for override in num.findall(qn("w:lvlOverride")):
+                try:
+                    ilvl = int(override.get(qn("w:ilvl"), "0"))
+                except ValueError:
+                    ilvl = 0
+                values: dict[str, Any] = {}
+                override_level = override.find(qn("w:lvl"))
+                if override_level is not None:
+                    level_values = _level_values(override_level)
+                    if override_level.find(qn("w:start")) is None:
+                        level_values.pop("start", None)
+                    values.update({
+                        key: value for key, value in level_values.items()
+                        if value is not None
+                    })
+                start_override = override.find(qn("w:startOverride"))
+                if start_override is not None:
+                    try:
+                        values["start"] = int(start_override.get(qn("w:val")))
+                    except (TypeError, ValueError):
+                        pass
+                if values:
+                    overrides[ilvl] = values
+            if overrides:
+                num_level_overrides[num_id] = overrides
         except (TypeError, ValueError):
             continue
 
@@ -102,23 +154,54 @@ def _numbering_maps(doc) -> tuple[dict[int, int], dict[int, dict[int, dict[str, 
             except ValueError:
                 ilvl = 0
 
-            def value(tag: str) -> str | None:
-                child = level.find(qn(tag))
-                return child.get(qn("w:val")) if child is not None else None
-
-            try:
-                start = int(value("w:start") or 1)
-            except (TypeError, ValueError):
-                start = 1
-
-            levels[ilvl] = {
-                "num_fmt": value("w:numFmt"),
-                "lvl_text": value("w:lvlText"),
-                "p_style": value("w:pStyle"),
-                "start": start,
-            }
+            levels[ilvl] = _level_values(level)
         abstract_levels[abstract_id] = levels
-    return num_to_abstract, abstract_levels
+    return num_to_abstract, abstract_levels, num_level_overrides
+
+
+def _normalized_marker_template(value: str | None) -> str:
+    """Normalize placeholder indexes while preserving visible punctuation."""
+    return re.sub(r"%\d+", "%n", value or "")
+
+
+def _physical_groups_continue(
+    previous: list[dict[str, Any]],
+    current: list[dict[str, Any]],
+) -> bool:
+    """Return True when two Word numbering instances form one visible sequence.
+
+    OOXML producers frequently create a new ``numId`` for an item that merely
+    continues the displayed sequence.  Continuity therefore uses observable
+    invariants instead of identifier equality alone.
+    """
+    if not previous or not current:
+        return False
+    prev_last = previous[-1]
+    curr_first = current[0]
+    if curr_first["source_position"] != prev_last["source_position"] + 1:
+        return False
+    if any(_is_protected_style(item.get("style", "")) for item in (*previous, *current)):
+        return False
+    if len({int(item.get("ilvl") or 0) for item in previous}) != 1:
+        return False
+    if len({int(item.get("ilvl") or 0) for item in current}) != 1:
+        return False
+    if int(previous[0].get("ilvl") or 0) != int(curr_first.get("ilvl") or 0):
+        return False
+    prev_format = previous[0].get("num_fmt")
+    curr_format = curr_first.get("num_fmt")
+    if prev_format not in _ORDERED_LIST_FORMATS or curr_format != prev_format:
+        return False
+    if _normalized_marker_template(previous[0].get("lvl_text")) != _normalized_marker_template(curr_first.get("lvl_text")):
+        return False
+    if previous[0].get("style", "").casefold().strip() != curr_first.get("style", "").casefold().strip():
+        return False
+    try:
+        expected_start = int(previous[0].get("start") or 1) + len(previous)
+        actual_start = int(curr_first.get("start") or 1)
+    except (TypeError, ValueError):
+        return False
+    return actual_start == expected_start
 
 
 def analyze_docx_lists(
@@ -129,7 +212,7 @@ def analyze_docx_lists(
 ) -> dict[int, dict[str, Any]]:
     """Return numbering descriptors keyed by stable top-level source position."""
     excluded = excluded_source_positions or set()
-    num_to_abstract, abstract_levels = _numbering_maps(doc)
+    num_to_abstract, abstract_levels, num_level_overrides = _numbering_maps(doc)
     candidates: list[dict[str, Any]] = []
     position = 0
     for child in doc.element.body.iterchildren():
@@ -139,7 +222,8 @@ def analyze_docx_lists(
                 ilvl, num_id, numbering_source = _paragraph_num_info(paragraph)
                 if num_id is not None:
                     abstract_id = num_to_abstract.get(num_id)
-                    level = abstract_levels.get(abstract_id, {}).get(ilvl or 0, {})
+                    level = dict(abstract_levels.get(abstract_id, {}).get(ilvl or 0, {}))
+                    level.update(num_level_overrides.get(num_id, {}).get(ilvl or 0, {}))
                     style_name = _style_name(paragraph)
                     candidates.append({
                         "source_position": position,
@@ -158,9 +242,9 @@ def analyze_docx_lists(
         elif child.tag == qn("w:tbl"):
             position += 1
 
-    group_id = 0
+    physical_group_id = 0
     previous: dict[str, Any] | None = None
-    groups: dict[int, list[dict[str, Any]]] = {}
+    physical_groups: list[list[dict[str, Any]]] = []
     for candidate in candidates:
         contiguous = (
             previous is not None
@@ -168,13 +252,29 @@ def analyze_docx_lists(
             and candidate["source_position"] == previous["source_position"] + 1
         )
         if not contiguous:
-            group_id += 1
-        candidate["group_id"] = f"list_group_{group_id}"
-        groups.setdefault(group_id, []).append(candidate)
+            physical_group_id += 1
+            physical_groups.append([])
+        candidate["physical_group_id"] = f"num_group_{physical_group_id}"
+        physical_groups[-1].append(candidate)
         previous = candidate
 
+    groups: list[list[dict[str, Any]]] = []
+    previous_physical_group: list[dict[str, Any]] | None = None
+    for physical_group in physical_groups:
+        if (
+            groups
+            and previous_physical_group is not None
+            and _physical_groups_continue(previous_physical_group, physical_group)
+        ):
+            groups[-1].extend(physical_group)
+        else:
+            groups.append(list(physical_group))
+        previous_physical_group = physical_group
+
     result: dict[int, dict[str, Any]] = {}
-    for numeric_group_id, group in groups.items():
+    for numeric_group_id, group in enumerate(groups, 1):
+        logical_num_ids = list(dict.fromkeys(int(item["num_id"]) for item in group))
+        continued_across_num_id = len(logical_num_ids) > 1
         for group_index, candidate in enumerate(group):
             style_name = candidate["style"]
             num_fmt = candidate.get("num_fmt")
@@ -184,8 +284,16 @@ def analyze_docx_lists(
                 evidence.append("valid_numbering_definition")
             if _is_list_style(style_name):
                 evidence.append("list_style")
-            if len(group) >= 2:
+            physical_group_size = sum(
+                1 for item in group
+                if item.get("physical_group_id") == candidate.get("physical_group_id")
+            )
+            if physical_group_size >= 2:
                 evidence.append("consecutive_num_id_group")
+            if len(group) >= 2:
+                evidence.append("consecutive_numbering_sequence")
+            if continued_across_num_id:
+                evidence.append("continued_across_num_id")
             if looks_like_list_item(candidate.get("text", "")):
                 evidence.append("visible_list_marker")
             if candidate.get("numbering_source") == "direct":
@@ -193,7 +301,9 @@ def analyze_docx_lists(
 
             protected = _is_protected_style(style_name) or p_style.startswith("heading")
             valid = candidate.get("abstract_num_id") is not None and num_fmt in _LIST_FORMATS
-            high = valid and bool({"list_style", "consecutive_num_id_group", "visible_list_marker"} & set(evidence))
+            high = valid and bool({
+                "list_style", "consecutive_numbering_sequence", "visible_list_marker",
+            } & set(evidence))
             if protected or num_fmt == "none" or not valid or not candidate.get("text"):
                 status = "ignored"
                 confidence = 0.0
@@ -217,6 +327,9 @@ def analyze_docx_lists(
             descriptor.update({
                 "group_size": len(group),
                 "group_index": group_index,
+                "group_id": f"list_group_{numeric_group_id}",
+                "logical_num_ids": logical_num_ids,
+                "continued_across_num_id": continued_across_num_id,
                 "restart": group_index == 0,
                 "status": status,
                 "confidence": confidence,
@@ -235,6 +348,8 @@ def analyze_docx_lists(
         "ambiguous": statuses.get("ambiguous", 0),
         "ignored": statuses.get("ignored", 0),
         "group_count": len(groups),
+        "physical_group_count": len(physical_groups),
+        "cross_num_id_group_count": sum(1 for group in groups if len({item['num_id'] for item in group}) > 1),
         "candidates": list(result.values()),
     }
     if statuses.get("ambiguous"):

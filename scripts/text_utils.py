@@ -12,9 +12,24 @@ HEADING_PATTERNS = [
     (re.compile(r"^（([一二三四五六七八九十百千零\d]+)）\s*"), 2),
 ]
 
+_HIERARCHICAL_ARABIC_HEADING = re.compile(
+    r"^(?P<number>\d+(?:[.．]\d+)+)(?:\s+|(?=[^\d.．\s]))"
+)
+_VERSION_CONTEXT = re.compile(
+    r"^(?:v(?:ersion)?\s*)?(?:版本(?:号|信息|说明)|release\b|build\b)",
+    re.IGNORECASE,
+)
+_NETWORK_CONTEXT = re.compile(
+    r"^(?:IP|IPv4|地址|网段|网关|掩码|端口|主机|服务器|节点|DNS|URL)",
+    re.IGNORECASE,
+)
+
 LIST_PATTERNS = [
     (re.compile(r"^[a-zA-Z]\)\s*"), "letter"),
-    (re.compile(r"^\d+\.\.?\s*"), "decimal"),
+    # A decimal list marker must end before another digit.  This prevents a
+    # hierarchical heading such as ``6.3 Title`` from being split into a
+    # synthetic list marker ``6.`` and residual text ``3 Title``.
+    (re.compile(r"^\d+[.．]{1,2}(?![.．\d])\s*"), "decimal"),
     (re.compile(r"^\d+\)\s*"), "decimal"),
     (re.compile(r"^（\d+）\s*"), "decimal"),
     (re.compile(r"^\(\d+\)\s*"), "decimal"),
@@ -31,9 +46,37 @@ FORMULA_PATTERN = re.compile(r"^(S|S\.)?\(?\d+(?:\.\d+)*\)?[：:]\s*")
 NOTE_FORMULA_LINE = re.compile(r"^（\d+(?:\.\d+)*）\s*")
 
 
+def hierarchical_heading_level_from_text(text: str) -> int | None:
+    """Return the level encoded by a leading dotted Arabic section number.
+
+    The marker is parsed as one token so list detection can never consume only
+    its first component.  Full-width dots are normalized for documents created
+    by localized Office suites.
+    """
+    clean_text = text.strip()
+    if len(clean_text) > 80 or clean_text.endswith(("。", "；", ";", "，", ",")):
+        return None
+    match = _HIERARCHICAL_ARABIC_HEADING.match(clean_text)
+    if match is None:
+        return None
+    remainder = clean_text[match.end():].strip()
+    if not remainder or not any(character.isalpha() for character in remainder):
+        return None
+    number = match.group("number").replace("．", ".")
+    parts = [int(part) for part in number.split(".")]
+    if parts[0] > 99:
+        return None
+    if len(parts) == 4 and all(0 <= part <= 255 for part in parts):
+        if parts[0] >= 10 or _NETWORK_CONTEXT.match(remainder):
+            return None
+    if len(parts) >= 3 and _VERSION_CONTEXT.match(remainder):
+        return None
+    return min(len(parts), 6)
+
+
 def strip_heading_marker(text: str) -> str:
     text = text.strip()
-    text = re.sub(r"^\d+(?:\.\d+)+\s*", "", text)
+    text = _HIERARCHICAL_ARABIC_HEADING.sub("", text, count=1)
     # Trailing page numbers or tabs: "概述	1", "依据文件 1"
     text = re.sub(r"[\t ]+\d+$", "", text)
     text = re.sub(r"^\d+\s+", "", text)
@@ -44,12 +87,15 @@ def strip_heading_marker(text: str) -> str:
 
 def heading_level_from_text(text: str) -> int | None:
     text = text.strip()
-    if len(text) > 30:
+    if len(text) > 80:
         return None
-    m = re.match(r"^\d+(?:\.\d+)+\s+", text)
-    if m:
-        parts = m.group().strip().split(".")
-        return min(len(parts), 6)
+    hierarchical_level = hierarchical_heading_level_from_text(text)
+    if hierarchical_level is not None:
+        return hierarchical_level
+    # A dotted numeric prefix that failed the complete heading contract must
+    # not fall through to the looser single-number heading patterns.
+    if re.match(r"^\d+[.．]\d+", text):
+        return None
     m = re.match(r"^\d+\s+", text)
     if m:
         return 1
@@ -105,7 +151,7 @@ def heading_number_source(num_id: int | None, num_level: int | None, text: str) 
 def existing_heading_number(text: str) -> bool:
     if not text:
         return False
-    if re.match(r"^\d+(?:\.\d+)+\s+", text):
+    if hierarchical_heading_level_from_text(text) is not None:
         return True
     if re.match(r"^\d+\s+", text):
         return True
@@ -117,27 +163,6 @@ def existing_heading_number(text: str) -> bool:
 
 def strip_manual_number(text: str) -> str:
     return strip_heading_marker(text)
-
-
-def compact_heading_text(text: str) -> str:
-    if " " in text or "　" in text:
-        return text.split()[0]
-    return text
-
-
-def is_compact_function_heading_text(text: str) -> bool:
-    return len(text) <= 16 and not text.endswith(("。", "；", ";", "，", ","))
-
-
-def is_compact_numbered_function_heading(text: str) -> bool:
-    text = text.strip()
-    m = re.match(r"^\d+(?:\.\d+)+\s*", text)
-    if not m:
-        return False
-    rest = text[m.end():].strip()
-    if not rest:
-        return False
-    return is_compact_function_heading_text(rest)
 
 
 def looks_like_list_item(text: str) -> bool:
@@ -197,7 +222,10 @@ def is_compact_function_heading_text(text: str) -> bool:
 
 
 def is_compact_numbered_function_heading(text: str) -> bool:
-    return bool(re.match(r"^\d+[.．]\S", text)) and is_compact_function_heading_text(text)
+    return (
+        hierarchical_heading_level_from_text(text) is not None
+        and is_compact_function_heading_text(text)
+    )
 
 
 def is_formula_text(text: str) -> bool:

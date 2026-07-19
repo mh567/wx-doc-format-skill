@@ -10,7 +10,11 @@ Supports a staged workflow:
 
 3. **Resume AST enhancement** (``--resume RUN_JSON``):
    Read ``llm_responses.jsonl``, verify integrity (``input_hash``), validate each
-   patch against the document model, apply approved patches, render final output.
+   patch against the document model and render an audited candidate.
+
+4. **Resume post-audit review** (``--resume RUN_JSON``), when needed:
+   Apply bounded ``document_review`` decisions, re-render, re-audit, then accept
+   the candidate or restore the baseline output.
 """
 
 from __future__ import annotations
@@ -257,6 +261,17 @@ class ProtocolError(Exception):
     pass
 
 
+def verify_source_snapshot(path: Path, expected_hash: str) -> None:
+    """Require the resume input to match the source used to build requests."""
+    if not expected_hash:
+        raise ProtocolError("run.json does not contain source_sha256")
+    actual_hash = compute_source_sha256(path)
+    if actual_hash != expected_hash:
+        raise ProtocolError(
+            "source file changed after request generation; regenerate the LLM requests"
+        )
+
+
 def validate_response_schema(response: dict) -> None:
     """Check top-level fields of a response entry."""
     if response.get("protocol_version") != PROTOCOL_VERSION:
@@ -269,6 +284,10 @@ def validate_response_schema(response: dict) -> None:
     if "raw_response" not in response:
         raise ProtocolError(
             f"Missing raw_response in response {response.get('request_id')}"
+        )
+    if not isinstance(response.get("input_hash"), str) or not response.get("input_hash"):
+        raise ProtocolError(
+            f"Missing input_hash in response {response.get('request_id')}"
         )
 
 
@@ -291,17 +310,21 @@ def verify_response(request: dict, response: dict) -> None:
             f"request has {rid_req!r}"
         )
 
-    # Recompute the hash that this response claims (if it carries one).
+    # Verify the stored request before trusting it, then bind the response to
+    # the recomputed value.
     claimed_hash = response.get("input_hash")
-    expected_hash = request.get("input_hash", "")
-    if claimed_hash and claimed_hash != expected_hash:
-        # Tag-team verification: the response's claimed hash must equal
-        # what the request recorded.  A mismatch means either the request
-        # was tampered with after generation, or the response was forged.
+    recorded_hash = request.get("input_hash", "")
+    expected_hash = compute_input_hash(request)
+    if recorded_hash != expected_hash:
+        raise ProtocolError(
+            f"request input_hash mismatch for {rid_resp}: "
+            f"recorded {recorded_hash}, computed {expected_hash}"
+        )
+    if claimed_hash != expected_hash:
         raise ProtocolError(
             f"input_hash mismatch for {rid_resp}: "
             f"response claims {claimed_hash}, "
-            f"request has {expected_hash}"
+            f"computed request hash is {expected_hash}"
         )
 
 
@@ -464,6 +487,8 @@ def replay_phase_responses(
 
         # ── Validation against model ───────────────────────────────
         validation_errors = validate_patch(patch, model, allowed_ops)
+        if desc.validator is not None:
+            validation_errors.extend(desc.validator(patch, model, report))
         if validation_errors:
             enh["errors"].append({
                 "phase": phase, "batch": batch_idx,

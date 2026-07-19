@@ -227,4 +227,4 @@ def test_low_confidence_llm_selection_is_skipped() -> None:
 
 
 def test_all_mode_includes_source_capability() -> None:
-    assert normalize_mode("all") == "sab"
+    assert normalize_mode("all") == "sabc"

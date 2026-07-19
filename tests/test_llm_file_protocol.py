@@ -337,6 +337,7 @@ class TestValidateResponseSchema:
             "protocol_version": PROTOCOL_VERSION,
             "run_id": "R1",
             "request_id": "A-0000",
+            "input_hash": "sha256:test",
             "raw_response": '{"schema_version":"1.0"}',
         }
         # Should not raise
@@ -414,6 +415,7 @@ class TestVerifyResponse:
             "protocol_version": PROTOCOL_VERSION,
             "run_id": "R1",
             "request_id": "B-0000",  # different
+            "input_hash": request["input_hash"],
             "raw_response": "{}",
         }
         try:
@@ -441,8 +443,8 @@ class TestVerifyResponse:
         except ProtocolError as e:
             assert "input_hash mismatch" in str(e)
 
-    def test_input_hash_absent_in_response_still_works(self):
-        """When the response lacks input_hash, verification passes (backward compat)."""
+    def test_input_hash_absent_in_response_is_rejected(self):
+        """Every response must be bound to the exact request payload."""
         request = build_llm_request(
             run_id="R1", request_id="A-0000",
             phase="A", capability="list_detect", prompt="test",
@@ -454,8 +456,11 @@ class TestVerifyResponse:
             "raw_response": "{}",
             # no input_hash
         }
-        # Should not raise (input_hash is optional in response for backward compat)
-        verify_response(request, response)
+        try:
+            verify_response(request, response)
+            assert False, "Expected ProtocolError"
+        except ProtocolError as e:
+            assert "Missing input_hash" in str(e)
 
 
 # ═════════════════════════════════════════════════════════════════════
