@@ -17,6 +17,7 @@ from docx.text.paragraph import Paragraph
 
 from list_style_mapping import normalize_wx_list_type, source_list_type, wx_list_style_name
 from text_utils import looks_like_list_item
+from unordered_lists import paragraph_layout_evidence
 
 
 _LIST_FORMATS = {
@@ -164,6 +165,47 @@ def _normalized_marker_template(value: str | None) -> str:
     return re.sub(r"%\d+", "%n", value or "")
 
 
+def _bullet_marker_family(value: str | None) -> str:
+    marker = str(value or "").strip()
+    if marker in {"•", "·", "●", "○", "◦", "∙"}:
+        return "round"
+    if marker in {"■", "□", "▪", "▫", "◆", "◇"}:
+        return "geometric"
+    if marker in {"-", "–", "—", "－"}:
+        return "line"
+    return marker
+
+
+def _layouts_compatible(previous: dict[str, Any], current: dict[str, Any]) -> bool:
+    previous_layout = previous.get("layout", {})
+    current_layout = current.get("layout", {})
+    for field in ("left_twips", "right_twips", "first_line_twips"):
+        previous_value = previous_layout.get(field)
+        current_value = current_layout.get(field)
+        if not isinstance(previous_value, int) or not isinstance(current_value, int):
+            continue
+        if abs(previous_value - current_value) > 120:
+            return False
+    return True
+
+
+def _bullet_groups_continue(
+    previous: list[dict[str, Any]],
+    current: list[dict[str, Any]],
+) -> bool:
+    prev_last = previous[-1]
+    curr_first = current[0]
+    if previous[0].get("num_fmt") != "bullet" or curr_first.get("num_fmt") != "bullet":
+        return False
+    if _bullet_marker_family(previous[0].get("lvl_text")) != _bullet_marker_family(curr_first.get("lvl_text")):
+        return False
+    previous_style = previous[0].get("style", "").casefold().strip()
+    current_style = curr_first.get("style", "").casefold().strip()
+    if previous_style != current_style:
+        return False
+    return _layouts_compatible(prev_last, curr_first)
+
+
 def _physical_groups_continue(
     previous: list[dict[str, Any]],
     current: list[dict[str, Any]],
@@ -190,6 +232,8 @@ def _physical_groups_continue(
         return False
     prev_format = previous[0].get("num_fmt")
     curr_format = curr_first.get("num_fmt")
+    if prev_format == "bullet" or curr_format == "bullet":
+        return _bullet_groups_continue(previous, current)
     if prev_format not in _ORDERED_LIST_FORMATS or curr_format != prev_format:
         return False
     if _normalized_marker_template(previous[0].get("lvl_text")) != _normalized_marker_template(curr_first.get("lvl_text")):
@@ -237,6 +281,7 @@ def analyze_docx_lists(
                         "p_style": level.get("p_style"),
                         "start": level.get("start", 1),
                         "numbering_source": numbering_source,
+                        "layout": paragraph_layout_evidence(paragraph),
                     })
             position += 1
         elif child.tag == qn("w:tbl"):
@@ -294,6 +339,8 @@ def analyze_docx_lists(
                 evidence.append("consecutive_numbering_sequence")
             if continued_across_num_id:
                 evidence.append("continued_across_num_id")
+                if num_fmt == "bullet":
+                    evidence.append("structural_bullet_continuity")
             if looks_like_list_item(candidate.get("text", "")):
                 evidence.append("visible_list_marker")
             if candidate.get("numbering_source") == "direct":
@@ -436,13 +483,19 @@ def audit_list_preservation(
         current_run = []
 
     origins: Counter[str] = Counter()
+    family_sources: Counter[str] = Counter()
     for block in ast_lists:
         source = block.get("source", {})
         numbering = source.get("numbering", {})
+        list_group = source.get("list_group_candidate", {})
+        if list_group.get("family_source"):
+            family_sources[str(list_group["family_source"])] += 1
         if block.get("_original_block_type") not in (None, "list_item"):
             origin = "llm"
         elif numbering.get("status") == "detected":
             origin = "rules"
+        elif list_group.get("status") == "auto":
+            origin = "semantic_group_rules"
         elif looks_like_list_item(str(source.get("raw_text") or block.get("text") or "")):
             origin = "text_marker"
         elif source.get("inferred_role") not in (None, "list"):
@@ -457,8 +510,12 @@ def audit_list_preservation(
         "rendered_list_items": len(rendered_lists),
         "origins": {
             name: origins.get(name, 0)
-            for name in ("rules", "llm", "text_marker", "normalization_fallback")
+            for name in (
+                "rules", "semantic_group_rules", "llm",
+                "text_marker", "normalization_fallback",
+            )
         },
+        "family_sources": dict(family_sources),
         "source_list_body_residue": source_body_residue,
         "style_level_mismatches": style_level_mismatches,
         "list_level_jumps": level_jumps,

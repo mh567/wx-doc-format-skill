@@ -198,6 +198,7 @@ def add_risk_warnings(report: dict, row_height_rule: str) -> None:
 def write_markdown_report(report: dict, path: Path) -> None:
     lines = ["# WX 文档格式转换报告", ""]
     audit = report.get("audit", {})
+    parse_report = report.get("parse_report", {})
     template_finalizer = report.get("template_finalizer", {})
     template_style_audit = template_finalizer.get("style_audit", {})
     lines.extend(
@@ -220,6 +221,8 @@ def write_markdown_report(report: dict, path: Path) -> None:
             f"- 首部结构审计：{'passed' if report.get('output_structure_audit', {}).get('passed') else 'failed'}",
             f"- 表格语义审计：{'passed' if report.get('table_semantics_audit', {}).get('passed') else 'failed'}",
             f"- 题注位置审计：{'passed' if report.get('caption_placement_audit', {}).get('passed') else 'failed'}",
+            f"- 语义列表候选组：{parse_report.get('parallel_content_candidates', 0)}",
+            f"- 待增强复核列表组：{parse_report.get('unresolved_parallel_groups', 0)}",
             "",
         ]
     )
