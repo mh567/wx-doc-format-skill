@@ -16,6 +16,7 @@ from docx.oxml.ns import qn
 from docx.text.paragraph import Paragraph
 
 from list_style_mapping import normalize_wx_list_type, source_list_type, wx_list_style_name
+from note_semantics import source_note_role
 from text_utils import looks_like_list_item
 from unordered_lists import paragraph_layout_evidence
 
@@ -50,6 +51,7 @@ def _is_protected_style(style_name: str) -> bool:
     return (
         normalized.startswith(("heading", "toc"))
         or normalized in _PROTECTED_STYLES
+        or source_note_role(style_name) is not None
         or any(token in normalized for token in ("目录", "题注", "注释", "公式", "附录标题"))
     )
 
@@ -346,7 +348,12 @@ def analyze_docx_lists(
             if candidate.get("numbering_source") == "direct":
                 evidence.append("direct_num_pr")
 
-            protected = _is_protected_style(style_name) or p_style.startswith("heading")
+            note_role = source_note_role(style_name, candidate, candidate.get("text"))
+            protected = (
+                _is_protected_style(style_name)
+                or p_style.startswith("heading")
+                or note_role is not None
+            )
             valid = candidate.get("abstract_num_id") is not None and num_fmt in _LIST_FORMATS
             high = valid and bool({
                 "list_style", "consecutive_numbering_sequence", "visible_list_marker",
@@ -381,6 +388,7 @@ def analyze_docx_lists(
                 "status": status,
                 "confidence": confidence,
                 "evidence": evidence,
+                "semantic_role": note_role,
                 "source_list_type": source_marker_type,
                 "list_type": normalize_wx_list_type(
                     source_marker_type,

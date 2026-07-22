@@ -8,21 +8,33 @@ from docx.enum.style import WD_STYLE_TYPE
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Twips
+from docx.text.paragraph import Paragraph
 
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from docx_pipeline import infer_docx_role
+from docx_pipeline import infer_docx_role, parse_docx_to_model
+from docx_render import render_docx_direct
 from list_detector import analyze_docx_lists
 from model_normalization import normalize_document_model_simple
+from note_semantics import audit_note_preservation
+from reporting import add_risk_warnings, new_report
+from template_profile import load_template_profile, template_numbering_ids
 from text_utils import (
+    CAPTION_PATTERN,
     heading_level_from_text,
+    iter_blocks,
+    looks_like_code_sample_table,
     looks_like_list_item,
     strip_heading_marker,
     strip_list_marker,
 )
+from word_model_renderer import render_document_model
+
+
+TEMPLATE = Path(__file__).resolve().parents[1] / "assets" / "wx_template.docx"
 
 
 def _add_single_level_abstract(doc: Document, abstract_id: int) -> None:
@@ -81,6 +93,67 @@ def _add_num(doc: Document, num_id: int, abstract_id: int, start: int) -> None:
         override.append(start_override)
         num.append(override)
     root.append(num)
+
+
+def _add_note_abstract(
+    doc: Document,
+    abstract_id: int,
+    *,
+    num_fmt_value: str,
+    level_text_value: str,
+    style_name: str,
+) -> None:
+    root = doc.part.numbering_part.element
+    abstract = OxmlElement("w:abstractNum")
+    abstract.set(qn("w:abstractNumId"), str(abstract_id))
+    level = OxmlElement("w:lvl")
+    level.set(qn("w:ilvl"), "0")
+    start = OxmlElement("w:start")
+    start.set(qn("w:val"), "1")
+    level.append(start)
+    num_fmt = OxmlElement("w:numFmt")
+    num_fmt.set(qn("w:val"), num_fmt_value)
+    level.append(num_fmt)
+    level_text = OxmlElement("w:lvlText")
+    level_text.set(qn("w:val"), level_text_value)
+    level.append(level_text)
+    p_style = OxmlElement("w:pStyle")
+    p_style.set(qn("w:val"), doc.styles[style_name].style_id)
+    level.append(p_style)
+    abstract.append(level)
+    root.insert(0, abstract)
+
+
+def _bind_style_numbering(doc: Document, style_name: str, num_id: int) -> None:
+    style = doc.styles.add_style(style_name, WD_STYLE_TYPE.PARAGRAPH)
+    num_pr = OxmlElement("w:numPr")
+    ilvl = OxmlElement("w:ilvl")
+    ilvl.set(qn("w:val"), "0")
+    num_pr.append(ilvl)
+    num = OxmlElement("w:numId")
+    num.set(qn("w:val"), str(num_id))
+    num_pr.append(num)
+    style._element.get_or_add_pPr().append(num_pr)
+
+
+def _note_document() -> Document:
+    doc = Document()
+    _bind_style_numbering(doc, "3.1注-无编号注", 901)
+    _bind_style_numbering(doc, "3.2注-有编号注", 902)
+    _add_note_abstract(
+        doc, 901, num_fmt_value="none", level_text_value="注：",
+        style_name="3.1注-无编号注",
+    )
+    _add_note_abstract(
+        doc, 902, num_fmt_value="decimal", level_text_value="注%1：",
+        style_name="3.2注-有编号注",
+    )
+    _add_num(doc, 901, 901, 1)
+    _add_num(doc, 902, 902, 1)
+    doc.add_paragraph("无编号注的格式要求。", style="3.1注-无编号注")
+    doc.add_paragraph("有编号注的格式要求。", style="3.2注-有编号注")
+    doc.add_paragraph("表格正文字号的例外说明。", style="3.2注-有编号注")
+    return doc
 
 
 def _set_direct_num(paragraph, num_id: int) -> None:
@@ -306,3 +379,137 @@ def test_normalization_repairs_legacy_role_conflicts() -> None:
     repair_types = {item["type"] for item in report["model_normalization_repairs"]}
     assert "list_item_retyped_as_hierarchical_heading" in repair_types
     assert "invalid_list_style_retyped_as_body" in repair_types
+
+
+def test_note_numbering_is_protected_before_generic_list_detection() -> None:
+    doc = _note_document()
+    report: dict = {}
+
+    descriptors = analyze_docx_lists(doc, report)
+    items = [descriptors[index] for index in sorted(descriptors)]
+
+    assert [item["semantic_role"] for item in items] == [
+        "note", "numbered_note", "numbered_note",
+    ]
+    assert all(item["status"] == "ignored" for item in items)
+    assert all("protected_role" in item["evidence"] for item in items)
+    inferred = [
+        infer_docx_role(paragraph, True, {}, descriptors[index])[2]
+        for index, paragraph in enumerate(doc.paragraphs)
+    ]
+    assert inferred == ["note", "numbered_note", "numbered_note"]
+
+
+def test_note_roles_are_written_into_source_ast() -> None:
+    doc = _note_document()
+    numbering_context = analyze_docx_lists(doc, {})
+
+    model = parse_docx_to_model(
+        Path("notes.docx"), doc, True, 0,
+        skill_version=lambda: "test",
+        new_report=lambda: new_report("test"),
+        iter_blocks=iter_blocks,
+        paragraph_class=Paragraph,
+        infer_docx_role=infer_docx_role,
+        looks_like_code_sample_table=looks_like_code_sample_table,
+        caption_pattern=CAPTION_PATTERN,
+        numbering_context=numbering_context,
+    )
+    blocks = model["document"]["blocks"]
+
+    assert [block["block_type"] for block in blocks] == ["body", "body", "body"]
+    assert [block["role"] for block in blocks] == [
+        "note", "numbered_note", "numbered_note",
+    ]
+    assert [block["source"]["role"] for block in blocks] == [
+        "note", "numbered_note", "numbered_note",
+    ]
+    assert all(not block["text"].startswith("注") for block in blocks)
+
+    normalized = normalize_document_model_simple(model, {})
+    normalized_blocks = normalized["document"]["blocks"]
+    assert [block["block_type"] for block in normalized_blocks] == [
+        "body", "body", "body",
+    ]
+    assert [block["role"] for block in normalized_blocks] == [
+        "note", "numbered_note", "numbered_note",
+    ]
+
+
+def test_note_roles_render_with_template_styles_and_pass_audit() -> None:
+    source_doc = _note_document()
+    numbering_context = analyze_docx_lists(source_doc, {})
+    model = parse_docx_to_model(
+        Path("notes.docx"), source_doc, True, 0,
+        skill_version=lambda: "test",
+        new_report=lambda: new_report("test"),
+        iter_blocks=iter_blocks,
+        paragraph_class=Paragraph,
+        infer_docx_role=infer_docx_role,
+        looks_like_code_sample_table=looks_like_code_sample_table,
+        caption_pattern=CAPTION_PATTERN,
+        numbering_context=numbering_context,
+    )
+    profile = load_template_profile(TEMPLATE)
+    output_doc = Document(TEMPLATE)
+    initial_count = len(output_doc.paragraphs)
+
+    render_document_model(
+        model, output_doc, {}, 0.8, "atLeast", template_numbering_ids(profile),
+        template_profile=profile,
+    )
+    rendered = output_doc.paragraphs[initial_count:]
+    audit = audit_note_preservation(output_doc, model, profile)
+
+    assert [paragraph.style.name for paragraph in rendered] == [
+        "3.1注-无编号注", "3.2注-有编号注", "3.2注-有编号注",
+    ]
+    assert audit["source_note_count"] == 3
+    assert audit["note_count"] == 1
+    assert audit["numbered_note_count"] == 2
+    assert audit["passed"] is True
+
+
+def test_direct_docx_renderer_consumes_body_semantic_role_from_ast() -> None:
+    source_doc = _note_document()
+    numbering_context = analyze_docx_lists(source_doc, {})
+    model = parse_docx_to_model(
+        Path("notes.docx"), source_doc, True, 0,
+        skill_version=lambda: "test",
+        new_report=lambda: new_report("test"),
+        iter_blocks=iter_blocks,
+        paragraph_class=Paragraph,
+        infer_docx_role=infer_docx_role,
+        looks_like_code_sample_table=looks_like_code_sample_table,
+        caption_pattern=CAPTION_PATTERN,
+        numbering_context=numbering_context,
+    )
+    profile = load_template_profile(TEMPLATE)
+    output_doc = Document(TEMPLATE)
+    initial_count = len(output_doc.paragraphs)
+
+    render_docx_direct(
+        source_doc, output_doc, {}, 0.8, "at-least", template_numbering_ids(profile),
+        template_profile=profile,
+        model=model,
+    )
+    rendered = output_doc.paragraphs[initial_count:]
+
+    assert [paragraph.style.name for paragraph in rendered] == [
+        "3.1注-无编号注", "3.2注-有编号注", "3.2注-有编号注",
+    ]
+
+
+def test_note_preservation_failure_enters_risk_review() -> None:
+    report = new_report("test")
+    report["note_preservation_audit"] = {
+        "passed": False,
+        "issues": [{"type": "note_rendered_style_mismatch"}],
+    }
+
+    add_risk_warnings(report, "at-least")
+
+    assert any(
+        warning["type"] == "note_preservation"
+        for warning in report["risk_warnings"]
+    )

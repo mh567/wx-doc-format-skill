@@ -10,6 +10,8 @@
 
 三段式流水线：解析 → 规范化 → 模板渲染。详见 SKILL.md。
 
+缺陷修复优先放在解析和 source AST 生成阶段。规范化、渲染和审计消费明确的 AST 语义并进行验证，finalizer 不承担可以前置的语义修补。
+
 LLM 增强为 Capability 插拔架构：
 - `list_detect` — 功能点列表识别
 - `caption_gen` — 表格/图片题注生成

@@ -32,6 +32,7 @@ from document_model import (
 )
 from md_pipeline import model_list_type_for_kind
 from list_style_mapping import wx_list_style_name
+from note_semantics import source_note_role, strip_source_note_marker
 from table_semantics import classify_docx_table
 from unordered_lists import annotate_unordered_candidates, paragraph_layout_evidence
 from list_group_detection import annotate_semantic_list_groups
@@ -82,6 +83,16 @@ def infer_docx_role(
 
     if is_toc_entry(text):
         return text, None, "skip"
+    note_role = source_note_role(style_name, numbering, text)
+    if note_role is not None:
+        parse_report.setdefault("inferred_notes", []).append({
+            "text": text,
+            "role": note_role,
+            "source": "docx-note-semantics",
+            "source_position": (numbering or {}).get("source_position"),
+            "style": style_name,
+        })
+        return strip_source_note_marker(text, note_role), None, note_role
     if is_caption_text(text):
         return text, "Caption", "caption"
     if is_date_like_text(text) or is_toc_title(text):
@@ -177,9 +188,6 @@ def infer_docx_role(
 
     if text.startswith(("\u5907\u6ce8\uff1a", "\u7f16\u5199\u63d0\u793a\uff1a", "\u3010\u5907\u6ce8\u63d0\u793a\u3011", "\u3010\u7f16\u5199\u6837\u4f8b\u3011")):
         return clean_note_prefix(text), None, "note"
-
-    if re.match(r"^\u6ce8\s*\d+[\uff1a:]", text):
-        return text, None, "numbered_note"
 
     if is_formula_text(text):
         return text, "\u516c\u5f0f", "formula"
@@ -297,6 +305,7 @@ def parse_docx_to_model_simple(
                             body_block(
                                 next_id(),
                                 inferred_text,
+                                role=role if role in {"note", "numbered_note", "formula"} else None,
                                 source=source_record(**source, had_mixed_graphic=True),
                             ),
                         )
@@ -362,7 +371,10 @@ def parse_docx_to_model_simple(
                 from text_utils import clean_note_prefix as _cnp
                 append_block(
                     model,
-                    body_block(next_id(), _cnp(inferred_text), source={**source, "role": role}),
+                    body_block(
+                        next_id(), _cnp(inferred_text), role=role,
+                        source={**source, "role": role},
+                    ),
                 )
                 reset_lists()
             else:

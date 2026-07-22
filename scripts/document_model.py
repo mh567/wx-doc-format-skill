@@ -69,13 +69,22 @@ def heading_block(
     return block
 
 
-def body_block(block_id: str, text: str, *, source: dict[str, Any] | None = None) -> dict[str, Any]:
-    return {
+def body_block(
+    block_id: str,
+    text: str,
+    *,
+    role: str | None = None,
+    source: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    block = {
         "id": block_id,
         "block_type": "body",
         "text": text,
         "source": source or {},
     }
+    if role:
+        block["role"] = role
+    return block
 
 
 def list_item_block(

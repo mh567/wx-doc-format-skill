@@ -29,6 +29,7 @@ def new_report(skill_version: str) -> dict:
         "source_document_model_summary": {},
         "source_document_model_issues": [],
         "template_finalizer": {},
+        "note_preservation_audit": {},
         "audit": {},
         "review_packet": {},
         "review_loop": {},
@@ -56,6 +57,15 @@ def add_risk_warnings(report: dict, row_height_rule: str) -> None:
                 "type": "non_text_objects",
                 "message": "Source document contains objects that may not be fully rebuilt by text normalization.",
                 "objects": risky_objects,
+            }
+        )
+    note_audit = report.get("note_preservation_audit", {})
+    if note_audit and not note_audit.get("passed", False):
+        report["risk_warnings"].append(
+            {
+                "type": "note_preservation",
+                "message": "Source note semantics do not match the normalized AST or rendered styles.",
+                "count": len(note_audit.get("issues", [])),
             }
         )
     clipped_cells = report.get("audit", {}).get("table_cells_may_clip", [])
@@ -221,6 +231,7 @@ def write_markdown_report(report: dict, path: Path) -> None:
             f"- 首部结构审计：{'passed' if report.get('output_structure_audit', {}).get('passed') else 'failed'}",
             f"- 表格语义审计：{'passed' if report.get('table_semantics_audit', {}).get('passed') else 'failed'}",
             f"- 题注位置审计：{'passed' if report.get('caption_placement_audit', {}).get('passed') else 'failed'}",
+            f"- 注语义保留审计：{'passed' if report.get('note_preservation_audit', {}).get('passed') else 'failed'}",
             f"- 语义列表候选组：{parse_report.get('parallel_content_candidates', 0)}",
             f"- 待增强复核列表组：{parse_report.get('unresolved_parallel_groups', 0)}",
             "",
