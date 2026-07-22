@@ -9,7 +9,7 @@ from docx.oxml.ns import qn
 from docx.shared import Cm
 
 
-TABLE_CELL_MARGINS = {"top": 80, "bottom": 80, "start": 120, "end": 120}
+TABLE_DEFAULT_CELL_MARGINS = {"top": 0, "bottom": 0, "left": 108, "right": 108}
 TABLE_BORDER_NAMES = ("top", "left", "bottom", "right", "insideH", "insideV")
 PARAGRAPH_ALLOWED_TAGS = {qn("w:pStyle"), qn("w:jc")}
 RUN_ALLOWED_TAGS = {qn("w:rStyle"), qn("w:lang"), qn("w:bCs"), qn("w:iCs")}
@@ -27,7 +27,7 @@ class TableFormatPolicy:
 
 
 def table_role(table_type: str | None) -> str:
-    if table_type in {"code_sample", "callout"}:
+    if table_type in {"code_sample", "callout", "layout"}:
         return str(table_type)
     return "data"
 
@@ -88,14 +88,28 @@ def _normalize_table_properties(table, policy: TableFormatPolicy, path: str) -> 
         corrections.append({"type": "table_indent_removed", "table": path})
 
     tbl_w = _get_or_add(tbl_pr, "w:tblW")
-    width_changed = _set_attr(tbl_w, "type", "pct")
-    width_changed = _set_attr(tbl_w, "w", "5000") or width_changed
+    width_changed = _set_attr(tbl_w, "type", "auto")
+    width_changed = _set_attr(tbl_w, "w", "0") or width_changed
     if width_changed:
         corrections.append({"type": "table_width_normalized", "table": path})
 
     tbl_layout = _get_or_add(tbl_pr, "w:tblLayout")
-    if _set_attr(tbl_layout, "type", "fixed"):
+    if _set_attr(tbl_layout, "type", "autofit"):
         corrections.append({"type": "table_layout_normalized", "table": path})
+
+    tbl_cell_mar = _get_or_add(tbl_pr, "w:tblCellMar")
+    margin_changed = False
+    expected_margin_tags = {qn(f"w:{name}") for name in TABLE_DEFAULT_CELL_MARGINS}
+    for child in list(tbl_cell_mar):
+        if child.tag not in expected_margin_tags:
+            tbl_cell_mar.remove(child)
+            margin_changed = True
+    for name, width in TABLE_DEFAULT_CELL_MARGINS.items():
+        margin = _get_or_add(tbl_cell_mar, f"w:{name}")
+        margin_changed = _set_attr(margin, "w", str(width)) or margin_changed
+        margin_changed = _set_attr(margin, "type", "dxa") or margin_changed
+    if margin_changed:
+        corrections.append({"type": "table_default_cell_margins_normalized", "table": path})
 
     if policy.table_look:
         tbl_look = _get_or_add(tbl_pr, "w:tblLook")
@@ -140,14 +154,10 @@ def _normalize_row(row, policy: TableFormatPolicy, path: str) -> list[dict]:
 def _normalize_cell(cell, policy: TableFormatPolicy, path: str) -> list[dict]:
     corrections: list[dict] = []
     tc_pr = cell._tc.get_or_add_tcPr()
-    tc_mar = _get_or_add(tc_pr, "w:tcMar")
-    changed = False
-    for name, width in TABLE_CELL_MARGINS.items():
-        margin = _get_or_add(tc_mar, f"w:{name}")
-        changed = _set_attr(margin, "w", str(width)) or changed
-        changed = _set_attr(margin, "type", "dxa") or changed
-    if changed:
-        corrections.append({"type": "table_cell_margins_normalized", "cell": path})
+    tc_mar = tc_pr.find(qn("w:tcMar"))
+    if tc_mar is not None:
+        tc_pr.remove(tc_mar)
+        corrections.append({"type": "table_cell_margin_override_removed", "cell": path})
 
     if cell.vertical_alignment != WD_CELL_VERTICAL_ALIGNMENT.CENTER:
         cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
@@ -210,6 +220,8 @@ def normalize_table(
     role: str = "data",
     path: str = "1",
 ) -> list[dict]:
+    if table_role(role) == "layout":
+        return []
     policy = build_table_policy(
         profile,
         row_height_cm,
@@ -264,6 +276,9 @@ def normalize_document_tables(
 
 def _audit_table(table, policy: TableFormatPolicy, path: str, audit: dict) -> None:
     audit["table_count"] += 1
+    if policy.role == "layout":
+        audit["layout_table_count"] += 1
+        return
     tbl_pr = table._tbl.tblPr
     tbl_style = tbl_pr.find(qn("w:tblStyle"))
     actual_style = tbl_style.get(qn("w:val")) if tbl_style is not None else None
@@ -273,6 +288,31 @@ def _audit_table(table, policy: TableFormatPolicy, path: str, audit: dict) -> No
             "expected": str(policy.table_style_id),
             "actual": actual_style,
         })
+
+    tbl_layout = tbl_pr.find(qn("w:tblLayout"))
+    if tbl_layout is None or tbl_layout.get(qn("w:type")) != "autofit":
+        audit["table_layout_issues"].append({"table": path})
+
+    tbl_w = tbl_pr.find(qn("w:tblW"))
+    if (
+        tbl_w is None
+        or tbl_w.get(qn("w:type")) != "auto"
+        or tbl_w.get(qn("w:w")) != "0"
+    ):
+        audit["table_width_issues"].append({"table": path})
+
+    tbl_cell_mar = tbl_pr.find(qn("w:tblCellMar"))
+    default_margin_issue = False
+    for name, width in TABLE_DEFAULT_CELL_MARGINS.items():
+        margin = tbl_cell_mar.find(qn(f"w:{name}")) if tbl_cell_mar is not None else None
+        if (
+            margin is None
+            or margin.get(qn("w:w")) != str(width)
+            or margin.get(qn("w:type")) != "dxa"
+        ):
+            default_margin_issue = True
+    if default_margin_issue:
+        audit["table_default_cell_margin_issues"].append({"table": path})
 
     seen_cells: set[object] = set()
     expected_rule = (
@@ -297,16 +337,7 @@ def _audit_table(table, policy: TableFormatPolicy, path: str, audit: dict) -> No
             audit["cell_count"] += 1
             tc_pr = cell._tc.get_or_add_tcPr()
             tc_mar = tc_pr.find(qn("w:tcMar"))
-            margin_issue = False
-            for name, width in TABLE_CELL_MARGINS.items():
-                margin = tc_mar.find(qn(f"w:{name}")) if tc_mar is not None else None
-                if (
-                    margin is None
-                    or margin.get(qn("w:w")) != str(width)
-                    or margin.get(qn("w:type")) != "dxa"
-                ):
-                    margin_issue = True
-            if margin_issue:
+            if tc_mar is not None:
                 audit["cell_margin_issues"].append({"cell": cell_path})
             if cell.vertical_alignment != WD_CELL_VERTICAL_ALIGNMENT.CENTER:
                 audit["cell_vertical_alignment_issues"].append({"cell": cell_path})
@@ -363,10 +394,14 @@ def audit_document_tables(
 ) -> dict:
     audit = {
         "table_count": 0,
+        "layout_table_count": 0,
         "row_count": 0,
         "cell_count": 0,
         "paragraph_count": 0,
         "invalid_table_styles": [],
+        "table_layout_issues": [],
+        "table_width_issues": [],
+        "table_default_cell_margin_issues": [],
         "row_height_rule_issues": [],
         "row_height_issues": [],
         "cell_margin_issues": [],
@@ -375,8 +410,27 @@ def audit_document_tables(
         "paragraph_alignment_issues": [],
         "paragraph_direct_format_issues": [],
         "run_direct_format_issues": [],
+        "table_body_style_spacing_issues": [],
     }
     roles = table_roles or []
+    if any((roles[index] if index < len(roles) else "data") != "layout" for index in range(len(doc.tables))):
+        resolved = (profile or {}).get("resolved_styles", {})
+        style_name = resolved.get("table_body", "表正文")
+        try:
+            style = doc.styles[style_name]
+            spacing = style._element.find(qn("w:pPr") + "/" + qn("w:spacing"))
+        except (KeyError, TypeError):
+            spacing = None
+        if (
+            spacing is None
+            or spacing.get(qn("w:line")) != "0"
+            or spacing.get(qn("w:lineRule")) != "atLeast"
+        ):
+            audit["table_body_style_spacing_issues"].append({
+                "style": style_name,
+                "expected_line": "0",
+                "expected_line_rule": "atLeast",
+            })
     for table_index, table in enumerate(doc.tables, 1):
         role = roles[table_index - 1] if table_index <= len(roles) else "data"
         policy = build_table_policy(
