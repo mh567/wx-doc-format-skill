@@ -95,7 +95,7 @@ def infer_docx_role(
         return strip_source_note_marker(text, note_role), None, note_role
     if is_caption_text(text):
         return text, "Caption", "caption"
-    if is_date_like_text(text) or is_toc_title(text):
+    if is_date_like_text(text):
         return text, None, "body"
     if style_name == "文档标题":
         return text, "文档标题", "title"
@@ -110,6 +110,8 @@ def infer_docx_role(
         if _stripped in _api_labels:
             return text, None, "body"
         return text, style_name, "heading"
+    if is_toc_title(text):
+        return text, None, "body"
 
     # A dotted Arabic section marker is a complete semantic token.  Resolve it
     # before Word numbering, list styles, and visible list markers so ``6.3``
