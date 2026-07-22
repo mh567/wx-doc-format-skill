@@ -9,6 +9,7 @@ from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 from docx.text.paragraph import Paragraph
 from docx.table import Table
+from docx.enum.text import WD_BREAK
 
 from text_utils import (
     heading_level_from_style,
@@ -41,6 +42,7 @@ from list_style_mapping import (
 from table_formatting import normalize_table
 from table_semantics import classify_docx_table, table_caption_eligible
 from docx_pipeline import infer_docx_role
+from appendix_semantics import APPENDIX_HEADING_STYLES
 
 
 def _body_insert_before_section(doc, new_el, *, qn_fn: Callable[[str], str]) -> None:
@@ -356,12 +358,21 @@ def render_docx_direct(
     def _emit_model_caption(caption: dict) -> None:
         caption_type = str(caption.get("caption_type") or "table")
         caption_text = str(caption.get("text") or "")
-        _insert_seq_caption(
-            dst_doc,
-            "figure" if caption_type == "figure" else "table",
-            caption_text,
-            template_profile=template_profile,
-        )
+        appendix_id = str(caption.get("appendix_id") or "").strip()
+        source_text = str(caption.get("source", {}).get("raw_text") or "").strip()
+        if appendix_id and source_text:
+            _add_styled(
+                source_text,
+                style_from_profile(template_profile, "caption", "Caption"),
+                "caption",
+            )
+        else:
+            _insert_seq_caption(
+                dst_doc,
+                "figure" if caption_type == "figure" else "table",
+                caption_text,
+                template_profile=template_profile,
+            )
         report.setdefault("captions_rendered_from_model", 0)
         report["captions_rendered_from_model"] += 1
         if caption.get("_auto_generated"):
@@ -416,14 +427,26 @@ def render_docx_direct(
                                 or "body"
                             )
                             inferred_text = model_block.get("text", inferred_text)
-                        elif model_type in {"heading", "list_item", "caption"}:
+                        elif model_type in {"heading", "list_item", "caption", "appendix"}:
                             role = model_type
                         if model_type == "list_item":
                             inferred_text = model_block.get("text", inferred_text)
                             list_meta = model_block
                         elif model_type == "heading":
                             inferred_text = model_block.get("text", inferred_text)
-                            style = heading_style_for_level(int(model_block.get("level") or 1))
+                            heading_level = int(model_block.get("level") or 1)
+                            if model_block.get("role") == "appendix_heading":
+                                role = "appendix_heading"
+                                style = style_from_profile(
+                                    template_profile,
+                                    f"appendix_heading_{heading_level}",
+                                    APPENDIX_HEADING_STYLES.get(heading_level, f"Heading {heading_level}"),
+                                )
+                            else:
+                                style = heading_style_for_level(heading_level)
+                        elif model_type == "appendix":
+                            inferred_text = "\n".join(model_block.get("title_lines") or ["", model_block.get("title", "")])
+                            style = style_from_profile(template_profile, "appendix_title", "附录标题")
                     if model_block is None and role_overrides is not None and _para_idx in role_overrides:
                         role = role_overrides[_para_idx]
                     source_style = block.style.name if block.style is not None else ""
@@ -453,7 +476,7 @@ def render_docx_direct(
                         )
                     _, media_count = _append_graphics_only_paragraph_clone_new(dst_doc, block, qn_fn=qn, image_reltype="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image", media_map=_media_map, normalize_graphics_paragraph_fn=_normalize_graphics_paragraph_new)
                     split_record = {"text": inferred_text, "role": role}
-                    if role == "heading":
+                    if role in {"heading", "appendix_heading"}:
                         split_record["level"] = resolved_heading_level(style, None, inferred_text)
                     report.setdefault("semantic_object_splits", []).append(split_record)
                     report.setdefault("mixed_text_graphic_paragraphs_split", []).append(split_record)
@@ -512,14 +535,26 @@ def render_docx_direct(
                         or "body"
                     )
                     inferred_text = model_block.get("text", inferred_text)
-                elif model_type in {"heading", "list_item", "caption"}:
+                elif model_type in {"heading", "list_item", "caption", "appendix"}:
                     role = model_type
                 if model_type == "list_item":
                     inferred_text = model_block.get("text", inferred_text)
                     list_meta = model_block
                 elif model_type == "heading":
                     inferred_text = model_block.get("text", inferred_text)
-                    style = heading_style_for_level(int(model_block.get("level") or 1))
+                    heading_level = int(model_block.get("level") or 1)
+                    if model_block.get("role") == "appendix_heading":
+                        role = "appendix_heading"
+                        style = style_from_profile(
+                            template_profile,
+                            f"appendix_heading_{heading_level}",
+                            APPENDIX_HEADING_STYLES.get(heading_level, f"Heading {heading_level}"),
+                        )
+                    else:
+                        style = heading_style_for_level(heading_level)
+                elif model_type == "appendix":
+                    inferred_text = "\n".join(model_block.get("title_lines") or ["", model_block.get("title", "")])
+                    style = style_from_profile(template_profile, "appendix_title", "附录标题")
             if model_block is None and role_overrides is not None and _para_idx in role_overrides:
                 role = role_overrides[_para_idx]
             source_style = block.style.name if block.style is not None else ""
@@ -554,7 +589,7 @@ def render_docx_direct(
                 )
 
             last_was_caption = (role == "caption")
-            if role == "heading":
+            if role in {"heading", "appendix", "appendix_heading"}:
                 structural_started = True
                 active_list_nums = {}
             seen_content = True
@@ -612,6 +647,30 @@ def _handle_inferred(
     list_meta: dict | None = None,
 ) -> dict:
     """Apply inferred paragraph to doc using template styles."""
+    if role in {"appendix", "appendix_title"}:
+        page_break = doc.add_paragraph()
+        page_break.add_run().add_break(WD_BREAK.PAGE)
+        resolved_style = style_from_profile(template_profile, "appendix_title", style or "附录标题")
+        try:
+            doc.add_paragraph(text, style=resolved_style)
+        except Exception:
+            doc.add_paragraph(text)
+        report.setdefault("automatic_numbers", []).append(
+            {"type": "appendix", "text": text, "source": "docx-render"}
+        )
+        return {}
+
+    if role == "appendix_heading":
+        resolved_style = style or APPENDIX_HEADING_STYLES[1]
+        try:
+            doc.add_paragraph(text, style=resolved_style)
+        except Exception:
+            doc.add_paragraph(text)
+        report.setdefault("automatic_numbers", []).append(
+            {"type": "appendix_heading", "text": text, "source": "docx-render"}
+        )
+        return {}
+
     if role == "heading":
         heading_level = resolved_heading_level(style, None, text)
         if heading_level <= 0 or role == "title":

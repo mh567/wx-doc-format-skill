@@ -176,9 +176,11 @@ def appendix_block(
     title: str,
     *,
     appendix_id: str | None = None,
+    classification: str | None = None,
+    title_lines: list[str] | None = None,
     source: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    block = {
         "id": block_id,
         "block_type": "appendix",
         "appendix_id": appendix_id,
@@ -186,6 +188,12 @@ def appendix_block(
         "numbering": {"mode": "auto"},
         "source": source or {},
     }
+    if classification:
+        block["classification"] = classification
+    if title_lines is not None:
+        block["title_lines"] = title_lines
+        block["soft_break_count"] = max(0, len(title_lines) - 1)
+    return block
 
 
 def unknown_block(
@@ -303,4 +311,23 @@ def validate_document_model(model: dict[str, Any]) -> list[dict[str, Any]]:
                                     "col": col_index,
                                 }
                             )
+        elif block_type == "appendix":
+            if not block.get("appendix_id"):
+                issues.append({"block": index, "type": "appendix_missing_id"})
+            if block.get("numbering", {}).get("mode") != "auto":
+                issues.append({"block": index, "type": "appendix_not_auto_numbered"})
+            if block.get("layout", {}).get("page_break_before") is not True:
+                issues.append({"block": index, "type": "appendix_missing_page_break_contract"})
+            title_lines = block.get("title_lines")
+            if title_lines is not None:
+                if not isinstance(title_lines, list) or not title_lines or title_lines[0] != "":
+                    issues.append({"block": index, "type": "appendix_invalid_title_lines"})
+                if block.get("soft_break_count") != max(0, len(title_lines) - 1):
+                    issues.append({"block": index, "type": "appendix_soft_break_count_mismatch"})
+        if block_type == "heading" and block.get("role") == "appendix_heading":
+            level = int(block.get("level") or 0)
+            if level not in {1, 2, 3}:
+                issues.append({"block": index, "type": "appendix_heading_invalid_level", "level": level})
+            if not block.get("appendix_id"):
+                issues.append({"block": index, "type": "appendix_heading_missing_id"})
     return issues

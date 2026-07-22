@@ -4,6 +4,7 @@ from typing import Callable
 
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
+from docx.enum.text import WD_BREAK
 from table_formatting import normalize_table
 
 from list_style_mapping import (
@@ -11,6 +12,7 @@ from list_style_mapping import (
     wx_list_style_name,
     wx_numbering_abstract_key,
 )
+from appendix_semantics import APPENDIX_HEADING_STYLES
 
 def style_from_profile(template_profile: dict | None, role: str, fallback: str) -> str:
     if template_profile:
@@ -78,6 +80,24 @@ def _set_list_numbering(paragraph, num_id: int, ilvl: int = 0) -> None:
         pass
 
 
+def _add_paragraph_with_soft_break_lines(doc, style: str, lines: list[str]):
+    try:
+        paragraph = doc.add_paragraph(style=style)
+    except Exception:
+        paragraph = doc.add_paragraph()
+    for index, line in enumerate(lines):
+        if index:
+            paragraph.add_run().add_break()
+        if line:
+            paragraph.add_run(line)
+    return paragraph
+
+
+def _add_explicit_page_break(doc) -> None:
+    paragraph = doc.add_paragraph()
+    paragraph.add_run().add_break(WD_BREAK.PAGE)
+
+
 def render_document_model(
     model: dict,
     doc,
@@ -116,6 +136,28 @@ def render_document_model(
                     doc.add_paragraph(text, style=style)
                 except Exception:
                     doc.add_paragraph(text)
+                active_list_nums = {}
+                continue
+
+            if role == "appendix_heading":
+                style = style_from_profile(
+                    template_profile,
+                    f"appendix_heading_{level}",
+                    APPENDIX_HEADING_STYLES.get(level, f"附录{level}级标题"),
+                )
+                try:
+                    doc.add_paragraph(text, style=style)
+                except Exception:
+                    doc.add_paragraph(text)
+                report.setdefault("automatic_numbers", []).append(
+                    {
+                        "type": "appendix_heading",
+                        "text": text,
+                        "level": level,
+                        "appendix_id": block.get("appendix_id"),
+                        "source": "model",
+                    }
+                )
                 active_list_nums = {}
                 continue
 
@@ -187,12 +229,26 @@ def render_document_model(
 
         # --- Appendix ---
         elif block_type == "appendix":
-            text = block.get("title", "")
+            if block.get("layout", {}).get("page_break_before", True):
+                _add_explicit_page_break(doc)
             style = style_from_profile(template_profile, "appendix_title", "附录标题")
-            try:
-                doc.add_paragraph(text, style=style)
-            except Exception:
-                doc.add_paragraph(text)
+            lines = list(block.get("title_lines") or [])
+            if not lines:
+                lines = [""]
+                classification = block.get("classification")
+                if classification:
+                    lines.append(f"（{classification}）")
+                if block.get("title"):
+                    lines.append(str(block["title"]))
+            _add_paragraph_with_soft_break_lines(doc, style, lines)
+            report.setdefault("automatic_numbers", []).append(
+                {
+                    "type": "appendix",
+                    "appendix_id": block.get("appendix_id"),
+                    "title": block.get("title", ""),
+                    "source": "model",
+                }
+            )
             active_list_nums = {}
 
         # --- Caption ---
@@ -200,7 +256,12 @@ def render_document_model(
             caption_type = block.get("caption_type", "table")
             label = "图" if caption_type == "figure" else "表"
             caption_text = block.get("text", "")
-            text = f"{label}  {caption_text}" if caption_text else f"{label}"
+            appendix_id = str(block.get("appendix_id") or "").strip()
+            source_text = str(block.get("source", {}).get("raw_text") or "").strip()
+            if appendix_id and source_text:
+                text = source_text
+            else:
+                text = f"{label}  {caption_text}" if caption_text else f"{label}"
             style = style_from_profile(template_profile, "caption", "Caption")
             try:
                 doc.add_paragraph(text, style=style)

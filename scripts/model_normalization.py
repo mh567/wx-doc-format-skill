@@ -20,6 +20,12 @@ from list_style_mapping import normalize_wx_list_type
 from caption_placement import normalize_caption_placement
 from unordered_lists import normalize_unordered_hierarchy
 from list_group_detection import apply_semantic_list_groups
+from appendix_semantics import (
+    annotate_appendix_ranges,
+    appendix_heading_level,
+    appendix_role_from_style,
+    parse_appendix_title,
+)
 
 
 def _model_list_type_for_kind(kind: str) -> str:
@@ -61,6 +67,45 @@ def normalize_document_model_simple(
         text = str(block.get("text") or block.get("title") or "")
         source = block.get("source", {})
         raw_text = str(source.get("raw_text") or text).strip()
+        source_style = str(source.get("style") or "")
+        appendix_source_role = appendix_role_from_style(source_style)
+
+        if appendix_source_role == "appendix_title" and block_type != "appendix":
+            existing_appendices = sum(
+                1 for candidate in model.get("document", {}).get("blocks", [])[:index]
+                if candidate.get("block_type") == "appendix"
+            )
+            title_data = parse_appendix_title(str(source.get("raw_text") or text), existing_appendices + 1)
+            block["block_type"] = "appendix"
+            block["appendix_id"] = title_data["appendix_id"]
+            block["title"] = title_data["title"]
+            block["classification"] = title_data["classification"]
+            block["title_lines"] = title_data["title_lines"]
+            block["soft_break_count"] = title_data["soft_break_count"]
+            block["numbering"] = {"mode": "auto"}
+            for key in ("text", "level", "list_type", "restart", "role"):
+                block.pop(key, None)
+            block_type = "appendix"
+            repairs.append({"block": index, "type": "source_style_retyped_as_appendix"})
+
+        appendix_level = appendix_heading_level(source_style)
+        if appendix_level is not None and not (
+            block_type == "heading" and block.get("role") == "appendix_heading"
+        ):
+            block["block_type"] = "heading"
+            block["role"] = "appendix_heading"
+            block["level"] = appendix_level
+            block["text"] = str(block.get("text") or raw_text)
+            block["numbering"] = {"mode": "auto"}
+            block.pop("list_type", None)
+            block.pop("restart", None)
+            block_type = "heading"
+            text = block["text"]
+            repairs.append({
+                "block": index,
+                "type": "source_style_retyped_as_appendix_heading",
+                "level": appendix_level,
+            })
 
         if block_type == "list_item":
             hierarchical_level = hierarchical_heading_level_from_text(raw_text)
@@ -277,6 +322,7 @@ def normalize_document_model_simple(
 
     normalize_unordered_hierarchy(model, repairs)
     normalize_caption_placement(model, repairs)
+    annotate_appendix_ranges(model)
 
     issues = validate_document_model(model)
     report["model_normalization_repairs"] = repairs

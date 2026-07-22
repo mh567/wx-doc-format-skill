@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 
 from table_formatting import audit_document_tables
+from appendix_semantics import audit_appendix_contract
 
 
 def _style_has_numbering(doc, style_name: str) -> bool:
@@ -117,6 +118,7 @@ def audit_document(
         "heading_paragraphs_without_numbering": [],
         "heading_text_still_has_manual_number": [],
         "ordered_list_nums_without_restart": [],
+        "appendix_contract": {},
     }
     seen_list_num_ids: set[str] = set()
     roles = table_roles or []
@@ -193,6 +195,7 @@ def audit_document(
         row_height_rule,
         table_roles=table_roles,
     )
+    audit["appendix_contract"] = audit_appendix_contract(doc, template_profile)
     return audit
 
 

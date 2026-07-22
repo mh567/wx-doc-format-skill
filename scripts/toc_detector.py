@@ -24,6 +24,7 @@ from toc_contract import (
     TOC_TITLE_FONT,
     TOC_TITLE_SIZE_HALF_POINTS,
     TOC_TITLE_STYLE,
+    TOC_CUSTOM_STYLE_LEVELS,
 )
 
 
@@ -515,6 +516,7 @@ def audit_toc_replacement(doc, context: dict | None) -> dict:
         ))
 
     field_level_issues: list[dict[str, Any]] = []
+    custom_style_mapping_issues: list[dict[str, Any]] = []
     for instruction in toc_instructions:
         match = re.search(r'\\o\s+"1-(\d+)"', instruction, re.I)
         actual_level = int(match.group(1)) if match else None
@@ -523,6 +525,20 @@ def audit_toc_replacement(doc, context: dict | None) -> dict:
                 "instruction": instruction,
                 "expected_max_level": TOC_MAX_LEVEL,
                 "actual_max_level": actual_level,
+            })
+        custom_match = re.search(r'\\t\s+"([^"]+)"', instruction, re.I)
+        tokens = [token.strip() for token in custom_match.group(1).split(",")] if custom_match else []
+        actual_mapping = {}
+        for index in range(0, len(tokens) - 1, 2):
+            try:
+                actual_mapping[tokens[index]] = int(tokens[index + 1])
+            except ValueError:
+                continue
+        if actual_mapping != TOC_CUSTOM_STYLE_LEVELS:
+            custom_style_mapping_issues.append({
+                "instruction": instruction,
+                "expected": TOC_CUSTOM_STYLE_LEVELS,
+                "actual": actual_mapping,
             })
 
     update_fields = doc.settings.element.find(qn("w:updateFields"))
@@ -538,6 +554,7 @@ def audit_toc_replacement(doc, context: dict | None) -> dict:
         "title_issues": title_issues,
         "toc_style_issues": toc_style_issues,
         "field_level_issues": field_level_issues,
+        "custom_style_mapping_issues": custom_style_mapping_issues,
         "update_fields_on_open": update_fields_on_open,
         "passed": (
             toc_field_count == 1
@@ -546,6 +563,7 @@ def audit_toc_replacement(doc, context: dict | None) -> dict:
             and not title_issues
             and not toc_style_issues
             and not field_level_issues
+            and not custom_style_mapping_issues
             and update_fields_on_open
         ),
     }

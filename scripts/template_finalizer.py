@@ -20,6 +20,7 @@ from toc_contract import (
     TOC_TITLE_FONT,
     TOC_TITLE_SIZE_HALF_POINTS,
     TOC_TITLE_STYLE,
+    toc_custom_style_switch,
 )
 
 
@@ -673,7 +674,7 @@ def insert_table_of_contents(doc, profile: dict) -> dict:
     # instruction
     r_instr = _Oxml('w:r')
     instr = _Oxml('w:instrText')
-    instr.text = f'TOC \\o "1-{max_level}" \\h \\z'
+    instr.text = f'TOC \\o "1-{max_level}" {toc_custom_style_switch()} \\h \\z'
     instr.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
     r_instr.append(instr)
     p_toc._element.append(r_instr)

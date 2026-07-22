@@ -425,14 +425,41 @@ def build_document_model_from_output(doc, source_path: Path, report: dict) -> di
         list_item_block, table_block, caption_block, image_block, appendix_block
     )
     from pathlib import Path
+    from appendix_semantics import (
+        annotate_appendix_ranges,
+        appendix_heading_level,
+        appendix_role_from_style,
+        parse_appendix_title,
+    )
     model = new_document_model(source_path, "docx", report.get("skill_version", "unknown"))
     block_index = 1
     images_found = 0
+    appendix_count = 0
     for paragraph in doc.paragraphs:
         text = paragraph.text.strip()
         style_name = paragraph.style.name if paragraph.style is not None else ""
         block_id = f"b{block_index:04d}"
-        if style_name.startswith("Heading"):
+        appendix_style_role = appendix_role_from_style(style_name)
+        if appendix_style_role == "appendix_title":
+            appendix_count += 1
+            title_data = parse_appendix_title(paragraph.text, appendix_count)
+            append_block(
+                model,
+                appendix_block(
+                    block_id,
+                    title_data["title"],
+                    appendix_id=title_data["appendix_id"],
+                    classification=title_data["classification"],
+                    title_lines=title_data["title_lines"],
+                ),
+            )
+        elif appendix_style_role and appendix_style_role.startswith("appendix_heading_"):
+            level = appendix_heading_level(style_name) or 1
+            append_block(
+                model,
+                heading_block(block_id, text, level, role="appendix_heading"),
+            )
+        elif style_name.startswith("Heading"):
             level = heading_level_from_style(style_name) or 1
             append_block(model, heading_block(block_id, text, level))
         elif "列项" in style_name:
@@ -440,8 +467,6 @@ def build_document_model_from_output(doc, source_path: Path, report: dict) -> di
             append_block(model, list_item_block(block_id, text, level, list_type, restart=restart))
         elif "文档标题" in style_name:
             append_block(model, heading_block(block_id, text, 0, role="title"))
-        elif "附录" in style_name:
-            append_block(model, appendix_block(block_id, text))
         elif is_caption_text(text):
             cap_type, label, raw_number, cap_text = caption_parts(text)
             append_block(model, caption_block(block_id, cap_text, cap_type, label=label, raw_number=raw_number))
@@ -470,6 +495,7 @@ def build_document_model_from_output(doc, source_path: Path, report: dict) -> di
         text = "".join(p.text for p in doc.paragraphs)
         if not text.strip() and not doc.tables:
             return model
+    annotate_appendix_ranges(model)
     report["non_text_objects"]["images_in_output"] = images_found
     return model
 
