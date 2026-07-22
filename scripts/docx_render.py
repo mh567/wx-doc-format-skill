@@ -409,7 +409,14 @@ def render_docx_direct(
                     list_meta = None
                     if model_block is not None:
                         model_type = model_block.get("block_type")
-                        if model_type in {"heading", "body", "list_item", "caption"}:
+                        if model_type == "body":
+                            role = (
+                                model_block.get("role")
+                                or model_block.get("source", {}).get("role")
+                                or "body"
+                            )
+                            inferred_text = model_block.get("text", inferred_text)
+                        elif model_type in {"heading", "list_item", "caption"}:
                             role = model_type
                         if model_type == "list_item":
                             inferred_text = model_block.get("text", inferred_text)
@@ -498,7 +505,14 @@ def render_docx_direct(
             list_meta = None
             if model_block is not None:
                 model_type = model_block.get("block_type")
-                if model_type in {"heading", "body", "list_item", "caption"}:
+                if model_type == "body":
+                    role = (
+                        model_block.get("role")
+                        or model_block.get("source", {}).get("role")
+                        or "body"
+                    )
+                    inferred_text = model_block.get("text", inferred_text)
+                elif model_type in {"heading", "list_item", "caption"}:
                     role = model_type
                 if model_type == "list_item":
                     inferred_text = model_block.get("text", inferred_text)
@@ -683,13 +697,13 @@ def _handle_inferred(
 
     # Fallback: use role-based template style
     if role == "note":
-        s = style_from_profile(None, "note", "3.1注-无编号注")
+        s = style_from_profile(template_profile, "note", "3.1注-无编号注")
     elif role == "numbered_note":
-        s = style_from_profile(None, "numbered_note", "3.2注-有编号注")
+        s = style_from_profile(template_profile, "numbered_note", "3.2注-有编号注")
     elif role == "caption":
-        s = style_from_profile(None, "caption", "Caption")
+        s = style_from_profile(template_profile, "caption", "Caption")
     else:
-        s = style_from_profile(None, "body", "Normal")
+        s = style_from_profile(template_profile, "body", "Normal")
     try:
         doc.add_paragraph(text, style=s)
     except Exception:

@@ -111,6 +111,9 @@ def normalize_document_model_simple(
                 if clean_text != text:
                     block["text"] = clean_text
                     repairs.append({"block": index, "type": "note_prefix_normalized", "from": text, "to": clean_text})
+            if block.get("role") in {"note", "numbered_note"}:
+                active_list_signatures.clear()
+                continue
             if is_formula_text(text) and block.get("role") != "formula":
                 block["role"] = "formula"
                 repairs.append({"block": index, "type": "body_role_promoted", "role": "formula"})
