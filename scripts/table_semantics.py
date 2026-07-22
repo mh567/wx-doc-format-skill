@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -54,6 +55,40 @@ def _cell_has_graphics(cell) -> bool:
     )
 
 
+def _cell_has_math(cell) -> bool:
+    element = cell._tc
+    return any(
+        next(element.iter(qn(tag)), None) is not None
+        for tag in ("m:oMath", "m:oMathPara")
+    )
+
+
+def _table_is_borderless(table) -> bool:
+    tbl_pr = table._tbl.tblPr
+    borders = tbl_pr.find(qn("w:tblBorders")) if tbl_pr is not None else None
+    if borders is None:
+        return False
+    edges = [
+        borders.find(qn(f"w:{name}"))
+        for name in ("top", "left", "bottom", "right", "insideH", "insideV")
+    ]
+    defined = [edge for edge in edges if edge is not None]
+    return len(defined) == len(edges) and all(
+        edge.get(qn("w:val")) in {"none", "nil"}
+        for edge in defined
+    )
+
+
+def _looks_like_formula_layout(table, cells: list[Any]) -> bool:
+    if len(table.rows) != 1 or len(cells) != 2:
+        return False
+    left, right = cells
+    number = right.text.strip()
+    if re.fullmatch(r"[(（]\d+(?:\.\d+)*[)）]", number) is None:
+        return False
+    return _cell_has_math(left) and _table_is_borderless(table)
+
+
 def _looks_like_code_payload(text: str) -> bool:
     value = text.strip()
     if not value:
@@ -103,6 +138,20 @@ def classify_docx_table(
     cells = unique_table_cells(table)
     visual_cell_count = len(cells)
     if visual_cell_count != 1:
+        if _looks_like_formula_layout(table, cells):
+            return TableSemantics(
+                table_type="layout",
+                header_rows=0,
+                visual_cell_count=visual_cell_count,
+                caption_eligible=False,
+                confidence=1.0,
+                evidence=(
+                    "formula_number_layout",
+                    "math_object",
+                    "borderless_table",
+                    "single_row_two_cells",
+                ),
+            )
         code_sample, code_evidence = _multi_cell_code_payload_evidence(cells)
         table_type = "code_sample" if code_sample else "data"
         evidence = code_evidence if code_sample else (

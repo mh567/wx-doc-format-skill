@@ -119,6 +119,7 @@ def audit_document(
         "ordered_list_nums_without_restart": [],
     }
     seen_list_num_ids: set[str] = set()
+    roles = table_roles or []
     for idx, paragraph in enumerate(doc.paragraphs, 1):
         text = paragraph.text.strip()
         if not text:
@@ -162,6 +163,9 @@ def audit_document(
                         {"paragraph": idx, "style": style_name, "num_id": num_id_str, "text": text[:120]}
                     )
     for table_idx, table in enumerate(doc.tables, 1):
+        role = roles[table_idx - 1] if table_idx <= len(roles) else "data"
+        if role == "layout":
+            continue
         is_code_sample = looks_like_code_sample_table(table)
         for row_idx, row in enumerate(table.rows, 1):
             if row.height is None or abs(row.height.cm - row_height_cm) > 0.02:

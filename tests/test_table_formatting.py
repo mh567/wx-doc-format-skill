@@ -65,6 +65,20 @@ def test_table_normalization_clears_paragraph_overrides_and_is_idempotent() -> N
     assert paragraph.runs[0]._r.rPr.find(qn("w:b")) is None
     assert table.rows[0].height_rule == WD_ROW_HEIGHT_RULE.AT_LEAST
     assert abs(table.rows[0].height.cm - 0.69) < 0.02
+    tbl_pr = table._tbl.tblPr
+    assert tbl_pr.find(qn("w:tblLayout")).get(qn("w:type")) == "autofit"
+    assert tbl_pr.find(qn("w:tblW")).get(qn("w:type")) == "auto"
+    assert tbl_pr.find(qn("w:tblW")).get(qn("w:w")) == "0"
+    tbl_cell_mar = tbl_pr.find(qn("w:tblCellMar"))
+    assert tbl_cell_mar.find(qn("w:top")).get(qn("w:w")) == "0"
+    assert tbl_cell_mar.find(qn("w:bottom")).get(qn("w:w")) == "0"
+    assert tbl_cell_mar.find(qn("w:left")).get(qn("w:w")) == "108"
+    assert tbl_cell_mar.find(qn("w:right")).get(qn("w:w")) == "108"
+    assert all(
+        cell._tc.get_or_add_tcPr().find(qn("w:tcMar")) is None
+        for row in table.rows
+        for cell in row.cells
+    )
 
 
 def test_table_normalization_handles_empty_merged_and_nested_cells() -> None:
@@ -96,6 +110,29 @@ def test_code_sample_alignment_is_an_explicit_policy() -> None:
     assert table.cell(0, 0).paragraphs[0].alignment == WD_ALIGN_PARAGRAPH.LEFT
 
 
+def test_layout_table_preserves_source_formatting() -> None:
+    profile = load_template_profile(TEMPLATE)
+    doc = _empty_template_document()
+    table = doc.add_table(rows=1, cols=2)
+    table.cell(0, 1).text = "(1)"
+    tbl_pr = table._tbl.tblPr
+    layout = OxmlElement("w:tblLayout")
+    layout.set(qn("w:type"), "autofit")
+    tbl_pr.append(layout)
+    borders = OxmlElement("w:tblBorders")
+    for name in ("top", "left", "bottom", "right", "insideH", "insideV"):
+        edge = OxmlElement(f"w:{name}")
+        edge.set(qn("w:val"), "none")
+        borders.append(edge)
+    tbl_pr.append(borders)
+    before = _xml_digest(table)
+
+    corrections = normalize_table(table, profile, 0.69, "at-least", role="layout")
+
+    assert corrections == []
+    assert _xml_digest(table) == before
+
+
 def test_table_contract_audit_rejects_direct_spacing_and_passes_after_normalization() -> None:
     profile = load_template_profile(TEMPLATE)
     doc = _empty_template_document()
@@ -113,6 +150,42 @@ def test_table_contract_audit_rejects_direct_spacing_and_passes_after_normalizat
     assert before["passed"] is False
     assert before["paragraph_direct_format_issues"]
     assert after["passed"] is True
+
+
+def test_table_contract_rejects_fixed_layout_and_cell_margin_overrides() -> None:
+    profile = load_template_profile(TEMPLATE)
+    doc = _empty_template_document()
+    table = doc.add_table(rows=1, cols=1)
+    normalize_table(table, profile, 0.69, "at-least", role="data")
+    table._tbl.tblPr.find(qn("w:tblLayout")).set(qn("w:type"), "fixed")
+    tc_mar = OxmlElement("w:tcMar")
+    table.cell(0, 0)._tc.get_or_add_tcPr().append(tc_mar)
+
+    audit = audit_document_tables(
+        doc, profile, 0.69, "at-least", table_roles=["data"],
+    )
+
+    assert audit["passed"] is False
+    assert audit["table_layout_issues"] == [{"table": "1"}]
+    assert audit["cell_margin_issues"] == [{"cell": "1.r1.c1"}]
+
+
+def test_table_contract_checks_effective_table_body_line_spacing() -> None:
+    profile = load_template_profile(TEMPLATE)
+    doc = _empty_template_document()
+    table = doc.add_table(rows=1, cols=1)
+    normalize_table(table, profile, 0.69, "at-least", role="data")
+    style = doc.styles[profile["resolved_styles"]["table_body"]]
+    spacing = style._element.find(qn("w:pPr") + "/" + qn("w:spacing"))
+    spacing.set(qn("w:line"), "240")
+    spacing.set(qn("w:lineRule"), "auto")
+
+    audit = audit_document_tables(
+        doc, profile, 0.69, "at-least", table_roles=["data"],
+    )
+
+    assert audit["passed"] is False
+    assert audit["table_body_style_spacing_issues"]
 
 
 def test_template_profile_resolves_real_table_style_id() -> None:

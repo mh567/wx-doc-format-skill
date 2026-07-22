@@ -134,16 +134,18 @@ def table_block(
     header_rows: int,
     source: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    block = {
         "id": block_id,
         "block_type": "table",
         "table_type": table_type,
         "header_rows": header_rows,
-        "autofit": True,
-        "row_height_rule": "atLeast",
         "rows": rows,
         "source": source or {},
     }
+    if table_type != "layout":
+        block["autofit"] = True
+        block["row_height_rule"] = "atLeast"
+    return block
 
 
 def caption_block(

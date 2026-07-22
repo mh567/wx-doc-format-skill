@@ -267,12 +267,13 @@ def normalize_document_model_simple(
                         if cell.get("cell_role") != expected_role:
                             cell["cell_role"] = expected_role
                             repairs.append({"block": index, "type": "data_table_cell_role_normalized", "role": expected_role})
-            if block.get("autofit") is not True:
-                block["autofit"] = True
-                repairs.append({"block": index, "type": "table_autofit_enabled"})
-            if block.get("row_height_rule") != "atLeast":
-                block["row_height_rule"] = "atLeast"
-                repairs.append({"block": index, "type": "table_row_height_rule_at_least"})
+            if table_type != "layout":
+                if block.get("autofit") is not True:
+                    block["autofit"] = True
+                    repairs.append({"block": index, "type": "table_autofit_enabled"})
+                if block.get("row_height_rule") != "atLeast":
+                    block["row_height_rule"] = "atLeast"
+                    repairs.append({"block": index, "type": "table_row_height_rule_at_least"})
 
     normalize_unordered_hierarchy(model, repairs)
     normalize_caption_placement(model, repairs)

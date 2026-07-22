@@ -5,6 +5,8 @@ from pathlib import Path
 
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
@@ -121,6 +123,38 @@ def test_single_cell_nested_table_is_layout() -> None:
     assert result.caption_eligible is False
 
 
+def test_borderless_two_cell_math_number_table_is_layout() -> None:
+    doc = Document()
+    table = doc.add_table(rows=1, cols=2)
+    table.cell(0, 0).paragraphs[0]._p.append(OxmlElement("m:oMath"))
+    table.cell(0, 1).text = "(1)"
+    tbl_pr = table._tbl.tblPr
+    borders = OxmlElement("w:tblBorders")
+    for name in ("top", "left", "bottom", "right", "insideH", "insideV"):
+        edge = OxmlElement(f"w:{name}")
+        edge.set(qn("w:val"), "none")
+        borders.append(edge)
+    tbl_pr.append(borders)
+
+    result = classify_docx_table(table)
+
+    assert result.table_type == "layout"
+    assert result.header_rows == 0
+    assert result.caption_eligible is False
+    assert "formula_number_layout" in result.evidence
+
+
+def test_two_cell_numbered_data_without_math_remains_data() -> None:
+    doc = Document()
+    table = doc.add_table(rows=1, cols=2)
+    table.cell(0, 0).text = "指标"
+    table.cell(0, 1).text = "(1)"
+
+    result = classify_docx_table(table)
+
+    assert result.table_type == "data"
+
+
 def test_only_data_tables_receive_automatic_captions() -> None:
     callout = _model_with_table("callout", header_rows=1)
     normalized_callout = normalize_document_model_simple(callout, {})
@@ -136,6 +170,14 @@ def test_only_data_tables_receive_automatic_captions() -> None:
 
     assert [block["block_type"] for block in data_blocks] == ["caption", "table"]
     assert data_blocks[0]["_auto_generated"] is True
+
+    layout = _model_with_table("layout", header_rows=1)
+    normalized_layout = normalize_document_model_simple(layout, {})
+    layout_block = normalized_layout["document"]["blocks"][0]
+    assert layout_block["table_type"] == "layout"
+    assert layout_block["header_rows"] == 0
+    assert "autofit" not in layout_block
+    assert "row_height_rule" not in layout_block
 
 
 def test_authored_caption_for_callout_is_preserved_and_valid() -> None:
