@@ -2,10 +2,25 @@ from __future__ import annotations
 
 import re
 from typing import Callable
+from docx.enum.style import WD_STYLE_TYPE
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Pt
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
+from docx.shared import RGBColor
 from table_formatting import normalize_document_tables
+from toc_contract import (
+    CANONICAL_TOC_TITLE,
+    TOC_ENTRY_FONT,
+    TOC_ENTRY_INDENT_CHARS_PER_LEVEL,
+    TOC_ENTRY_INDENT_TWIPS_PER_LEVEL,
+    TOC_ENTRY_SIZE_HALF_POINTS,
+    TOC_LINE_SPACING,
+    TOC_MAX_LEVEL,
+    TOC_TITLE_FONT,
+    TOC_TITLE_SIZE_HALF_POINTS,
+    TOC_TITLE_STYLE,
+)
 
 
 def normalized_name(name: str | None) -> str:
@@ -203,7 +218,10 @@ def normalize_caption_prefixes(doc) -> list[dict]:
 def audit_template_styles(doc, profile: dict) -> dict:
     allowed = {normalized_name(value) for value in profile.get("resolved_styles", {}).values()}
     # TOC styles inserted by the finalizer itself are always allowed.
-    allowed |= {normalized_name(n) for n in ("toc 1", "toc 2", "toc 3")}
+    allowed |= {
+        normalized_name(name)
+        for name in (TOC_TITLE_STYLE, "toc 1", "toc 2", "toc 3", "toc 4")
+    }
     used = []
     unexpected = []
     for index, paragraph in enumerate(doc.paragraphs, 1):
@@ -305,14 +323,30 @@ _STYLE_FONT_FALLBACK = {
     "formula": {"east_asia": "宋体", "ascii": "Times New Roman", "size_pt": 12, "bold": False},
     "appendix_title": {"east_asia": "黑体", "ascii": "Times New Roman", "size_pt": 14, "bold": False},
     "list": {"east_asia": "宋体", "ascii": "Times New Roman", "size_pt": 12, "bold": False},
+    "toc_title": {
+        "east_asia": TOC_TITLE_FONT,
+        "ascii": TOC_TITLE_FONT,
+        "size_pt": TOC_TITLE_SIZE_HALF_POINTS / 2,
+        "bold": False,
+    },
+    "toc_entry": {
+        "east_asia": TOC_ENTRY_FONT,
+        "ascii": TOC_ENTRY_FONT,
+        "size_pt": TOC_ENTRY_SIZE_HALF_POINTS / 2,
+        "bold": False,
+    },
 }
 
 
 def _resolve_font_for_style(profile: dict, style_name: str) -> dict:
+    normalized = (style_name or "").casefold().replace(" ", "")
+    if normalized == normalized_name(TOC_TITLE_STYLE):
+        return dict(_STYLE_FONT_FALLBACK["toc_title"])
+    if re.fullmatch(r"toc[1-4]", normalized):
+        return dict(_STYLE_FONT_FALLBACK["toc_entry"])
     font = _style_font_from_profile(profile, style_name)
     if font:
         return font
-    normalized = (style_name or "").casefold().replace(" ", "")
     if normalized.startswith("heading") or style_name.startswith("Heading"):
         return dict(_STYLE_FONT_FALLBACK["heading"])
     if "附录" in style_name and "标题" in style_name:
@@ -450,37 +484,170 @@ def finalize_run_fonts(doc, profile: dict) -> list[dict]:
 
 
 
+def _find_or_add_paragraph_style(doc, name: str):
+    target = normalized_name(name)
+    for style in doc.styles:
+        if style.type == WD_STYLE_TYPE.PARAGRAPH and normalized_name(style.name) == target:
+            return style, False
+    style = doc.styles.add_style(name, WD_STYLE_TYPE.PARAGRAPH)
+    try:
+        style.base_style = doc.styles["Normal"]
+    except KeyError:
+        pass
+    return style, True
+
+
+def _set_style_font(style, *, family: str, size_pt: float) -> None:
+    style.font.name = family
+    style.font.size = Pt(size_pt)
+    style.font.bold = False
+    style.font.color.rgb = RGBColor(0, 0, 0)
+    r_pr = style._element.get_or_add_rPr()
+    fonts = r_pr.find(qn("w:rFonts"))
+    if fonts is None:
+        fonts = OxmlElement("w:rFonts")
+        r_pr.insert(0, fonts)
+    for attribute in ("asciiTheme", "hAnsiTheme", "eastAsiaTheme", "cstheme"):
+        fonts.attrib.pop(qn(f"w:{attribute}"), None)
+    for attribute in ("ascii", "hAnsi", "eastAsia", "cs"):
+        fonts.set(qn(f"w:{attribute}"), family)
+    size_half_points = str(int(round(size_pt * 2)))
+    size = r_pr.find(qn("w:sz"))
+    if size is None:
+        size = OxmlElement("w:sz")
+        r_pr.append(size)
+    size.set(qn("w:val"), size_half_points)
+    size_cs = r_pr.find(qn("w:szCs"))
+    if size_cs is None:
+        size_cs = OxmlElement("w:szCs")
+        r_pr.append(size_cs)
+    size_cs.set(qn("w:val"), size_half_points)
+
+
+def _set_style_paragraph_contract(
+    style,
+    *,
+    left_twips: int,
+    left_chars: int,
+    alignment: str,
+) -> None:
+    p_pr = style._element.get_or_add_pPr()
+    spacing = p_pr.find(qn("w:spacing"))
+    if spacing is None:
+        spacing = OxmlElement("w:spacing")
+        p_pr.append(spacing)
+    spacing.attrib.clear()
+    spacing.set(qn("w:before"), "0")
+    spacing.set(qn("w:beforeLines"), "0")
+    spacing.set(qn("w:beforeAutospacing"), "0")
+    spacing.set(qn("w:after"), "0")
+    spacing.set(qn("w:afterLines"), "0")
+    spacing.set(qn("w:afterAutospacing"), "0")
+    spacing.set(qn("w:line"), str(TOC_LINE_SPACING))
+    spacing.set(qn("w:lineRule"), "auto")
+
+    indent = p_pr.find(qn("w:ind"))
+    if indent is None:
+        indent = OxmlElement("w:ind")
+        p_pr.append(indent)
+    indent.attrib.clear()
+    indent.set(qn("w:left"), str(left_twips))
+    indent.set(qn("w:leftChars"), str(left_chars))
+    indent.set(qn("w:firstLine"), "0")
+    indent.set(qn("w:firstLineChars"), "0")
+
+    jc = p_pr.find(qn("w:jc"))
+    if jc is None:
+        jc = OxmlElement("w:jc")
+        p_pr.append(jc)
+    jc.set(qn("w:val"), alignment)
+
+
+def normalize_toc_styles(doc) -> list[dict]:
+    corrections: list[dict] = []
+    title_style, title_created = _find_or_add_paragraph_style(doc, TOC_TITLE_STYLE)
+    _set_style_font(
+        title_style,
+        family=TOC_TITLE_FONT,
+        size_pt=TOC_TITLE_SIZE_HALF_POINTS / 2,
+    )
+    _set_style_paragraph_contract(
+        title_style,
+        left_twips=0,
+        left_chars=0,
+        alignment="center",
+    )
+    title_style.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    corrections.append({
+        "type": "toc_title_style_normalized",
+        "style": title_style.name,
+        "created": title_created,
+    })
+
+    for level in range(1, TOC_MAX_LEVEL + 1):
+        style, created = _find_or_add_paragraph_style(doc, f"TOC {level}")
+        _set_style_font(
+            style,
+            family=TOC_ENTRY_FONT,
+            size_pt=TOC_ENTRY_SIZE_HALF_POINTS / 2,
+        )
+        _set_style_paragraph_contract(
+            style,
+            left_twips=(level - 1) * TOC_ENTRY_INDENT_TWIPS_PER_LEVEL,
+            left_chars=(level - 1) * TOC_ENTRY_INDENT_CHARS_PER_LEVEL,
+            alignment="left",
+        )
+        style.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        corrections.append({
+            "type": "toc_entry_style_normalized",
+            "style": style.name,
+            "level": level,
+            "created": created,
+            "left_chars": (
+                (level - 1) * TOC_ENTRY_INDENT_CHARS_PER_LEVEL // 100
+            ),
+        })
+    return corrections
+
+
 def insert_table_of_contents(doc, profile: dict) -> dict:
     """Insert a TOC field with "目  次" heading and page break at the start."""
     from docx.oxml import OxmlElement as _Oxml
     from docx.oxml.ns import qn as _qn
 
-    max_level = 0
-    for level in range(1, 10):
-        if profile.get("resolved_styles", {}).get(f"heading_{level}"):
-            max_level = level
-    if max_level == 0:
-        max_level = 3
+    style_corrections = normalize_toc_styles(doc)
+    max_level = TOC_MAX_LEVEL
 
     body = doc.element.body
 
-    # --- "目  次" title (first) — 黑体, Normal style, centered ---
+    # --- "目  次" title (first) ---
     p_title = doc.add_paragraph()
     try:
-        p_title.style = doc.styles['Normal']
+        p_title.style = next(
+            style for style in doc.styles
+            if normalized_name(style.name) == normalized_name(TOC_TITLE_STYLE)
+        )
     except Exception:
         pass
-    p_title.alignment = 1  # center
+    p_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
     r_t = _Oxml('w:r')
     rpr_t = _Oxml('w:rPr')
     rfonts_t = _Oxml('w:rFonts')
-    rfonts_t.set(_qn('w:eastAsia'), '黑体')
-    rfonts_t.set(_qn('w:ascii'), '黑体')
-    rfonts_t.set(_qn('w:hAnsi'), '黑体')
+    for attribute in ('eastAsia', 'ascii', 'hAnsi', 'cs'):
+        rfonts_t.set(_qn(f'w:{attribute}'), TOC_TITLE_FONT)
     rpr_t.append(rfonts_t)
+    size_t = _Oxml('w:sz')
+    size_t.set(_qn('w:val'), str(TOC_TITLE_SIZE_HALF_POINTS))
+    rpr_t.append(size_t)
+    size_cs_t = _Oxml('w:szCs')
+    size_cs_t.set(_qn('w:val'), str(TOC_TITLE_SIZE_HALF_POINTS))
+    rpr_t.append(size_cs_t)
+    bold_t = _Oxml('w:b')
+    bold_t.set(_qn('w:val'), '0')
+    rpr_t.append(bold_t)
     r_t.append(rpr_t)
     t_t = _Oxml('w:t')
-    t_t.text = '目  次'
+    t_t.text = CANONICAL_TOC_TITLE
     t_t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
     r_t.append(t_t)
     p_title._element.append(r_t)
@@ -489,7 +656,10 @@ def insert_table_of_contents(doc, profile: dict) -> dict:
     # --- TOC field (second) ---
     p_toc = doc.add_paragraph()
     try:
-        p_toc.style = doc.styles['toc 1']
+        p_toc.style = next(
+            style for style in doc.styles
+            if normalized_name(style.name) == normalized_name("TOC 1")
+        )
     except Exception:
         pass
 
@@ -545,7 +715,12 @@ def insert_table_of_contents(doc, profile: dict) -> dict:
         settings.append(update_fields)
     update_fields.set(_qn("w:val"), "true")
 
-    return {"toc_inserted": True, "levels": max_level, "update_fields_on_open": True}
+    return {
+        "toc_inserted": True,
+        "levels": max_level,
+        "update_fields_on_open": True,
+        "style_corrections": style_corrections,
+    }
 
 
 def apply_template_finalizer(

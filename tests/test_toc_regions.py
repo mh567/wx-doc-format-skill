@@ -16,7 +16,8 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 from llm_enhancer import enhance_document_model, normalize_mode, validate_patch
-from toc_detector import detect_toc_regions, selected_source_positions
+from toc_detector import audit_toc_replacement, detect_toc_regions, selected_source_positions
+from template_finalizer import insert_table_of_contents
 
 
 def _manual_toc_document() -> Document:
@@ -84,6 +85,46 @@ def test_body_directory_heading_is_not_removed_by_rules() -> None:
 
     assert report["source_toc"]["status"] != "detected"
     assert selected_source_positions(context) == set()
+
+
+def test_body_heading_named_toc_is_not_reported_as_source_toc_residue() -> None:
+    doc = Document()
+    doc.add_paragraph("模板使用说明", style="Heading 1")
+    doc.add_paragraph("目次", style="Heading 2")
+    insert_table_of_contents(doc, {
+        "resolved_styles": {
+            "heading_1": "Heading 1",
+            "heading_2": "Heading 2",
+        },
+    })
+
+    audit = audit_toc_replacement(doc, None)
+
+    assert audit["source_toc_title_residue"] == []
+    assert audit["passed"] is True
+
+
+def test_toc_audit_rejects_excess_levels_and_non_song_latin_font() -> None:
+    doc = Document()
+    doc.add_paragraph("项目概述", style="Heading 1")
+    insert_table_of_contents(doc, {"resolved_styles": {"heading_1": "Heading 1"}})
+    instruction = next(doc.paragraphs[1]._p.iter(qn("w:instrText")))
+    instruction.text = 'TOC \\o "1-6" \\h \\z'
+    toc_two = next(
+        style for style in doc.styles
+        if style.name.casefold().replace(" ", "") == "toc2"
+    )
+    fonts = toc_two._element.get_or_add_rPr().find(qn("w:rFonts"))
+    fonts.set(qn("w:ascii"), "Times New Roman")
+
+    audit = audit_toc_replacement(doc, None)
+
+    assert audit["passed"] is False
+    assert audit["field_level_issues"][0]["actual_max_level"] == 6
+    assert any(
+        issue["style"] == "TOC 2" and issue["type"] == "font_family"
+        for issue in audit["toc_style_issues"]
+    )
 
 
 def test_word_toc_field_is_strong_evidence() -> None:

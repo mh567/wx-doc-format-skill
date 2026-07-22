@@ -222,6 +222,27 @@ def test_role_inference_prefers_hierarchical_heading_over_list_rules() -> None:
     assert report["inferred_headings"][0]["source"] == "docx-hierarchical-text"
 
 
+def test_heading_styled_toc_title_in_body_keeps_heading_role() -> None:
+    doc = Document()
+    paragraph = doc.add_paragraph("目次", style="Heading 2")
+
+    text, style, role = infer_docx_role(paragraph, True, {})
+
+    assert text == "目次"
+    assert style == "Heading 2"
+    assert role == "heading"
+
+
+def test_plain_toc_title_without_heading_evidence_remains_body() -> None:
+    doc = Document()
+    paragraph = doc.add_paragraph("目次")
+
+    _, style, role = infer_docx_role(paragraph, True, {})
+
+    assert style is None
+    assert role == "body"
+
+
 def test_invalid_numbering_cannot_be_revived_by_list_style() -> None:
     doc = Document()
     style_name = "1.1一级列项-编号"

@@ -20,7 +20,7 @@ from front_matter import (
     inject_document_title,
 )
 from template_finalizer import insert_table_of_contents
-from toc_detector import detect_toc_regions, selected_source_positions
+from toc_detector import audit_toc_replacement, detect_toc_regions, selected_source_positions
 
 
 def _title_paragraph(doc: Document, text: str):
@@ -135,6 +135,32 @@ def test_output_structure_requires_toc_then_title() -> None:
     assert result["passed"] is True
     assert result["document_title_text"] == "零信任集成方案"
     assert result["document_title_count"] == 1
+
+
+def test_inserted_toc_meets_wx_title_style_level_and_indent_contract() -> None:
+    doc = Document()
+    doc.styles.add_style("文档标题", WD_STYLE_TYPE.PARAGRAPH)
+    doc.add_paragraph("零信任集成方案", style="文档标题")
+    for level in range(1, 7):
+        doc.add_paragraph(f"第{level}级标题", style=f"Heading {level}")
+    profile = {
+        "resolved_styles": {
+            "title": "文档标题",
+            **{f"heading_{level}": f"Heading {level}" for level in range(1, 7)},
+        },
+    }
+
+    result = insert_table_of_contents(doc, profile)
+    audit = audit_toc_replacement(doc, None)
+
+    assert result["levels"] == 4
+    assert doc.paragraphs[0].text == "目  次"
+    assert doc.paragraphs[0].style.name == "目录标题"
+    assert audit["title_issues"] == []
+    assert audit["toc_style_issues"] == []
+    assert audit["field_level_issues"] == []
+    assert audit["update_fields_on_open"] is True
+    assert audit["passed"] is True
 
 
 def test_output_structure_rejects_table_before_title() -> None:

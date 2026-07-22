@@ -13,6 +13,18 @@ from typing import Any
 from docx.oxml.ns import qn
 from docx.table import Table
 from docx.text.paragraph import Paragraph
+from toc_contract import (
+    CANONICAL_TOC_TITLE,
+    TOC_ENTRY_FONT,
+    TOC_ENTRY_INDENT_CHARS_PER_LEVEL,
+    TOC_ENTRY_INDENT_TWIPS_PER_LEVEL,
+    TOC_ENTRY_SIZE_HALF_POINTS,
+    TOC_LINE_SPACING,
+    TOC_MAX_LEVEL,
+    TOC_TITLE_FONT,
+    TOC_TITLE_SIZE_HALF_POINTS,
+    TOC_TITLE_STYLE,
+)
 
 
 _TOC_TITLES = {"目录", "目次", "目  次", "目  录"}
@@ -313,12 +325,126 @@ def selected_source_positions(context: dict) -> set[int]:
     return set(context.get("source_context", {}).get("excluded_source_positions", []))
 
 
+def _normalized_style_name(value: str | None) -> str:
+    return (value or "").casefold().replace(" ", "")
+
+
+def _find_style(doc, name: str):
+    target = _normalized_style_name(name)
+    for style in doc.styles:
+        if _normalized_style_name(style.name) == target:
+            return style
+    return None
+
+
+def _false_on_off(element) -> bool:
+    if element is None:
+        return False
+    value = element.get(qn("w:val"))
+    return value in {"0", "false", "off"}
+
+
+def _style_contract_issues(
+    doc,
+    *,
+    style_name: str,
+    family: str,
+    size_half_points: int,
+    left_twips: int,
+    left_chars: int,
+    alignment: str,
+) -> list[dict[str, Any]]:
+    issues: list[dict[str, Any]] = []
+    style = _find_style(doc, style_name)
+    if style is None:
+        return [{"style": style_name, "type": "missing_style"}]
+    element = style._element
+    r_pr = element.find(qn("w:rPr"))
+    fonts = r_pr.find(qn("w:rFonts")) if r_pr is not None else None
+    actual_fonts = {
+        name: fonts.get(qn(f"w:{name}")) if fonts is not None else None
+        for name in ("ascii", "hAnsi", "eastAsia", "cs")
+    }
+    if any(value != family for value in actual_fonts.values()):
+        issues.append({
+            "style": style_name,
+            "type": "font_family",
+            "expected": family,
+            "actual": actual_fonts,
+        })
+    size = r_pr.find(qn("w:sz")) if r_pr is not None else None
+    size_cs = r_pr.find(qn("w:szCs")) if r_pr is not None else None
+    actual_sizes = {
+        "size": size.get(qn("w:val")) if size is not None else None,
+        "size_cs": size_cs.get(qn("w:val")) if size_cs is not None else None,
+    }
+    expected_size = str(size_half_points)
+    if any(value != expected_size for value in actual_sizes.values()):
+        issues.append({
+            "style": style_name,
+            "type": "font_size",
+            "expected": expected_size,
+            "actual": actual_sizes,
+        })
+    bold = r_pr.find(qn("w:b")) if r_pr is not None else None
+    if not _false_on_off(bold):
+        issues.append({"style": style_name, "type": "bold", "expected": False})
+
+    p_pr = element.find(qn("w:pPr"))
+    spacing = p_pr.find(qn("w:spacing")) if p_pr is not None else None
+    actual_spacing = {
+        "line": spacing.get(qn("w:line")) if spacing is not None else None,
+        "line_rule": spacing.get(qn("w:lineRule")) if spacing is not None else None,
+    }
+    expected_spacing = {"line": str(TOC_LINE_SPACING), "line_rule": "auto"}
+    if actual_spacing != expected_spacing:
+        issues.append({
+            "style": style_name,
+            "type": "line_spacing",
+            "expected": expected_spacing,
+            "actual": actual_spacing,
+        })
+    indent = p_pr.find(qn("w:ind")) if p_pr is not None else None
+    actual_indent = {
+        "left": indent.get(qn("w:left")) if indent is not None else None,
+        "left_chars": indent.get(qn("w:leftChars")) if indent is not None else None,
+        "first_line": indent.get(qn("w:firstLine")) if indent is not None else None,
+        "first_line_chars": indent.get(qn("w:firstLineChars")) if indent is not None else None,
+    }
+    expected_indent = {
+        "left": str(left_twips),
+        "left_chars": str(left_chars),
+        "first_line": "0",
+        "first_line_chars": "0",
+    }
+    if actual_indent != expected_indent:
+        issues.append({
+            "style": style_name,
+            "type": "indent",
+            "expected": expected_indent,
+            "actual": actual_indent,
+        })
+    jc = p_pr.find(qn("w:jc")) if p_pr is not None else None
+    actual_alignment = jc.get(qn("w:val")) if jc is not None else None
+    if actual_alignment != alignment:
+        issues.append({
+            "style": style_name,
+            "type": "alignment",
+            "expected": alignment,
+            "actual": actual_alignment,
+        })
+    return issues
+
+
 def audit_toc_replacement(doc, context: dict | None) -> dict:
     """Audit the canonical output TOC and residual source-directory entries."""
     toc_field_count = 0
+    toc_instructions: list[str] = []
     for paragraph in doc.paragraphs:
-        if re.search(r"\bTOC\b", _field_instruction(paragraph), re.I):
+        instruction = _field_instruction(paragraph)
+        if re.search(r"\bTOC\b", instruction, re.I):
             toc_field_count += 1
+            toc_instructions.append(instruction)
 
     selected = []
     if context:
@@ -345,15 +471,81 @@ def audit_toc_replacement(doc, context: dict | None) -> dict:
     source_toc_title_residue = [
         index for index, paragraph in enumerate(doc.paragraphs[2:], start=2)
         if paragraph.text.strip() in _TOC_TITLES
+        and not _style_name(paragraph).casefold().startswith("heading")
     ]
+    title_paragraph = next(
+        (paragraph for paragraph in doc.paragraphs if paragraph.text.strip()),
+        None,
+    )
+    title_text = title_paragraph.text if title_paragraph is not None else None
+    title_style = _style_name(title_paragraph) if title_paragraph is not None else None
+    title_issues: list[dict[str, Any]] = []
+    if title_text != CANONICAL_TOC_TITLE:
+        title_issues.append({
+            "type": "title_text",
+            "expected": CANONICAL_TOC_TITLE,
+            "actual": title_text,
+        })
+    if _normalized_style_name(title_style) != _normalized_style_name(TOC_TITLE_STYLE):
+        title_issues.append({
+            "type": "title_style",
+            "expected": TOC_TITLE_STYLE,
+            "actual": title_style,
+        })
+    title_issues.extend(_style_contract_issues(
+        doc,
+        style_name=TOC_TITLE_STYLE,
+        family=TOC_TITLE_FONT,
+        size_half_points=TOC_TITLE_SIZE_HALF_POINTS,
+        left_twips=0,
+        left_chars=0,
+        alignment="center",
+    ))
+
+    toc_style_issues: list[dict[str, Any]] = []
+    for level in range(1, TOC_MAX_LEVEL + 1):
+        toc_style_issues.extend(_style_contract_issues(
+            doc,
+            style_name=f"TOC {level}",
+            family=TOC_ENTRY_FONT,
+            size_half_points=TOC_ENTRY_SIZE_HALF_POINTS,
+            left_twips=(level - 1) * TOC_ENTRY_INDENT_TWIPS_PER_LEVEL,
+            left_chars=(level - 1) * TOC_ENTRY_INDENT_CHARS_PER_LEVEL,
+            alignment="left",
+        ))
+
+    field_level_issues: list[dict[str, Any]] = []
+    for instruction in toc_instructions:
+        match = re.search(r'\\o\s+"1-(\d+)"', instruction, re.I)
+        actual_level = int(match.group(1)) if match else None
+        if actual_level != TOC_MAX_LEVEL:
+            field_level_issues.append({
+                "instruction": instruction,
+                "expected_max_level": TOC_MAX_LEVEL,
+                "actual_max_level": actual_level,
+            })
+
+    update_fields = doc.settings.element.find(qn("w:updateFields"))
+    update_fields_on_open = (
+        update_fields is not None
+        and update_fields.get(qn("w:val")) in {"1", "true", "on"}
+    )
     return {
         "toc_field_count": toc_field_count,
         "has_single_canonical_toc": toc_field_count == 1,
         "duplicate_source_entries": duplicate_entries,
         "source_toc_title_residue": source_toc_title_residue,
+        "title_issues": title_issues,
+        "toc_style_issues": toc_style_issues,
+        "field_level_issues": field_level_issues,
+        "update_fields_on_open": update_fields_on_open,
         "passed": (
             toc_field_count == 1
             and not duplicate_entries
             and not source_toc_title_residue
+            and not title_issues
+            and not toc_style_issues
+            and not field_level_issues
+            and update_fields_on_open
         ),
     }
