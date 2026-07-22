@@ -28,6 +28,7 @@ tests/*
 !tests/test_table_formatting.py
 !tests/test_unordered_lists.py
 !tests/test_list_group_detection.py
+!tests/test_appendix_semantics.py
 scripts/anonymize_template.py
 scripts/bootstrap_macos_lxml.sh
 scripts/list_semantic_enhancer.py

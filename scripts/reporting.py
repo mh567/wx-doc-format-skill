@@ -145,6 +145,16 @@ def add_risk_warnings(report: dict, row_height_rule: str) -> None:
                 "count": len(source_model_issues),
             }
         )
+    appendix_preservation = report.get("appendix_preservation_audit", {})
+    if appendix_preservation and not appendix_preservation.get("passed", False):
+        report["risk_warnings"].append(
+            {
+                "type": "appendix_preservation",
+                "message": "Appendix structure or 2.2.5 formatting contract has issues.",
+                "count": len(appendix_preservation.get("issues", [])),
+                "issues": appendix_preservation.get("issues", []),
+            }
+        )
     model_diff_warnings = report.get("document_model_diff", {}).get("warnings", [])
     if model_diff_warnings:
         report["risk_warnings"].append(

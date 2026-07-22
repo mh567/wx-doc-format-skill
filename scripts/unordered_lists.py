@@ -35,8 +35,8 @@ def _twips(value: Any) -> int | None:
         return None
 
 
-def paragraph_layout_evidence(paragraph: Any) -> dict[str, int]:
-    """Return stable paragraph indentation evidence in twips."""
+def paragraph_layout_evidence(paragraph: Any) -> dict[str, Any]:
+    """Return stable paragraph indentation and page-boundary evidence."""
     direct = paragraph.paragraph_format
     style_format = getattr(getattr(paragraph, "style", None), "paragraph_format", None)
 
@@ -51,6 +51,20 @@ def paragraph_layout_evidence(paragraph: Any) -> dict[str, int]:
         "right_twips": resolved("right_indent") or 0,
         "first_line_twips": resolved("first_line_indent") or 0,
     }
+    try:
+        from docx.oxml.ns import qn
+
+        p_pr = paragraph._p.find(qn("w:pPr"))
+        page_break_before = p_pr.find(qn("w:pageBreakBefore")) if p_pr is not None else None
+        if page_break_before is not None:
+            value = (page_break_before.get(qn("w:val")) or "true").casefold()
+            result["page_break_before"] = value not in {"0", "false", "off", "no"}
+        result["contains_page_break"] = any(
+            element.get(qn("w:type")) == "page"
+            for element in paragraph._p.iter(qn("w:br"))
+        )
+    except Exception:
+        pass
     return {key: value for key, value in result.items() if value is not None}
 
 

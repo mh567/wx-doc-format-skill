@@ -52,6 +52,7 @@ def _is_protected_style(style_name: str) -> bool:
         normalized.startswith(("heading", "toc"))
         or normalized in _PROTECTED_STYLES
         or source_note_role(style_name) is not None
+        or ("附录" in style_name and "标题" in style_name)
         or any(token in normalized for token in ("目录", "题注", "注释", "公式", "附录标题"))
     )
 

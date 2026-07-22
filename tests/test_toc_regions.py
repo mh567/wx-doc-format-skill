@@ -127,6 +127,19 @@ def test_toc_audit_rejects_excess_levels_and_non_song_latin_font() -> None:
     )
 
 
+def test_toc_field_maps_appendix_styles_to_toc_levels() -> None:
+    doc = Document()
+    doc.add_paragraph("项目概述", style="Heading 1")
+    insert_table_of_contents(doc, {"resolved_styles": {"heading_1": "Heading 1"}})
+
+    instruction = next(doc.paragraphs[1]._p.iter(qn("w:instrText"))).text
+    audit = audit_toc_replacement(doc, None)
+
+    assert '\\t "附录标题,2,附录一级标题,2,附录二级标题,3,附录三级标题,4"' in instruction
+    assert audit["custom_style_mapping_issues"] == []
+    assert audit["passed"] is True
+
+
 def test_word_toc_field_is_strong_evidence() -> None:
     doc = Document()
     paragraph = doc.add_paragraph()

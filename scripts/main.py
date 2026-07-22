@@ -34,6 +34,7 @@ from reporting import new_report, add_risk_warnings, write_markdown_report
 from template_finalizer import apply_template_finalizer
 from template_profile import load_template_profile
 from note_semantics import audit_note_preservation
+from appendix_semantics import audit_appendix_preservation
 from toc_detector import (
     audit_toc_replacement,
     detect_toc_regions,
@@ -247,6 +248,9 @@ def _finalize_and_audit_output(
         template_profile,
     )
     report["note_preservation_audit"] = audit_note_preservation(
+        out_doc, normalized_model, template_profile,
+    )
+    report["appendix_preservation_audit"] = audit_appendix_preservation(
         out_doc, normalized_model, template_profile,
     )
     report["content_warnings"] = collect_content_warnings(out_doc)
