@@ -19,6 +19,7 @@ from llm_enhancer import enhance_document_model, validate_patch
 from template_profile import load_template_profile, template_numbering_ids
 from docx_render import _handle_inferred
 from word_model_renderer import render_document_model
+from list_hierarchy import resolve_list_hierarchy
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -435,3 +436,135 @@ def test_rendered_list_audit_rejects_secondary_style_for_level_zero() -> None:
         "rendered_style": "2.1二级列项-有编号",
     }]
     assert result["passed"] is False
+
+
+def test_rendered_list_audit_rejects_orphaned_nested_item() -> None:
+    doc = Document()
+    secondary = doc.styles.add_style("2.1二级列项-有编号", WD_STYLE_TYPE.PARAGRAPH)
+    doc.add_paragraph("子项", style=secondary)
+    model = {
+        "document": {
+            "blocks": [{
+                "id": "b0001",
+                "block_type": "list_item",
+                "text": "子项",
+                "level": 1,
+                "list_type": "decimal_paren",
+                "source": {"numbering": {"status": "detected"}},
+            }],
+        },
+    }
+
+    result = audit_list_preservation(doc, model, {"detected": 1})
+
+    assert result["missing_list_parents"] == [{
+        "block_id": "b0001",
+        "level": 1,
+        "parent_list_item_id": None,
+    }]
+    assert result["passed"] is False
+
+
+def _hierarchy_item(block_id: str, list_type: str, left: int, ilvl: int = 0) -> dict:
+    return {
+        "id": block_id,
+        "block_type": "list_item",
+        "text": block_id,
+        "level": ilvl,
+        "list_type": list_type,
+        "restart": False,
+        "source": {
+            "layout": {"left_twips": left},
+            "numbering": {"status": "detected", "ilvl": ilvl},
+        },
+    }
+
+
+def test_indent_recovers_ordered_and_unordered_nested_hierarchy() -> None:
+    blocks = [
+        _hierarchy_item("a", "lower_letter_paren", 0),
+        _hierarchy_item("a1", "dash", 720),
+        _hierarchy_item("a2", "dash", 720),
+        _hierarchy_item("b", "lower_letter_paren", 0),
+    ]
+
+    resolve_list_hierarchy({"document": {"blocks": blocks}}, [])
+
+    assert [(item["level"], item["list_type"]) for item in blocks] == [
+        (0, "lower_letter_paren"),
+        (1, "bullet_dot"),
+        (1, "bullet_dot"),
+        (0, "lower_letter_paren"),
+    ]
+    assert blocks[1]["parent_list_item_id"] == "a"
+    assert [item["restart"] for item in blocks] == [True, True, False, False]
+
+
+def test_indent_recovers_nested_unordered_hierarchy_when_ilvl_is_zero() -> None:
+    blocks = [
+        _hierarchy_item("a", "dash", 0),
+        _hierarchy_item("a1", "dash", 720),
+        _hierarchy_item("a2", "dash", 720),
+        _hierarchy_item("b", "dash", 0),
+    ]
+
+    resolve_list_hierarchy({"document": {"blocks": blocks}}, [])
+
+    assert [(item["level"], item["list_type"]) for item in blocks] == [
+        (0, "dash"),
+        (1, "bullet_dot"),
+        (1, "bullet_dot"),
+        (0, "dash"),
+    ]
+
+
+def test_source_numbering_restart_is_preserved_for_adjacent_ordered_groups() -> None:
+    blocks = [
+        _hierarchy_item("a", "lower_letter_paren", 0),
+        _hierarchy_item("b", "lower_letter_paren", 0),
+    ]
+    for block in blocks:
+        block["source"]["numbering"]["restart"] = True
+
+    resolve_list_hierarchy({"document": {"blocks": blocks}}, [])
+
+    assert [item["restart"] for item in blocks] == [True, True]
+
+
+def test_rendered_list_audit_rejects_parent_that_appears_later() -> None:
+    doc = Document()
+    primary = doc.styles.add_style("1.1一级列项-编号", WD_STYLE_TYPE.PARAGRAPH)
+    secondary = doc.styles.add_style("2.1二级列项-有编号", WD_STYLE_TYPE.PARAGRAPH)
+    doc.add_paragraph("子项", style=secondary)
+    doc.add_paragraph("父项", style=primary)
+    model = {
+        "document": {
+            "blocks": [
+                {
+                    "id": "child",
+                    "block_type": "list_item",
+                    "text": "子项",
+                    "level": 1,
+                    "list_type": "decimal_paren",
+                    "parent_list_item_id": "parent",
+                    "source": {"numbering": {"status": "detected"}},
+                },
+                {
+                    "id": "parent",
+                    "block_type": "list_item",
+                    "text": "父项",
+                    "level": 0,
+                    "list_type": "lower_letter_paren",
+                    "source": {"numbering": {"status": "detected"}},
+                },
+            ],
+        },
+    }
+
+    result = audit_list_preservation(doc, model, {"detected": 2})
+
+    assert result["missing_list_parents"] == [{
+        "block_id": "child",
+        "level": 1,
+        "parent_list_item_id": "parent",
+    }]

@@ -18,7 +18,7 @@ from text_utils import (
 from document_model import validate_document_model
 from list_style_mapping import normalize_wx_list_type
 from caption_placement import normalize_caption_placement
-from unordered_lists import normalize_unordered_hierarchy
+from list_hierarchy import resolve_list_hierarchy
 from list_group_detection import apply_semantic_list_groups
 from appendix_semantics import (
     annotate_appendix_ranges,
@@ -320,7 +320,7 @@ def normalize_document_model_simple(
                     block["row_height_rule"] = "atLeast"
                     repairs.append({"block": index, "type": "table_row_height_rule_at_least"})
 
-    normalize_unordered_hierarchy(model, repairs)
+    resolve_list_hierarchy(model, repairs)
     normalize_caption_placement(model, repairs)
     annotate_appendix_ranges(model)
 

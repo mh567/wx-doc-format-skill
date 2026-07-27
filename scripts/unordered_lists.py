@@ -158,94 +158,14 @@ def strip_source_unordered_marker(block: dict) -> str:
     return text
 
 
-def _layout_level_map(run: list[dict]) -> dict[int, int]:
-    left_values = []
-    for block in run:
-        value = block.get("source", {}).get("layout", {}).get("left_twips")
-        if isinstance(value, int):
-            left_values.append(value)
-    if not left_values:
-        return {}
-
-    clusters: list[int] = []
-    for value in sorted(set(left_values)):
-        if not clusters or value - clusters[-1] >= 120:
-            clusters.append(value)
-    return {value: min(index, 8) for index, value in enumerate(clusters)}
-
-
 def normalize_unordered_hierarchy(model: dict, repairs: list[dict]) -> None:
-    """Normalize unordered levels per section while leaving ordered levels intact."""
-    blocks = model.get("document", {}).get("blocks", [])
-    run: list[dict] = []
+    """Compatibility wrapper for the unified list hierarchy resolver."""
+    from list_hierarchy import resolve_list_hierarchy
 
-    def flush() -> None:
-        if not run:
-            return
-        unordered = [b for b in run if b.get("list_type") in UNORDERED_LIST_TYPES]
-        if not unordered:
-            run.clear()
-            return
-
-        layout_levels = _layout_level_map(run)
-        proposed: dict[int, int] = {}
-        for block in unordered:
-            source = block.get("source", {})
-            numbering = source.get("numbering", {})
-            left = source.get("layout", {}).get("left_twips")
-            if numbering.get("status") in {"detected", "ambiguous"}:
-                level = int(numbering.get("ilvl") or 0)
-            elif isinstance(left, int) and left in layout_levels:
-                level = layout_levels[left]
-            else:
-                level = int(block.get("level") or 0)
-            proposed[id(block)] = max(0, level)
-
-        if len(unordered) == len(run):
-            baseline = min(proposed.values(), default=0)
-        else:
-            baseline = 0
-
-        previous_level: int | None = None
-        active_unordered_signatures: set[tuple[int, str]] = set()
-        for block in run:
-            if block.get("list_type") not in UNORDERED_LIST_TYPES:
-                previous_level = int(block.get("level") or 0)
-                continue
-            old_level = int(block.get("level") or 0)
-            level = max(0, proposed[id(block)] - baseline)
-            if previous_level is None and level > 0:
-                level = 0
-            elif previous_level is not None and level > previous_level + 1:
-                level = previous_level + 1
-            block["level"] = level
-            target_type = "dash" if level == 0 else "bullet_dot"
-            block["list_type"] = target_type
-            signature = (level, target_type)
-            block["restart"] = signature not in active_unordered_signatures
-            active_unordered_signatures.add(signature)
-            clean_text = strip_source_unordered_marker(block)
-            if clean_text != block.get("text"):
-                block["text"] = clean_text
-                repairs.append({
-                    "block_id": block.get("id"),
-                    "type": "unordered_source_marker_removed",
-                })
-            if old_level != level:
-                repairs.append({
-                    "block_id": block.get("id"),
-                    "type": "unordered_level_normalized",
-                    "from": old_level,
-                    "to": level,
-                })
-            previous_level = level
-        run.clear()
-
-    for block in blocks:
-        if block.get("block_type") == "heading":
-            flush()
-        elif block.get("block_type") == "list_item":
-            run.append(block)
-        else:
-            flush()
-    flush()
+    if not any(
+        block.get("block_type") == "list_item"
+        and block.get("list_type") in UNORDERED_LIST_TYPES
+        for block in model.get("document", {}).get("blocks", [])
+    ):
+        return
+    resolve_list_hierarchy(model, repairs)

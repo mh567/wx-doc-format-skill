@@ -472,6 +472,7 @@ def audit_list_preservation(
         and block.get("source", {}).get("numbering", {}).get("status") == "detected"
     ]
     level_jumps: list[dict[str, Any]] = []
+    missing_list_parents: list[dict[str, Any]] = []
     isolated_items: list[str] = []
     current_run: list[dict[str, Any]] = []
     for block in [*blocks, {"block_type": "_end"}]:
@@ -487,6 +488,23 @@ def audit_list_preservation(
                     })
             current_run.append(block)
             continue
+        active_parents: dict[int, str] = {}
+        for item in current_run:
+            level = int(item.get("level") or 0)
+            parent_id = str(item.get("parent_list_item_id") or "")
+            expected_parent_id = active_parents.get(level - 1) if level else None
+            if level > 0 and (
+                expected_parent_id is None
+                or parent_id != expected_parent_id
+            ):
+                missing_list_parents.append({
+                    "block_id": item.get("id"),
+                    "level": level,
+                    "parent_list_item_id": parent_id or None,
+                })
+            active_parents[level] = str(item.get("id") or "")
+            for deeper_level in [key for key in active_parents if key > level]:
+                active_parents.pop(deeper_level, None)
         if len(current_run) == 1:
             isolated_items.append(str(current_run[0].get("id") or ""))
         current_run = []
@@ -528,6 +546,7 @@ def audit_list_preservation(
         "source_list_body_residue": source_body_residue,
         "style_level_mismatches": style_level_mismatches,
         "list_level_jumps": level_jumps,
+        "missing_list_parents": missing_list_parents,
         "isolated_ast_list_items": isolated_items,
         "protected_role_conflicts": conflicts,
         "passed": (
@@ -536,6 +555,7 @@ def audit_list_preservation(
             and not source_body_residue
             and not style_level_mismatches
             and not level_jumps
+            and not missing_list_parents
             and not conflicts
         ),
     }
