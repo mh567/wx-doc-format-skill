@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from copy import deepcopy
 from typing import Callable
 from docx.enum.style import WD_STYLE_TYPE
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -724,6 +725,40 @@ def insert_table_of_contents(doc, profile: dict) -> dict:
     }
 
 
+def extract_template_toc_fragment(doc) -> list:
+    """Copy the template's top-level TOC content control and its page break."""
+    body = doc.element.body
+    children = list(body)
+    for index, child in enumerate(children):
+        if child.tag != qn("w:sdt"):
+            continue
+        instructions = [node.text or "" for node in child.iter(qn("w:instrText"))]
+        if not any(re.search(r"\bTOC\b", value, re.I) for value in instructions):
+            continue
+        fragment = [deepcopy(child)]
+        if index + 1 < len(children):
+            following = children[index + 1]
+            if following.tag == qn("w:p") and any(
+                br.get(qn("w:type")) == "page" for br in following.iter(qn("w:br"))
+            ):
+                fragment.append(deepcopy(following))
+        return fragment
+    return []
+
+
+def insert_template_toc_fragment(doc, fragment: list) -> dict:
+    body = doc.element.body
+    for index, child in enumerate(fragment):
+        body.insert(index, deepcopy(child))
+    settings = doc.settings.element
+    update_fields = settings.find(qn("w:updateFields"))
+    if update_fields is None:
+        update_fields = OxmlElement("w:updateFields")
+        settings.append(update_fields)
+    update_fields.set(qn("w:val"), "true")
+    return {"toc_inserted": True, "mode": "template_fragment", "update_fields_on_open": True}
+
+
 def apply_template_finalizer(
     doc,
     profile: dict | None,
@@ -737,11 +772,15 @@ def apply_template_finalizer(
     set_table_autofit_to_window: Callable,
     looks_like_code_sample_table: Callable,
     table_roles: list[str] | None = None,
+    template_toc_fragment: list | None = None,
 ) -> dict:
     if not profile:
         return {"enabled": False, "corrections": [], "style_audit": {}, "layout_audit": {}}
     corrections = []
-    corrections.append(insert_table_of_contents(doc, profile))
+    if template_toc_fragment:
+        corrections.append(insert_template_toc_fragment(doc, template_toc_fragment))
+    else:
+        corrections.append(insert_table_of_contents(doc, profile))
     corrections.extend(finalize_appendix_structure(doc, profile))
     corrections.extend(apply_paragraph_style_aliases(doc, profile))
     corrections.extend(normalize_caption_prefixes(doc))

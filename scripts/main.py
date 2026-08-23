@@ -31,7 +31,7 @@ from word_model_renderer import (
 from docx_render import render_docx_direct
 from audit import audit_document, collect_content_warnings
 from reporting import new_report, add_risk_warnings, write_markdown_report
-from template_finalizer import apply_template_finalizer
+from template_finalizer import apply_template_finalizer, extract_template_toc_fragment
 from template_profile import load_template_profile
 from note_semantics import audit_note_preservation
 from appendix_semantics import audit_appendix_preservation
@@ -211,6 +211,7 @@ def _finalize_and_audit_output(
             for block in (normalized_model or {}).get("document", {}).get("blocks", [])
             if block.get("block_type") == "table"
         ],
+        template_toc_fragment=getattr(out_doc, "_template_toc_fragment", None),
     )
     suffix = args.input.suffix.lower()
     report["toc_replacement_audit"] = audit_toc_replacement(
@@ -1024,6 +1025,7 @@ def main() -> None:
     if args.template is not None:
         template_profile = load_template_profile(args.template)
         out_doc = _open_template_renamed_media(args.template)
+        out_doc._template_toc_fragment = extract_template_toc_fragment(out_doc)
         clear_document_body(out_doc)
         numbering_ids = merge_template_numbering_ids(template_profile, {})
         report["template_profile"] = {

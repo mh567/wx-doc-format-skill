@@ -439,9 +439,15 @@ def _style_contract_issues(
 
 def audit_toc_replacement(doc, context: dict | None) -> dict:
     """Audit the canonical output TOC and residual source-directory entries."""
+    paragraphs = [Paragraph(element, doc) for element in doc.element.body.iter(qn("w:p"))]
+    template_toc = any(
+        child.tag == qn("w:sdt")
+        and any(re.search(r"\bTOC\b", node.text or "", re.I) for node in child.iter(qn("w:instrText")))
+        for child in doc.element.body.iterchildren()
+    )
     toc_field_count = 0
     toc_instructions: list[str] = []
-    for paragraph in doc.paragraphs:
+    for paragraph in paragraphs:
         instruction = _field_instruction(paragraph)
         if re.search(r"\bTOC\b", instruction, re.I):
             toc_field_count += 1
@@ -460,7 +466,7 @@ def audit_toc_replacement(doc, context: dict | None) -> dict:
         for entry in selected[0].get("entry_preview", []):
             normalized = _normalize_entry_text(entry)
             matches = [
-                index for index, paragraph in enumerate(doc.paragraphs)
+                index for index, paragraph in enumerate(paragraphs)
                 if _normalize_entry_text(paragraph.text) == normalized
             ]
             if len(matches) > 1:
@@ -470,12 +476,12 @@ def audit_toc_replacement(doc, context: dict | None) -> dict:
                 })
 
     source_toc_title_residue = [
-        index for index, paragraph in enumerate(doc.paragraphs[2:], start=2)
+        index for index, paragraph in enumerate(paragraphs[2:], start=2)
         if paragraph.text.strip() in _TOC_TITLES
         and not _style_name(paragraph).casefold().startswith("heading")
     ]
     title_paragraph = next(
-        (paragraph for paragraph in doc.paragraphs if paragraph.text.strip()),
+        (paragraph for paragraph in paragraphs if paragraph.text.strip()),
         None,
     )
     title_text = title_paragraph.text if title_paragraph is not None else None
@@ -487,24 +493,21 @@ def audit_toc_replacement(doc, context: dict | None) -> dict:
             "expected": CANONICAL_TOC_TITLE,
             "actual": title_text,
         })
-    if _normalized_style_name(title_style) != _normalized_style_name(TOC_TITLE_STYLE):
+    if not template_toc and _normalized_style_name(title_style) != _normalized_style_name(TOC_TITLE_STYLE):
         title_issues.append({
             "type": "title_style",
             "expected": TOC_TITLE_STYLE,
             "actual": title_style,
         })
-    title_issues.extend(_style_contract_issues(
-        doc,
-        style_name=TOC_TITLE_STYLE,
-        family=TOC_TITLE_FONT,
-        size_half_points=TOC_TITLE_SIZE_HALF_POINTS,
-        left_twips=0,
-        left_chars=0,
-        alignment="center",
-    ))
+    if not template_toc:
+        title_issues.extend(_style_contract_issues(
+            doc, style_name=TOC_TITLE_STYLE, family=TOC_TITLE_FONT,
+            size_half_points=TOC_TITLE_SIZE_HALF_POINTS, left_twips=0,
+            left_chars=0, alignment="center",
+        ))
 
     toc_style_issues: list[dict[str, Any]] = []
-    for level in range(1, TOC_MAX_LEVEL + 1):
+    for level in ([] if template_toc else range(1, TOC_MAX_LEVEL + 1)):
         toc_style_issues.extend(_style_contract_issues(
             doc,
             style_name=f"TOC {level}",
@@ -520,7 +523,7 @@ def audit_toc_replacement(doc, context: dict | None) -> dict:
     for instruction in toc_instructions:
         match = re.search(r'\\o\s+"1-(\d+)"', instruction, re.I)
         actual_level = int(match.group(1)) if match else None
-        if actual_level != TOC_MAX_LEVEL:
+        if not template_toc and actual_level != TOC_MAX_LEVEL:
             field_level_issues.append({
                 "instruction": instruction,
                 "expected_max_level": TOC_MAX_LEVEL,
@@ -534,7 +537,7 @@ def audit_toc_replacement(doc, context: dict | None) -> dict:
                 actual_mapping[tokens[index]] = int(tokens[index + 1])
             except ValueError:
                 continue
-        if actual_mapping != TOC_CUSTOM_STYLE_LEVELS:
+        if not template_toc and actual_mapping != TOC_CUSTOM_STYLE_LEVELS:
             custom_style_mapping_issues.append({
                 "instruction": instruction,
                 "expected": TOC_CUSTOM_STYLE_LEVELS,

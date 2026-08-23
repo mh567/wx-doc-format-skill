@@ -383,6 +383,26 @@ def audit_output_structure(doc, profile: dict | None = None) -> dict:
     """Audit the canonical TOC, title, and body ordering."""
     profile = profile or {}
     expected_title_style = profile.get("resolved_styles", {}).get("title", "文档标题")
+    children = list(doc.element.body.iterchildren())
+    if children and children[0].tag == qn("w:sdt"):
+        instructions = [node.text or "" for node in children[0].iter(qn("w:instrText"))]
+        if any(re.search(r"\bTOC\b", instruction, re.I) for instruction in instructions):
+            page_break = (
+                len(children) > 1
+                and children[1].tag == qn("w:p")
+                and any(br.get(qn("w:type")) == "page" for br in children[1].iter(qn("w:br")))
+            )
+            return {
+                "toc_title_index": 0,
+                "toc_field_index": 0,
+                "document_title_index": 2 if len(children) > 2 else None,
+                "document_title_text": None,
+                "document_title_style": None,
+                "document_title_count": None,
+                "issues": [] if page_break else [{"type": "toc_missing_page_break"}],
+                "passed": page_break,
+                "mode": "template_fragment",
+            }
     body_children = [
         child for child in doc.element.body.iterchildren()
         if child.tag in {qn("w:p"), qn("w:tbl")}
