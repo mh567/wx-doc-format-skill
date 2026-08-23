@@ -4,6 +4,7 @@ import re
 from typing import Callable
 
 from text_utils import (
+    caption_parts,
     clean_note_prefix,
     heading_level_from_text,
     is_appendix_title,
@@ -17,7 +18,9 @@ from document_model import (
     append_block,
     appendix_block,
     body_block,
+    caption_block,
     heading_block,
+    image_block,
     list_item_block,
     new_document_model,
     source_record,
@@ -25,6 +28,11 @@ from document_model import (
 )
 from unordered_lists import annotate_unordered_candidates
 from list_group_detection import annotate_semantic_list_groups
+
+
+MD_IMAGE_PATTERN = re.compile(
+    r'^!\[(?P<alt>[^\]]*)\]\((?P<target><[^>]+>|[^\s)]+)(?:\s+"[^"]*")?\)$'
+)
 
 
 def is_md_table_start(lines: list[str], index: int) -> bool:
@@ -124,6 +132,25 @@ def parse_md_to_model(
         if not line:
             index += 1
             continue
+        image_match = MD_IMAGE_PATTERN.match(line)
+        if image_match is not None:
+            target = image_match.group("target").strip("<>")
+            asset_path = (src_path.parent / target).resolve()
+            append_block(
+                model,
+                image_block(
+                    next_id(),
+                    alt_text=image_match.group("alt").strip(),
+                    source=source_record(
+                        raw_text=line,
+                        format="md_image",
+                        asset_path=str(asset_path),
+                    ),
+                ),
+            )
+            reset_lists()
+            index += 1
+            continue
         if is_md_table_start(lines, index):
             rows, next_index = parse_md_table(lines, index)
             append_block(
@@ -199,6 +226,26 @@ def parse_md_to_model(
                     next_id(),
                     line,
                     source=source_record(raw_text=line, role="appendix_title", format="md_text"),
+                ),
+            )
+            reset_lists()
+            index += 1
+            continue
+        caption_type, label, raw_number, caption_text = caption_parts(line)
+        if caption_type != "unknown":
+            append_block(
+                model,
+                caption_block(
+                    next_id(),
+                    caption_text,
+                    caption_type,
+                    label=label,
+                    raw_number=raw_number,
+                    source=source_record(
+                        raw_text=line,
+                        format="md_caption",
+                        layout=source_layout,
+                    ),
                 ),
             )
             reset_lists()

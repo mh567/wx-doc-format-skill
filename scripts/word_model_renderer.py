@@ -4,7 +4,7 @@ from typing import Callable
 
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from docx.enum.text import WD_BREAK
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_BREAK
 from table_formatting import normalize_table
 
 from list_style_mapping import (
@@ -96,6 +96,37 @@ def _add_paragraph_with_soft_break_lines(doc, style: str, lines: list[str]):
 def _add_explicit_page_break(doc) -> None:
     paragraph = doc.add_paragraph()
     paragraph.add_run().add_break(WD_BREAK.PAGE)
+
+
+def _add_seq_caption(
+    doc,
+    caption_type: str,
+    caption_text: str,
+    *,
+    template_profile: dict | None = None,
+):
+    """Render a caption with a Word SEQ field and the template caption style."""
+    style = style_from_profile(template_profile, "caption", "Caption")
+    try:
+        paragraph = doc.add_paragraph(style=style)
+    except Exception:
+        paragraph = doc.add_paragraph()
+
+    seq_name = "Table" if caption_type == "table" else "Figure"
+    prefix = "表 " if caption_type == "table" else "图 "
+    paragraph.add_run(prefix)
+
+    field = OxmlElement("w:fldSimple")
+    field.set(qn("w:instr"), f"SEQ {seq_name} \\* ARABIC")
+    field_run = OxmlElement("w:r")
+    field_text = OxmlElement("w:t")
+    field_text.text = "1"
+    field_run.append(field_text)
+    field.append(field_run)
+    paragraph._p.append(field)
+
+    paragraph.add_run(f" {caption_text}")
+    return paragraph
 
 
 def render_document_model(
@@ -227,6 +258,27 @@ def render_document_model(
                 )
             active_list_nums = {}
 
+        # --- Image ---
+        elif block_type == "image":
+            asset_path = str(block.get("source", {}).get("asset_path") or "")
+            if not asset_path:
+                report.setdefault("content_warnings", []).append({
+                    "type": "markdown_image_missing_asset_path",
+                    "block_id": block.get("id"),
+                })
+                continue
+            try:
+                paragraph = doc.add_paragraph()
+                paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                paragraph.add_run().add_picture(asset_path)
+            except Exception as error:
+                report.setdefault("content_warnings", []).append({
+                    "type": "markdown_image_render_failed",
+                    "block_id": block.get("id"),
+                    "error": type(error).__name__,
+                })
+            active_list_nums = {}
+
         # --- Appendix ---
         elif block_type == "appendix":
             if block.get("layout", {}).get("page_break_before", True):
@@ -254,19 +306,23 @@ def render_document_model(
         # --- Caption ---
         elif block_type == "caption":
             caption_type = block.get("caption_type", "table")
-            label = "图" if caption_type == "figure" else "表"
             caption_text = block.get("text", "")
             appendix_id = str(block.get("appendix_id") or "").strip()
             source_text = str(block.get("source", {}).get("raw_text") or "").strip()
             if appendix_id and source_text:
                 text = source_text
+                style = style_from_profile(template_profile, "caption", "Caption")
+                try:
+                    doc.add_paragraph(text, style=style)
+                except Exception:
+                    doc.add_paragraph(text)
             else:
-                text = f"{label}  {caption_text}" if caption_text else f"{label}"
-            style = style_from_profile(template_profile, "caption", "Caption")
-            try:
-                doc.add_paragraph(text, style=style)
-            except Exception:
-                doc.add_paragraph(text)
+                _add_seq_caption(
+                    doc,
+                    "figure" if caption_type == "figure" else "table",
+                    caption_text,
+                    template_profile=template_profile,
+                )
             active_list_nums = {}
 
         # --- Body / Note / Formula ---
