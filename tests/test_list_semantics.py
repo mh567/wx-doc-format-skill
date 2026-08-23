@@ -24,7 +24,9 @@ from reporting import add_risk_warnings, new_report
 from template_profile import load_template_profile, template_numbering_ids
 from text_utils import (
     CAPTION_PATTERN,
+    caption_parts,
     heading_level_from_text,
+    is_caption_text,
     iter_blocks,
     looks_like_code_sample_table,
     looks_like_list_item,
@@ -241,6 +243,40 @@ def test_plain_toc_title_without_heading_evidence_remains_body() -> None:
 
     assert style is None
     assert role == "body"
+
+
+def test_caption_recognition_requires_numeric_marker_or_separator() -> None:
+    for text in (
+        "图1-1 架构图",
+        "图 5-1 架构图",
+        "图：架构图",
+        "表 1 接口清单",
+    ):
+        assert is_caption_text(text)
+        assert caption_parts(text)[0] in {"figure", "table"}
+
+
+def test_caption_recognition_rejects_words_starting_with_caption_labels() -> None:
+    for text in (
+        "图表组件、模板、主题与仪表盘，供门户与监控复用。",
+        "图表组件",
+        "图表1",
+        "表单管理",
+    ):
+        assert not is_caption_text(text)
+
+
+def test_infer_docx_role_keeps_graph_component_heading_and_body_text() -> None:
+    document = Document()
+    heading = document.add_paragraph("图表组件", style="Heading 6")
+    body = document.add_paragraph("图表组件、模板、主题与仪表盘，供门户与监控复用。", style="Normal")
+
+    assert infer_docx_role(heading, True, {}) == ("图表组件", "Heading 6", "heading")
+    assert infer_docx_role(body, True, {}) == (
+        "图表组件、模板、主题与仪表盘，供门户与监控复用。",
+        None,
+        "body",
+    )
 
 
 def test_invalid_numbering_cannot_be_revived_by_list_style() -> None:

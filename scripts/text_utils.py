@@ -41,7 +41,12 @@ LIST_PATTERNS = [
 
 DATE_LIKE = re.compile(r"^\d{4}\s*年\s*\d{1,2}\s*月")
 TOC_TITLES = {"目次", "目录", "目  次"}
-CAPTION_PATTERN = re.compile(r"^([图表])[：:\s]*(?:(?:[A-Z]\.)?\d+(?:[-\.](?:[A-Z]\.)?\d+)*\s*)?(.*)")
+# A caption label must end at a numeric marker or an explicit separator.
+# This keeps ordinary words such as "图表组件" and "表单管理" out of the
+# caption path while supporting numbered and label-only source captions.
+CAPTION_PATTERN = re.compile(
+    r"^([图表])(?:(?:[A-Z]\.)?\d+(?:[-\.](?:[A-Z]\.)?\d+)*\s*|[：:]\s*|\s+(?:(?:[A-Z]\.)?\d+(?:[-\.](?:[A-Z]\.)?\d+)*\s*)?)(.*)"
+)
 FORMULA_PATTERN = re.compile(r"^(S|S\.)?\(?\d+(?:\.\d+)*\)?[：:]\s*")
 NOTE_FORMULA_LINE = re.compile(r"^（\d+(?:\.\d+)*）\s*")
 
@@ -357,8 +362,8 @@ def caption_parts(text: str) -> tuple[str, str | None, str | None, str]:
         return "unknown", None, None, text.strip()
     label, caption_text = match.groups()
     caption_text = (caption_text or "").strip()
-    # "图表1" → label=图, caption_text=表1: ambiguous, treat as one token
-    # and return empty caption_text (it has no descriptive title, just a number)
+    # CAPTION_PATTERN rejects "图表1" because "图" has no valid boundary.
+    # A valid caption with a second label in its captured text is label-only.
     if caption_text.startswith(("表", "图")):
         return ("figure" if label == "图" else "table"), label, None, ""
     return ("figure" if label == "图" else "table"), label, None, caption_text
