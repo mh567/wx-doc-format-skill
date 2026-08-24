@@ -1,29 +1,43 @@
 # wx-doc-format-skill
 
-本仓库是 wx-doc-format 的公开 Skill 分发层。核心处理程序以按平台编译的离线包发布，目标机无需安装 Python。
+## 核心能力
 
-## 安装 Skill
+将 Markdown 或 DOCX 文档转换为 WX 模板格式的 DOCX，自动处理标题、目录、列表、表格、题注和附录，并生成审计报告。
 
-可以让支持 Skill 的 Agent 从 `mh567/wx-doc-format-skill` 安装，也可以直接克隆到 Agent 的 Skill 目录。
+运行时以本机编译包分发，目标机无需安装 Python。当前提供 macOS ARM64 和 Linux ARM64 制品，Windows x86_64 运行时待后续补充。
 
-首次运行 `scripts/run.sh` 或 `scripts/run.ps1` 时，启动器根据当前操作系统和架构获取对应归档。当前发布可用平台见 `artifacts/AVAILABLE_PLATFORMS.txt`。对应平台缺失时，启动器会返回明确错误，已安装的 Skill 保持可更新。
+## 安装方法
 
-## 离线和内网部署
+让支持 Skill 的 Agent 执行：
 
-从 GitHub Release 下载目标平台的完整归档，解压后可以直接作为 Skill 使用。也可以将归档和本仓库一同放入内网介质，首次运行前设置：
+> 从 GitHub 仓库 mh567/wx-doc-format-skill 安装 wx-doc-format skill
+
+也可以将仓库克隆到 Agent 的 Skill 目录。首次运行会自动获取当前平台制品并验证 SHA256。
+
+内网环境可以直接解压 GitHub Release 中对应平台的完整包，或设置本地制品目录：
 
 ```bash
 export WX_DOC_FORMAT_ARCHIVE_DIR=/path/to/offline-artifacts
 ```
 
-Windows PowerShell 使用：
+## 使用方法
 
-```powershell
-$env:WX_DOC_FORMAT_ARCHIVE_DIR = "D:\offline-artifacts"
+macOS 和 Linux：
+
+```bash
+scripts/run.sh \
+  --input source.docx \
+  --output output.docx \
+  --template assets/wx_template.docx \
+  --report report.json
 ```
 
-启动器会根据仓库内置的 SHA256 清单验证归档。缓存和安装路径需要只包含可打印 ASCII 字符。
+Windows PowerShell：
 
-## 可用性
-
-Windows 运行时可以后续补充。当 `windows-x86_64` 未列入当前版本的可用平台时，Windows 端会保留 Skill 并返回 `WXDF-E-RUNTIME-UNAVAILABLE`。
+```powershell
+.\scripts\run.ps1 `
+  --input source.docx `
+  --output output.docx `
+  --template assets\wx_template.docx `
+  --report report.json
+```
