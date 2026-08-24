@@ -53,3 +53,18 @@ wx-doc-format-skill-<version>-windows-x86_64.zip
 ```
 
 发布包的安装目录必须只包含可打印 ASCII 字符。安装器会验证 `SHA256SUMS.txt`、完整文件集和运行时版本。调用 `scripts/run.sh` 或 `scripts/run.ps1` 时也会重新检查安装路径。
+
+## 组装公开 Skill
+
+公开仓库只保留薄 Skill 和平台运行时引导脚本。组装时可以要求已经完成的平台，未生成的 Windows 制品会记录为暂不可用：
+
+```bash
+scripts/.venv/bin/python3 packaging/nuitka/assemble_public_skill.py \
+  --artifacts-dir dist/local \
+  --output-dir dist/public-skill \
+  --require-platform macos-arm64 \
+  --require-platform kylin-v10-arm64 \
+  --macos-min-version 26.0
+```
+
+`dist/public-skill/` 用于替换公开仓库当前文件。`dist/local/` 中列入 `artifacts/SHA256SUMS.txt` 的归档作为同版本 GitHub Release 资产上传。

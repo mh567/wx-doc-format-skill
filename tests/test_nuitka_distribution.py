@@ -43,6 +43,18 @@ def _load_smoke_module():
 smoke_distribution = _load_smoke_module()
 
 
+def _load_public_assembler_module():
+    path = ROOT / "packaging" / "nuitka" / "assemble_public_skill.py"
+    spec = importlib.util.spec_from_file_location("wx_nuitka_public", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+public_assembler = _load_public_assembler_module()
+
+
 def _write_posix_runtime(path: Path) -> None:
     version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
     path.write_text(
@@ -472,3 +484,77 @@ def test_public_adapters_enforce_printable_ascii_install_path():
     for filename in ("install.sh", "run.sh", "install.ps1", "run.ps1"):
         text = (nuitka_dir / filename).read_text(encoding="utf-8")
         assert "printable ASCII" in text
+
+
+def test_public_skill_assembly_allows_missing_windows_artifact(tmp_path):
+    version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+    artifacts_dir = tmp_path / "artifacts"
+    artifacts_dir.mkdir()
+    for platform_id in ("macos-arm64", "kylin-v10-arm64"):
+        name = public_assembler.artifact_name(version, platform_id)
+        (artifacts_dir / name).write_bytes(platform_id.encode("ascii"))
+
+    output = public_assembler.assemble_public_skill(
+        artifacts_dir,
+        tmp_path / "public-skill",
+        ("macos-arm64", "kylin-v10-arm64"),
+        "26.0",
+    )
+
+    manifest = json.loads((output / "artifacts" / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["available_platforms"] == ["kylin-v10-arm64", "macos-arm64"]
+    assert manifest["unavailable_platforms"] == ["windows-x86_64"]
+    assert manifest["macos_min_version"] == "26.0"
+    assert "windows-x86_64" not in (output / "artifacts" / "SHA256SUMS.txt").read_text(encoding="utf-8")
+    powershell = (output / "scripts" / "run.ps1").read_text(encoding="utf-8")
+    assert "WXDF-E-RUNTIME-UNAVAILABLE" in powershell
+    assert "exit 3" in powershell
+    assert not list(output.rglob("*.py"))
+
+
+def test_public_skill_assembly_can_require_a_platform(tmp_path):
+    with pytest.raises(FileNotFoundError, match="windows-x86_64"):
+        public_assembler.assemble_public_skill(
+            tmp_path,
+            tmp_path / "public-skill",
+            ("windows-x86_64",),
+        )
+
+
+def test_public_skill_assembly_preserves_unrecognized_output_directory(tmp_path):
+    artifacts_dir = tmp_path / "artifacts"
+    artifacts_dir.mkdir()
+    version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+    linux_name = public_assembler.artifact_name(version, "kylin-v10-arm64")
+    (artifacts_dir / linux_name).write_bytes(b"placeholder")
+    output = tmp_path / "public-skill"
+    output.mkdir()
+    protected = output / "user-file.txt"
+    protected.write_text("keep", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="not a generated public Skill"):
+        public_assembler.assemble_public_skill(artifacts_dir, output)
+
+    assert protected.read_text(encoding="utf-8") == "keep"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX bootstrap test")
+def test_public_posix_bootstrap_reports_unavailable_runtime(tmp_path):
+    version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+    artifacts_dir = tmp_path / "artifacts"
+    artifacts_dir.mkdir()
+    linux_name = public_assembler.artifact_name(version, "kylin-v10-arm64")
+    (artifacts_dir / linux_name).write_bytes(b"placeholder")
+    output = public_assembler.assemble_public_skill(artifacts_dir, tmp_path / "public-skill")
+
+    result = subprocess.run(
+        ["/bin/sh", str(output / "scripts" / "run.sh"), "--version"],
+        text=True,
+        capture_output=True,
+    )
+    expected_available = sys.platform.startswith("linux") and os.uname().machine in {"aarch64", "arm64"}
+    if expected_available:
+        assert result.returncode != 3
+    else:
+        assert result.returncode == 3
+        assert "WXDF-E-RUNTIME-UNAVAILABLE" in result.stderr or "WXDF-E-PLATFORM-UNSUPPORTED" in result.stderr
