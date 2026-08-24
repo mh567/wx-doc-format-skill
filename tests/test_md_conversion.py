@@ -76,6 +76,9 @@ def test_markdown_inline_syntax_does_not_reach_rendered_document(tmp_path: Path)
         table_roles=["data"],
     )
     assert audit["markdown_residue"] == []
+    body = next(paragraph for paragraph in doc.paragraphs if "代码" in paragraph.text)
+    assert "w:hyperlink" in body._p.xml
+    assert any(run.style.font.bold for run in body.runs if "强调" in run.text)
 
 
 def test_markdown_residue_audit_ignores_identifier_underscores() -> None:
@@ -297,6 +300,19 @@ def test_markdown_percent_decoded_chinese_image_filename_round_trips(tmp_path: P
     doc.save(output)
     report["audit"] = {"markdown_residue": []}
     assert audit_markdown_preservation(source_model, model, report, build_document_model_from_output(Document(output), tmp_path / "images.md", report))["passed"] is True
+
+
+def test_saved_inline_character_style_removal_fails_preservation(tmp_path: Path) -> None:
+    source_model, report = _parse_for_conversion(tmp_path, "# 标题\n\n正文 **强**\n\n- 列项 *斜*\n\n列 | 值\n--- | ---\n甲 | `码`\n")
+    model = normalize_document_model(source_model, report)
+    profile = load_template_profile(TEMPLATE); doc = Document(TEMPLATE); clear_document_body(doc)
+    render_document_model(model, doc, report, .69, "atLeast", template_numbering_ids(profile), template_profile=profile)
+    for paragraph in list(doc.paragraphs) + [cell.paragraphs[0] for table in doc.tables for row in table.rows for cell in row.cells]:
+        for run in paragraph.runs:
+            if run.style.name.startswith("Markdown"):
+                run.style = doc.styles["Default Paragraph Font"]
+    output = tmp_path / "removed-style.docx"; doc.save(output); report["audit"] = {"markdown_residue": []}
+    assert audit_markdown_preservation(source_model, model, report, build_document_model_from_output(Document(output), tmp_path / "removed.md", report))["passed"] is False
 
 
 def paragraph_has_image(paragraph) -> bool:

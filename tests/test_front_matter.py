@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+import pytest
 
 from docx import Document
 from docx.enum.style import WD_STYLE_TYPE
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_BREAK
 from docx.shared import Pt
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
@@ -177,6 +180,50 @@ def test_output_structure_rejects_table_before_title() -> None:
 
     assert result["passed"] is False
     assert any(issue["type"] == "title_missing_after_toc" for issue in result["issues"])
+
+
+@pytest.mark.parametrize("titles", [["", "方案标题"], ["方案标题", "重复标题"]])
+def test_template_fragment_audit_rejects_missing_or_duplicate_title(titles: list[str]) -> None:
+    doc = Document()
+    title_style = doc.styles.add_style("文档标题", WD_STYLE_TYPE.PARAGRAPH)
+    for text in titles:
+        doc.add_paragraph(text, style=title_style)
+    profile = {"resolved_styles": {"title": "文档标题", "heading_1": "Heading 1"}}
+    insert_table_of_contents(doc, profile)
+    result = audit_output_structure(doc, profile)
+    assert result["passed"] is False
+    assert result["issues"]
+
+
+def test_real_sdt_template_fragment_rejects_title_not_immediately_after_toc() -> None:
+    doc = Document()
+    title_style = doc.styles.add_style("文档标题", WD_STYLE_TYPE.PARAGRAPH)
+    page_break = doc.add_paragraph()
+    page_break.add_run().add_break(WD_BREAK.PAGE)
+    doc.add_paragraph("错位正文")
+    doc.add_paragraph("唯一标题", style=title_style)
+    sdt = OxmlElement("w:sdt")
+    content = OxmlElement("w:sdtContent")
+    paragraph = OxmlElement("w:p")
+    run = OxmlElement("w:r")
+    instruction = OxmlElement("w:instrText")
+    instruction.text = " TOC \\o \"1-4\" "
+    run.append(instruction)
+    paragraph.append(run)
+    content.append(paragraph)
+    sdt.append(content)
+    body = doc.element.body
+    body.remove(page_break._p)
+    body.insert(0, sdt)
+    body.insert(1, page_break._p)
+    profile = {"resolved_styles": {"title": "文档标题", "heading_1": "Heading 1"}}
+
+    result = audit_output_structure(doc, profile)
+
+    assert result["mode"] == "template_fragment"
+    assert result["document_title_count"] == 1
+    assert result["passed"] is False
+    assert any(issue["type"] == "title_not_immediately_after_toc" for issue in result["issues"])
 
 
 def test_output_model_ignores_layout_only_toc_page_break() -> None:

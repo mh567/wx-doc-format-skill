@@ -10,6 +10,12 @@ input/
 agents/
 .pytest_cache/
 docs/
+!docs/
+docs/*
+!docs/markdown-ast-recognition-spec.md
+!docs/adr/
+docs/adr/*
+!docs/adr/0001-markdown-recognition-deep-module.md
 tasks/
 reviews/
 task_plan.md
@@ -20,6 +26,7 @@ tests/
 tests/*
 !tests/test_md_pipeline.py
 !tests/test_md_conversion.py
+!tests/test_markdown_recognition.py
 !tests/test_toc_regions.py
 !tests/test_list_numbering.py
 !tests/test_front_matter.py

@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 from copy import deepcopy
 from pathlib import Path
+import pytest
 
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
@@ -128,7 +129,7 @@ def test_markdown_token_containers_and_unsupported_content_are_readable(tmp_path
     )
     blocks = model["document"]["blocks"]
     text = "\n".join(str(block.get("text") or "") for block in blocks)
-    assert not [block for block in blocks if block.get("role") == "title"]
+    assert [block["text"] for block in blocks if block.get("role") == "title"] == ["source"]
     assert any(block.get("role") == "quote" and block.get("text") == "引用标题" for block in blocks)
     assert any(block.get("role") == "code_block" and block.get("text") == "1 code line\n" for block in blocks)
     assert "https://example.com/image.png" in text
@@ -145,9 +146,10 @@ def test_markdown_token_code_and_quote_roles_survive_normalization(tmp_path: Pat
     normalized_model = normalize_document_model(source_model, report)
     blocks = normalized_model["document"]["blocks"]
 
-    assert report["source_document_model_summary"]["block_count"] == 2
+    assert report["source_document_model_summary"]["block_count"] == 3
     assert report["source_document_model_issues"] == []
     assert [(block.get("role"), block.get("text")) for block in blocks] == [
+        ("title", "source"),
         ("quote", "引用标题"),
         ("code_block", "1 code line\n"),
     ]
@@ -157,12 +159,13 @@ def test_list_nested_quote_keeps_a_separate_quote_block(tmp_path: Path) -> None:
     model, report = _parse(tmp_path, "- 父列项\n  > 引用子块\n\n> - 引用中的列项\n")
     blocks = model["document"]["blocks"]
     assert [(block["block_type"], block.get("role"), block.get("text")) for block in blocks] == [
+        ("heading", "title", "source"),
         ("list_item", None, "父列项"),
         ("body", "quote", "引用子块"),
         ("list_item", None, "引用中的列项"),
     ]
-    assert blocks[1]["source"]["container_quote_depth"] == 1
     assert blocks[2]["source"]["container_quote_depth"] == 1
+    assert blocks[3]["source"]["container_quote_depth"] == 1
 
 
 def test_rendered_model_semantic_mutations_fail_preservation_audit(tmp_path: Path) -> None:
@@ -220,3 +223,31 @@ def test_markdown_preservation_audit_detects_cross_type_order_swaps(tmp_path: Pa
     paragraph_table_swap = audit_markdown_preservation(source_model, source_model, report, rendered_model)
     assert paragraph_table_swap["rendered_semantic_mismatch"] is True
     assert paragraph_table_swap["passed"] is False
+
+
+def test_markdown_inline_runs_separator_and_first_semantic_title_contract(tmp_path: Path) -> None:
+    model, _ = _parse(tmp_path, "---\n\n# 后置 H1\n\n正文 **强** *调* `码` [链接](https://example.com)\n")
+    blocks = model["document"]["blocks"]
+    assert blocks[0]["role"] == "title"
+    assert blocks[1]["block_type"] == "separator"
+    titles = [block for block in blocks if block.get("role") == "title"]
+    assert [block["text"] for block in titles] == ["source"]
+    heading = next(block for block in blocks if block["block_type"] == "heading" and block.get("role") != "title")
+    assert heading["text"] == "后置 H1"
+    body = next(block for block in blocks if block["block_type"] == "body")
+    assert body["text"] == "正文 强 调 码 链接 (https://example.com)"
+    assert body["inline_runs"] == [
+        {"text": "正文 "}, {"text": "强", "marks": ["strong"]}, {"text": " "},
+        {"text": "调", "marks": ["emphasis"]}, {"text": " "}, {"text": "码", "marks": ["code"]},
+        {"text": " "}, {"text": "链接", "href": "https://example.com"}, {"text": " (https://example.com)"},
+    ]
+
+
+@pytest.mark.parametrize("leading", [
+    "```\ncode\n```", "> 引用", "- 列项", "列 | 值\n--- | ---\n甲 | 乙", "![图](image.png)",
+])
+def test_postfix_h1_after_semantic_block_uses_filename_title(tmp_path: Path, leading: str) -> None:
+    model, _ = _parse(tmp_path, f"{leading}\n\n# 后置 H1\n")
+    blocks = model["document"]["blocks"]
+    assert [block["text"] for block in blocks if block.get("role") == "title"] == ["source"]
+    assert any(block["block_type"] == "heading" and block.get("role") != "title" and block["text"] == "后置 H1" for block in blocks)
