@@ -6,22 +6,38 @@
 
 ## 安装
 
+将本安装包交给 Agent：
+
+> 安装这个 wx-doc-format 离线 Skill 包
+
+Agent 解压后将包含 `SKILL.md` 的完整目录安装到自身 skills 目录，建议目录名使用 `wx-doc-format`。安装完成后可直接通过对话触发。
+
+也可以执行包内安装脚本，并将目标 Agent 的 Skill 路径作为安装目录传入：
+
 POSIX 系统：
 
 ```bash
-scripts/install.sh
+scripts/install.sh /path/to/agent/skills/wx-doc-format
 ```
 
 Windows PowerShell：
 
 ```powershell
-.\scripts\install.ps1
+.\scripts\install.ps1 -Destination C:\path\to\agent\skills\wx-doc-format
 ```
 
-可以向安装脚本传入自定义目标目录。安装前会验证 SHA256，升级时会在目标目录旁保留上一版备份。
+安装前会验证 SHA256，升级时会在目标目录旁保留上一版备份。
 安装目录的完整路径必须只包含可打印 ASCII 字符。如果用户主目录含有中文等字符，请显式指定类似 `/opt/wx-doc-format` 或 `C:\wx-doc-format` 的目录。安装脚本和启动脚本会在运行前检查该条件。
 
-## 运行
+## 使用
+
+上传 Markdown 或 DOCX 文档，在对话中说：
+
+> wx文档格式，请把附件转换成标准格式。
+
+Agent 会请用户选择普通模式或 LLM 增强模式。用户已指定模式时会直接执行。
+
+以下命令仅用于手工检查：
 
 ```bash
 scripts/run.sh --version

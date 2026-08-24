@@ -69,4 +69,4 @@ scripts/.venv/bin/python3 packaging/nuitka/assemble_public_skill.py \
 
 `dist/public-skill/` 用于替换公开仓库当前文件。`dist/local/` 中列入 `artifacts/SHA256SUMS.txt` 的归档作为同版本 GitHub Release 资产上传。
 
-生成内网离线 Skill 包时，将目标平台归档复制到 `dist/public-skill/artifacts/` 后分发整个目录。启动器会优先使用该目录中的归档，无需设置环境变量。公开 Git 仓库仍只提交薄 Skill，平台归档保持在 GitHub Release 中。
+`dist/local/` 中的每个平台归档都是完整离线 Skill 安装包，内含 `SKILL.md`、模板、启动脚本和本机运行时。内网可直接分发对应平台归档，由 Agent 解压到自身 skills 目录。公开 Git 仓库只提交薄 Skill，平台安装包保持在 GitHub Release 中。
