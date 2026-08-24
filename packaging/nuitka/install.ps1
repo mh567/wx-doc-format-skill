@@ -8,6 +8,9 @@ if ([string]::IsNullOrWhiteSpace($Destination)) {
     throw "Installation destination must not be empty."
 }
 $DestinationFullPath = [System.IO.Path]::GetFullPath($Destination).TrimEnd('\')
+if ($DestinationFullPath -match '[^\x20-\x7E]') {
+    throw "Installation destination must use printable ASCII characters."
+}
 $RootPath = [System.IO.Path]::GetPathRoot($DestinationFullPath).TrimEnd('\')
 $HomeFullPath = [System.IO.Path]::GetFullPath($HOME).TrimEnd('\')
 if ($DestinationFullPath -eq $RootPath -or $DestinationFullPath -eq $HomeFullPath) {

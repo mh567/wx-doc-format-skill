@@ -108,23 +108,6 @@ def test_runtime_layout_restores_python_docx_parts_directory(tmp_path):
     assert (runtime / "docx" / "parts").is_dir()
 
 
-def test_unicode_path_smoke_copies_package_before_execution(tmp_path, monkeypatch):
-    package = tmp_path / "package"
-    package.mkdir()
-    (package / "VERSION").write_text("1.2.3\n", encoding="utf-8")
-    observed = []
-
-    def record_smoke(copied_package):
-        observed.append(copied_package)
-        assert "中文安装路径" in str(copied_package)
-        assert (copied_package / "VERSION").read_text(encoding="utf-8") == "1.2.3\n"
-
-    monkeypatch.setattr(smoke_distribution, "smoke", record_smoke)
-    smoke_distribution.smoke_from_unicode_path(package)
-
-    assert len(observed) == 1
-
-
 def test_skip_compile_package_assembly_writes_runtime_and_manifest(tmp_path):
     dist = tmp_path / "existing.dist"
     dist.mkdir()
@@ -338,6 +321,42 @@ def test_posix_installer_rejects_unsafe_destinations(tmp_path, destination_kind)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX installer test")
+def test_posix_installer_rejects_non_ascii_destination(tmp_path):
+    dist = tmp_path / "existing.dist"
+    dist.mkdir()
+    binary = dist / build.executable_name()
+    _write_posix_runtime(binary)
+    package = build.assemble_package(dist, tmp_path / "output", build.platform_id())
+    destination = tmp_path / "中文目录" / "wx-doc-format"
+    result = subprocess.run(
+        ["/bin/sh", str(package / "scripts" / "install.sh"), str(destination)],
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 2
+    assert "printable ASCII" in result.stderr
+    assert not destination.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX launcher test")
+def test_posix_launcher_rejects_non_ascii_package_path(tmp_path):
+    package = tmp_path / "中文目录" / "wx-doc-format"
+    scripts = package / "scripts"
+    scripts.mkdir(parents=True)
+    source = ROOT / "packaging" / "nuitka" / "run.sh"
+    launcher = scripts / "run.sh"
+    launcher.write_bytes(source.read_bytes())
+    launcher.chmod(0o755)
+    result = subprocess.run(
+        ["/bin/sh", str(launcher), "--version"],
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 2
+    assert "printable ASCII" in result.stderr
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX installer test")
 def test_posix_installer_rejects_files_missing_from_checksum_list(tmp_path):
     dist = tmp_path / "existing.dist"
     dist.mkdir()
@@ -428,3 +447,28 @@ def test_public_skill_description_does_not_expose_private_implementation_names()
     )
     for private_name in ("docx_pipeline", "model_normalization", "review_loop", "python-docx", "lxml"):
         assert private_name not in public_text
+
+
+def test_local_build_entrypoints_cover_only_supported_release_targets():
+    nuitka_dir = ROOT / "packaging" / "nuitka"
+    entrypoints = {
+        "build-local-macos-arm64.sh": "macos-arm64",
+        "build-local-linux-arm64.sh": "kylin-v10-arm64",
+        "build-local-windows-x86_64.ps1": "windows-x86_64",
+    }
+    assert set(entrypoints.values()) == set(build.SUPPORTED_PLATFORM_IDS)
+    for filename, platform_identifier in entrypoints.items():
+        text = (nuitka_dir / filename).read_text(encoding="utf-8")
+        assert f"--platform-id {platform_identifier}" in text
+        assert "--unicode-path" not in text
+    linux_text = (nuitka_dir / "build-local-linux-arm64.sh").read_text(encoding="utf-8")
+    assert "libjpeg-turbo-devel" in linux_text
+    assert "zlib-devel" in linux_text
+    assert "static-libs-for-embedding-only.tar.xz" in linux_text
+
+
+def test_public_adapters_enforce_printable_ascii_install_path():
+    nuitka_dir = ROOT / "packaging" / "nuitka"
+    for filename in ("install.sh", "run.sh", "install.ps1", "run.ps1"):
+        text = (nuitka_dir / filename).read_text(encoding="utf-8")
+        assert "printable ASCII" in text

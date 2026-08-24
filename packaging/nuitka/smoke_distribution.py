@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 import platform
-import shutil
 import subprocess
 import tempfile
 import zipfile
@@ -74,28 +73,12 @@ def smoke(package_dir: Path) -> None:
             raise RuntimeError("Release report does not expose unexpected_styles")
 
 
-def smoke_from_unicode_path(package_dir: Path) -> None:
-    """Exercise runtime startup and conversion from a non-ASCII install path."""
-    with tempfile.TemporaryDirectory(prefix="wx-doc-format-unicode-smoke-") as temporary:
-        copied_package = Path(temporary) / "中文安装路径" / package_dir.name
-        shutil.copytree(package_dir, copied_package)
-        smoke(copied_package)
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="Smoke test an assembled offline package.")
     parser.add_argument("package_dir", type=Path)
-    parser.add_argument(
-        "--unicode-path",
-        action="store_true",
-        help="Copy the package to a non-ASCII path before running the smoke test",
-    )
     args = parser.parse_args()
     package_dir = args.package_dir.resolve()
-    if args.unicode_path:
-        smoke_from_unicode_path(package_dir)
-    else:
-        smoke(package_dir)
+    smoke(package_dir)
 
 
 if __name__ == "__main__":

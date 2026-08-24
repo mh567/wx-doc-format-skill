@@ -62,3 +62,4 @@ scripts/run.sh --resume request-dir/run.json
 1. 目录页码和复杂域可能需要在 Word 或 WPS 中更新。
 2. 复杂嵌入对象需要根据报告执行人工复核。
 3. 发布包不提供完整中间结构导出。
+4. Skill 安装目录的完整路径必须只包含可打印 ASCII 字符。

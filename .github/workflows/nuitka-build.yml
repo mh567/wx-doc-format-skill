@@ -40,8 +40,6 @@ jobs:
         run: python packaging/nuitka/build_distribution.py --platform-id "${{ matrix.platform_id }}" --expected-version "${{ github.event_name == 'push' && github.ref_name || '' }}" --archive
       - name: Smoke assembled runtime
         run: python packaging/nuitka/smoke_distribution.py "dist/wx-doc-format-skill-${{ steps.version.outputs.value }}-${{ matrix.platform_id }}"
-      - name: Smoke runtime from Unicode installation path
-        run: python packaging/nuitka/smoke_distribution.py "dist/wx-doc-format-skill-${{ steps.version.outputs.value }}-${{ matrix.platform_id }}" --unicode-path
       - name: Upload archived candidate
         uses: actions/upload-artifact@v4
         with:
@@ -57,7 +55,7 @@ jobs:
       matrix:
         include:
           - os: ubuntu-24.04-arm
-            container_image: quay.io/pypa/manylinux2014_aarch64:latest
+            container_image: quay.io/pypa/manylinux2014_aarch64@sha256:1145c233b5693c770b878d51e64261603b0d374942ff134d589656799f72e9f9
             platform_id: kylin-v10-arm64
     runs-on: ${{ matrix.os }}
     steps:
@@ -79,11 +77,9 @@ jobs:
             -v "${{ github.workspace }}:/workspace" \
             -w /workspace \
             "${{ matrix.container_image }}" \
-            /bin/bash -lc '/opt/python/cp313-cp313/bin/python -m pip install -r packaging/nuitka/requirements-runtime.txt -r packaging/nuitka/requirements-build.txt && /opt/python/cp313-cp313/bin/python packaging/nuitka/build_distribution.py --platform-id "${{ matrix.platform_id }}" --expected-version "${{ github.event_name == 'push' && github.ref_name || '' }}" --archive'
+            /bin/bash -lc 'yum install -y libjpeg-turbo-devel zlib-devel && if [ -f /opt/_internal/static-libs-for-embedding-only.tar.xz ]; then (cd /opt/_internal && tar xf static-libs-for-embedding-only.tar.xz); fi && /opt/python/cp313-cp313/bin/python -m pip install -r packaging/nuitka/requirements-runtime.txt -r packaging/nuitka/requirements-build.txt && /opt/python/cp313-cp313/bin/python packaging/nuitka/build_distribution.py --platform-id "${{ matrix.platform_id }}" --expected-version "${{ github.event_name == 'push' && github.ref_name || '' }}" --archive'
       - name: Smoke assembled runtime
         run: python packaging/nuitka/smoke_distribution.py "dist/wx-doc-format-skill-${{ steps.version.outputs.value }}-${{ matrix.platform_id }}"
-      - name: Smoke runtime from Unicode installation path
-        run: python packaging/nuitka/smoke_distribution.py "dist/wx-doc-format-skill-${{ steps.version.outputs.value }}-${{ matrix.platform_id }}" --unicode-path
       - name: Upload archived candidate
         uses: actions/upload-artifact@v4
         with:

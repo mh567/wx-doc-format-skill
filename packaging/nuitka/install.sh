@@ -67,6 +67,10 @@ fi
 mkdir -p "$DESTINATION_PARENT"
 DESTINATION_PARENT=$(CDPATH= cd -- "$DESTINATION_PARENT" && pwd -P)
 DESTINATION="$DESTINATION_PARENT/$DESTINATION_NAME"
+if printf '%s' "$DESTINATION" | LC_ALL=C grep -q '[^ -~]'; then
+    echo "Installation destination must use printable ASCII characters." >&2
+    exit 2
+fi
 HOME_DIR=$(CDPATH= cd -- "$HOME" && pwd -P)
 if [ "$DESTINATION" = "/" ] || [ "$DESTINATION" = "$HOME_DIR" ]; then
     echo "Installation to the filesystem root or home directory is forbidden." >&2
