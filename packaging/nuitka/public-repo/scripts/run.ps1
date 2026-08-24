@@ -26,8 +26,13 @@ $CacheRoot = if ($env:WX_DOC_FORMAT_CACHE_DIR) {
     Join-Path $env:LOCALAPPDATA "wx-doc-format"
 }
 $CacheRoot = [System.IO.Path]::GetFullPath($CacheRoot)
+if (-not $env:WX_DOC_FORMAT_CACHE_DIR -and $CacheRoot -match '[^\x20-\x7E]') {
+    $CommonData = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
+    $UserSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $CacheRoot = [System.IO.Path]::GetFullPath((Join-Path $CommonData "wx-doc-format\$UserSid"))
+}
 if ($CacheRoot -match '[^\x20-\x7E]') {
-    [Console]::Error.WriteLine("WXDF-E-NONASCII-PATH: WX_DOC_FORMAT_CACHE_DIR must use printable ASCII characters.")
+    [Console]::Error.WriteLine("WXDF-E-NONASCII-PATH: runtime cache path must use printable ASCII characters.")
     exit 2
 }
 $PackageName = "wx-doc-format-skill-$Version-$Platform"
@@ -46,7 +51,10 @@ $TempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("wx-doc-format-bootstra
 New-Item -ItemType Directory -Path $TempRoot | Out-Null
 try {
     $ArchivePath = Join-Path $TempRoot $ArchiveName
-    if ($env:WX_DOC_FORMAT_ARCHIVE_DIR) {
+    $BundledArchive = Join-Path $SkillDir "artifacts\$ArchiveName"
+    if (Test-Path $BundledArchive -PathType Leaf) {
+        Copy-Item $BundledArchive $ArchivePath
+    } elseif ($env:WX_DOC_FORMAT_ARCHIVE_DIR) {
         Copy-Item (Join-Path $env:WX_DOC_FORMAT_ARCHIVE_DIR $ArchiveName) $ArchivePath
     } else {
         $ReleaseBaseUrl = if ($env:WX_DOC_FORMAT_RELEASE_BASE_URL) {

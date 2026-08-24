@@ -43,8 +43,15 @@ if [ -z "$EXPECTED_SHA" ]; then
 fi
 
 CACHE_ROOT=${WX_DOC_FORMAT_CACHE_DIR:-"$HOME/.cache/wx-doc-format"}
+if [ -z "${WX_DOC_FORMAT_CACHE_DIR:-}" ] && printf '%s' "$CACHE_ROOT" | LC_ALL=C grep -q '[^ -~]'; then
+    FALLBACK_ROOT=${TMPDIR:-/tmp}
+    if printf '%s' "$FALLBACK_ROOT" | LC_ALL=C grep -q '[^ -~]'; then
+        FALLBACK_ROOT=/tmp
+    fi
+    CACHE_ROOT="${FALLBACK_ROOT%/}/wx-doc-format-$(id -u)"
+fi
 if printf '%s' "$CACHE_ROOT" | LC_ALL=C grep -q '[^ -~]'; then
-    echo "WXDF-E-NONASCII-PATH: WX_DOC_FORMAT_CACHE_DIR must use printable ASCII characters." >&2
+    echo "WXDF-E-NONASCII-PATH: runtime cache path must use printable ASCII characters." >&2
     exit 2
 fi
 PACKAGE_NAME="wx-doc-format-skill-$VERSION-$PLATFORM"
@@ -63,7 +70,10 @@ cleanup_bootstrap() {
 }
 trap cleanup_bootstrap EXIT HUP INT TERM
 ARCHIVE_PATH="$TEMP_ROOT/$ARCHIVE_NAME"
-if [ -n "${WX_DOC_FORMAT_ARCHIVE_DIR:-}" ]; then
+BUNDLED_ARCHIVE="$SKILL_DIR/artifacts/$ARCHIVE_NAME"
+if [ -f "$BUNDLED_ARCHIVE" ]; then
+    cp "$BUNDLED_ARCHIVE" "$ARCHIVE_PATH"
+elif [ -n "${WX_DOC_FORMAT_ARCHIVE_DIR:-}" ]; then
     cp "$WX_DOC_FORMAT_ARCHIVE_DIR/$ARCHIVE_NAME" "$ARCHIVE_PATH"
 else
     if ! command -v curl >/dev/null 2>&1; then

@@ -139,7 +139,7 @@ git log --all --name-only --format= | rg '\.(py|pyc|pyo)$'
 2. 从 GitHub 新鲜克隆公开仓库。
 3. 重跑 Skill validator 和公开历史门禁。
 4. 使用空缓存运行 `scripts/run.sh --version`，验证 GitHub Release 下载、归档 SHA256、包内完整性、安装和版本输出。
-5. 使用 `WX_DOC_FORMAT_ARCHIVE_DIR` 重跑本地介质安装，验证内网路由。
+5. 将当前平台归档放入公开 Skill 的 `artifacts/` 目录，在空缓存且不设置 `WX_DOC_FORMAT_*` 变量的环境重跑首次转换，验证内网离线路由。
 6. 在至少一个已发布平台执行真实 Markdown 或 DOCX 转换。
 
 完成条件：公开仓库安装体验、线上获取、离线介质获取和真实转换均通过，公开历史不含私有文件。

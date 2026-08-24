@@ -1,35 +1,71 @@
 ---
 name: wx-doc-format
-description: Convert Markdown or DOCX documents into WX template-formatted DOCX files with an offline native runtime.
+description: Convert Markdown or DOCX documents into WX template-formatted DOCX files when the user asks for WX document formatting or requests standardized titles, TOC, lists, tables, captions, or appendices.
 metadata:
   short-description: Convert MD or DOCX to WX formatted DOCX
 ---
 
 # WX 文档格式
 
-当用户要求将 Markdown 或 DOCX 文档转换为 WX 模板格式时使用本 Skill。
+当用户上传 Markdown 或 DOCX 文档并要求“wx文档格式”、“WX 格式转换”或按 WX 模板整理文档时使用本 Skill。
 
-## 平台检查
+## 交互
 
-执行前读取 `artifacts/AVAILABLE_PLATFORMS.txt`。当前平台没有发布运行时时，告知用户并停止转换，保留原始输入文件。
+1. 确认用户已提供 Markdown 或 DOCX 输入文件。
+2. 用户未指定运行模式时，请其选择“普通模式”或“LLM 增强模式”。
+3. 用户已选定模式时直接执行，无需再次确认。
+4. 完成后交付 DOCX，同时说明审计是否通过、`unexpected_styles` 是否为空以及人工复核项。
 
-## 运行
+运行模式：
+
+1. 普通模式：使用本地规则完成转换。
+2. LLM 增强模式：增加模糊目录复核、语义列表识别、符合条件的题注生成和审计后受限复核。
+
+## 运行时准备
+
+执行前读取 `artifacts/AVAILABLE_PLATFORMS.txt`。当前平台没有发布运行时时，告知用户并保留原始文件。
+
+首次运行按以下顺序自动准备运行时：
+
+1. 使用 Skill 的 `artifacts/` 目录中已配套的当前平台归档。
+2. 本地归档缺失时，从当前版本的 GitHub Release 下载。
+
+两种路径都会验证 SHA256 并自动安装。常规安装和转换无需环境变量。
+
+## 执行
+
+将 `SKILL_ROOT` 解析为包含本 `SKILL.md` 的目录，并对输入、输出、模板和报告使用绝对路径。
 
 POSIX 系统：
 
 ```bash
-scripts/run.sh --input source.docx --output output.docx --template assets/wx_template.docx --report report.json
+"$SKILL_ROOT/scripts/run.sh" \
+  --input "$INPUT_FILE" \
+  --output "$OUTPUT_FILE" \
+  --template "$SKILL_ROOT/assets/wx_template.docx" \
+  --report "$REPORT_FILE"
 ```
 
 Windows PowerShell：
 
 ```powershell
-.\scripts\run.ps1 --input source.docx --output output.docx --template assets\wx_template.docx --report report.json
+& "$SkillRoot\scripts\run.ps1" `
+  --input $InputFile `
+  --output $OutputFile `
+  --template "$SkillRoot\assets\wx_template.docx" `
+  --report $ReportFile
 ```
 
-首次运行会下载当前平台的发布归档并验证 SHA256。内网或离线环境使用 `WX_DOC_FORMAT_ARCHIVE_DIR` 指向存放平台归档的目录。
+## LLM 增强模式
 
-使用内网本地 LLM 命令时，增加 `--llm-enhance all --llm-command "<command>"`。发布运行时不自动访问互联网模型服务。
+选择 LLM 增强模式时，使用文件协议：
+
+1. 在转换命令中增加 `--llm-enhance all --generate-requests "$REQUEST_DIR"`。
+2. 读取 `llm_requests.jsonl`，逐行处理请求，将模型原始 JSON 返回文本写入对应响应的 `raw_response`。
+3. 将响应写入同目录的 `llm_responses.jsonl`。每行保留请求中的 `protocol_version`、`request_id` 和 `input_hash`。
+4. 执行 `scripts/run.sh --resume "$REQUEST_DIR/run.json"`。如果生成新请求，继续处理，直到转换完成或协议验证失败。
+
+发布运行时不会自动访问互联网模型服务。
 
 ## 验证
 
@@ -43,7 +79,6 @@ Windows PowerShell：
 
 ## 已知边界
 
-1. Skill 缓存和安装目录的完整路径必须只包含可打印 ASCII 字符。
-2. 目录页码和复杂域可能需要在 Word 或 WPS 中更新。
-3. Kylin V10 ARM64 制品在真机验收前保持候选状态。
-4. macOS ARM64 可用系统版本取决于发布制品的 `minos`。
+1. 目录页码和复杂域可能需要在 Word 或 WPS 中更新。
+2. Kylin V10 ARM64 制品在真机验收前保持候选状态。
+3. macOS ARM64 可用系统版本取决于发布制品的 `minos`。
