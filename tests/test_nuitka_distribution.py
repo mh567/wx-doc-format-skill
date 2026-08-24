@@ -81,10 +81,17 @@ def test_offline_backend_allows_command_and_blocks_cloud_auto_detection(monkeypa
 
 def test_platform_identifiers_cover_release_matrix():
     assert build.platform_id("Windows", "AMD64") == "windows-x86_64"
-    assert build.platform_id("Darwin", "x86_64") == "macos-x86_64"
     assert build.platform_id("Darwin", "arm64") == "macos-arm64"
-    assert build.platform_id("Linux", "x86_64") == "kylin-v10-x86_64"
     assert build.platform_id("Linux", "aarch64") == "kylin-v10-arm64"
+
+
+@pytest.mark.parametrize(
+    ("system", "machine"),
+    [("Darwin", "x86_64"), ("Linux", "x86_64")],
+)
+def test_removed_release_targets_are_rejected(system, machine):
+    with pytest.raises(ValueError, match="Unsupported release target"):
+        build.platform_id(system, machine)
 
 
 def test_nuitka_command_writes_private_compilation_report(tmp_path):

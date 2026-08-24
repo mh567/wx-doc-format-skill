@@ -9,6 +9,8 @@ metadata:
 
 当用户要求转换 Markdown 或 DOCX 文档为 WX 模板格式时使用本 Skill。
 
+发布运行时支持 Windows x86_64、macOS ARM64 和 Linux ARM64。
+
 ## 运行模式
 
 1. 普通模式。默认使用本地规则转换。

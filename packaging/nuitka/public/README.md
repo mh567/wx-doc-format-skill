@@ -2,6 +2,8 @@
 
 本发布包用于将 Markdown 或 DOCX 文档转换为 WX 模板格式的 DOCX 文档。运行时无需安装 Python，安装和转换过程不下载文件。
 
+支持 Windows x86_64、macOS ARM64 和 Linux ARM64。Linux ARM64 制品以 Kylin V10 为候选兼容目标。
+
 ## 安装
 
 POSIX 系统：

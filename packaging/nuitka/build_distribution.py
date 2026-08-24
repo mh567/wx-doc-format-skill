@@ -18,9 +18,7 @@ ENTRYPOINT = Path(__file__).with_name("release_entrypoint.py")
 PUBLIC_DIR = Path(__file__).with_name("public")
 SUPPORTED_PLATFORM_IDS = (
     "windows-x86_64",
-    "macos-x86_64",
     "macos-arm64",
-    "kylin-v10-x86_64",
     "kylin-v10-arm64",
 )
 
@@ -46,7 +44,10 @@ def platform_id(system: str | None = None, machine: str | None = None) -> str:
     target_system = systems.get(system_name)
     if target_system is None:
         raise ValueError(f"Unsupported operating system: {system_name}")
-    return f"{target_system}-{architecture}"
+    target = f"{target_system}-{architecture}"
+    if target not in SUPPORTED_PLATFORM_IDS:
+        raise ValueError(f"Unsupported release target: {target}")
+    return target
 
 
 def executable_name(system: str | None = None) -> str:

@@ -19,9 +19,6 @@ jobs:
           - os: windows-latest
             platform_id: windows-x86_64
             archive_suffix: zip
-          - os: macos-15-intel
-            platform_id: macos-x86_64
-            archive_suffix: tar.gz
           - os: macos-15
             platform_id: macos-arm64
             archive_suffix: tar.gz
@@ -53,15 +50,12 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  build-kylin-candidate:
+  build-linux-arm64-candidate:
     name: ${{ matrix.platform_id }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-24.04
-            container_image: quay.io/pypa/manylinux2014_x86_64:latest
-            platform_id: kylin-v10-x86_64
           - os: ubuntu-24.04-arm
             container_image: quay.io/pypa/manylinux2014_aarch64:latest
             platform_id: kylin-v10-arm64
