@@ -14,6 +14,7 @@ BLOCK_TYPES = {
     "table",
     "caption",
     "appendix",
+    "separator",
     "unknown",
 }
 
@@ -85,6 +86,10 @@ def body_block(
     if role:
         block["role"] = role
     return block
+
+
+def separator_block(block_id: str, *, source: dict[str, Any] | None = None) -> dict[str, Any]:
+    return {"id": block_id, "block_type": "separator", "source": source or {}}
 
 
 def list_item_block(
@@ -278,6 +283,16 @@ def validate_document_model(model: dict[str, Any]) -> list[dict[str, Any]]:
         if block_type not in BLOCK_TYPES:
             issues.append({"block": index, "type": "unknown_block_type", "value": block_type})
             continue
+        inline_runs = block.get("inline_runs")
+        if inline_runs is not None:
+            joined = "".join(str(run.get("text") or "") for run in inline_runs)
+            if joined != str(block.get("text") or ""):
+                issues.append({"block": index, "type": "inline_runs_text_mismatch"})
+            for run in inline_runs:
+                if not set(run.get("marks") or []).issubset({"strong", "emphasis", "code"}):
+                    issues.append({"block": index, "type": "inline_runs_unknown_mark"})
+                if "href" in run and not isinstance(run["href"], str):
+                    issues.append({"block": index, "type": "inline_runs_href_not_string"})
         if block_type == "heading":
             text = str(block.get("text") or "")
             level = block.get("level")
@@ -299,6 +314,11 @@ def validate_document_model(model: dict[str, Any]) -> list[dict[str, Any]]:
             if block.get("table_type") == "code_sample" and block.get("header_rows", 0) != 0:
                 issues.append({"block": index, "type": "code_sample_has_header_rows"})
             rows = block.get("rows", [])
+            for row_index, row in enumerate(rows, 1):
+                for col_index, cell in enumerate(row, 1):
+                    inline = cell.get("inline_runs")
+                    if inline is not None and "".join(str(run.get("text") or "") for run in inline) != str(cell.get("text") or ""):
+                        issues.append({"block": index, "type": "table_inline_runs_text_mismatch", "row": row_index, "col": col_index})
             if block.get("table_type") == "code_sample":
                 for row_index, row in enumerate(rows, 1):
                     for col_index, cell in enumerate(row, 1):

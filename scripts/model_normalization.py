@@ -72,7 +72,8 @@ def normalize_document_model_simple(
         appendix_source_role = appendix_role_from_style(source_style)
 
         if source.get("semantic_origin") == "markdown_token" and (
-            block.get("role") in {"code_block", "quote"}
+            block_type == "separator" or block_type == "body"
+            or block.get("role") in {"code_block", "quote"}
             or source.get("container_quote_depth")
         ):
             active_list_signatures.clear()

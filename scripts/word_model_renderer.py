@@ -5,7 +5,10 @@ import hashlib
 
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
+from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_BREAK
+from docx.enum.style import WD_STYLE_TYPE
+from docx.shared import RGBColor
 from table_formatting import normalize_table
 
 from list_style_mapping import (
@@ -167,6 +170,7 @@ def render_document_model(
             "document_order": markdown_semantic_order,
             "block_type": block.get("block_type"),
             "text": block.get("text"),
+            "inline_runs": block.get("inline_runs"),
             "role": block.get("role"),
             "level": block.get("level"),
             "list_type": block.get("list_type"),
@@ -207,7 +211,7 @@ def render_document_model(
             "document_order": markdown_semantic_order,
             "table_type": block.get("table_type"),
             "header_rows": block.get("header_rows"),
-            "rows": [[{"cell_role": cell.get("cell_role")} for cell in row] for row in block.get("rows", [])],
+            "rows": [[{"cell_role": cell.get("cell_role"), "inline_runs": cell.get("inline_runs")} for cell in row] for row in block.get("rows", [])],
         })
 
     def add_text_paragraph(text: str, style: str):
@@ -216,6 +220,40 @@ def render_document_model(
         except KeyError:
             return doc.add_paragraph(text)
         return doc.add_paragraph(text, style=style)
+
+    def write_inline_runs(paragraph, block: dict) -> None:
+        runs = block.get("inline_runs") or []
+        if not runs:
+            return
+        paragraph.clear()
+        for item in runs:
+            text = str(item.get("text") or "")
+            if not text:
+                continue
+            run = paragraph.add_run(text)
+            marks = set(item.get("marks") or [])
+            href = item.get("href")
+            style_key = "Markdown" + "".join(mark.title() for mark in sorted(marks)) + ("Link" if href else "")
+            if marks or href:
+                try:
+                    style = doc.styles[style_key]
+                except KeyError:
+                    style = doc.styles.add_style(style_key, WD_STYLE_TYPE.CHARACTER)
+                    style.font.bold = "strong" in marks
+                    style.font.italic = "emphasis" in marks
+                    if "code" in marks:
+                        style.font.name = "Courier New"
+                    if href:
+                        style.font.color.rgb = RGBColor(5, 99, 193)
+                        style.font.underline = True
+                run.style = style
+            if href:
+                relation_id = paragraph.part.relate_to(href, RT.HYPERLINK, is_external=True)
+                hyperlink = OxmlElement("w:hyperlink")
+                hyperlink.set(qn("r:id"), relation_id)
+                paragraph._p.remove(run._r)
+                hyperlink.append(run._r)
+                paragraph._p.append(hyperlink)
 
     for block in model.get("document", {}).get("blocks", []):
         block_type = block.get("block_type")
@@ -229,6 +267,7 @@ def render_document_model(
             if role == "title" or level <= 0:
                 style = style_from_profile(template_profile, "title", "文档标题")
                 paragraph = add_text_paragraph(text, style)
+                write_inline_runs(paragraph, block)
                 track_markdown_paragraph(block, paragraph)
                 active_list_nums = {}
                 continue
@@ -240,6 +279,7 @@ def render_document_model(
                     APPENDIX_HEADING_STYLES.get(level, f"附录{level}级标题"),
                 )
                 paragraph = add_text_paragraph(text, style)
+                write_inline_runs(paragraph, block)
                 track_markdown_paragraph(block, paragraph)
                 report.setdefault("automatic_numbers", []).append(
                     {
@@ -255,6 +295,7 @@ def render_document_model(
 
             style = style_from_profile(template_profile, f"heading_{level}", f"Heading {level}")
             paragraph = add_text_paragraph(text, style)
+            write_inline_runs(paragraph, block)
             track_markdown_paragraph(block, paragraph)
 
             report.setdefault("automatic_numbers", []).append(
@@ -273,6 +314,7 @@ def render_document_model(
             style_name = list_style_for_model(list_type, level, template_profile)
 
             paragraph = add_text_paragraph(text, style_name)
+            write_inline_runs(paragraph, block)
             track_markdown_paragraph(block, paragraph)
 
             # Only numbered lists need manual numId management for restart.
@@ -304,7 +346,10 @@ def render_document_model(
                 for ri, row_data in enumerate(rows_data):
                     for ci in range(col_count):
                         text = row_data[ci].get("text", "") if ci < len(row_data) else ""
-                        table.rows[ri].cells[ci].text = text
+                        cell = table.rows[ri].cells[ci]
+                        cell.text = text
+                        if ci < len(row_data) and row_data[ci].get("inline_runs"):
+                            write_inline_runs(cell.paragraphs[0], row_data[ci])
                 normalize_table(
                     table,
                     template_profile,
@@ -337,6 +382,20 @@ def render_document_model(
                     "block_id": block.get("id"),
                     "error": type(error).__name__,
                 })
+            active_list_nums = {}
+
+        elif block_type == "separator":
+            paragraph = doc.add_paragraph()
+            p_pr = paragraph._p.get_or_add_pPr()
+            borders = OxmlElement("w:pBdr")
+            bottom = OxmlElement("w:bottom")
+            bottom.set(qn("w:val"), "single")
+            bottom.set(qn("w:sz"), "4")
+            bottom.set(qn("w:space"), "1")
+            bottom.set(qn("w:color"), "auto")
+            borders.append(bottom)
+            p_pr.append(borders)
+            track_markdown_paragraph(block, paragraph)
             active_list_nums = {}
 
         # --- Appendix ---
@@ -396,5 +455,6 @@ def render_document_model(
             else:
                 style = style_from_profile(template_profile, "body", "Normal")
             paragraph = add_text_paragraph(block.get("text", ""), style)
+            write_inline_runs(paragraph, block)
             track_markdown_paragraph(block, paragraph)
             active_list_nums = {}

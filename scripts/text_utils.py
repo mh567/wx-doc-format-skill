@@ -476,10 +476,14 @@ def build_document_model_from_output(doc, source_path: Path, report: dict) -> di
             }
             block_type = markdown_semantic.get("block_type")
             if block_type == "heading":
-                append_block(model, heading_block(
+                rendered_block = heading_block(
                     block_id, text, int(markdown_semantic.get("level") or 0),
                     role=markdown_semantic.get("role") or "heading", source=source,
-                ))
+                )
+                actual_runs = inline_runs_from_paragraph(paragraph) if markdown_semantic.get("inline_runs") else []
+                if actual_runs:
+                    rendered_block["inline_runs"] = actual_runs
+                append_block(model, rendered_block)
             elif block_type == "list_item":
                 list_block = list_item_block(
                     block_id, text, int(markdown_semantic.get("level") or 0),
@@ -488,6 +492,9 @@ def build_document_model_from_output(doc, source_path: Path, report: dict) -> di
                 )
                 if markdown_semantic.get("parent_list_item_id"):
                     list_block["parent_list_item_id"] = markdown_semantic["parent_list_item_id"]
+                actual_runs = inline_runs_from_paragraph(paragraph) if markdown_semantic.get("inline_runs") else []
+                if actual_runs:
+                    list_block["inline_runs"] = actual_runs
                 append_block(model, list_block)
             elif block_type == "image":
                 image_relation = image_relationship_info(paragraph)
@@ -514,12 +521,18 @@ def build_document_model_from_output(doc, source_path: Path, report: dict) -> di
                     classification=markdown_semantic.get("classification"),
                     title_lines=markdown_semantic.get("title_lines") or [text], source=source,
                 ))
+            elif block_type == "separator":
+                append_block(model, {"id": block_id, "block_type": "separator", "source": source})
             else:
-                append_block(model, body_block(
+                rendered_block = body_block(
                     block_id,
                     raw_text if markdown_semantic.get("role") == "code_block" else text,
                     role=markdown_semantic.get("role"), source=source,
-                ))
+                )
+                actual_runs = inline_runs_from_paragraph(paragraph) if markdown_semantic.get("inline_runs") else []
+                if actual_runs:
+                    rendered_block["inline_runs"] = actual_runs
+                append_block(model, rendered_block)
             block_index += 1
             return
         appendix_style_role = appendix_role_from_style(style_name)
@@ -583,6 +596,10 @@ def build_document_model_from_output(doc, source_path: Path, report: dict) -> di
                 for cell_idx, cell in enumerate(row):
                     try:
                         cell["cell_role"] = role_rows[row_idx][cell_idx].get("cell_role") or cell.get("cell_role")
+                        expected = role_rows[row_idx][cell_idx].get("inline_runs")
+                        if expected:
+                            actual = inline_runs_from_paragraph(table.rows[row_idx].cells[cell_idx].paragraphs[0])
+                            cell["inline_runs"] = actual
                     except (IndexError, AttributeError):
                         pass
         block_id = f"b{block_index:04d}"
@@ -613,6 +630,42 @@ _R_ID_QN     = "{http://schemas.openxmlformats.org/officeDocument/2006/relations
 _R_PICT_QN   = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}pict"
 
 _IMAGE_RELTYPE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
+
+
+def inline_runs_from_paragraph(paragraph) -> list[dict]:
+    """Extract actual runs and hyperlink relationships from saved OOXML."""
+    result = []
+    try:
+        for item in paragraph.iter_inner_content():
+            runs = getattr(item, "runs", None)
+            href = getattr(item, "url", None)
+            if runs is None:
+                runs = [item]
+            for run in runs:
+                entry = {"text": run.text}
+                marks = []
+                r_style = run._r.rPr.rStyle.val if run._r.rPr is not None and run._r.rPr.rStyle is not None else ""
+                if "Strong" in r_style:
+                    marks.append("strong")
+                if "Emphasis" in r_style:
+                    marks.append("emphasis")
+                if "Code" in r_style:
+                    marks.append("code")
+                if run.bold:
+                    if "strong" not in marks: marks.append("strong")
+                if run.italic:
+                    marks.append("emphasis")
+                if run.font.name == "Courier New":
+                    if "code" not in marks: marks.append("code")
+                marks = [mark for mark in ("strong", "emphasis", "code") if mark in marks]
+                if marks:
+                    entry["marks"] = marks
+                if href:
+                    entry["href"] = href
+                result.append(entry)
+    except AttributeError:
+        return []
+    return result
 
 
 def image_relationship_info(paragraph) -> dict[str, object]:

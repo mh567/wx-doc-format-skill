@@ -392,15 +392,26 @@ def audit_output_structure(doc, profile: dict | None = None) -> dict:
                 and children[1].tag == qn("w:p")
                 and any(br.get(qn("w:type")) == "page" for br in children[1].iter(qn("w:br")))
             )
+            title_paragraphs = [p for p in doc.paragraphs if _normalized_style(p.style.name if p.style else "") == _normalized_style(expected_title_style) and p.text.strip()]
+            issues = [] if page_break else [{"type": "toc_missing_page_break"}]
+            if len(title_paragraphs) != 1:
+                issues.append({"type": "document_title_count_mismatch", "count": len(title_paragraphs)})
+            expected_child = children[2] if len(children) > 2 else None
+            if expected_child is None or expected_child.tag != qn("w:p"):
+                issues.append({"type": "title_missing_after_toc"})
+            else:
+                expected_paragraph = Paragraph(expected_child, doc)
+                if _normalized_style(expected_paragraph.style.name if expected_paragraph.style else "") != _normalized_style(expected_title_style) or not expected_paragraph.text.strip():
+                    issues.append({"type": "title_not_immediately_after_toc"})
             return {
                 "toc_title_index": 0,
                 "toc_field_index": 0,
                 "document_title_index": 2 if len(children) > 2 else None,
-                "document_title_text": None,
-                "document_title_style": None,
-                "document_title_count": None,
-                "issues": [] if page_break else [{"type": "toc_missing_page_break"}],
-                "passed": page_break,
+                "document_title_text": title_paragraphs[0].text.strip() if len(title_paragraphs) == 1 else None,
+                "document_title_style": title_paragraphs[0].style.name if len(title_paragraphs) == 1 and title_paragraphs[0].style else None,
+                "document_title_count": len(title_paragraphs),
+                "issues": issues,
+                "passed": not issues,
                 "mode": "template_fragment",
             }
     body_children = [

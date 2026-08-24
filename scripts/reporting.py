@@ -139,6 +139,8 @@ def add_risk_warnings(report: dict, row_height_rule: str) -> None:
             }
         )
     source_model_issues = report.get("source_document_model_issues", [])
+    if report.get("markdown_title_audit", {}).get("leading_h1_absent"):
+        report["risk_warnings"].append({"type": "markdown_title_generated", "message": "Markdown had no leading H1; filename title was generated.", "title": report["markdown_title_audit"].get("title")})
     if source_model_issues:
         report["risk_warnings"].append(
             {

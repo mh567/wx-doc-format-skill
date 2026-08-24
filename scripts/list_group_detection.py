@@ -25,6 +25,8 @@ def _source_position(block: dict[str, Any], fallback: int) -> int:
 def _protected_body(block: dict[str, Any]) -> bool:
     if block.get("block_type") != "body":
         return True
+    if block.get("source", {}).get("semantic_origin") == "markdown_token":
+        return True
     role = str(block.get("role") or block.get("source", {}).get("role") or "")
     return role in {"note", "numbered_note", "formula", "appendix_title", "title"}
 
@@ -47,7 +49,7 @@ def _ratio(values: list[bool]) -> float:
 
 def _layout_cohesion(items: list[dict[str, Any]]) -> float:
     layouts = [item.get("source", {}).get("layout", {}) for item in items]
-    if not layouts:
+    if not layouts or not any(layout for layout in layouts):
         return 0.0
     compatible = []
     first = layouts[0]
