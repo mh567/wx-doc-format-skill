@@ -6,6 +6,24 @@ from table_formatting import audit_document_tables
 from appendix_semantics import audit_appendix_contract
 
 
+def markdown_residue_reasons(text: str) -> list[str]:
+    """Return visible Markdown syntax that should have been consumed by the adapter."""
+    reasons = []
+    if "**" in text or re.search(r"(?<!\w)__(?=\S).*?__(?!\w)", text):
+        reasons.append("strong")
+    if "`" in text:
+        reasons.append("code")
+    if re.search(r"\[[^\]]+\]\([^\s)]+(?:\s+['\"][^)]*['\"])?\)", text):
+        reasons.append("link")
+    if re.search(r"(?m)^\s*(?:#{1,6}\s+|>\s+|```|~~~)", text):
+        reasons.append("block_marker")
+    if re.search(r"(?<!\*)\*[^*\n]+\*(?!\*)", text) or re.search(r"(?<![\w_])_[^_\n]+_(?![\w_])", text):
+        reasons.append("emphasis")
+    if "~~" in text:
+        reasons.append("strike")
+    return reasons
+
+
 def _style_has_numbering(doc, style_name: str) -> bool:
     """Return True if the style definition binds to a numbering definition."""
     try:
@@ -103,6 +121,9 @@ def audit_document(
     center_alignment,
     template_profile: dict | None = None,
     table_roles: list[str] | None = None,
+    markdown_input: bool = False,
+    markdown_code_paragraphs: set[int] | None = None,
+    markdown_code_texts: set[str] | None = None,
 ) -> dict:
     audit = {
         "paragraph_count": len(doc.paragraphs),
@@ -126,8 +147,9 @@ def audit_document(
         text = paragraph.text.strip()
         if not text:
             continue
-        if "**" in text or re.match(r"^#{1,6}\s+", text):
-            audit["markdown_residue"].append({"paragraph": idx, "text": text[:120]})
+        reasons = markdown_residue_reasons(text) if markdown_input and idx not in (markdown_code_paragraphs or set()) else []
+        if reasons:
+            audit["markdown_residue"].append({"paragraph": idx, "text": text[:120], "reasons": reasons})
         style_name = paragraph.style.name if paragraph.style is not None else ""
         if style_name.startswith("Heading"):
             heading_level = heading_level_from_style(style_name)
@@ -179,6 +201,13 @@ def audit_document(
                         {"table": table_idx, "row": row_idx, "text": cell_text[:120]}
                     )
                 for paragraph in cell.paragraphs:
+                    reasons = markdown_residue_reasons(paragraph.text.strip()) if markdown_input else []
+                    if reasons:
+                        audit["markdown_residue"].append({
+                            "paragraph": f"table:{table_idx}:{row_idx}",
+                            "text": paragraph.text.strip()[:120],
+                            "reasons": reasons,
+                        })
                     if paragraph.text.strip() and paragraph.style.name != "表正文":
                         audit["table_paragraphs_not_table_body"].append(
                             {"table": table_idx, "row": row_idx, "style": paragraph.style.name, "text": paragraph.text[:80]}

@@ -268,10 +268,12 @@ python3 scripts/main.py \
 ## 使用要求
 
 - Python 3.10+
-- python-docx、lxml
+- python-docx、lxml、markdown-it-py
 
 ## 已知边界
 
 - 文本框、形状、SmartArt、批注、修订记录不会完整重建
-- Markdown 路径不会自动嵌入图片
+- Markdown 路径支持本地图片、ATX 与 Setext 标题、标准嵌套列表、GFM 表格、引用、围栏代码、软换行和常用行内格式
+- Markdown 远程图片、HTML 块、任务列表状态和扩展语法会保留风险或未支持 token 记录
+- Markdown token 语义在 source AST 中记录来源、列表层级与容器上下文；代码块和引用不参与正文标题、题注或列表推断
 - 页眉页脚、页码、复杂目录域需要人工复核

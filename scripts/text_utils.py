@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import re
+import hashlib
+from docx.opc.constants import RELATIONSHIP_TYPE as RT
 
 
 HEADING_PATTERNS = [
@@ -242,7 +244,8 @@ def is_formula_text(text: str) -> bool:
 
 
 def is_appendix_title(text: str) -> bool:
-    return bool(re.match(r"^附\s*录\s", text)) or bool(re.match(r"^附录([A-Z]|[一二三四五六七八九十百千零])", text))
+    value = (text or "").strip()
+    return value == "附录" or bool(re.match(r"^附\s*录\s", value)) or bool(re.match(r"^附录([A-Z]|[一二三四五六七八九十百千零])", value))
 
 
 def is_caption_text(text: str) -> bool:
@@ -437,13 +440,88 @@ def build_document_model_from_output(doc, source_path: Path, report: dict) -> di
         parse_appendix_title,
     )
     model = new_document_model(source_path, "docx", report.get("skill_version", "unknown"))
+    from docx.oxml.ns import qn as docx_qn
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+    markdown_semantics = report.get("markdown_render_semantics", {})
+    markdown_paragraphs = {
+        item.get("para_id"): item
+        for item in markdown_semantics.get("paragraphs", [])
+        if item.get("para_id")
+    }
+    markdown_tables = iter(markdown_semantics.get("tables", []))
     block_index = 1
     images_found = 0
     appendix_count = 0
-    for paragraph in doc.paragraphs:
-        text = paragraph.text.strip()
+    def append_rendered_paragraph(paragraph) -> None:
+        nonlocal block_index, images_found, appendix_count
+        raw_text = paragraph.text
+        text = raw_text.strip()
         style_name = paragraph.style.name if paragraph.style is not None else ""
+        markdown_semantic = markdown_paragraphs.get(paragraph._p.get(docx_qn("w14:paraId")))
+        if not text and not paragraph_has_graphics(paragraph) and not markdown_semantic:
+            # TOC insertion and section transitions create layout-only empty
+            # paragraphs. They have no source-AST counterpart and must not
+            # become synthetic titles or body blocks during content comparison.
+            return
         block_id = f"b{block_index:04d}"
+        if markdown_semantic:
+            source = {
+                "semantic_origin": "markdown_token",
+                "render_semantic_order": markdown_semantic.get("document_order"),
+                "role": markdown_semantic.get("role"),
+                "numbering": dict(markdown_semantic.get("numbering") or {}),
+                "task_state": markdown_semantic.get("task_state"),
+                "container_quote_depth": markdown_semantic.get("container_quote_depth"),
+            }
+            block_type = markdown_semantic.get("block_type")
+            if block_type == "heading":
+                append_block(model, heading_block(
+                    block_id, text, int(markdown_semantic.get("level") or 0),
+                    role=markdown_semantic.get("role") or "heading", source=source,
+                ))
+            elif block_type == "list_item":
+                list_block = list_item_block(
+                    block_id, text, int(markdown_semantic.get("level") or 0),
+                    markdown_semantic.get("list_type") or "dash",
+                    restart=bool(markdown_semantic.get("restart")), source=source,
+                )
+                if markdown_semantic.get("parent_list_item_id"):
+                    list_block["parent_list_item_id"] = markdown_semantic["parent_list_item_id"]
+                append_block(model, list_block)
+            elif block_type == "image":
+                image_relation = image_relationship_info(paragraph)
+                append_block(model, image_block(
+                    block_id, asset_id=markdown_semantic.get("asset_id"),
+                    alt_text=markdown_semantic.get("alt_text") or text,
+                    source=source | {
+                        "asset_path": markdown_semantic.get("asset_path"),
+                        "asset_sha256": image_relation.get("sha256"),
+                        "image_relationship_target": image_relation.get("target"),
+                        "image_relationship_valid": image_relation.get("valid"),
+                    },
+                ))
+                images_found += 1
+            elif block_type == "caption":
+                append_block(model, caption_block(
+                    block_id, markdown_semantic.get("text") or text,
+                    markdown_semantic.get("caption_type") or "unknown", source=source,
+                ))
+            elif block_type == "appendix":
+                appendix_count += 1
+                append_block(model, appendix_block(
+                    block_id, text, appendix_id=markdown_semantic.get("appendix_id") or str(appendix_count),
+                    classification=markdown_semantic.get("classification"),
+                    title_lines=markdown_semantic.get("title_lines") or [text], source=source,
+                ))
+            else:
+                append_block(model, body_block(
+                    block_id,
+                    raw_text if markdown_semantic.get("role") == "code_block" else text,
+                    role=markdown_semantic.get("role"), source=source,
+                ))
+            block_index += 1
+            return
         appendix_style_role = appendix_role_from_style(style_name)
         if appendix_style_role == "appendix_title":
             appendix_count += 1
@@ -486,16 +564,40 @@ def build_document_model_from_output(doc, source_path: Path, report: dict) -> di
                 role = "note"
             append_block(model, body_block(block_id, text, source={"role": role}))
         block_index += 1
-    for table_idx, table in enumerate(doc.tables, 1):
+
+    def append_rendered_table(table) -> None:
+        nonlocal block_index
+        markdown_table = next(markdown_tables, None)
         table_type = "data"
         header_rows = 1
-        if looks_like_code_sample_table(table):
+        if markdown_table:
+            table_type = markdown_table.get("table_type") or "data"
+            header_rows = int(markdown_table.get("header_rows") or 0)
+        elif looks_like_code_sample_table(table):
             table_type = "code_sample"
             header_rows = 0
         rows = table_rows_for_model(table, table_type, header_rows)
+        if markdown_table:
+            role_rows = markdown_table.get("rows") or []
+            for row_idx, row in enumerate(rows):
+                for cell_idx, cell in enumerate(row):
+                    try:
+                        cell["cell_role"] = role_rows[row_idx][cell_idx].get("cell_role") or cell.get("cell_role")
+                    except (IndexError, AttributeError):
+                        pass
         block_id = f"b{block_index:04d}"
-        append_block(model, table_block(block_id, table_type, rows, header_rows=header_rows))
+        table_source = (
+            {"semantic_origin": "markdown_token", "render_semantic_order": markdown_table.get("document_order")}
+            if markdown_table else None
+        )
+        append_block(model, table_block(block_id, table_type, rows, header_rows=header_rows, source=table_source))
         block_index += 1
+
+    for child in doc.element.body.iterchildren():
+        if child.tag == docx_qn("w:p"):
+            append_rendered_paragraph(Paragraph(child, doc._body))
+        elif child.tag == docx_qn("w:tbl"):
+            append_rendered_table(Table(child, doc._body))
     if block_index <= 2:
         text = "".join(p.text for p in doc.paragraphs)
         if not text.strip() and not doc.tables:
@@ -511,6 +613,30 @@ _R_ID_QN     = "{http://schemas.openxmlformats.org/officeDocument/2006/relations
 _R_PICT_QN   = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}pict"
 
 _IMAGE_RELTYPE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
+
+
+def image_relationship_info(paragraph) -> dict[str, object]:
+    """Return identity derived from the saved image relationship, never sidecar data."""
+    try:
+        for descendant in paragraph._p.iter():
+            relation_id = descendant.get(_R_EMBED_QN)
+            if not relation_id:
+                continue
+            rel = paragraph.part.rels.get(relation_id)
+            if rel is None or rel.reltype != RT.IMAGE:
+                return {"valid": False, "target": None, "sha256": None}
+            target_part = getattr(rel, "target_part", None)
+            blob = getattr(target_part, "blob", None)
+            if not isinstance(blob, bytes):
+                return {"valid": False, "target": None, "sha256": None}
+            return {
+                "valid": True,
+                "target": str(getattr(target_part, "partname", "")),
+                "sha256": hashlib.sha256(blob).hexdigest(),
+            }
+    except (AttributeError, KeyError):
+        pass
+    return {"valid": False, "target": None, "sha256": None}
 
 
 def paragraph_has_graphics(paragraph) -> bool:

@@ -18,6 +18,8 @@ progress.md
 tests/
 !tests/
 tests/*
+!tests/test_md_pipeline.py
+!tests/test_md_conversion.py
 !tests/test_toc_regions.py
 !tests/test_list_numbering.py
 !tests/test_front_matter.py
@@ -33,3 +35,4 @@ scripts/anonymize_template.py
 scripts/bootstrap_macos_lxml.sh
 scripts/list_semantic_enhancer.py
 requirements.txt
+!requirements.txt

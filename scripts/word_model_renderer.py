@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Callable
+import hashlib
 
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
@@ -151,6 +152,70 @@ def render_document_model(
     """
     active_list_nums: dict[int, int] = {}
     heading_num_id = numbering_ids.get("heading")
+    markdown_semantic_order = 0
+
+    def track_markdown_paragraph(block: dict, paragraph) -> None:
+        nonlocal markdown_semantic_order
+        source = block.get("source", {})
+        if source.get("semantic_origin") != "markdown_token":
+            return
+        para_id = f"{len(report.setdefault('markdown_render_semantics', {}).setdefault('paragraphs', [])) + 1:08X}"
+        markdown_semantic_order += 1
+        paragraph._p.set(qn("w14:paraId"), para_id)
+        report["markdown_render_semantics"]["paragraphs"].append({
+            "para_id": para_id,
+            "document_order": markdown_semantic_order,
+            "block_type": block.get("block_type"),
+            "text": block.get("text"),
+            "role": block.get("role"),
+            "level": block.get("level"),
+            "list_type": block.get("list_type"),
+            "restart": block.get("restart"),
+            "parent_list_item_id": block.get("parent_list_item_id"),
+            "numbering": dict(source.get("numbering", {})),
+            "task_state": source.get("task_state"),
+            "container_quote_depth": source.get("container_quote_depth"),
+            "asset_path": source.get("asset_path"),
+            "asset_sha256": source.get("asset_sha256"),
+            "asset_id": block.get("asset_id"),
+            "alt_text": block.get("alt_text"),
+            "caption_type": block.get("caption_type"),
+            "appendix_id": block.get("appendix_id"),
+            "classification": block.get("classification"),
+            "title_lines": block.get("title_lines"),
+        })
+
+    def record_image_relationship(paragraph) -> str | None:
+        for element in paragraph._p.iter():
+            relation_id = element.get(qn("r:embed"))
+            if not relation_id:
+                continue
+            try:
+                return hashlib.sha256(paragraph.part.related_parts[relation_id].blob).hexdigest()
+            except (KeyError, AttributeError):
+                return None
+        return None
+
+    def track_markdown_table(block: dict, table) -> None:
+        nonlocal markdown_semantic_order
+        source = block.get("source", {})
+        if source.get("semantic_origin") != "markdown_token":
+            return
+        markdown_semantic_order += 1
+        report.setdefault("markdown_render_semantics", {}).setdefault("tables", []).append({
+            "table_index": len(doc.tables) - 1,
+            "document_order": markdown_semantic_order,
+            "table_type": block.get("table_type"),
+            "header_rows": block.get("header_rows"),
+            "rows": [[{"cell_role": cell.get("cell_role")} for cell in row] for row in block.get("rows", [])],
+        })
+
+    def add_text_paragraph(text: str, style: str):
+        try:
+            doc.styles[style]
+        except KeyError:
+            return doc.add_paragraph(text)
+        return doc.add_paragraph(text, style=style)
 
     for block in model.get("document", {}).get("blocks", []):
         block_type = block.get("block_type")
@@ -163,10 +228,8 @@ def render_document_model(
 
             if role == "title" or level <= 0:
                 style = style_from_profile(template_profile, "title", "文档标题")
-                try:
-                    doc.add_paragraph(text, style=style)
-                except Exception:
-                    doc.add_paragraph(text)
+                paragraph = add_text_paragraph(text, style)
+                track_markdown_paragraph(block, paragraph)
                 active_list_nums = {}
                 continue
 
@@ -176,10 +239,8 @@ def render_document_model(
                     f"appendix_heading_{level}",
                     APPENDIX_HEADING_STYLES.get(level, f"附录{level}级标题"),
                 )
-                try:
-                    doc.add_paragraph(text, style=style)
-                except Exception:
-                    doc.add_paragraph(text)
+                paragraph = add_text_paragraph(text, style)
+                track_markdown_paragraph(block, paragraph)
                 report.setdefault("automatic_numbers", []).append(
                     {
                         "type": "appendix_heading",
@@ -193,10 +254,8 @@ def render_document_model(
                 continue
 
             style = style_from_profile(template_profile, f"heading_{level}", f"Heading {level}")
-            try:
-                doc.add_paragraph(text, style=style)
-            except Exception:
-                doc.add_paragraph(text)
+            paragraph = add_text_paragraph(text, style)
+            track_markdown_paragraph(block, paragraph)
 
             report.setdefault("automatic_numbers", []).append(
                 {"type": "heading", "text": text, "level": level, "source": "model"}
@@ -213,10 +272,8 @@ def render_document_model(
             restart = block.get("restart", False)
             style_name = list_style_for_model(list_type, level, template_profile)
 
-            try:
-                doc.add_paragraph(text, style=style_name)
-            except Exception:
-                doc.add_paragraph(text)
+            paragraph = add_text_paragraph(text, style_name)
+            track_markdown_paragraph(block, paragraph)
 
             # Only numbered lists need manual numId management for restart.
             # Key by (level, list_type) so that letter‑style and decimal‑style
@@ -256,6 +313,7 @@ def render_document_model(
                     role=block.get("table_type", "data"),
                     path=str(len(doc.tables)),
                 )
+                track_markdown_table(block, table)
             active_list_nums = {}
 
         # --- Image ---
@@ -271,6 +329,8 @@ def render_document_model(
                 paragraph = doc.add_paragraph()
                 paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
                 paragraph.add_run().add_picture(asset_path)
+                track_markdown_paragraph(block, paragraph)
+                report["markdown_render_semantics"]["paragraphs"][-1]["image_relationship_sha256"] = record_image_relationship(paragraph)
             except Exception as error:
                 report.setdefault("content_warnings", []).append({
                     "type": "markdown_image_render_failed",
@@ -292,7 +352,8 @@ def render_document_model(
                     lines.append(f"（{classification}）")
                 if block.get("title"):
                     lines.append(str(block["title"]))
-            _add_paragraph_with_soft_break_lines(doc, style, lines)
+            paragraph = _add_paragraph_with_soft_break_lines(doc, style, lines)
+            track_markdown_paragraph(block, paragraph)
             report.setdefault("automatic_numbers", []).append(
                 {
                     "type": "appendix",
@@ -312,17 +373,15 @@ def render_document_model(
             if appendix_id and source_text:
                 text = source_text
                 style = style_from_profile(template_profile, "caption", "Caption")
-                try:
-                    doc.add_paragraph(text, style=style)
-                except Exception:
-                    doc.add_paragraph(text)
+                paragraph = add_text_paragraph(text, style)
             else:
-                _add_seq_caption(
+                paragraph = _add_seq_caption(
                     doc,
                     "figure" if caption_type == "figure" else "table",
                     caption_text,
                     template_profile=template_profile,
                 )
+            track_markdown_paragraph(block, paragraph)
             active_list_nums = {}
 
         # --- Body / Note / Formula ---
@@ -336,8 +395,6 @@ def render_document_model(
                 style = style_from_profile(template_profile, "formula", "Normal")
             else:
                 style = style_from_profile(template_profile, "body", "Normal")
-            try:
-                doc.add_paragraph(block.get("text", ""), style=style)
-            except Exception:
-                doc.add_paragraph(block.get("text", ""))
+            paragraph = add_text_paragraph(block.get("text", ""), style)
+            track_markdown_paragraph(block, paragraph)
             active_list_nums = {}

@@ -15,7 +15,7 @@ from text_utils import (
     strip_heading_marker,
     strip_list_marker,
 )
-from document_model import validate_document_model
+from document_model import summarize_document_model, validate_document_model
 from list_style_mapping import normalize_wx_list_type
 from caption_placement import normalize_caption_placement
 from list_hierarchy import resolve_list_hierarchy
@@ -48,7 +48,8 @@ def _summarize(model: dict) -> dict:
 
 
 def summarize_source_document_model(report: dict, model: dict) -> None:
-    report["source_document_model_summary"] = _summarize(model)
+    report["source_document_model_summary"] = summarize_document_model(model)
+    report["source_document_model_issues"] = validate_document_model(model)
 
 
 def normalize_document_model_simple(
@@ -69,6 +70,13 @@ def normalize_document_model_simple(
         raw_text = str(source.get("raw_text") or text).strip()
         source_style = str(source.get("style") or "")
         appendix_source_role = appendix_role_from_style(source_style)
+
+        if source.get("semantic_origin") == "markdown_token" and (
+            block.get("role") in {"code_block", "quote"}
+            or source.get("container_quote_depth")
+        ):
+            active_list_signatures.clear()
+            continue
 
         if appendix_source_role == "appendix_title" and block_type != "appendix":
             existing_appendices = sum(

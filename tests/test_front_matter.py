@@ -19,6 +19,8 @@ from front_matter import (
     front_matter_source_positions,
     inject_document_title,
 )
+from document_model import compare_document_models
+from text_utils import build_document_model_from_output
 from template_finalizer import insert_table_of_contents
 from toc_detector import audit_toc_replacement, detect_toc_regions, selected_source_positions
 
@@ -175,3 +177,48 @@ def test_output_structure_rejects_table_before_title() -> None:
 
     assert result["passed"] is False
     assert any(issue["type"] == "title_missing_after_toc" for issue in result["issues"])
+
+
+def test_output_model_ignores_layout_only_toc_page_break() -> None:
+    doc = Document()
+    title_style = doc.styles.add_style("文档标题", WD_STYLE_TYPE.PARAGRAPH)
+    layout_only = doc.add_paragraph(style=title_style)
+    layout_only.add_run().add_break(WD_BREAK.PAGE)
+    doc.add_paragraph("统一身份认证方案", style=title_style)
+    doc.add_paragraph("项目概述", style="Heading 1")
+    source_model = {
+        "schema_version": "1.0",
+        "document": {
+            "blocks": [
+                {"id": "title", "block_type": "heading", "role": "title", "level": 0, "text": "统一身份认证方案"},
+                {"id": "heading", "block_type": "heading", "role": "heading", "level": 1, "text": "项目概述"},
+            ],
+        },
+    }
+
+    output_model = build_document_model_from_output(doc, Path("output.docx"), {"skill_version": "test", "non_text_objects": {}})
+    diff = compare_document_models(source_model, output_model)
+
+    assert [block["text"] for block in output_model["document"]["blocks"] if block.get("role") == "title"] == ["统一身份认证方案"]
+    assert diff["warnings"] == []
+
+
+def test_output_model_diff_still_reports_lost_heading() -> None:
+    source_model = {
+        "schema_version": "1.0",
+        "document": {"blocks": [
+            {"id": "one", "block_type": "heading", "role": "heading", "level": 1, "text": "第一章"},
+            {"id": "two", "block_type": "heading", "role": "heading", "level": 1, "text": "第二章"},
+        ]},
+    }
+    output_model = {
+        "schema_version": "1.0",
+        "document": {"blocks": [
+            {"id": "one", "block_type": "heading", "role": "heading", "level": 1, "text": "第一章"},
+        ]},
+    }
+
+    diff = compare_document_models(source_model, output_model)
+
+    assert diff["type_count_delta"] == {"heading": -1}
+    assert {warning["type"] for warning in diff["warnings"]} == {"block_count_delta", "block_type_count_delta"}

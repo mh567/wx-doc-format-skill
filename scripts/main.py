@@ -11,6 +11,7 @@ try:
     from docx import Document
     from docx.enum.table import WD_ROW_HEIGHT_RULE
     from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.oxml.ns import qn
     from docx.shared import Cm
 except Exception as exc:
     DOCX_IMPORT_ERROR = exc
@@ -22,7 +23,7 @@ from text_utils import (
 )
 from document_model import summarize_document_model, validate_document_model, compare_document_models
 from docx_pipeline import parse_docx_to_model
-from md_pipeline import parse_md_to_model
+from md_pipeline import audit_markdown_preservation, parse_md_to_model
 from model_normalization import normalize_document_model, summarize_source_document_model
 from word_model_renderer import (
     render_document_model,
@@ -149,6 +150,9 @@ def audit_document_wrapper(
     *,
     template_profile: dict | None = None,
     table_roles: list[str] | None = None,
+    markdown_input: bool = False,
+    markdown_code_paragraphs: set[int] | None = None,
+    markdown_code_texts: set[str] | None = None,
 ) -> dict:
     from text_utils import heading_level_from_style as _hls, strip_heading_marker as _shm, paragraph_num_info as _pni
     from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -163,6 +167,9 @@ def audit_document_wrapper(
         center_alignment=WD_ALIGN_PARAGRAPH.CENTER,
         template_profile=template_profile,
         table_roles=table_roles,
+        markdown_input=markdown_input,
+        markdown_code_paragraphs=markdown_code_paragraphs,
+        markdown_code_texts=markdown_code_texts,
     )
 
 
@@ -241,6 +248,16 @@ def _finalize_and_audit_output(
         args.table_row_height_rule,
         template_profile=template_profile,
         table_roles=final_table_roles,
+        markdown_input=suffix in {".md", ".markdown"},
+        markdown_code_paragraphs={
+            index + 1
+            for index, paragraph in enumerate(out_doc.paragraphs)
+            if paragraph._p.get(qn("w14:paraId")) in {
+                item.get("para_id")
+                for item in report.get("markdown_render_semantics", {}).get("paragraphs", [])
+                if item.get("role") == "code_block"
+            }
+        },
     )
     report["list_preservation_audit"] = audit_list_preservation(
         out_doc,
@@ -254,6 +271,10 @@ def _finalize_and_audit_output(
     report["appendix_preservation_audit"] = audit_appendix_preservation(
         out_doc, normalized_model, template_profile,
     )
+    if (source_model or {}).get("document", {}).get("source", {}).get("type") == "markdown":
+        report["markdown_preservation_audit"] = audit_markdown_preservation(
+            source_model, normalized_model, report, rendered_model,
+        )
     report["content_warnings"] = collect_content_warnings(out_doc)
     report["risk_warnings"] = []
     add_risk_warnings(report, args.table_row_height_rule)

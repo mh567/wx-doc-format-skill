@@ -30,6 +30,8 @@ def new_report(skill_version: str) -> dict:
         "source_document_model_issues": [],
         "template_finalizer": {},
         "note_preservation_audit": {},
+        "markdown_source_audit": {},
+        "markdown_preservation_audit": {},
         "audit": {},
         "review_packet": {},
         "review_loop": {},
@@ -153,6 +155,17 @@ def add_risk_warnings(report: dict, row_height_rule: str) -> None:
                 "message": "Appendix structure or 2.2.5 formatting contract has issues.",
                 "count": len(appendix_preservation.get("issues", [])),
                 "issues": appendix_preservation.get("issues", []),
+            }
+        )
+    markdown_preservation = report.get("markdown_preservation_audit", {})
+    if markdown_preservation and not markdown_preservation.get("passed", False):
+        report["risk_warnings"].append(
+            {
+                "type": "markdown_preservation",
+                "message": "Markdown source semantics do not match the normalized AST or rendered document.",
+                "table_shape_lost": markdown_preservation.get("table_shape_lost", []),
+                "markdown_residue": len(markdown_preservation.get("markdown_residue", [])),
+                "unsupported_tokens": markdown_preservation.get("unsupported_tokens", []),
             }
         )
     model_diff_warnings = report.get("document_model_diff", {}).get("warnings", [])
@@ -279,6 +292,17 @@ def write_markdown_report(report: dict, path: Path) -> None:
         if warnings:
             lines.append(f"- 差异提示：{warnings[:20]}")
     lines.append("")
+    markdown_preservation = report.get("markdown_preservation_audit", {})
+    if markdown_preservation:
+        lines.append("## Markdown 语义守恒")
+        lines.append(f"- 是否通过：{markdown_preservation.get('passed', False)}")
+        lines.append(f"- 源语义：{markdown_preservation.get('source_ast', {})}")
+        lines.append(f"- 规范化语义：{markdown_preservation.get('normalized_ast', {})}")
+        if markdown_preservation.get("table_shape_lost"):
+            lines.append(f"- 表格结构丢失：{markdown_preservation['table_shape_lost']}")
+        if markdown_preservation.get("unsupported_tokens"):
+            lines.append(f"- 未支持 token：{markdown_preservation['unsupported_tokens']}")
+        lines.append("")
     lines.append("## 非文本对象")
     for key, value in report.get("non_text_objects", {}).items():
         lines.append(f"- {key}：{value}")
