@@ -1,0 +1,99 @@
+name: Nuitka offline package candidates
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build-native:
+    name: ${{ matrix.platform_id }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform_id: windows-x86_64
+            archive_suffix: zip
+          - os: macos-15-intel
+            platform_id: macos-x86_64
+            archive_suffix: tar.gz
+          - os: macos-15
+            platform_id: macos-arm64
+            archive_suffix: tar.gz
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Read version
+        id: version
+        run: python -c "import os,pathlib; open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8').write('value=' + pathlib.Path('VERSION').read_text(encoding='utf-8').strip() + '\n')"
+      - name: Install locked dependencies
+        run: python -m pip install -r packaging/nuitka/requirements-runtime.txt -r packaging/nuitka/requirements-build.txt
+      - name: Run full test suite
+        run: python -m pytest tests/ -q
+      - name: Build standalone offline package and archive
+        run: python packaging/nuitka/build_distribution.py --platform-id "${{ matrix.platform_id }}" --expected-version "${{ github.event_name == 'push' && github.ref_name || '' }}" --archive
+      - name: Smoke assembled runtime
+        run: python packaging/nuitka/smoke_distribution.py "dist/wx-doc-format-skill-${{ steps.version.outputs.value }}-${{ matrix.platform_id }}"
+      - name: Smoke runtime from Unicode installation path
+        run: python packaging/nuitka/smoke_distribution.py "dist/wx-doc-format-skill-${{ steps.version.outputs.value }}-${{ matrix.platform_id }}" --unicode-path
+      - name: Upload archived candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: wx-doc-format-skill-${{ steps.version.outputs.value }}-${{ matrix.platform_id }}
+          path: dist/wx-doc-format-skill-${{ steps.version.outputs.value }}-${{ matrix.platform_id }}.${{ matrix.archive_suffix }}
+          if-no-files-found: error
+          retention-days: 14
+
+  build-kylin-candidate:
+    name: ${{ matrix.platform_id }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            container_image: quay.io/pypa/manylinux2014_x86_64:latest
+            platform_id: kylin-v10-x86_64
+          - os: ubuntu-24.04-arm
+            container_image: quay.io/pypa/manylinux2014_aarch64:latest
+            platform_id: kylin-v10-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Read version
+        id: version
+        run: python -c "import os,pathlib; open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8').write('value=' + pathlib.Path('VERSION').read_text(encoding='utf-8').strip() + '\n')"
+      - name: Install locked dependencies
+        run: python -m pip install -r packaging/nuitka/requirements-runtime.txt -r packaging/nuitka/requirements-build.txt
+      - name: Run full test suite
+        run: python -m pytest tests/ -q
+      - name: Build in manylinux2014 and archive
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/workspace" \
+            -w /workspace \
+            "${{ matrix.container_image }}" \
+            /bin/bash -lc '/opt/python/cp313-cp313/bin/python -m pip install -r packaging/nuitka/requirements-runtime.txt -r packaging/nuitka/requirements-build.txt && /opt/python/cp313-cp313/bin/python packaging/nuitka/build_distribution.py --platform-id "${{ matrix.platform_id }}" --expected-version "${{ github.event_name == 'push' && github.ref_name || '' }}" --archive'
+      - name: Smoke assembled runtime
+        run: python packaging/nuitka/smoke_distribution.py "dist/wx-doc-format-skill-${{ steps.version.outputs.value }}-${{ matrix.platform_id }}"
+      - name: Smoke runtime from Unicode installation path
+        run: python packaging/nuitka/smoke_distribution.py "dist/wx-doc-format-skill-${{ steps.version.outputs.value }}-${{ matrix.platform_id }}" --unicode-path
+      - name: Upload archived candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: wx-doc-format-skill-${{ steps.version.outputs.value }}-${{ matrix.platform_id }}
+          path: dist/wx-doc-format-skill-${{ steps.version.outputs.value }}-${{ matrix.platform_id }}.tar.gz
+          if-no-files-found: error
+          retention-days: 14

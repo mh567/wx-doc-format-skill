@@ -9,6 +9,8 @@ outputs/
 input/
 agents/
 .pytest_cache/
+build/nuitka/
+dist/
 docs/
 !docs/
 docs/*
@@ -38,6 +40,7 @@ tests/*
 !tests/test_unordered_lists.py
 !tests/test_list_group_detection.py
 !tests/test_appendix_semantics.py
+!tests/test_nuitka_distribution.py
 scripts/anonymize_template.py
 scripts/bootstrap_macos_lxml.sh
 scripts/list_semantic_enhancer.py

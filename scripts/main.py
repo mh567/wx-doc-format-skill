@@ -89,12 +89,46 @@ def skill_version() -> str:
     return SKILL_VERSION
 
 
-def _load_version() -> str:
-    try:
-        v = Path(__file__).resolve().parent.parent / "VERSION"
-        return v.read_text().strip()
-    except Exception:
-        return SKILL_VERSION
+def _version_resource_candidates(
+    *,
+    module_file: str | Path | None = None,
+    executable: str | Path | None = None,
+    release: bool | None = None,
+) -> list[Path]:
+    """Return VERSION locations for source and packaged executions."""
+    import os as _os
+
+    source_file = Path(module_file or __file__).resolve()
+    is_release = (
+        _os.environ.get("WX_DOC_FORMAT_RELEASE") == "1"
+        if release is None
+        else release
+    )
+    candidates = []
+    if is_release:
+        candidates.append(Path(executable or sys.executable).resolve().parent / "VERSION")
+    candidates.append(source_file.parent.parent / "VERSION")
+    return candidates
+
+
+def _load_version(
+    *,
+    module_file: str | Path | None = None,
+    executable: str | Path | None = None,
+    release: bool | None = None,
+) -> str:
+    for version_file in _version_resource_candidates(
+        module_file=module_file,
+        executable=executable,
+        release=release,
+    ):
+        try:
+            value = version_file.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if value:
+            return value
+    return SKILL_VERSION
 
 
 def maybe_reexec_with_skill_venv() -> None:
@@ -386,6 +420,12 @@ def _resolve_llm_call(args):
     if command_call is not None:
         return command_call
 
+    # Release packages are offline by default. Explicit local commands and the
+    # request/response file protocol remain available, while cloud SDK
+    # auto-discovery is disabled.
+    if _os.environ.get("WX_DOC_FORMAT_OFFLINE") == "1":
+        return None
+
     # 2. Anthropic API
     key = _os.environ.get("ANTHROPIC_API_KEY")
     if key:
@@ -421,6 +461,74 @@ def _resolve_llm_call(args):
         return _llm
 
     return None
+
+
+_RELEASE_REPORT_OMIT_KEYS = {
+    "review_packet",
+    "unknown_pattern_packet",
+    "decisions",
+    "blocks",
+}
+_RELEASE_REPORT_OMIT_FRAGMENTS = (
+    "candidate",
+    "confidence",
+    "decision",
+    "evidence",
+    "frame",
+    "score",
+    "stack",
+    "traceback",
+)
+
+
+def _is_full_ast(value) -> bool:
+    if not isinstance(value, dict):
+        return False
+    document = value.get("document")
+    return (
+        isinstance(document, dict) and isinstance(document.get("blocks"), list)
+    ) or (
+        "schema_version" in value and isinstance(value.get("blocks"), list)
+    )
+
+
+def _release_report_key_is_sensitive(key: object) -> bool:
+    normalized = str(key).strip().lower()
+    if normalized in _RELEASE_REPORT_OMIT_KEYS:
+        return True
+    if normalized == "ast" or normalized.startswith("ast_") or normalized.endswith("_ast"):
+        return True
+    return any(fragment in normalized for fragment in _RELEASE_REPORT_OMIT_FRAGMENTS)
+
+
+def sanitize_release_report(report: dict) -> dict:
+    """Return a report copy without private diagnostic implementation data."""
+    def sanitize(value):
+        if _is_full_ast(value):
+            return None
+        if isinstance(value, dict):
+            cleaned = {}
+            for key, child in value.items():
+                if _release_report_key_is_sensitive(key) or _is_full_ast(child):
+                    continue
+                cleaned[key] = sanitize(child)
+            return cleaned
+        if isinstance(value, list):
+            return [sanitize(item) for item in value if not _is_full_ast(item)]
+        return deepcopy(value)
+
+    return sanitize(report)
+
+
+def report_for_output(report: dict, *, release: bool | None = None) -> dict:
+    import os as _os
+
+    is_release = (
+        _os.environ.get("WX_DOC_FORMAT_RELEASE") == "1"
+        if release is None
+        else release
+    )
+    return sanitize_release_report(report) if is_release else report
 
 
 def convert_md(src: Path, doc, report: dict, row_height_cm: float, row_height_rule: str, numbering_ids: dict, args=None, file_protocol_ctx=None) -> dict:
@@ -890,7 +998,9 @@ def _run_generate_requests(args, report) -> None:
 
 
 def main() -> None:
+    global SKILL_VERSION
     parser = argparse.ArgumentParser(description="Convert MD or DOCX to template-formatted DOCX.")
+    parser.add_argument("--version", action="store_true", help="Print the installed Skill version and exit.")
     parser.add_argument("--input", type=Path, help="Source file (optional when --resume is used)")
     parser.add_argument("--output", type=Path, help="Output .docx path (optional when --resume is used)")
     parser.add_argument("--template", type=Path, default=None, help="DOCX template driving styles and numbering.")
@@ -958,6 +1068,15 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    SKILL_VERSION = _load_version()
+    if args.version:
+        print(SKILL_VERSION)
+        return
+
+    import os as _os
+    if _os.environ.get("WX_DOC_FORMAT_RELEASE") == "1" and (args.ast or args.source_ast):
+        parser.error("--ast and --source-ast are unavailable in release packages")
+
     # ── Argument validation ─────────────────────────────────────────
     if args.generate_requests and args.resume:
         parser.error("--generate-requests and --resume are mutually exclusive")
@@ -975,7 +1094,6 @@ def main() -> None:
     # the required check until after the resume handler runs.
 
     # Backward compatibility: WX_DOC_LLM_ENHANCE env var → abc mode
-    import os as _os
     if args.llm_enhance == "off" and _os.environ.get("WX_DOC_LLM_ENHANCE") == "1":
         args.llm_enhance = "abc"
 
@@ -1015,6 +1133,9 @@ def main() -> None:
         if "table_row_height_rule" in run_args:
             args.table_row_height_rule = run_args["table_row_height_rule"]
 
+    if _os.environ.get("WX_DOC_FORMAT_RELEASE") == "1" and (args.ast or args.source_ast):
+        parser.error("--ast and --source-ast are unavailable in release packages")
+
     # After --resume resolution, verify required paths exist.
     if args.resume and not args.input:
         raise SystemExit("--resume: run.json does not contain 'input', provide --input on CLI")
@@ -1025,9 +1146,6 @@ def main() -> None:
             verify_source_snapshot(args.input, str(run_info.get("source_sha256") or ""))
         except ProtocolError as exc:
             raise SystemExit(f"--resume: {exc}") from exc
-
-    global SKILL_VERSION
-    SKILL_VERSION = _load_version()
 
     maybe_reexec_with_skill_venv()
 
@@ -1249,11 +1367,12 @@ def main() -> None:
     if args.source_ast is not None and source_document_model is not None:
         args.source_ast.parent.mkdir(parents=True, exist_ok=True)
         args.source_ast.write_text(json.dumps(source_document_model, ensure_ascii=False, indent=2), encoding="utf-8")
+    output_report = report_for_output(report)
     if args.report is not None:
         args.report.parent.mkdir(parents=True, exist_ok=True)
-        args.report.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        args.report.write_text(json.dumps(output_report, ensure_ascii=False, indent=2), encoding="utf-8")
     if args.report_md is not None:
-        write_markdown_report(report, args.report_md)
+        write_markdown_report(output_report, args.report_md)
     if args.fail_on_risk and report["risk_warnings"]:
         raise SystemExit("Conversion completed with risk warnings. Review the report before delivery.")
     print(args.output)
