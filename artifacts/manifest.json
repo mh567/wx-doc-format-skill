@@ -13,14 +13,14 @@
     {
       "platform": "kylin-v10-arm64",
       "name": "wx-doc-format-skill-0.12.18-kylin-v10-arm64.tar.gz",
-      "sha256": "aa45a33bf668d7bcf72c290638305cbd8987ad36921c6abade9a2142f9efa882",
-      "size": 20440179
+      "sha256": "9ae6498df81c66ae354ad9bade8dbf1c6ae3b90cdd8987dfe50d50ca57650817",
+      "size": 20440232
     },
     {
       "platform": "macos-arm64",
       "name": "wx-doc-format-skill-0.12.18-macos-arm64.tar.gz",
-      "sha256": "1080c0604d0822f8f9fc7c4a85a386672b9951699ddb155feafbf0db1f6eaebe",
-      "size": 21209890
+      "sha256": "16891562fb46160d42f35858a241b85e36540380a600fac81136b83e19407b5c",
+      "size": 21209916
     }
   ]
 }
