@@ -1,0 +1,2 @@
+aa45a33bf668d7bcf72c290638305cbd8987ad36921c6abade9a2142f9efa882  wx-doc-format-skill-0.12.18-kylin-v10-arm64.tar.gz
+1080c0604d0822f8f9fc7c4a85a386672b9951699ddb155feafbf0db1f6eaebe  wx-doc-format-skill-0.12.18-macos-arm64.tar.gz

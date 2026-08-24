@@ -1,0 +1,2 @@
+kylin-v10-arm64
+macos-arm64
