@@ -79,10 +79,13 @@ LLM 增强为 Capability 插拔架构：
 
 ## 仓库管理
 
-- 公开 mh567/wx-doc-format-skill — main（纯 skill）
-- 私有 mh567/wx-doc-format-skill-dev — main（含全部开发文件）
-- 本地 main → 公开，dev → 私有
-- 发布用 git cherry-pick，严禁 merge dev→main
+执行分支操作、Nuitka 构建、公开 Skill 生成、标签或 Release 前，必须完整读取 [`docs/development-workflow.md`](docs/development-workflow.md)。
+
+- 私有 `mh567/wx-doc-format-skill-dev` 是唯一源码开发仓库，本地 `dev` 推送到远程 `dev/main`。
+- 公开 `mh567/wx-doc-format-skill` 只保留生成后的薄 Skill，本地 `main` 跟踪 `origin/main`。
+- 公开发布只消费 `dist/public-skill/`，禁止 merge 或 cherry-pick 私有分支到公开分支。
+- 公开历史中 `.py`、`.pyc`、`.pyo` 必须为零。
+- 历史重写、强制推送、同版本标签移动或 Release 资产替换需要用户明确授权。
 
 ## 常用命令
 

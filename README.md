@@ -33,3 +33,7 @@
 2. LLM 增强模式：增加语义识别、题注生成和审计后受限复核
 
 详细架构见 `SKILL.md`。
+
+## 开发与发布
+
+本仓库是私有源码仓库。分支边界、本地构建、公开薄 Skill 生成、验证门禁和发布流程见 [`docs/development-workflow.md`](docs/development-workflow.md)。
