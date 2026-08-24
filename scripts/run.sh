@@ -70,10 +70,7 @@ cleanup_bootstrap() {
 }
 trap cleanup_bootstrap EXIT HUP INT TERM
 ARCHIVE_PATH="$TEMP_ROOT/$ARCHIVE_NAME"
-BUNDLED_ARCHIVE="$SKILL_DIR/artifacts/$ARCHIVE_NAME"
-if [ -f "$BUNDLED_ARCHIVE" ]; then
-    cp "$BUNDLED_ARCHIVE" "$ARCHIVE_PATH"
-elif [ -n "${WX_DOC_FORMAT_ARCHIVE_DIR:-}" ]; then
+if [ -n "${WX_DOC_FORMAT_ARCHIVE_DIR:-}" ]; then
     cp "$WX_DOC_FORMAT_ARCHIVE_DIR/$ARCHIVE_NAME" "$ARCHIVE_PATH"
 else
     if ! command -v curl >/dev/null 2>&1; then

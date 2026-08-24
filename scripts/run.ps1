@@ -51,10 +51,7 @@ $TempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("wx-doc-format-bootstra
 New-Item -ItemType Directory -Path $TempRoot | Out-Null
 try {
     $ArchivePath = Join-Path $TempRoot $ArchiveName
-    $BundledArchive = Join-Path $SkillDir "artifacts\$ArchiveName"
-    if (Test-Path $BundledArchive -PathType Leaf) {
-        Copy-Item $BundledArchive $ArchivePath
-    } elseif ($env:WX_DOC_FORMAT_ARCHIVE_DIR) {
+    if ($env:WX_DOC_FORMAT_ARCHIVE_DIR) {
         Copy-Item (Join-Path $env:WX_DOC_FORMAT_ARCHIVE_DIR $ArchiveName) $ArchivePath
     } else {
         $ReleaseBaseUrl = if ($env:WX_DOC_FORMAT_RELEASE_BASE_URL) {

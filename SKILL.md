@@ -25,12 +25,11 @@ metadata:
 
 执行前读取 `artifacts/AVAILABLE_PLATFORMS.txt`。当前平台没有发布运行时时，告知用户并保留原始文件。
 
-首次运行按以下顺序自动准备运行时：
+从 GitHub 仓库安装时，首次运行会从当前版本的 GitHub Release 下载平台运行时，验证 SHA256 后自动安装。
 
-1. 使用 Skill 的 `artifacts/` 目录中已配套的当前平台归档。
-2. 本地归档缺失时，从当前版本的 GitHub Release 下载。
+使用离线 Skill 安装包时，Agent 将解压后包含 `SKILL.md` 的完整目录放入自身 skills 目录。离线包已包含平台运行时，可直接执行转换。
 
-两种路径都会验证 SHA256 并自动安装。常规安装和转换无需环境变量。
+联网仓库安装和离线安装包均无需配置环境变量。`artifacts/` 只保存薄 Skill 用于校验下载的平台清单、版本信息和 SHA256，不作为用户安装入口。
 
 ## 执行
 
