@@ -1,8 +1,8 @@
 ---
 name: wx-doc-format
-description: Convert Markdown or DOCX documents into WX template-formatted .docx. Removes source covers, places a generated TOC first, normalizes one document title, classifies data tables and single-cell content containers, and runs a three-stage pipeline (parse → normalize → render), with optional LLM enhancement for ambiguous TOC review, list detection, eligible data-table caption generation, and bounded post-audit semantic repair.
+description: 将 Markdown 或 DOCX 转换为模板化技术文档 DOCX。当用户说“技术文档格式”“转换为技术文档格式”“wx文档格式”“WX 格式转换”，或要求按技术文档模板整理标题、目录、列表、表格、题注和附录时使用。
 metadata:
-  short-description: Convert MD/DOCX to template-formatted DOCX
+  short-description: 转换为模板化技术文档 DOCX
 ---
 
 # WX 文档格式
@@ -11,7 +11,7 @@ metadata:
 
 ## 使用方式
 
-当用户要求转换文档时，Agent 必须先弹出两个选项供用户选择：
+用户上传 Markdown 或 DOCX 并说“技术文档格式”“转换为技术文档格式”“按技术文档格式排版”“整理成技术文档”“wx文档格式”或“WX 格式转换”时触发本 Skill。用户未指定模式时，Agent 必须先弹出两个选项供用户选择：
 
 1. **普通模式**（默认）：纯规则转换，不调用 LLM
 2. **LLM 增强模式**：增加模糊目录复核、功能点列表识别、题注生成和审计后受限复核
