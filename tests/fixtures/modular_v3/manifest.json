@@ -1,0 +1,26 @@
+{
+  "schema_version": "modular-v3-baseline-1",
+  "inputs": {
+    "markdown": "input/test_baseline.md",
+    "template": "assets/wx_template.docx",
+    "input_sha256": "d00adaa9df14992d244c00297e525d3ce4637e6f98ebcc7c39e28b0efb04c454",
+    "template_sha256": "889b3f1ba873d0db5373a96c76464885c50d465f9ca6c6b6b43f1ca0efa5a2fe"
+  },
+  "expected": {
+    "markdown_blocks": [
+      {"block_type": "heading", "text": "零信任安全管理平台架构详细设计方案大纲"},
+      {"block_type": "heading", "text": "概述"},
+      {"block_type": "heading", "text": "项目背景"},
+      {"block_type": "body", "text": "备注"}
+    ],
+    "docx_blocks": [
+      {"text": "模块化基线", "numbered": 0},
+      {"text": "一级条目", "numbered": 1},
+      {"text": "二级条目", "numbered": 1},
+      {"text": "无序子项", "numbered": 1},
+      {"text": "第二个一级条目", "numbered": 1},
+      {"text": "正文说明", "numbered": 0}
+    ]
+  },
+  "local_only_inputs": []
+}

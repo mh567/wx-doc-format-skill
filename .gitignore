@@ -16,6 +16,13 @@ docs/
 docs/*
 !docs/markdown-ast-recognition-spec.md
 !docs/development-workflow.md
+!docs/modular-pipeline-design-v3.md
+!docs/modular-pipeline-migration-v3.1.md
+!docs/execution-v3/
+!docs/execution-v3/**
+!docs/contracts/
+!docs/contracts/modular-v3/
+!docs/contracts/modular-v3/**
 !docs/adr/
 docs/adr/*
 !docs/adr/0001-markdown-recognition-deep-module.md
@@ -42,6 +49,11 @@ tests/*
 !tests/test_list_group_detection.py
 !tests/test_appendix_semantics.py
 !tests/test_nuitka_distribution.py
+!tests/test_modular_*.py
+!tests/modular_support.py
+!tests/fixtures/
+!tests/fixtures/modular_v3/
+!tests/fixtures/modular_v3/**
 scripts/anonymize_template.py
 scripts/bootstrap_macos_lxml.sh
 scripts/list_semantic_enhancer.py

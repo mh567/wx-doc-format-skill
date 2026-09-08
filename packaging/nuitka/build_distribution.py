@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -21,6 +22,82 @@ SUPPORTED_PLATFORM_IDS = (
     "macos-arm64",
     "kylin-v10-arm64",
 )
+
+
+MODULAR_CONTRACT_VERSIONS = {
+    "source_facts": "1.0",
+    "ast": "2.0",
+    "patch": "2.0",
+    "checkpoint": "2.0",
+    "capability_input": "2.0",
+    "normalized": "1.0",
+}
+
+MODULAR_OPEN_MODES = {
+    "modular_pure": {"status": "enabled", "entrypoint": "ConversionKernel.convert", "contract": "T09"},
+    "modular_online": {"status": "closed", "entrypoint": "EnhancementExecutor", "reason": "kernel candidate-acceptance integration is pending"},
+    "modular_file": {"status": "closed", "entrypoint": "CheckpointStore", "reason": "modular CLI resume integration is pending"},
+    "modular_review": {"status": "closed", "entrypoint": "ReviewEvaluator", "reason": "modular post-audit rerender integration is pending"},
+    "legacy_online": {"status": "enabled", "entrypoint": "legacy CLI", "contract": "legacy"},
+    "legacy_file": {"status": "enabled", "entrypoint": "legacy CLI", "contract": "1.0"},
+    "legacy_review": {"status": "enabled", "entrypoint": "legacy CLI", "contract": "legacy"},
+}
+
+
+def wxdf_module_names() -> tuple[str, ...]:
+    """Return the source wxdf package and every Python module below it."""
+
+    package_root = PROJECT_ROOT / "scripts" / "wxdf"
+    names = {"wxdf"}
+    for path in package_root.rglob("*.py"):
+        relative = path.relative_to(package_root)
+        parts = list(relative.with_suffix("").parts)
+        if parts[-1] == "__init__":
+            parts.pop()
+        if parts:
+            names.add("wxdf." + ".".join(parts))
+    return tuple(sorted(names))
+
+
+def modular_module_manifest(
+    *,
+    runtime_modules: tuple[str, ...] | list[str] | None = None,
+    runtime_evidence: str = "explicit_nuitka_inclusion",
+) -> dict:
+    """Describe the modular surface carried by a compiled release."""
+
+    source_modules = list(wxdf_module_names())
+    runtime_names = sorted(set(runtime_modules or source_modules))
+    return {
+        "package": "wxdf",
+        "source_modules": source_modules,
+        "runtime_modules": runtime_names,
+        "module_set_status": "matched" if source_modules == runtime_names else "mismatch",
+        "runtime_evidence": runtime_evidence,
+        "contract_versions": dict(MODULAR_CONTRACT_VERSIONS),
+        "open_modes": json.loads(json.dumps(MODULAR_OPEN_MODES)),
+    }
+
+
+def _report_wxdf_modules(report_path: Path) -> tuple[str, ...]:
+    """Extract wxdf module names from a Nuitka compilation report."""
+
+    if not report_path.is_file():
+        return ()
+    text = report_path.read_text(encoding="utf-8", errors="replace")
+    candidates = set(re.findall(r"\bwxdf(?:\.[A-Za-z_][A-Za-z0-9_]*)*\b", text))
+    known = set(wxdf_module_names())
+    return tuple(sorted(candidate for candidate in candidates if candidate in known))
+
+
+def _write_runtime_module_manifest(dist_dir: Path, report_path: Path) -> None:
+    report_modules = _report_wxdf_modules(report_path)
+    evidence = "compilation_report" if report_modules else "explicit_nuitka_inclusion"
+    manifest = modular_module_manifest(runtime_modules=report_modules or None, runtime_evidence=evidence)
+    (dist_dir / "wxdf-module-manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
 
 def platform_id(system: str | None = None, machine: str | None = None) -> str:
@@ -63,12 +140,22 @@ def sha256_file(path: Path) -> str:
 
 
 def nuitka_command(build_dir: Path) -> list[str]:
+    include_args = [
+        "--include-package=wxdf",
+        *[
+            f"--include-module={name}"
+            for name in wxdf_module_names()
+            if name not in {"wxdf", "wxdf.semantics"}
+        ],
+        "--include-package=wxdf.semantics",
+    ]
     return [
         sys.executable,
         "-m",
         "nuitka",
         "--standalone",
         "--assume-yes-for-downloads",
+        *include_args,
         f"--output-dir={build_dir}",
         f"--output-filename={executable_name()}",
         f"--report={build_dir / 'compilation-report.xml'}",
@@ -87,6 +174,7 @@ def compile_standalone(build_dir: Path) -> Path:
     if not dist_dir.is_dir():
         raise RuntimeError(f"Nuitka standalone directory was not created: {dist_dir}")
     ensure_runtime_layout(dist_dir)
+    _write_runtime_module_manifest(dist_dir, build_dir / "compilation-report.xml")
     return dist_dir
 
 
@@ -146,6 +234,9 @@ def _write_integrity_files(package_dir: Path, target: str, version: str) -> None
         "platform": target,
         "compatibility_status": "candidate" if target.startswith("kylin-v10-") else "native",
         "offline": True,
+        "modular": json.loads(
+            (package_dir / "runtime" / "wxdf-module-manifest.json").read_text(encoding="utf-8")
+        ) if (package_dir / "runtime" / "wxdf-module-manifest.json").is_file() else modular_module_manifest(),
         "files": [
             {
                 "path": path.relative_to(package_dir).as_posix(),

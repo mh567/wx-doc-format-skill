@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wx-doc-format.invalid/contracts/patch-2.0.schema.json",
+  "title": "WX Modular Patch 2.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["patch_schema_version", "patch_id", "base_revision", "phase", "candidates", "decisions"],
+  "properties": {
+    "patch_schema_version": {"const": "2.0"},
+    "patch_id": {"type": "string", "minLength": 1},
+    "base_revision": {"type": "integer", "minimum": 0},
+    "phase": {"enum": ["source", "scope", "role", "relation", "normalize", "render", "audit", "publish"]},
+    "candidates": {"type": "array", "items": {"$ref": "#/$defs/candidate"}},
+    "decisions": {"type": "array", "items": {"$ref": "#/$defs/decision"}}
+  },
+  "$defs": {
+    "sourceRef": {"type": "object", "required": ["source_id", "part", "content_sha256"], "properties": {"source_id": {"type": "string"}, "part": {"type": "string"}, "content_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}, "span": {"type": "object"}, "node_path": {"type": "array"}}},
+    "evidence": {"type": "object", "required": ["kind"], "properties": {"kind": {"type": "string", "minLength": 1}}},
+    "candidate": {
+      "type": "object",
+      "required": ["candidate_id", "module_id", "module_version", "target_source_refs", "target_node_ids", "proposal", "positive_evidence", "negative_evidence", "scope", "constraints", "rationale"],
+      "properties": {"candidate_id": {"type": "string"}, "module_id": {"type": "string"}, "module_version": {"type": "string"}, "target_source_refs": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/sourceRef"}}, "target_node_ids": {"type": "array", "minItems": 1, "items": {"type": "string"}}, "proposal": {"type": "object"}, "positive_evidence": {"type": "array", "items": {"$ref": "#/$defs/evidence"}}, "negative_evidence": {"type": "array", "items": {"$ref": "#/$defs/evidence"}}, "scope": {"type": "object", "required": ["stages"]}, "constraints": {"type": "array", "items": {"type": "object"}}, "rationale": {"type": "string"}, "confidence": {"type": "number", "minimum": 0, "maximum": 1}}
+    },
+    "decision": {
+      "type": "object",
+      "required": ["decision_id", "candidate_id", "operation", "target_node_ids", "expected_revision", "property_scope", "value", "preconditions", "evidence", "invalidates"],
+      "properties": {"decision_id": {"type": "string"}, "candidate_id": {"type": "string"}, "operation": {"enum": ["create_node", "update_role", "move_node", "update_association", "delete_node", "update_overlay", "set_presentation_override"]}, "target_node_ids": {"type": "array", "items": {"type": "string"}}, "expected_revision": {"type": "integer", "minimum": 0}, "property_scope": {"type": "array", "items": {"enum": ["role", "level", "caption_type", "target_id", "list_kind", "source_marker", "source_ordinal", "association", "children", "overlay", "presentation"]}}, "value": {"type": "object"}, "preconditions": {"type": "array", "items": {"type": "object"}}, "evidence": {"type": "array", "items": {"$ref": "#/$defs/evidence"}}, "invalidates": {"type": "array", "items": {"type": "string"}}}
+    }
+  }
+}

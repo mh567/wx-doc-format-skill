@@ -1,0 +1,323 @@
+{
+  "plan_version": "3.0-execution-1",
+  "design_path": "docs/modular-pipeline-design-v3.md",
+  "design_sha256": "c083884277ca6df4fb82426210fd3860242606cdf18691ff7bd5199da2f8d764",
+  "observed_head": "cd68200d521146508c306ca7f62f32590d729587",
+  "observed_skill_version": "0.12.19",
+  "implementation_started": true,
+  "current_task": "T16",
+  "next_task": null,
+  "tasks": [
+    {
+      "id": "T00",
+      "title": "锁定基线与执行环境",
+      "phase": "A",
+      "depends_on": [],
+      "status": "done",
+      "card": "tasks/T00.md",
+      "evidence": "evidence/T00.md",
+      "review": "codex_self_review_passed",
+      "blocker": null,
+      "next_action": "开始 T01",
+      "tests": [
+        "tests/test_modular_baseline.py"
+      ]
+    },
+    {
+      "id": "T01",
+      "title": "冻结公共合同与反例夹具",
+      "phase": "A",
+      "depends_on": [
+        "T00"
+      ],
+      "status": "done",
+      "card": "tasks/T01.md",
+      "evidence": "evidence/T01.md",
+      "review": "codex_self_review_passed",
+      "blocker": null,
+      "next_action": "开始 T02",
+      "tests": [
+        "tests/test_modular_contracts.py"
+      ]
+    },
+    {
+      "id": "T02",
+      "title": "抽出底座并包装旧流水线",
+      "phase": "B",
+      "depends_on": [
+        "T01"
+      ],
+      "status": "done",
+      "card": "tasks/T02.md",
+      "evidence": "evidence/T02.md",
+      "review": "codex_self_review_passed",
+      "blocker": null,
+      "next_action": "开始 T03",
+      "tests": [
+        "tests/test_modular_kernel.py",
+        "tests/test_md_conversion.py",
+        "tests/test_review_loop.py"
+      ]
+    },
+    {
+      "id": "T03",
+      "title": "实现公共源事实与资源访问",
+      "phase": "C",
+      "depends_on": [
+        "T02"
+      ],
+      "status": "done",
+      "card": "tasks/T03.md",
+      "evidence": "evidence/T03.md",
+      "review": "codex_self_review_passed",
+      "blocker": null,
+      "next_action": "开始 T04",
+      "tests": [
+        "tests/test_modular_source_facts.py",
+        "tests/test_markdown_recognition.py",
+        "tests/test_list_numbering.py"
+      ]
+    },
+    {
+      "id": "T04",
+      "title": "实现 AST 图、迁移和阶段索引",
+      "phase": "C",
+      "depends_on": [
+        "T03"
+      ],
+      "status": "done",
+      "card": "tasks/T04.md",
+      "evidence": "evidence/T04.md",
+      "review": "codex_self_review_passed",
+      "blocker": null,
+      "next_action": "开始 T05",
+      "tests": [
+        "tests/test_modular_ast.py",
+        "tests/test_modular_contracts.py"
+      ]
+    },
+    {
+      "id": "T05",
+      "title": "实现统一裁决与修订重放",
+      "phase": "C",
+      "depends_on": [
+        "T04"
+      ],
+      "status": "done",
+      "card": "tasks/T05.md",
+      "evidence": "evidence/T05.md",
+      "review": "codex_self_review_passed",
+      "blocker": null,
+      "next_action": "开始 T06",
+      "tests": [
+        "tests/test_modular_resolver.py",
+        "tests/test_modular_ledger.py"
+      ]
+    },
+    {
+      "id": "T06",
+      "title": "实现完整列表语义模块",
+      "phase": "D",
+      "depends_on": [
+        "T05"
+      ],
+      "status": "done",
+      "card": "tasks/T06.md",
+      "evidence": "evidence/T06.md",
+      "review": "codex_self_review_passed",
+      "blocker": null,
+      "next_action": "开始 T07",
+      "tests": [
+        "tests/test_modular_lists.py",
+        "tests/test_list_semantics.py",
+        "tests/test_unordered_lists.py"
+      ]
+    },
+    {
+      "id": "T07",
+      "title": "实现规范化策略与编号承载",
+      "phase": "D",
+      "depends_on": [
+        "T06"
+      ],
+      "status": "done",
+      "card": "tasks/T07.md",
+      "evidence": "evidence/T07.md",
+      "review": "codex_self_review_passed",
+      "blocker": null,
+      "next_action": "开始 T08",
+      "tests": [
+        "tests/test_modular_normalization.py",
+        "tests/test_modular_contracts.py"
+      ]
+    },
+    {
+      "id": "T08",
+      "title": "实现 AST 驱动渲染与独立输出审计",
+      "phase": "D",
+      "depends_on": [
+        "T07"
+      ],
+      "status": "done",
+      "card": "tasks/T08.md",
+      "evidence": "evidence/T08.md",
+      "review": "codex_self_review_passed",
+      "blocker": null,
+      "next_action": "开始 T09",
+      "tests": [
+        "tests/test_modular_rendering.py",
+        "tests/test_table_formatting.py",
+        "tests/test_md_conversion.py"
+      ]
+    },
+    {
+      "id": "T09",
+      "title": "接通新纯规则路径与一致性发布",
+      "phase": "D",
+      "depends_on": [
+        "T08"
+      ],
+      "status": "done",
+      "card": "tasks/T09.md",
+      "evidence": "evidence/T09.md",
+      "review": "codex_self_review_passed",
+      "blocker": null,
+      "next_action": "开始 T10",
+      "tests": [
+        "tests/test_modular_conversion.py",
+        "tests/test_modular_publication.py",
+        "tests/test_modular_kernel.py"
+      ]
+    },
+    {
+      "id": "T10",
+      "title": "适配旧能力读取与 Patch 写入",
+      "phase": "E",
+      "depends_on": [
+        "T09"
+      ],
+      "status": "done",
+      "card": "tasks/T10.md",
+      "evidence": "evidence/T10.md",
+      "review": "codex_self_review_passed",
+      "blocker": null,
+      "next_action": "开始 T11",
+      "tests": [
+        "tests/test_modular_capability.py",
+        "tests/test_review_loop.py"
+      ]
+    },
+    {
+      "id": "T11",
+      "title": "实现检查点与文件式暂停恢复",
+      "phase": "E",
+      "depends_on": [
+        "T10"
+      ],
+      "status": "done",
+      "card": "tasks/T11.md",
+      "evidence": "evidence/T11.md",
+      "review": "codex_self_review_passed",
+      "blocker": null,
+      "next_action": "开始 T12",
+      "tests": [
+        "tests/test_modular_resume.py",
+        "tests/test_modular_capability.py"
+      ]
+    },
+    {
+      "id": "T12",
+      "title": "接通候选接受与分模式开放",
+      "phase": "E",
+      "depends_on": [
+        "T11"
+      ],
+      "status": "done",
+      "card": "tasks/T12.md",
+      "evidence": "evidence/T12.md",
+      "review": "codex_self_review_passed",
+      "blocker": null,
+      "next_action": "开始 T13",
+      "tests": [
+        "tests/test_modular_review.py",
+        "tests/test_modular_resume.py",
+        "tests/test_modular_conversion.py"
+      ]
+    },
+    {
+      "id": "T13",
+      "title": "迁移范围、结构与保护语义",
+      "phase": "F",
+      "depends_on": [
+        "T12"
+      ],
+      "status": "done",
+      "card": "tasks/T13.md",
+      "evidence": "evidence/T13.md",
+      "review": "codex_self_review_passed",
+      "blocker": null,
+      "next_action": "开始 T14",
+      "tests": [
+        "tests/test_modular_structure.py",
+        "tests/test_front_matter.py",
+        "tests/test_toc_regions.py",
+        "tests/test_list_semantics.py"
+      ]
+    },
+    {
+      "id": "T14",
+      "title": "迁移表格、题注与附录语义",
+      "phase": "F",
+      "depends_on": [
+        "T13"
+      ],
+      "status": "done",
+      "card": "tasks/T14.md",
+      "evidence": "evidence/T14.md",
+      "review": "codex_self_review_passed",
+      "blocker": null,
+      "next_action": "开始 T15",
+      "tests": [
+        "tests/test_modular_semantics.py",
+        "tests/test_table_semantics.py",
+        "tests/test_caption_placement.py",
+        "tests/test_appendix_semantics.py"
+      ]
+    },
+    {
+      "id": "T15",
+      "title": "基准、默认策略候选与完整回归",
+      "phase": "G",
+      "depends_on": [
+        "T14"
+      ],
+      "status": "done",
+      "card": "tasks/T15.md",
+      "evidence": "evidence/T15.md",
+      "review": "codex_self_review_passed",
+      "blocker": null,
+      "next_action": "开始 T16",
+      "tests": [
+        "tests/test_modular_performance.py"
+      ]
+    },
+    {
+      "id": "T16",
+      "title": "编译交付门禁与默认切换",
+      "phase": "G",
+      "depends_on": [
+        "T15"
+      ],
+      "status": "done",
+      "card": "tasks/T16.md",
+      "evidence": "evidence/T16.md",
+      "review": "codex_self_review_passed",
+      "blocker": "pending_external: Kylin V10 ARM64 和 Windows x86_64 目标验收，页面视觉抽检 pending",
+      "next_action": "按 handoff.md 完成外部平台验收，获得授权后再评估默认切换",
+      "tests": [
+        "tests/test_modular_distribution.py",
+        "tests/test_nuitka_distribution.py"
+      ]
+    }
+  ]
+}

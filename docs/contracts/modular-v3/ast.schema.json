@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wx-doc-format.invalid/contracts/ast-2.0.schema.json",
+  "title": "WX Modular AST 2.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "revision", "document"],
+  "properties": {
+    "schema_version": {"const": "2.0"},
+    "revision": {"type": "integer", "minimum": 0},
+    "document": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root_id", "blocks", "containers", "children", "associations", "resources"],
+      "properties": {
+        "root_id": {"const": "root"},
+        "blocks": {"type": "object", "additionalProperties": {"$ref": "#/$defs/block"}},
+        "containers": {"type": "object", "additionalProperties": {"$ref": "#/$defs/container"}},
+        "children": {"type": "object", "additionalProperties": {"type": "array", "items": {"type": "string"}}},
+        "associations": {"type": "array", "items": {"$ref": "#/$defs/association"}},
+        "resources": {"type": "object", "additionalProperties": {"type": "object"}}
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "sourceRef": {"type": "object", "required": ["source_id", "part", "content_sha256"], "properties": {"source_id": {"type": "string", "minLength": 1}, "part": {"type": "string", "minLength": 1}, "content_sha256": {"$ref": "#/$defs/sha256"}, "span": {"type": "object"}, "node_path": {"type": "array"}}},
+    "inline": {"type": "object", "required": ["kind"], "properties": {"kind": {"enum": ["text", "break", "tab", "image", "link", "field", "bookmark", "opaque_inline"]}, "text": {"type": "string"}, "marks": {"type": "array"}, "children": {"type": "array"}, "resource_id": {"type": "string"}}},
+    "block": {
+      "type": "object",
+      "required": ["block_type"],
+      "properties": {
+        "block_type": {"enum": ["paragraph", "image", "table", "opaque"]},
+        "role": {"enum": ["body", "heading", "caption", "note", "numbered_note", "unknown"]},
+        "level": {"type": "integer", "minimum": 1, "maximum": 6},
+        "inline_content": {"type": "array", "items": {"$ref": "#/$defs/inline"}},
+        "caption_type": {"enum": ["figure", "table"]},
+        "target_id": {"type": "string"},
+        "table_type": {"enum": ["data", "code_sample", "callout", "layout", "unknown"]},
+        "source_ref": {"$ref": "#/$defs/sourceRef"},
+        "generated_by": {"type": "string"},
+        "generation_basis": {"type": "array"}
+      },
+      "allOf": [
+        {"if": {"properties": {"role": {"const": "heading"}}}, "then": {"required": ["level"]}},
+        {"if": {"properties": {"role": {"const": "caption"}}}, "then": {"required": ["caption_type", "target_id"]}},
+        {"anyOf": [{"required": ["source_ref"]}, {"required": ["generated_by", "generation_basis"]}]}
+      ]
+    },
+    "container": {
+      "type": "object",
+      "required": ["kind"],
+      "properties": {
+        "kind": {"enum": ["document", "section", "appendix", "quote", "list", "list_item", "table_row", "table_cell"]},
+        "list_kind": {"enum": ["ordered", "unordered"]},
+        "source_start": {"type": "integer", "minimum": 1},
+        "source_sequence_id": {"type": "string"},
+        "source_marker": {"type": "string"},
+        "source_ordinal": {"type": "integer", "minimum": 1},
+        "source_classification": {"enum": ["normative", "informative", "unknown"]},
+        "title_ref": {"type": "string"},
+        "row": {"type": "integer", "minimum": 0},
+        "col": {"type": "integer", "minimum": 0},
+        "row_span": {"type": "integer", "minimum": 1},
+        "col_span": {"type": "integer", "minimum": 1},
+        "source_ref": {"$ref": "#/$defs/sourceRef"}
+      }
+    },
+    "association": {"type": "object", "required": ["kind", "source_id", "target_id"], "properties": {"kind": {"enum": ["caption_target", "sequence_continuation", "source_relation"]}, "source_id": {"type": "string"}, "target_id": {"type": "string"}}}
+  }
+}

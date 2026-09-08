@@ -26,9 +26,41 @@ def report_keys(value) -> set[str]:
     return keys
 
 
+def validate_modular_manifest(manifest: dict) -> None:
+    modular = manifest.get("modular")
+    if not isinstance(modular, dict):
+        raise RuntimeError("Release manifest does not expose the modular surface")
+    source_modules = modular.get("source_modules")
+    runtime_modules = modular.get("runtime_modules")
+    if not isinstance(source_modules, list) or not source_modules:
+        raise RuntimeError("Modular manifest has no source module list")
+    if not isinstance(runtime_modules, list) or source_modules != runtime_modules:
+        raise RuntimeError("Compiled runtime wxdf modules do not match source modules")
+    if modular.get("module_set_status") != "matched":
+        raise RuntimeError("Modular module set is not marked as matched")
+    contract_versions = modular.get("contract_versions")
+    required_contracts = {"source_facts", "ast", "patch", "checkpoint", "capability_input", "normalized"}
+    if not isinstance(contract_versions, dict) or set(contract_versions) != required_contracts:
+        raise RuntimeError("Modular contract version manifest is incomplete")
+    modes = modular.get("open_modes")
+    required_modes = {
+        "modular_pure", "modular_online", "modular_file", "modular_review",
+        "legacy_online", "legacy_file", "legacy_review",
+    }
+    if not isinstance(modes, dict) or set(modes) != required_modes:
+        raise RuntimeError("Modular mode manifest is incomplete")
+    if modes["modular_pure"].get("status") != "enabled":
+        raise RuntimeError("modular_pure must be enabled in the release manifest")
+    for mode in ("modular_online", "modular_file", "modular_review"):
+        if modes[mode].get("status") != "closed":
+            raise RuntimeError(f"{mode} must remain closed in the release manifest")
+
+
 def smoke(package_dir: Path) -> None:
     executable = runtime_executable(package_dir)
     version = (package_dir / "VERSION").read_text(encoding="utf-8").strip()
+    manifest = json.loads((package_dir / "manifest.json").read_text(encoding="utf-8"))
+    validate_modular_manifest(manifest)
     version_result = subprocess.run([str(executable), "--version"], text=True, capture_output=True, check=True)
     if version_result.stdout.strip() != version:
         raise RuntimeError("Runtime version does not match package VERSION")

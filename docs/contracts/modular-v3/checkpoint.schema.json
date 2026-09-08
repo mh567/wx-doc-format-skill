@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wx-doc-format.invalid/contracts/checkpoint-2.0.schema.json",
+  "title": "WX Modular Checkpoint 2.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["checkpoint_schema_version", "run_id", "status", "resume_stage", "source_facts", "decision_ledger", "source_ast", "normalized_ast", "content_overlay", "presentation_override", "target_map", "resource_summary", "contracts", "modules", "requests", "responses", "budget", "round", "candidate_baseline_id"],
+  "properties": {
+    "checkpoint_schema_version": {"const": "2.0"},
+    "run_id": {"type": "string", "minLength": 1},
+    "status": {"enum": ["created", "running", "waiting_external", "completed", "completed_with_warnings", "failed", "cancelled"]},
+    "resume_stage": {"type": ["string", "null"]},
+    "source_facts": {"type": "object"},
+    "decision_ledger": {"type": "object"},
+    "source_ast": {"type": "object"},
+    "normalized_ast": {"type": ["object", "null"]},
+    "content_overlay": {"type": "array"},
+    "presentation_override": {"type": "array"},
+    "target_map": {"type": "object", "required": ["revision", "entries", "view_sha256"]},
+    "resource_summary": {"type": "object", "required": ["resources", "source_sha256"]},
+    "contracts": {"type": "object", "required": ["source_facts", "ast", "patch", "checkpoint"]},
+    "modules": {"type": "array"},
+    "requests": {"type": "array"},
+    "responses": {"type": "array"},
+    "budget": {"type": "object", "required": ["limit", "consumed", "waiting_seconds"]},
+    "round": {"type": "integer", "minimum": 0},
+    "candidate_baseline_id": {"type": "string", "minLength": 1}
+  }
+}

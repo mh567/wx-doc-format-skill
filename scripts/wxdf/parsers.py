@@ -1,0 +1,455 @@
+"""SourceFacts adapters for Markdown and DOCX inputs."""
+
+from __future__ import annotations
+
+import hashlib
+import re
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Iterable
+
+from .contracts import SOURCE_FACTS_SCHEMA_VERSION
+from .source_store import SourceHandle, SourceStore
+from .validation import validate_source_facts
+
+
+def _digest(value: bytes | str) -> str:
+    raw = value if isinstance(value, bytes) else value.encode("utf-8")
+    return "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
+def _stable_id(prefix: str, *parts: object) -> str:
+    payload = "|".join(str(part) for part in parts)
+    return f"{prefix}-{hashlib.sha256(payload.encode('utf-8')).hexdigest()[:16]}"
+
+
+def _empty_facts(handle: SourceHandle, parser_id: str, parser_config: str) -> dict[str, Any]:
+    return {
+        "facts_schema_version": SOURCE_FACTS_SCHEMA_VERSION,
+        "source": {
+            "source_id": handle.source_id,
+            "source_type": handle.source_type,
+            "content_sha256": handle.content_sha256,
+            "encoding": handle.encoding,
+        },
+        "parser": {
+            "id": parser_id,
+            "version": "1.0.0",
+            "dialect": parser_config,
+            "config_sha256": _digest(parser_config),
+        },
+        "units": {},
+        "containers": {"root": {"kind": "document"}},
+        "children": {"root": []},
+        "evidence": {},
+        "resources": {},
+        "diagnostics": [],
+        "extensions": {},
+    }
+
+
+def _source_ref(handle: SourceHandle, part: str, *, start: int | None = None, end: int | None = None, node_path: list[str | int] | None = None, content: bytes | str | None = None) -> dict[str, Any]:
+    ref: dict[str, Any] = {
+        "source_id": handle.source_id,
+        "part": part,
+        "content_sha256": _digest(content if content is not None else handle.content_sha256),
+    }
+    if start is not None and end is not None:
+        ref["span"] = {"start": start, "end": end, "unit": "unicode_code_point"}
+    elif node_path is not None:
+        ref["node_path"] = node_path
+    else:
+        ref["span"] = {"start": 0, "end": 0, "unit": "unicode_code_point"}
+    return ref
+
+
+def _line_offsets(text: str) -> list[int]:
+    offsets = [0]
+    for line in text.splitlines(keepends=True):
+        offsets.append(offsets[-1] + len(line))
+    return offsets
+
+
+def _inline_nodes(tokens: Iterable[Any], handle: SourceHandle, part: str, resources: dict[str, Any], diagnostics: list[dict[str, Any]], source_ref: dict[str, Any]) -> list[dict[str, Any]]:
+    tokens = list(tokens)
+
+    def parse_range(start: int, stop_kind: str | None = None, marks: list[str] | None = None) -> tuple[list[dict[str, Any]], int]:
+        result: list[dict[str, Any]] = []
+        marks = list(marks or [])
+        index = start
+        while index < len(tokens):
+            token = tokens[index]
+            kind = getattr(token, "type", "")
+            if stop_kind and kind == stop_kind:
+                return result, index
+            if kind == "text":
+                result.append({"kind": "text", "text": token.content, "marks": list(marks)})
+            elif kind == "code_inline":
+                result.append({"kind": "text", "text": token.content, "marks": [*marks, "code"]})
+            elif kind == "softbreak":
+                result.append({"kind": "break"})
+            elif kind == "hardbreak":
+                result.append({"kind": "break"})
+            elif kind in {"strong_open", "em_open"}:
+                mark = "strong" if kind == "strong_open" else "emphasis"
+                nested, index = parse_range(index + 1, "strong_close" if kind == "strong_open" else "em_close", [*marks, mark])
+                result.extend(nested)
+            elif kind in {"strong_close", "em_close"}:
+                if stop_kind is None:
+                    diagnostics.append({"code": "unbalanced_inline_mark", "severity": "warning", "message": kind})
+                    index += 1
+                    continue
+                return result, index
+            elif kind == "link_open":
+                target = str(token.attrGet("href") or "")
+                nested, index = parse_range(index + 1, "link_close", marks)
+                result.append({"kind": "link", "target": target, "children": nested})
+            elif kind == "image":
+                target = str(token.attrGet("src") or "")
+                alt_text = str(token.content or "")
+                resource_id = _stable_id("res", handle.source_id, target)
+                if resource_id not in resources:
+                    resource_bytes: bytes | None = None
+                    target_path = Path(target)
+                    if not target_path.is_absolute():
+                        target_path = handle.path.parent / target_path
+                    try:
+                        resource_bytes = target_path.read_bytes()
+                    except OSError:
+                        diagnostics.append({"code": "external_resource_unresolved", "severity": "warning", "message": target})
+                    resource_content = resource_bytes if resource_bytes is not None else target
+                    resources[resource_id] = {
+                        "kind": "image",
+                        "source_ref": _source_ref(handle, target, node_path=["inline", target]),
+                        "content_sha256": _digest(resource_content),
+                        "dependencies": [],
+                    }
+                result.append({"kind": "image", "resource_id": resource_id, "alt_text": alt_text})
+            elif kind in {"html_inline", "entity"}:
+                result.append({"kind": "text", "text": token.content, "marks": list(marks)})
+            else:
+                diagnostics.append({"code": "unknown_inline_token", "severity": "warning", "message": kind})
+                result.append({"kind": "opaque_inline", "source_ref": source_ref, "diagnostic": f"unsupported inline token: {kind}"})
+            index += 1
+        if stop_kind:
+            diagnostics.append({"code": "unclosed_inline_container", "severity": "warning", "message": stop_kind})
+        return result, index
+
+    return parse_range(0)[0]
+
+
+def _marker(line: str) -> tuple[str | None, int | None, int]:
+    match = re.match(r"^(?P<indent>[ \t]*)(?P<marker>(?:\d+[.)]|[-+*]))[ \t]+", line)
+    if not match:
+        return None, None, 0
+    marker = match.group("marker")
+    if marker[0].isdigit():
+        return "ordered", int(re.match(r"\d+", marker).group(0)), len(match.group("indent"))
+    return "unordered", None, len(match.group("indent"))
+
+
+@dataclass
+class _MarkdownFactsBuilder:
+    source_text: str
+    handle: SourceHandle
+    part: str
+
+    def __post_init__(self) -> None:
+        self.facts = _empty_facts(self.handle, "markdown-source-facts", "commonmark+table")
+        self.lines = self.source_text.splitlines()
+        self.offsets = _line_offsets(self.source_text)
+        self.stack = ["root"]
+        self.pending: tuple[str, Any] | None = None
+        self.token_index = 0
+
+    def _span(self, token: Any) -> tuple[int, int]:
+        token_map = getattr(token, "map", None)
+        if token_map is None:
+            return 0, len(self.source_text)
+        start_line, end_line = token_map
+        start = self.offsets[min(start_line, len(self.offsets) - 1)]
+        end = self.offsets[min(end_line, len(self.offsets) - 1)]
+        if end_line >= len(self.offsets):
+            end = len(self.source_text)
+        return start, max(start, end)
+
+    def _ref(self, token: Any) -> dict[str, Any]:
+        start, end = self._span(token)
+        return _source_ref(self.handle, self.part, start=start, end=end, content=self.source_text[start:end])
+
+    def _append(self, node_id: str) -> None:
+        self.facts["children"].setdefault(self.stack[-1], []).append(node_id)
+
+    def _new_container(self, kind: str, token: Any, **fields: Any) -> str:
+        start, end = self._span(token)
+        node_id = _stable_id("c", self.handle.source_id, kind, start, end, self.token_index)
+        while node_id in self.facts["containers"]:
+            self.token_index += 1
+            node_id = _stable_id("c", self.handle.source_id, kind, start, end, self.token_index)
+        self.facts["containers"][node_id] = {"kind": kind, **fields, "source_ref": self._ref(token)}
+        self.facts["children"][node_id] = []
+        self._append(node_id)
+        return node_id
+
+    def _new_unit(self, kind: str, token: Any, **fields: Any) -> str:
+        start, end = self._span(token)
+        node_id = _stable_id("u", self.handle.source_id, kind, start, end, self.token_index)
+        while node_id in self.facts["units"]:
+            self.token_index += 1
+            node_id = _stable_id("u", self.handle.source_id, kind, start, end, self.token_index)
+        self.facts["units"][node_id] = {"kind": kind, "source_ref": self._ref(token), **fields}
+        self._append(node_id)
+        return node_id
+
+    def _record_list_evidence(self, node_id: str, token: Any) -> None:
+        start_line = (getattr(token, "map", None) or [0])[0]
+        line = self.lines[start_line] if start_line < len(self.lines) else ""
+        marker_kind, ordinal, indent = _marker(line)
+        if marker_kind is None:
+            return
+        self.facts["evidence"][node_id] = {
+            "marker_kind": marker_kind,
+            "marker_text": line[indent:].split(None, 1)[0] if line[indent:].split(None, 1) else None,
+            "ordinal": ordinal,
+            "explicit_depth": indent,
+            "indent_value": indent,
+            "indent_unit": "unicode_code_point",
+            "numbering_definition_ref": None,
+            "restart_hint": ordinal == 1 if ordinal is not None else None,
+            "blank_before": start_line == 0 or not self.lines[start_line - 1].strip(),
+            "continuation_hint": False,
+        }
+
+    def consume(self, tokens: Iterable[Any]) -> dict[str, Any]:
+        from markdown_it import MarkdownIt
+
+        for token in tokens:
+            self.token_index += 1
+            token_type = token.type
+            if token_type in {"ordered_list_open", "bullet_list_open"}:
+                start = 1
+                if token_type == "ordered_list_open":
+                    attrs = dict(token.attrs or [])
+                    try:
+                        start = int(attrs.get("start", 1))
+                    except (TypeError, ValueError):
+                        start = 1
+                container_id = self._new_container(
+                    "list",
+                    token,
+                    list_kind="ordered" if token_type == "ordered_list_open" else "unordered",
+                    source_start=start,
+                    source_sequence_id=_stable_id("seq", self.handle.source_id, self.token_index),
+                )
+                self.facts["evidence"][container_id] = {"marker_kind": "ordered" if token_type == "ordered_list_open" else "unordered", "source_token": token_type}
+                self.stack.append(container_id)
+            elif token_type == "list_item_open":
+                item_id = self._new_container(
+                    "list_item",
+                    token,
+                    source_marker="item",
+                    source_ordinal=1,
+                    source_sequence_id=_stable_id("seq", self.handle.source_id, self.stack[-1]),
+                )
+                self._record_list_evidence(item_id, token)
+                evidence = self.facts["evidence"].get(item_id, {})
+                self.facts["containers"][item_id]["source_marker"] = evidence.get("marker_text") or "item"
+                self.facts["containers"][item_id]["source_ordinal"] = evidence.get("ordinal") or 1
+                self.stack.append(item_id)
+            elif token_type == "blockquote_open":
+                self.stack.append(self._new_container("quote", token))
+            elif token_type == "table_open":
+                self.stack.append(self._new_container("table", token))
+            elif token_type == "tr_open":
+                table_id = self.stack[-1]
+                row_index = len(self.facts["children"].get(table_id, []))
+                self.stack.append(self._new_container("table_row", token, row=row_index))
+            elif token_type in {"th_open", "td_open"}:
+                row_id = self.stack[-1]
+                row = self.facts["containers"][row_id]
+                row_index = int(row["row"])
+                col_index = len(self.facts["children"].get(row_id, []))
+                self.stack.append(
+                    self._new_container(
+                        "table_cell",
+                        token,
+                        row=row_index,
+                        col=col_index,
+                        row_span=1,
+                        col_span=1,
+                    )
+                )
+                self.pending = ("body", None)
+            elif token_type in {"ordered_list_close", "bullet_list_close", "list_item_close", "blockquote_close", "table_close", "tr_close", "th_close", "td_close"}:
+                if len(self.stack) > 1:
+                    self.stack.pop()
+            elif token_type in {"heading_open", "paragraph_open"}:
+                role = "heading" if token_type == "heading_open" else "body"
+                level = int(token.tag[1:]) if role == "heading" and token.tag[1:].isdigit() else None
+                self.pending = (role, level)
+            elif token_type == "inline" and self.pending is not None:
+                role, level = self.pending
+                ref = self._ref(token)
+                inline_content = _inline_nodes(token.children or [], self.handle, self.part, self.facts["resources"], self.facts["diagnostics"], ref)
+                fields: dict[str, Any] = {"role": role, "inline_content": inline_content}
+                if level is not None:
+                    fields["level"] = level
+                unit_id = self._new_unit("paragraph", token, **fields)
+                self.facts["evidence"][unit_id] = {"line_start": (getattr(token, "map", None) or [0])[0] + 1, "source_token": "inline", "blank_before": False}
+                self.pending = None
+            elif token_type in {"fence", "code_block"}:
+                unit_id = self._new_unit("code_block", token, raw_text=token.content, language=(token.info or "").strip() or None)
+                self.facts["evidence"][unit_id] = {"source_token": token_type}
+            elif token_type == "hr":
+                self._new_unit("separator", token, raw_text="")
+            elif token_type == "html_block":
+                unit_id = self._new_unit("opaque", token, raw_text=token.content, diagnostic_ids=["unsupported_html_block"])
+                self.facts["evidence"][unit_id] = {"source_token": token_type}
+                self.facts["diagnostics"].append({"code": "unsupported_html_block", "severity": "warning", "message": "HTML block is retained as opaque source content"})
+            elif token.map is not None and token_type not in {"thead_open", "thead_close", "tbody_open", "tbody_close", "paragraph_close", "heading_close", "table_close"}:
+                unit_id = self._new_unit("opaque", token, raw_text=token.content or "", diagnostic_ids=[f"unsupported_{token_type}"])
+                self.facts["diagnostics"].append({"code": f"unsupported_{token_type}", "severity": "warning", "message": f"token {token_type} retained as opaque source content"})
+        return self.facts
+
+
+def _parse_markdown(source: Path | str, *, store: SourceStore, text: str | None = None) -> dict[str, Any]:
+    from markdown_it import MarkdownIt
+
+    handle = store.open_source(source, text=text)
+    source_text = text if text is not None else store.resolve({"source_id": handle.source_id, "part": handle.path.name})
+    if isinstance(source_text, bytes):
+        source_text = source_text.decode(handle.encoding or "utf-8")
+    parser = MarkdownIt("commonmark", {"html": False}).enable("table")
+    builder = _MarkdownFactsBuilder(str(source_text), handle, handle.path.name)
+    facts = builder.consume(parser.parse(str(source_text)))
+    validate_source_facts(facts)
+    return facts
+
+
+def _docx_inline_content(paragraph: Any, handle: SourceHandle, node_path: list[str | int], resources: dict[str, Any]) -> list[dict[str, Any]]:
+    from docx.oxml.ns import qn
+
+    content: list[dict[str, Any]] = []
+    if paragraph.text:
+        content.append({"kind": "text", "text": paragraph.text, "marks": []})
+    for element in paragraph._p.iter():
+        if not str(element.tag).endswith("}blip"):
+            continue
+        relationship_id = element.get(qn("r:embed"))
+        if not relationship_id:
+            continue
+        resource_id = _stable_id("res", handle.source_id, relationship_id)
+        if resource_id not in resources:
+            part = paragraph.part.related_parts.get(relationship_id)
+            blob = getattr(part, "blob", b"")
+            resources[resource_id] = {
+                "kind": "image",
+                "source_ref": _source_ref(handle, getattr(part, "partname", "word/media/unknown"), node_path=[*node_path, "drawing", relationship_id]),
+                "content_sha256": _digest(blob),
+                "dependencies": [],
+            }
+        content.append({"kind": "image", "resource_id": resource_id, "alt_text": ""})
+    return content
+
+
+def _parse_docx(source: Path | str, *, store: SourceStore) -> dict[str, Any]:
+    from docx import Document
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+    from docx.oxml.ns import qn
+    from list_detector import analyze_docx_lists
+
+    handle = store.open_source(source)
+    document = Document(str(handle.path))
+    facts = _empty_facts(handle, "docx-source-facts", "docx-ooxml")
+    report: dict[str, Any] = {}
+    numbering = analyze_docx_lists(document, report)
+    body = document.element.body
+    position = 0
+
+    def add_unit(parent_id: str, paragraph: Any, node_path: list[str | int], source_position: int, descriptor: dict[str, Any] | None = None) -> None:
+        unit_id = _stable_id("u", handle.source_id, "paragraph", *node_path)
+        ref = _source_ref(handle, "word/document.xml", node_path=node_path)
+        facts["units"][unit_id] = {
+            "kind": "paragraph",
+            "source_ref": ref,
+            "inline_content": _docx_inline_content(paragraph, handle, node_path, facts["resources"]),
+            "style": paragraph.style.name if paragraph.style is not None else None,
+        }
+        facts["children"].setdefault(parent_id, []).append(unit_id)
+        evidence = {"source_position": source_position, "style": paragraph.style.name if paragraph.style is not None else None}
+        if descriptor is not None:
+            evidence.update({
+                "marker_kind": "ordered" if descriptor.get("num_fmt") != "bullet" else "unordered",
+                "marker_text": descriptor.get("lvl_text"),
+                "ordinal": descriptor.get("start"),
+                "explicit_depth": descriptor.get("ilvl", 0),
+                "indent_value": descriptor.get("layout", {}).get("left_twips", 0),
+                "indent_unit": "twips",
+                "numbering_definition_ref": {
+                    "num_id": descriptor.get("num_id"),
+                    "abstract_num_id": descriptor.get("abstract_num_id"),
+                },
+                "restart_hint": descriptor.get("restart"),
+                "blank_before": False,
+                "continuation_hint": False,
+            })
+        facts["evidence"][unit_id] = evidence
+
+    for child_index, child in enumerate(body.iterchildren()):
+        if child.tag == qn("w:p"):
+            paragraph = Paragraph(child, document)
+            add_unit("root", paragraph, ["body", child_index, "w:p"], position, numbering.get(position))
+            position += 1
+        elif child.tag == qn("w:tbl"):
+            table = Table(child, document)
+            table_id = _stable_id("c", handle.source_id, "table", child_index)
+            facts["containers"][table_id] = {"kind": "table", "source_ref": _source_ref(handle, "word/document.xml", node_path=["body", child_index, "w:tbl"])}
+            facts["children"][table_id] = []
+            facts["children"]["root"].append(table_id)
+            for row_index, row in enumerate(table.rows):
+                row_id = _stable_id("c", handle.source_id, "row", child_index, row_index)
+                facts["containers"][row_id] = {"kind": "table_row", "source_ref": _source_ref(handle, "word/document.xml", node_path=["body", child_index, "w:tbl", row_index])}
+                facts["children"][row_id] = []
+                facts["children"][table_id].append(row_id)
+                for col_index, cell in enumerate(row.cells):
+                    cell_id = _stable_id("c", handle.source_id, "cell", child_index, row_index, col_index)
+                    facts["containers"][cell_id] = {"kind": "table_cell", "row": row_index, "col": col_index, "row_span": 1, "col_span": 1, "source_ref": _source_ref(handle, "word/document.xml", node_path=["body", child_index, "w:tbl", row_index, col_index])}
+                    facts["children"][cell_id] = []
+                    facts["children"][row_id].append(cell_id)
+                    for para_index, paragraph in enumerate(cell.paragraphs):
+                        add_unit(cell_id, paragraph, ["body", child_index, "w:tbl", row_index, col_index, "w:p", para_index], position, None)
+            facts["evidence"][table_id] = {"source_position": position, "table_scope": "cell_local"}
+            position += 1
+
+    facts["extensions"]["docx_numbering_report"] = {"source_lists": report.get("source_lists", {})}
+    validate_source_facts(facts)
+    return facts
+
+
+def parse(source: Path | str, context: dict[str, Any] | None = None) -> dict[str, Any]:
+    context = context or {}
+    store = context.get("source_store") or SourceStore()
+    owns_store = "source_store" not in context
+    text = context.get("text")
+    try:
+        suffix = Path(source).suffix.lower()
+        if suffix == ".docx":
+            return _parse_docx(source, store=store)
+        return _parse_markdown(source, store=store, text=text)
+    finally:
+        if owns_store:
+            store.close()
+
+
+def summarize_source_facts(facts: dict[str, Any]) -> dict[str, Any]:
+    """A public consumer that only reads the SourceFacts contract."""
+    validate_source_facts(facts)
+    return {
+        "source_type": facts["source"]["source_type"],
+        "unit_count": len(facts["units"]),
+        "container_count": len(facts["containers"]),
+        "resource_count": len(facts["resources"]),
+        "diagnostic_codes": [item["code"] for item in facts["diagnostics"]],
+        "marker_kinds": sorted({item.get("marker_kind") for item in facts["evidence"].values() if item.get("marker_kind")}),
+    }

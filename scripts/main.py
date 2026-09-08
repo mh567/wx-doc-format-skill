@@ -78,6 +78,7 @@ from llm_file_protocol import (
     ProtocolError,
     verify_source_snapshot,
 )
+from wxdf.kernel import ConversionKernel, ConversionRequest, RunResult
 
 
 SKILL_VERSION = "0.7.0"
@@ -531,8 +532,58 @@ def report_for_output(report: dict, *, release: bool | None = None) -> dict:
     return sanitize_release_report(report) if is_release else report
 
 
-def convert_md(src: Path, doc, report: dict, row_height_cm: float, row_height_rule: str, numbering_ids: dict, args=None, file_protocol_ctx=None) -> dict:
+def _apply_native_structure_context(
+    source_model: dict,
+    report: dict,
+    runtime_context: dict | None,
+) -> dict:
+    context = (runtime_context or {}).get("native_structure")
+    if not isinstance(context, dict):
+        return source_model
+    from wxdf.semantics.structure_bridge import apply_structure_decisions
+
+    applied = apply_structure_decisions(
+        source_model,
+        context.get("source_facts") or {},
+        list(context.get("candidates") or []),
+    )
+    report["structure_decision_consumption"] = applied.evidence
+    return applied.model
+
+
+def _native_region_resolution(runtime_context: dict | None) -> dict | None:
+    context = (runtime_context or {}).get("native_region")
+    return context if isinstance(context, dict) else None
+
+
+def _merge_native_region_report(report: dict, resolution: dict | None) -> None:
+    for key, value in ((resolution or {}).get("report") or {}).items():
+        report[key] = deepcopy(value)
+
+
+def _apply_native_markdown_regions(
+    source_model: dict,
+    report: dict,
+    runtime_context: dict | None,
+) -> dict:
+    resolution = _native_region_resolution(runtime_context)
+    if not resolution or resolution.get("source_type") != "markdown":
+        return source_model
+    from wxdf.semantics.region_bridge import apply_region_decisions
+
+    applied = apply_region_decisions(
+        source_model,
+        resolution.get("source_facts") or {},
+        resolution.get("regions") or {},
+    )
+    report["source_region_decision_consumption"] = applied.evidence
+    return applied.model
+
+
+def convert_md(src: Path, doc, report: dict, row_height_cm: float, row_height_rule: str, numbering_ids: dict, args=None, file_protocol_ctx=None, runtime_context=None) -> dict:
     source_model = parse_md_to_model(src, report, skill_version=skill_version)
+    source_model = _apply_native_markdown_regions(source_model, report, runtime_context)
+    source_model = _apply_native_structure_context(source_model, report, runtime_context)
     summarize_source_document_model(report, source_model)
 
     # ── LLM Enhancement ──
@@ -569,14 +620,20 @@ def convert_md(src: Path, doc, report: dict, row_height_cm: float, row_height_ru
     return {"source": source_model, "normalized": model}
 
 
-def convert_docx(src: Path, dst_doc, row_height_cm: float, row_height_rule: str, strict_normalize: bool, report: dict, numbering_ids: dict, args=None, file_protocol_ctx=None) -> dict:
+def convert_docx(src: Path, dst_doc, row_height_cm: float, row_height_rule: str, strict_normalize: bool, report: dict, numbering_ids: dict, args=None, file_protocol_ctx=None, runtime_context=None) -> dict:
     from docx.oxml.ns import qn as _qn
     from docx.text.paragraph import Paragraph
     from docx.table import Table
     from docx_pipeline import infer_docx_role
 
     src_doc = Document(src)
-    toc_context = detect_toc_regions(src_doc, report)
+    native_region = _native_region_resolution(runtime_context)
+    if native_region and native_region.get("source_type") == "docx":
+        _merge_native_region_report(report, native_region)
+        toc_context = deepcopy(native_region.get("toc_context") or {})
+    else:
+        native_region = None
+        toc_context = detect_toc_regions(src_doc, report)
     enhance_mode = normalize_mode(getattr(args, "llm_enhance", "off")) if args is not None else "off"
     llm_call = _resolve_llm_call(args) if enhance_mode != "off" else None
     llm_hint = getattr(args, "llm_hint", None) if args is not None else None
@@ -593,11 +650,22 @@ def convert_docx(src: Path, dst_doc, row_height_cm: float, row_height_rule: str,
             for item in report.get("llm_enhancer", {}).get("applied", [])
         ) else "rules"
     ))
-    front_matter_context = analyze_front_matter(src_doc, toc_context, src, report)
+    if native_region and not should_enhance(report, "S", enhance_mode):
+        front_matter_context = deepcopy(native_region.get("front_matter_context") or {})
+        report["source_front_matter"] = deepcopy(front_matter_context)
+    else:
+        front_matter_context = analyze_front_matter(src_doc, toc_context, src, report)
     excluded_source_positions = (
         selected_source_positions(toc_context)
         | front_matter_source_positions(front_matter_context)
     )
+    if native_region:
+        report["source_region_decision_consumption"] = {
+            "excluded_candidate_count": len(native_region.get("excluded_source_positions") or []),
+            "removed_count": len(excluded_source_positions),
+            "unmatched_count": 0,
+            "ambiguous_count": 0,
+        }
     numbering_context = analyze_docx_lists(
         src_doc,
         report,
@@ -622,6 +690,7 @@ def convert_docx(src: Path, dst_doc, row_height_cm: float, row_height_rule: str,
     )
     report["parse_report"] = source_model.get("parse_report", {})
     source_model = inject_document_title(source_model, front_matter_context)
+    source_model = _apply_native_structure_context(source_model, report, runtime_context)
     summarize_source_document_model(report, source_model)
 
     # ── LLM Enhancement ──
@@ -893,6 +962,8 @@ def _write_protocol_requests(args, requests: list[dict], *, request_stage: str) 
             "strict_normalize": args.strict_normalize,
             "table_row_height_cm": args.table_row_height_cm,
             "table_row_height_rule": args.table_row_height_rule,
+            "pipeline": args.pipeline,
+            "list_policy": args.list_policy,
         },
         work_dir=str(args.generate_requests),
     )
@@ -901,7 +972,7 @@ def _write_protocol_requests(args, requests: list[dict], *, request_stage: str) 
     return run_info
 
 
-def _run_generate_requests(args, report) -> None:
+def _run_generate_requests(args, report, runtime_context=None) -> None:
     """Phase 1: parse source, build prompts, write files, stop."""
     suffix = args.input.suffix.lower()
     llm_hint = getattr(args, "llm_hint", None)
@@ -916,6 +987,7 @@ def _run_generate_requests(args, report) -> None:
         source_model = parse_md_to_model(
             args.input, report, skill_version=skill_version,
         )
+        source_model = _apply_native_markdown_regions(source_model, report, runtime_context)
     elif suffix == ".docx":
         from docx import Document as _Document
         from docx.oxml.ns import qn as _qn
@@ -924,7 +996,13 @@ def _run_generate_requests(args, report) -> None:
         from docx_pipeline import infer_docx_role
 
         src_doc = _Document(args.input)
-        toc_context = detect_toc_regions(src_doc, report)
+        native_region = _native_region_resolution(runtime_context)
+        if native_region and native_region.get("source_type") == "docx":
+            _merge_native_region_report(report, native_region)
+            toc_context = deepcopy(native_region.get("toc_context") or {})
+        else:
+            native_region = None
+            toc_context = detect_toc_regions(src_doc, report)
         if should_enhance(report, "S", enhance_mode):
             _run_phase_enhancement(
                 toc_context, report, phase="S",
@@ -936,13 +1014,24 @@ def _run_generate_requests(args, report) -> None:
             print(f"Generated {len(all_requests)} source-stage LLM request(s) in {args.generate_requests.resolve()}")
             print("Run with --resume <run.json> after processing llm_responses.jsonl.")
             return
-        front_matter_context = analyze_front_matter(
-            src_doc, toc_context, args.input, report,
-        )
+        if native_region and not should_enhance(report, "S", enhance_mode):
+            front_matter_context = deepcopy(native_region.get("front_matter_context") or {})
+            report["source_front_matter"] = deepcopy(front_matter_context)
+        else:
+            front_matter_context = analyze_front_matter(
+                src_doc, toc_context, args.input, report,
+            )
         excluded_source_positions = (
             selected_source_positions(toc_context)
             | front_matter_source_positions(front_matter_context)
         )
+        if native_region:
+            report["source_region_decision_consumption"] = {
+                "excluded_candidate_count": len(native_region.get("excluded_source_positions") or []),
+                "removed_count": len(excluded_source_positions),
+                "unmatched_count": 0,
+                "ambiguous_count": 0,
+            }
         numbering_context = analyze_docx_lists(
             src_doc,
             report,
@@ -969,6 +1058,7 @@ def _run_generate_requests(args, report) -> None:
     else:
         raise SystemExit(f"Unsupported input type: {args.input.suffix}")
 
+    source_model = _apply_native_structure_context(source_model, report, runtime_context)
     summarize_source_document_model(report, source_model)
 
     # ── Collect Phase A requests ─────────────────────────────────────
@@ -997,13 +1087,134 @@ def _run_generate_requests(args, report) -> None:
     print("Run with --resume <run.json> after processing llm_responses.jsonl.")
 
 
-def main() -> None:
+def _legacy_adapter_argv(args) -> list[str]:
+    """Re-enter the stable CLI path with the already resolved modular arguments."""
+
+    argv: list[str] = ["--pipeline", "legacy", "--list-policy", "legacy"]
+    for flag, value in (
+        ("--input", args.input),
+        ("--output", args.output),
+        ("--template", args.template),
+        ("--report", args.report),
+        ("--report-md", args.report_md),
+        ("--ast", args.ast),
+        ("--source-ast", args.source_ast),
+        ("--llm-hint", args.llm_hint),
+        ("--llm-command", args.llm_command),
+        ("--generate-requests", args.generate_requests),
+        ("--resume", args.resume),
+    ):
+        if value is not None:
+            argv.extend((flag, str(value)))
+    argv.extend((
+        "--llm-enhance", str(args.llm_enhance),
+        "--table-row-height-cm", str(args.table_row_height_cm),
+        "--table-row-height-rule", str(args.table_row_height_rule),
+        "--strict-normalize" if args.strict_normalize else "--no-strict-normalize",
+    ))
+    if args.fail_on_risk:
+        argv.append("--fail-on-risk")
+    return argv
+
+
+def _run_legacy_full_adapter(args, request: ConversionRequest) -> RunResult:
+    """Execute all stable capabilities as one transitional modular module."""
+
+    try:
+        main(
+            _legacy_adapter_argv(args),
+            runtime_context={
+                "native_structure": request.options.get("_native_structure_context"),
+                "native_region": request.options.get("_native_region_context"),
+                "adapter_artifacts": request.options.get("_adapter_artifacts"),
+            },
+        )
+    except SystemExit as exc:
+        code = exc.code if isinstance(exc.code, int) else 1
+        return RunResult(
+            status="failed",
+            exit_code=code,
+            diagnostics=[{
+                "code": "LEGACY_FULL_ADAPTER_FAILED",
+                "message": str(exc.code or "stable conversion failed"),
+            }],
+        )
+
+    artifacts = {"docx": str(request.output_path)} if request.output_path.is_file() else {}
+    try:
+        from wxdf.migration import migrate_legacy_model
+        from wxdf.normalization import normalize as normalize_modular_ast
+        from wxdf.template import load_template_bundle
+
+        if args.source_ast is not None and args.source_ast.is_file():
+            legacy_source = json.loads(args.source_ast.read_text(encoding="utf-8"))
+            migrated_source = migrate_legacy_model(legacy_source).ast
+            args.source_ast.write_text(
+                json.dumps(migrated_source, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            artifacts["source_ast"] = str(args.source_ast)
+        if args.ast is not None and args.ast.is_file():
+            legacy_normalized = json.loads(args.ast.read_text(encoding="utf-8"))
+            migrated_normalized = migrate_legacy_model(legacy_normalized).ast
+            profile = load_template_bundle(args.template) if args.template is not None else {
+                "resolved_styles": {},
+                "numbering_ids": {},
+            }
+            normalized_ast = normalize_modular_ast(
+                migrated_normalized,
+                profile,
+                strategy=request.list_policy,
+            )
+            args.ast.write_text(
+                json.dumps(normalized_ast, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            artifacts["normalized_ast"] = str(args.ast)
+    except Exception as exc:
+        return RunResult(
+            status="failed",
+            exit_code=1,
+            artifacts=artifacts,
+            diagnostics=[{
+                "code": "LEGACY_FULL_ADAPTER_AST_MIGRATION_FAILED",
+                "message": str(exc),
+                "type": type(exc).__name__,
+            }],
+        )
+
+    report: dict = {}
+    if args.report is not None and args.report.is_file():
+        report = json.loads(args.report.read_text(encoding="utf-8"))
+    if request.options.get("protocol_mode") in {"generate_requests", "resume"} and not request.output_path.is_file():
+        return RunResult(status="waiting_external", exit_code=0, report=report)
+    if not request.output_path.is_file():
+        return RunResult(
+            status="failed",
+            exit_code=1,
+            report=report,
+            diagnostics=[{
+                "code": "LEGACY_FULL_ADAPTER_OUTPUT_MISSING",
+                "message": str(request.output_path),
+            }],
+        )
+    return RunResult(
+        status="completed",
+        exit_code=0,
+        report=report,
+        artifacts=artifacts,
+    )
+
+
+def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) -> None:
     global SKILL_VERSION
     parser = argparse.ArgumentParser(description="Convert MD or DOCX to template-formatted DOCX.")
     parser.add_argument("--version", action="store_true", help="Print the installed Skill version and exit.")
     parser.add_argument("--input", type=Path, help="Source file (optional when --resume is used)")
     parser.add_argument("--output", type=Path, help="Output .docx path (optional when --resume is used)")
     parser.add_argument("--template", type=Path, default=None, help="DOCX template driving styles and numbering.")
+    parser.add_argument("--pipeline", choices=["legacy", "modular"], default="legacy")
+    parser.add_argument("--list-policy", choices=["legacy", "wx-default-v2"], default="legacy")
     parser.add_argument("--strict-normalize", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--report", type=Path, default=None)
     parser.add_argument("--report-md", type=Path, default=None)
@@ -1066,7 +1277,7 @@ def main() -> None:
             "the pipeline (enhance → validate → apply → render)."
         ),
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     SKILL_VERSION = _load_version()
     if args.version:
@@ -1132,6 +1343,10 @@ def main() -> None:
             args.table_row_height_cm = run_args["table_row_height_cm"]
         if "table_row_height_rule" in run_args:
             args.table_row_height_rule = run_args["table_row_height_rule"]
+        if "pipeline" in run_args:
+            args.pipeline = run_args["pipeline"]
+        if "list_policy" in run_args:
+            args.list_policy = run_args["list_policy"]
 
     if _os.environ.get("WX_DOC_FORMAT_RELEASE") == "1" and (args.ast or args.source_ast):
         parser.error("--ast and --source-ast are unavailable in release packages")
@@ -1146,6 +1361,41 @@ def main() -> None:
             verify_source_snapshot(args.input, str(run_info.get("source_sha256") or ""))
         except ProtocolError as exc:
             raise SystemExit(f"--resume: {exc}") from exc
+
+    if args.pipeline == "legacy" and args.list_policy != "legacy":
+        parser.error("legacy pipeline only accepts --list-policy legacy")
+
+    if args.pipeline == "modular":
+        modular_protocol_mode = "resume" if args.resume else "generate_requests" if args.generate_requests else None
+        modular_output_path = args.output
+        if modular_output_path is None and args.generate_requests is not None:
+            modular_output_path = args.generate_requests / ".pending-output.docx"
+        result = ConversionKernel(
+            modular_runner=lambda request: _run_legacy_full_adapter(args, request),
+        ).convert(
+            ConversionRequest(
+                input_path=args.input,
+                output_path=modular_output_path,
+                template_path=args.template,
+                pipeline=args.pipeline,
+                list_policy=args.list_policy,
+                options={
+                    "llm_enhance": args.llm_enhance,
+                    "protocol_mode": modular_protocol_mode,
+                    "source_ast_path": args.source_ast,
+                    "normalized_ast_path": args.ast,
+                    "report_path": args.report,
+                    "release": _os.environ.get("WX_DOC_FORMAT_RELEASE") == "1",
+                },
+            )
+        )
+        if args.report is not None:
+            args.report.parent.mkdir(parents=True, exist_ok=True)
+            args.report.write_text(json.dumps(report_for_output(result.as_report()), ensure_ascii=False, indent=2), encoding="utf-8")
+        if result.diagnostics:
+            diagnostic = result.diagnostics[0]
+            print(diagnostic.get("code", "MODULAR_CONVERSION_FAILED"), file=sys.stderr)
+        raise SystemExit(result.exit_code)
 
     maybe_reexec_with_skill_venv()
 
@@ -1185,7 +1435,7 @@ def main() -> None:
 
     # ── Phase 1: Generate LLM requests and stop ─────────────────────
     if args.generate_requests:
-        _run_generate_requests(args, report)
+        _run_generate_requests(args, report, runtime_context=runtime_context)
         return
 
     # ── Phase 3: Resume — set up file protocol context ──────────────
@@ -1201,15 +1451,19 @@ def main() -> None:
         }
 
     if suffix in {".md", ".markdown"}:
-        models = convert_md(args.input, out_doc, report, args.table_row_height_cm, args.table_row_height_rule, numbering_ids, args, file_protocol_ctx=file_protocol_ctx)
+        models = convert_md(args.input, out_doc, report, args.table_row_height_cm, args.table_row_height_rule, numbering_ids, args, file_protocol_ctx=file_protocol_ctx, runtime_context=runtime_context)
         source_document_model = models["source"]
         normalized_document_model = models["normalized"]
     elif suffix == ".docx":
-        models = convert_docx(args.input, out_doc, args.table_row_height_cm, args.table_row_height_rule, args.strict_normalize, report, numbering_ids, args, file_protocol_ctx=file_protocol_ctx)
+        models = convert_docx(args.input, out_doc, args.table_row_height_cm, args.table_row_height_rule, args.strict_normalize, report, numbering_ids, args, file_protocol_ctx=file_protocol_ctx, runtime_context=runtime_context)
         source_document_model = models["source"]
         normalized_document_model = models["normalized"]
     else:
         raise SystemExit(f"Unsupported input type: {args.input.suffix}")
+
+    adapter_artifacts = (runtime_context or {}).get("adapter_artifacts")
+    if isinstance(adapter_artifacts, dict) and source_document_model is not None:
+        adapter_artifacts["source_document_model"] = deepcopy(source_document_model)
 
     if file_protocol_ctx and file_protocol_ctx.get("new_requests"):
         run_info["request_stage"] = "ast"
