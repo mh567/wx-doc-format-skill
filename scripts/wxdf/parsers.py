@@ -425,6 +425,10 @@ def _parse_docx(source: Path | str, *, store: SourceStore) -> dict[str, Any]:
                 "numbering_evidence": list(descriptor.get("evidence") or []),
                 "indent_value": descriptor.get("layout", {}).get("left_twips", 0),
                 "indent_unit": "twips",
+                "marker_text": descriptor.get("lvl_text"),
+                "ordinal": descriptor.get("start"),
+                "explicit_depth": descriptor.get("ilvl"),
+                "restart_hint": descriptor.get("restart"),
                 "numbering_definition_ref": {
                     "num_id": descriptor.get("num_id"),
                     "abstract_num_id": descriptor.get("abstract_num_id"),
@@ -435,10 +439,6 @@ def _parse_docx(source: Path | str, *, store: SourceStore) -> dict[str, Any]:
             if descriptor.get("status") == "detected":
                 evidence.update({
                     "marker_kind": "ordered" if descriptor.get("num_fmt") != "bullet" else "unordered",
-                    "marker_text": descriptor.get("lvl_text"),
-                    "ordinal": descriptor.get("start"),
-                    "explicit_depth": descriptor.get("ilvl", 0),
-                    "restart_hint": descriptor.get("restart"),
                 })
         facts["evidence"][unit_id] = evidence
 
@@ -524,7 +524,7 @@ def _parse_docx(source: Path | str, *, store: SourceStore) -> dict[str, Any]:
                     if child.tag == qn("w:p"):
                         paragraph = Paragraph(child, cell)
                         descriptor = describe_docx_paragraph(document, paragraph, numbering_maps=numbering_maps)
-                        if descriptor is not None and descriptor.get("status") == "detected":
+                        if descriptor is not None:
                             key = (cell_id, int(descriptor.get("num_id") or 0), int(descriptor.get("ilvl") or 0), descriptor.get("num_fmt"))
                             ordinal = nested_list_ordinals.get(key, 0) + 1
                             nested_list_ordinals[key] = ordinal

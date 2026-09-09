@@ -554,6 +554,8 @@ class ConversionKernel:
                     "source_start": max(1, int(spec.get("source_start") or 1)),
                     "source_sequence_id": str(spec.get("source_sequence_id") or list_id),
                 }
+                if isinstance(spec.get("group_boundary"), Mapping):
+                    list_node["group_boundary"] = copy.deepcopy(dict(spec["group_boundary"]))
                 ref = source_ref(first_source_id)
                 if ref is not None:
                     list_node["source_ref"] = ref
@@ -1212,6 +1214,8 @@ class ConversionKernel:
                     "item_count": len(list_result["items"]),
                     "continuation_count": len(list_result["continuations"]),
                     "diagnostics": list(list_result["diagnostics"]),
+                    "downgrades": list(list_result.get("downgrades") or []),
+                    "groups": list(list_result["lists"]),
                 },
                 "list_semantics_consumption": {
                     "candidate_count": len(list_candidates),

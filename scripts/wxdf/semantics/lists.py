@@ -101,15 +101,41 @@ def _scope_id(ancestors: list[str], facts: Mapping[str, Any]) -> str:
     return "scope:document"
 
 
-def _list_family(evidence: Mapping[str, Any], container: Mapping[str, Any] | None = None) -> str:
+def _list_family(evidence: Mapping[str, Any], container: Mapping[str, Any] | None = None) -> str | None:
     marker_kind = evidence.get("marker_kind")
     if marker_kind in {"unordered", "bullet"}:
         return "unordered"
     if marker_kind in {"ordered", "decimal", "lower_letter", "upper_letter"}:
         return "ordered"
-    if container and container.get("list_kind") == "unordered":
-        return "unordered"
-    return "ordered"
+    if container and container.get("list_kind") in {"ordered", "unordered"}:
+        return str(container["list_kind"])
+    return None
+
+
+def _source_numbering_evidence(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    fields = (
+        "numbering_status",
+        "numbering_definition_ref",
+        "num_fmt",
+        "lvl_text",
+        "marker_kind",
+        "marker_text",
+        "source_list_type",
+        "numbering_evidence",
+        "ordinal",
+        "explicit_depth",
+        "indent_value",
+        "indent_unit",
+        "restart_hint",
+        "blank_before",
+        "continuation_hint",
+        "source_position",
+    )
+    return {
+        field: copy.deepcopy(evidence[field])
+        for field in fields
+        if field in evidence
+    }
 
 
 def _anchor_info(item_id: str, facts: Mapping[str, Any]) -> tuple[bool, str]:
@@ -148,18 +174,20 @@ def _emit_group(
     scope_id: str,
     parent_item_id: str | None = None,
     explicit: bool,
+    group_boundary: Mapping[str, Any] | None = None,
 ) -> None:
-    result["lists"].append(
-        {
-            "list_id": list_id,
-            "list_kind": list_kind,
-            "source_sequence_id": source_sequence_id,
-            "source_start": source_start,
-            "scope_id": scope_id,
-            "parent_item_id": parent_item_id,
-            "explicit": explicit,
-        }
-    )
+    group = {
+        "list_id": list_id,
+        "list_kind": list_kind,
+        "source_sequence_id": source_sequence_id,
+        "source_start": source_start,
+        "scope_id": scope_id,
+        "parent_item_id": parent_item_id,
+        "explicit": explicit,
+    }
+    if group_boundary is not None:
+        group["group_boundary"] = copy.deepcopy(dict(group_boundary))
+    result["lists"].append(group)
     last_by_depth: dict[int, str] = {}
     for index, item in enumerate(item_records):
         item_id = item["item_id"]
@@ -244,8 +272,34 @@ def analyze_lists(facts: Mapping[str, Any], *, context: Mapping[str, Any] | None
         "continuations": [],
         "candidates": [],
         "diagnostics": [],
+        "downgrades": [],
         "context": copy.deepcopy(dict(context or {})),
     }
+
+    for node_id, evidence in facts["evidence"].items():
+        if evidence.get("numbering_status") != "ignored":
+            continue
+        numbering_evidence = set(evidence.get("numbering_evidence") or [])
+        if "invalid_numbering_definition" not in numbering_evidence:
+            continue
+        definition_ref = evidence.get("numbering_definition_ref")
+        missing_definition = not isinstance(definition_ref, Mapping) or definition_ref.get("abstract_num_id") is None
+        code = "missing_numbering_definition" if missing_definition else "invalid_numbering_definition"
+        diagnostic = {
+            "code": code,
+            "severity": "info",
+            "message": f"list-like paragraph {node_id} was downgraded to a body paragraph because its numbering definition is unavailable",
+            "node_id": node_id,
+            "numbering_status": "ignored",
+            "numbering_definition_ref": copy.deepcopy(dict(definition_ref)) if isinstance(definition_ref, Mapping) else None,
+            "source_evidence": _source_numbering_evidence(evidence),
+            "fallback": {
+                "kind": "body_paragraph",
+                "preserve_source_content": True,
+            },
+        }
+        result["diagnostics"].append(diagnostic)
+        result["downgrades"].append(copy.deepcopy(diagnostic))
 
     def ordered_list_ids() -> list[str]:
         ordered: list[str] = []
@@ -269,11 +323,23 @@ def analyze_lists(facts: Mapping[str, Any], *, context: Mapping[str, Any] | None
         ancestor_ids = _ancestors(container_id, parents)
         parent_item_id = next((node_id for node_id in reversed(ancestor_ids) if facts["containers"].get(node_id, {}).get("kind") == "list_item"), None)
         item_records = [{"item_id": item_id, "evidence": facts["evidence"].get(item_id, {})} for item_id in direct_items]
+        list_kind = _list_family({}, container)
+        if list_kind is None:
+            diagnostic = {
+                "code": "unknown_list_kind",
+                "severity": "info",
+                "message": f"explicit list container {container_id} has no supported list kind; its source content was preserved",
+                "node_id": container_id,
+                "fallback": {"kind": "source_container", "preserve_source_content": True},
+            }
+            result["diagnostics"].append(diagnostic)
+            result["downgrades"].append(copy.deepcopy(diagnostic))
+            continue
         _emit_group(
             result,
             facts,
             list_id=container_id,
-            list_kind=_list_family({}, container),
+            list_kind=list_kind,
             source_sequence_id=str(container.get("source_sequence_id") or container_id),
             source_start=max(1, int(container.get("source_start") or 1)),
             item_records=item_records,
@@ -323,9 +389,42 @@ def analyze_lists(facts: Mapping[str, Any], *, context: Mapping[str, Any] | None
                         }
                     )
                 family = _list_family(evidence)
+                if family is None:
+                    for old_depth in [key for key in active_items if key >= depth]:
+                        active_items.pop(old_depth, None)
+                        active_groups.pop(old_depth, None)
+                    diagnostic = {
+                        "code": "unknown_list_marker_kind",
+                        "severity": "info",
+                        "message": f"list-like paragraph {unit_id} has an unsupported marker kind; its source content was preserved",
+                        "node_id": unit_id,
+                        "source_evidence": _source_numbering_evidence(evidence),
+                        "fallback": {"kind": "body_paragraph", "preserve_source_content": True},
+                    }
+                    result["diagnostics"].append(diagnostic)
+                    result["downgrades"].append(copy.deepcopy(diagnostic))
+                    continue
                 current = active_groups.get(depth)
                 if current is None or current["list_kind"] != family or current.get("parent_item_id") != parent_item_id:
                     sequence_ref = evidence.get("numbering_definition_ref")
+                    if current is None:
+                        group_boundary = {"kind": "run_start", "depth": depth}
+                    elif current["list_kind"] != family:
+                        group_boundary = {
+                            "kind": "same_level_list_kind_switch",
+                            "depth": depth,
+                            "from": current["list_kind"],
+                            "to": family,
+                            "previous_list_id": current["list_id"],
+                        }
+                    else:
+                        group_boundary = {
+                            "kind": "parent_item_switch",
+                            "depth": depth,
+                            "previous_list_id": current["list_id"],
+                            "previous_parent_item_id": current.get("parent_item_id"),
+                            "parent_item_id": parent_item_id,
+                        }
                     current = {
                         "list_id": f"implicit-list-{unit_id}-{len(group_specs)}",
                         "list_kind": family,
@@ -334,6 +433,7 @@ def analyze_lists(facts: Mapping[str, Any], *, context: Mapping[str, Any] | None
                         "scope_id": _scope_id([*_ancestors(parent_id, parents), parent_id], facts),
                         "parent_item_id": parent_item_id,
                         "items": [],
+                        "group_boundary": group_boundary,
                     }
                     group_specs.append(current)
                     active_groups[depth] = current
@@ -354,6 +454,7 @@ def analyze_lists(facts: Mapping[str, Any], *, context: Mapping[str, Any] | None
                     scope_id=group["scope_id"],
                     parent_item_id=group["parent_item_id"],
                     explicit=False,
+                    group_boundary=group.get("group_boundary"),
                 )
 
     relation_by_id = {item["item_id"]: item for item in result["items"]}
