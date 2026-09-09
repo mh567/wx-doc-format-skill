@@ -143,6 +143,32 @@ P1 聚焦回归：
 
 最终双轴 review：Standards 通过，Spec 通过。复核确认真实图片解析链、关系目标、媒体集合、编号映射、空 DOCX 列项和 L09 源树顺序均已闭环。混合 DOCX 文字与图片顺序列入 L14 后续范围，审查过程未修改文件。
 
+## L11 保护语义与输出保真验收
+
+2026-09-10 增加 `tests/test_issue4_acceptance.py`，覆盖 Markdown 和动态 DOCX 两类输入。用例包含代码中的 `1.`、日期、带前缀日期、版本号、带前缀版本、HTTP API、API 标签、无冒号注语、标题样式保护、有效 DOCX 编号以及多行 fenced code。
+
+初始红灯暴露以下问题：保护候选缺少日期、版本、API 标签和无冒号注语；DOCX 有效编号会被文本启发式遮蔽；标题结构候选可以覆盖保护语义；opaque 代码内容未进入 native 输出；保存审计未回读 `w:br`。
+
+修复内容：
+
+1. 统一补充代码、日期、版本、API 和注语义的保护识别，显式 protected 证据优先于编号状态，已验证的 DOCX 列表结构优先于文本启发式。
+2. native-v2 结构候选通过显式保护语义候选参与 Resolver 和单批事务，API 标签保持 body，编号注保持 numbered_note，旧 modular 路径的结构统计合同保持不变。
+3. opaque 源单元保留原文并沿用父容器渲染，代码中的编号和多行代码不会进入列表语义，表格嵌套位置保持。
+4. 保存后审计同时回读 `w:t`、`w:br`、`w:cr` 和 `w:tab`，验收测试逐节点核对 transaction overlay、RenderPlan、输出段落文本和保护样式。
+5. Renderer 产物注册为真实 RenderPlan，避免以 RenderMap 代替计划接口。
+
+验证：
+
+`tests/test_issue4_acceptance.py`，`4 passed`。
+
+专项及相关回归命令：
+
+`tests/test_issue4_acceptance.py tests/test_modular_rendering.py tests/test_modular_semantics.py`，`12 passed`。
+
+全量回归：`scripts/.venv/bin/python3 -m pytest tests/ -q`，`448 passed`。
+
+最终双轴 review：Standards 通过，Spec 通过。未跟踪 `_build/` 和 `paseo.json` 保持原状，未纳入提交。列表语义物化时点和通用 Resolver protected-node 集合属于后续架构复核项，当前 L11 验收不阻断。
+
 ## 真实转换证据
 
 Markdown `input/benchmark_report.md` 通过显式 `--modular-profile native-v2` 转换成功，命令退出码为 `0`。报告路径为 `/tmp/wx-issue1-native-p1-markdown-report.json`，报告显示 `execution_plan.profile=wx_full_rules-native-v2`、八个 native 模块均列入执行计划、事务状态 `committed`、决策数 `21`、模型审计和保存后审计均通过。输出路径为 `/tmp/wx-issue1-native-p1-markdown.docx`，`unzip -t` 退出码为 `0`。
