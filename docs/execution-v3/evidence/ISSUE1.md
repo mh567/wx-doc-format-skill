@@ -141,7 +141,7 @@ P1 聚焦回归：
 
 完整回归：`scripts/.venv/bin/python3 -m pytest tests/ -q`，`444 passed`。
 
-双轴 review：Standards 通过。Spec review 在修复编号层级映射回归、补充块图片保存审计并同步本证据后通过，审查过程未修改文件。
+最终双轴 review：Standards 通过，Spec 通过。复核确认真实图片解析链、关系目标、媒体集合、编号映射、空 DOCX 列项和 L09 源树顺序均已闭环。混合 DOCX 文字与图片顺序列入 L14 后续范围，审查过程未修改文件。
 
 ## 真实转换证据
 
