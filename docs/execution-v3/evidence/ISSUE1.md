@@ -89,7 +89,7 @@ P1 聚焦回归：
 
 两份 native 报告均为 `status=completed`、`source_facts_immutable=true`、八个模块执行、`restart=[true,true,false,false]`。三份 DOCX 均通过 `unzip -t`。
 
-提交：`96083d3`、`8fad0b3`、`9645173`、`ffa0b0a`、`875d16f`、`e843d47`。当前未推送远程。
+提交：`96083d3`、`8fad0b3`、`9645173`、`ffa0b0a`、`875d16f`、`e843d47`、`121647e`。当前未推送远程。
 
 ## 真实转换证据
 
@@ -105,6 +105,6 @@ DOCX 最小列表夹具 `/tmp/wx-issue1-input.docx` 通过 `scripts/main.py --mo
 
 双轴审查固定点为 `4b595c0`，原始实现提交为 `b44de5f`。本轮已补充显式 profile 路由、列表结构单批事务、续段关系、生成锚点、legacy retype 标准语义更新、注册表实际执行绑定、source reference 预条件校验和 failure policy 发布阻断。
 
-L01 至 L16 的逐项双 parser、RenderPlan、`numbering.xml`、段落 `numPr` 和保存后 OOXML 矩阵尚未在本轮补齐，不能据此宣称 Issue #1 全部验收完成。Kylin V10 ARM64 真机、页面视觉和发布流程仍属于外部门禁。远程推送、标签、Release 和公开 Skill 同步均未执行。
+L02 至 L16 的逐项双 parser、RenderPlan、`numbering.xml`、段落 `numPr` 和保存后 OOXML 矩阵尚未在本轮补齐，不能据此宣称 Issue #1 全部验收完成。Kylin V10 ARM64 真机、页面视觉和发布流程仍属于外部门禁。远程推送、标签、Release 和公开 Skill 同步均未执行。
 
 下一步：补齐 L01 至 L16 双 parser 验收矩阵及编号 XML 证据，再根据外部平台验收结果评估默认策略切换。

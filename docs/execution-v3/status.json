@@ -2,7 +2,7 @@
   "plan_version": "3.0-execution-1",
   "design_path": "docs/modular-pipeline-design-v3.md",
   "design_sha256": "c083884277ca6df4fb82426210fd3860242606cdf18691ff7bd5199da2f8d764",
-  "observed_head": "e843d47d1cdc9874e7326ab51aa18bc1003f7a19",
+  "observed_head": "121647ebb5fdb7b8aad4ce1d00dab3f23bf5d4d4",
   "observed_skill_version": "0.12.19",
   "implementation_started": true,
   "current_task": "T16",
@@ -10,7 +10,7 @@
   "issue1_remediation": {
     "status": "implemented_with_external_gates",
     "evidence": "evidence/ISSUE1.md",
-    "last_commit": "e843d47d1cdc9874e7326ab51aa18bc1003f7a19",
+    "last_commit": "121647ebb5fdb7b8aad4ce1d00dab3f23bf5d4d4",
     "verified_on": "2026-09-09",
     "tests": {
       "issue1": "3 passed",
