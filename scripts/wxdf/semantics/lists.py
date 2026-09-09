@@ -9,10 +9,16 @@ from typing import Any, Mapping
 from ..validation import validate_source_facts
 
 
-_DATE_RE = re.compile(r"^(?:\d{4}[./年-]\d{1,2}(?:[./月-]\d{1,2}日?)?|二〇?二\S+年)")
-_VERSION_RE = re.compile(r"^(?:v?\d+(?:\.\d+){1,}|版本\s*\d+)", re.IGNORECASE)
-_API_RE = re.compile(r"^(?:GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\s+/|^API\s*[:：]", re.IGNORECASE)
+_DATE_RE = re.compile(r"^(?:(?:发布日期|日期|时间)\s*[:：]?\s*)?(?:\d{4}[./年-]\d{1,2}(?:[./月-]\d{1,2}日?)?|二〇?二\S+年)")
+_VERSION_RE = re.compile(r"^(?:(?:版本(?:号)?|version|release|build)\s*[:：]?\s*)?(?:v?\d+(?:\.\d+){1,}|版本\s*\d+)", re.IGNORECASE)
+_API_RE = re.compile(r"^(?:GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\s+/|^(?:API|接口)(?:\s*[:：]|\s+|$)", re.IGNORECASE)
 _MANUAL_HEADING_RE = re.compile(r"^(?:第[一二三四五六七八九十百千万0-9]+[章节]|\d+(?:\.\d+)+)[\s、.．:：]")
+_CODE_STYLE_RE = re.compile(r"^(?:code|codeblock|代码|代码块|代码段)$", re.IGNORECASE)
+_VERSION_CONTEXT_RE = re.compile(r"^(?:v?\d+(?:\.\d+){1,})\s*(?:版本|版本号|release|build|发布)", re.IGNORECASE)
+_API_LABELS = {
+    "请求参数", "请求示例", "返回参数", "返回示例", "接口说明", "请求体",
+    "响应体", "成功响应", "失败响应",
+}
 
 
 def _node_kind(facts: Mapping[str, Any], node_id: str) -> str:
@@ -64,19 +70,25 @@ def _is_protected(unit: Mapping[str, Any], evidence: Mapping[str, Any]) -> tuple
     role = str(unit.get("role") or evidence.get("role") or "")
     style = str(unit.get("style") or evidence.get("style") or "")
     text = _unit_text(unit).strip()
-    if role in {"heading", "note", "numbered_note", "caption", "title"}:
+    if role in {"heading", "note", "numbered_note", "caption", "title", "code", "code_block"}:
         return True, f"protected_role:{role}"
+    if _CODE_STYLE_RE.match(style.strip()):
+        return True, "opaque_code"
     if evidence.get("protected") is True:
         return True, "source_protected"
+    if evidence.get("numbering_status") == "detected" and evidence.get("marker_kind"):
+        return False, None
     normalized = style.casefold().replace(" ", "")
     if normalized.startswith(("heading", "toc")) or "目录" in style or "题注" in style or "附录标题" in style:
         return True, "protected_style"
-    if _API_RE.match(text):
+    if _API_RE.match(text) or text.rstrip("：:") in _API_LABELS:
         return True, "api_label"
-    if _DATE_RE.match(text) or _VERSION_RE.match(text):
+    if _DATE_RE.match(text) or _VERSION_CONTEXT_RE.match(text):
         return True, "date_or_version"
     if _MANUAL_HEADING_RE.match(text):
         return True, "manual_heading_marker"
+    if _VERSION_RE.match(text):
+        return True, "date_or_version"
     if evidence.get("semantic_role") in {"note", "numbered_note"}:
         return True, "note_evidence"
     return False, None

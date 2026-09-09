@@ -87,10 +87,22 @@ def check_saved_output(path: Path | str, expected: Mapping[str, Any], render_map
                 collect_xml(child)
 
     collect_xml(document.element.body)
+    def paragraph_text(paragraph: Any) -> str:
+        parts: list[str] = []
+        for node in paragraph.iter():
+            if node.tag == f"{{{namespace}}}t":
+                parts.append(node.text or "")
+            elif node.tag in {f"{{{namespace}}}br", f"{{{namespace}}}cr"}:
+                parts.append("\n")
+            elif node.tag == f"{{{namespace}}}tab":
+                parts.append("\t")
+        return "".join(parts)
+
     actual_texts = [
-        "".join(node.text or "" for node in paragraph.findall(".//w:t", ns))
+        text
         for paragraph in xml_paragraphs
-        if "".join(node.text or "" for node in paragraph.findall(".//w:t", ns))
+        if any(node.text for node in paragraph.findall(".//w:t", ns))
+        and (text := paragraph_text(paragraph))
     ]
     expected_texts = [text for text in _expected_paragraph_texts(expected, render_map) if text]
     if actual_texts != expected_texts:

@@ -8,6 +8,7 @@ from typing import Any, Mapping
 
 from ..model import inline_text_projection
 from ..validation import validate_source_facts
+from .protected import protected_unit_semantics
 
 
 def _candidate(node_id: str, unit: Mapping[str, Any], value: dict[str, Any], evidence: list[dict[str, Any]]) -> dict[str, Any]:
@@ -48,6 +49,8 @@ def _docx_style_role(style_name: str) -> tuple[str | None, int | None]:
 def collect_structure_candidates(
     facts: Mapping[str, Any],
     regions: Mapping[str, Any] | None = None,
+    *,
+    protect_semantics: bool = False,
 ) -> list[dict[str, Any]]:
     """Collect explicit heading and paragraph roles from public facts."""
 
@@ -85,6 +88,18 @@ def collect_structure_candidates(
         if not text.strip() and not has_media:
             continue
         evidence = facts["evidence"].get(node_id, {})
+        protected = protected_unit_semantics(unit, evidence)
+        if protect_semantics and protected is not None:
+            protected_role = str(protected.get("role") or "")
+            resolved_role = protected_role if protected_role in {"title", "body", "heading", "caption", "note", "numbered_note", "unknown"} else "body"
+            result.append(_candidate(
+                str(node_id),
+                unit,
+                {"role": resolved_role},
+                [{"kind": "format_contract", "source": "protected_content", "reason": protected.get("reason")}],
+            ))
+            semantic_content_seen = True
+            continue
         if not is_markdown:
             source_style = str(unit.get("style") or evidence.get("style") or "")
             style_role, style_level = _docx_style_role(source_style)

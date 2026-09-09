@@ -310,7 +310,19 @@ def render(
                 "image_resources": [str(resource_id)],
             }
         elif block.get("block_type") == "opaque":
-            diagnostics.append({"code": "opaque_node_skipped", "node_id": block_id})
+            raw_text = str(block.get("raw_text") or "").rstrip("\r\n")
+            if raw_text:
+                add_paragraph(
+                    block_id,
+                    {
+                        "role": "body",
+                        "inline_content": [{"kind": "text", "text": raw_text}],
+                    },
+                    parent=parent,
+                )
+                render_map[block_id]["opaque_source"] = True
+            else:
+                diagnostics.append({"code": "opaque_node_skipped", "node_id": block_id})
 
     def render_list_item(child_id: str, *, parent: Any | None = None) -> None:
         presentation = normalized.get("presentation", {}).get("nodes", {}).get(child_id, {})

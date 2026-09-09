@@ -13,7 +13,17 @@ from ..model import inline_text_projection
 from ..validation import validate_source_facts
 
 
-_API_RE = re.compile(r"^(?:API|接口)\s*[:：]", re.IGNORECASE)
+_API_RE = re.compile(r"^(?:API|接口)(?:\s*[:：]|\s+|$)", re.IGNORECASE)
+_HTTP_API_RE = re.compile(r"^(?:GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\s+/", re.IGNORECASE)
+_DATE_RE = re.compile(r"^(?:(?:发布日期|日期|时间)\s*[:：]?\s*)?(?:\d{4}[./年-]\d{1,2}(?:[./月-]\d{1,2}日?)?|二〇?二\S+年)")
+_VERSION_RE = re.compile(r"^(?:(?:版本(?:号)?|version|release|build)\s*[:：]?\s*)?(?:v?\d+(?:\.\d+){1,}|版本\s*\d+)", re.IGNORECASE)
+_MANUAL_HEADING_RE = re.compile(r"^(?:第[一二三四五六七八九十百千万0-9]+[章节]|\d+(?:\.\d+)+)[\s、.．:：]")
+_CODE_STYLE_RE = re.compile(r"^(?:code|codeblock|代码|代码块|代码段)$", re.IGNORECASE)
+_VERSION_CONTEXT_RE = re.compile(r"^(?:v?\d+(?:\.\d+){1,})\s*(?:版本|版本号|release|build|发布)", re.IGNORECASE)
+_API_LABELS = {
+    "请求参数", "请求示例", "返回参数", "返回示例", "接口说明", "请求体",
+    "响应体", "成功响应", "失败响应",
+}
 _FORMULA_RE = re.compile(r"(?:[=＋+−\-*/^]|\\frac|\\sum|\d\s*[A-Za-z])")
 _NOTE_PREFIXES = ("备注：", "编写提示：", "【备注提示】", "【编写样例】")
 
@@ -29,6 +39,9 @@ def protected_unit_semantics(unit: Mapping[str, Any], evidence: Mapping[str, Any
             "role": None,
             "text": text,
         }
+    style = str(unit.get("style") or evidence.get("style") or "").strip()
+    if unit.get("role") in {"code", "code_block"} or evidence.get("semantic_role") in {"code", "code_block"} or _CODE_STYLE_RE.match(style):
+        return {"reason": "opaque_code", "role": "code_block", "text": text}
     role = source_note_role(
         unit.get("style") or evidence.get("style"),
         evidence.get("numbering"),
@@ -39,8 +52,15 @@ def protected_unit_semantics(unit: Mapping[str, Any], evidence: Mapping[str, Any
     if role:
         canonical = clean_note_prefix(strip_source_note_marker(text, role))
         return {"reason": "note", "role": role, "text": canonical}
-    if _API_RE.match(text.strip()):
+    normalized_text = text.strip()
+    if _API_RE.match(normalized_text) or _HTTP_API_RE.match(normalized_text) or normalized_text.rstrip("：:") in _API_LABELS:
         return {"reason": "api_label", "role": None, "text": text}
+    if _DATE_RE.match(normalized_text) or _VERSION_CONTEXT_RE.match(normalized_text):
+        return {"reason": "date_or_version", "role": None, "text": text}
+    if _MANUAL_HEADING_RE.match(normalized_text):
+        return {"reason": "manual_heading_marker", "role": None, "text": text}
+    if _VERSION_RE.match(normalized_text):
+        return {"reason": "date_or_version", "role": None, "text": text}
     if _FORMULA_RE.search(text) and evidence.get("formula"):
         return {"reason": "formula_opaque", "role": "formula", "text": text}
     return None

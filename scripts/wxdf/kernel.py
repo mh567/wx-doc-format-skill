@@ -115,7 +115,7 @@ class ConversionKernel:
             if kind == "paragraph":
                 block: dict[str, Any] = {
                     "block_type": "paragraph",
-                    "role": unit.get("role", "body"),
+                    "role": unit.get("role") or "body",
                     "inline_content": copy.deepcopy(unit.get("inline_content", [])),
                     "source_ref": source_ref,
                 }
@@ -126,6 +126,7 @@ class ConversionKernel:
                 units[unit_id] = {
                     "block_type": "opaque",
                     "diagnostic_ids": list(unit.get("diagnostic_ids") or [f"source_{kind}"]),
+                    "raw_text": str(unit.get("raw_text") or ""),
                     "source_ref": source_ref,
                 }
             else:
@@ -888,7 +889,7 @@ class ConversionKernel:
                     result = render(runtime["normalized"], staging_path, resources=runtime["resources"])
                 metrics.record_render()
             runtime["render_result"] = result
-            runtime["artifacts"]["render_plan"] = result["render_map"]
+            runtime["artifacts"]["render_plan"] = result["render_plan"]
             return result
 
         def auditor(runtime: dict[str, Any]) -> dict[str, Any]:
@@ -985,7 +986,11 @@ class ConversionKernel:
             with metrics.stage("scope"):
                 regions = resolve_source_regions(request.input_path, facts)
             with metrics.stage("role"):
-                structure_candidates = collect_structure_candidates(facts, regions["regions"])
+                structure_candidates = collect_structure_candidates(
+                    facts,
+                    regions["regions"],
+                    protect_semantics=True,
+                )
                 protected_candidates = collect_protected_candidates(facts)
             with metrics.stage("relation"):
                 list_result = analyze_lists(facts)

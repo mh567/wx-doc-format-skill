@@ -37,9 +37,9 @@ def source_note_role(
         return "numbered_note"
 
     source_text = (text or "").strip()
-    if re.match(r"^注\s*\d+\s*[：:]", source_text):
+    if re.match(r"^注\s*\d+(?:\s*[：:]|\s+|$)", source_text):
         return "numbered_note"
-    if re.match(r"^注\s*[：:]", source_text):
+    if re.match(r"^注(?:\s*[：:]|\s+|$)", source_text):
         return "note"
     return None
 
@@ -47,9 +47,9 @@ def source_note_role(
 def strip_source_note_marker(text: str, role: str | None) -> str:
     """Remove a literal note marker when the target style will render it."""
     if role == "numbered_note":
-        return re.sub(r"^注\s*\d+\s*[：:]\s*", "", text, count=1).strip()
+        return re.sub(r"^注\s*\d+\s*(?:[：:]\s*)?", "", text, count=1).strip()
     if role == "note":
-        return re.sub(r"^注\s*[：:]\s*", "", text, count=1).strip()
+        return re.sub(r"^注\s*(?:[：:]\s*)?", "", text, count=1).strip()
     return text
 
 
