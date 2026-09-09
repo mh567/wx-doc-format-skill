@@ -20,6 +20,7 @@ _TITLE_RE = re.compile(r"^附\s*录(?:\s+([A-Z]))?(?:[：:]\s*)?(.*)$", re.IGNOR
 _VISIBLE_RE = re.compile(r"^([A-Z])(?:[.．]\d+){1,3}\s*(.*)$", re.IGNORECASE)
 _MAIN_NUMBER_RE = re.compile(r"^\d+(?:\.\d+)+\s+")
 _HEADING_STYLE_RE = re.compile(r"^heading\s*(\d+)$", re.IGNORECASE)
+_CLASSIFICATION_ONLY_RE = re.compile(r"^[（(](规范性|资料性)[)）]$")
 
 
 def _text(block: Mapping[str, Any]) -> str:
@@ -140,6 +141,7 @@ def collect_source_appendix_semantics(facts: Mapping[str, Any]) -> dict[str, Any
 
     validate_source_facts(facts)
     entries: list[dict[str, Any]] = []
+    root_children = list(facts["children"].get("root", []))
     candidates: list[dict[str, Any]] = []
     for order, node_id in enumerate(facts["children"].get("root", [])):
         unit = facts["units"].get(node_id)
@@ -161,7 +163,18 @@ def collect_source_appendix_semantics(facts: Mapping[str, Any]) -> dict[str, Any
             numbered_match = _MAIN_NUMBER_RE.match(text)
             nested_marker = parse_appendix_marker(text[numbered_match.end():]) if numbered_match else None
             style_role = appendix_role_from_style(unit.get("style"))
-            if direct_marker is None and nested_marker is None and style_role != "appendix_title":
+            heading_like = (
+                unit.get("role") == "heading"
+                or _source_heading_level(unit) is not None
+                or style_role == "appendix_title"
+            )
+            direct_title = str((direct_marker or {}).get("title") or "")
+            direct_marker_allowed = direct_marker is not None and (
+                heading_like
+                or not direct_title
+                or _CLASSIFICATION_ONLY_RE.fullmatch(direct_title) is not None
+            )
+            if not direct_marker_allowed and nested_marker is None and style_role != "appendix_title":
                 continue
             source_evidence = facts.get("evidence", {}).get(node_id, {})
             nested_numbering = (
@@ -198,7 +211,7 @@ def collect_source_appendix_semantics(facts: Mapping[str, Any]) -> dict[str, Any
     accepted = [item for item in candidates if item["accepted"]]
     ranges: list[dict[str, Any]] = []
     for index, candidate in enumerate(accepted):
-        end_order = accepted[index + 1]["order"] - 1 if index + 1 < len(accepted) else max((entry["order"] for entry in entries), default=candidate["order"])
+        end_order = accepted[index + 1]["order"] - 1 if index + 1 < len(accepted) else len(root_children) - 1
         scoped = [entry for entry in entries if candidate["order"] <= entry["order"] <= end_order]
         title_data = parse_appendix_title(candidate["raw_text"], index + 1)
         if candidate.get("appendix_id"):
@@ -238,6 +251,7 @@ def collect_source_appendix_semantics(facts: Mapping[str, Any]) -> dict[str, Any
             "title_lines": list(title_data.get("title_lines") or []),
             "soft_break_count": int(title_data.get("soft_break_count") or 0),
             "title_location": copy.deepcopy(candidate["location"]),
+            "title_node_id": candidate["node_id"],
             "start_location": copy.deepcopy(candidate["location"]),
             "end_location": copy.deepcopy(end_entry["location"]),
             "page_break_before": True,
@@ -245,6 +259,9 @@ def collect_source_appendix_semantics(facts: Mapping[str, Any]) -> dict[str, Any
             "evidence": list(candidate["evidence"]),
             "negative_evidence": list(candidate["negative_evidence"]),
             "heading_decisions": heading_decisions,
+            "start_order": candidate["order"],
+            "end_order": end_order,
+            "root_node_ids": root_children[candidate["order"]:end_order + 1],
         })
     for candidate in candidates:
         candidate.pop("order", None)
@@ -252,4 +269,306 @@ def collect_source_appendix_semantics(facts: Mapping[str, Any]) -> dict[str, Any
     return {"candidates": candidates, "ranges": ranges, "issues": []}
 
 
-__all__ = ["annotate_appendix_ranges", "collect_appendix_candidates", "collect_source_appendix_semantics"]
+def _appendix_classification(value: Any) -> str:
+    return {
+        "规范性": "normative",
+        "资料性": "informative",
+        "normative": "normative",
+        "informative": "informative",
+    }.get(str(value or ""), "unknown")
+
+
+def _ast_source_ref(ast: Mapping[str, Any], node_id: str) -> dict[str, Any] | None:
+    document = ast["document"]
+    node = document["blocks"].get(node_id) or document["containers"].get(node_id)
+    source_ref = node.get("source_ref") if isinstance(node, Mapping) else None
+    return copy.deepcopy(dict(source_ref)) if isinstance(source_ref, Mapping) else None
+
+
+def _appendix_candidate(
+    candidate_id: str,
+    target_node_ids: list[str],
+    target_source_refs: list[dict[str, Any]],
+    proposal: dict[str, Any],
+    *,
+    rationale: str,
+    evidence: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    return {
+        "candidate_id": candidate_id,
+        "module_id": "appendix_semantics",
+        "module_version": "1.0",
+        "target_source_refs": target_source_refs,
+        "target_node_ids": target_node_ids,
+        "proposal": proposal,
+        "positive_evidence": evidence or [{"kind": "format_contract", "source": "appendix_semantics"}],
+        "negative_evidence": [],
+        "scope": {"stages": ["relation"]},
+        "constraints": [],
+        "rationale": rationale,
+    }
+
+
+def prepare_native_appendix_semantics(
+    facts: Mapping[str, Any],
+    source_ast: Mapping[str, Any],
+    semantics: Mapping[str, Any],
+    list_result: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Map source-root list paragraphs to their native list containers."""
+
+    validate_source_facts(facts)
+    validate_ast(source_ast)
+    prepared = copy.deepcopy(dict(semantics))
+    item_to_list = {
+        str(item.get("item_id")): str(item.get("list_id"))
+        for item in (list_result or {}).get("items", [])
+        if item.get("item_id") and item.get("list_id")
+    }
+    for appendix in prepared.get("ranges", []):
+        seen: set[str] = set()
+        mapped: list[str] = []
+        for node_id in appendix.get("root_node_ids", []):
+            native_id = item_to_list.get(str(node_id), str(node_id))
+            if native_id in seen:
+                continue
+            seen.add(native_id)
+            mapped.append(native_id)
+        appendix["source_root_node_ids"] = list(appendix.get("root_node_ids") or [])
+        appendix["root_node_ids"] = mapped
+    return prepared
+
+
+def collect_native_appendix_candidates(
+    facts: Mapping[str, Any],
+    source_ast: Mapping[str, Any],
+    semantics: Mapping[str, Any] | None = None,
+    list_result: Mapping[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Build native AST operations for accepted SourceFacts appendix ranges."""
+
+    validate_source_facts(facts)
+    validate_ast(source_ast)
+    semantics = semantics or collect_source_appendix_semantics(facts)
+    document = source_ast["document"]
+    root_children = list(document["children"].get(document["root_id"], []))
+    candidates: list[dict[str, Any]] = []
+    used_container_ids = set(document["containers"])
+    list_first_source_id: dict[str, str] = {}
+    for item in (list_result or {}).get("items", []):
+        list_id = item.get("list_id")
+        item_id = item.get("item_id")
+        if list_id and item_id:
+            list_first_source_id.setdefault(str(list_id), str(item_id))
+
+    def node_source_ref(node_id: str) -> dict[str, Any] | None:
+        ref = _ast_source_ref(source_ast, node_id)
+        if ref is not None:
+            return ref
+        source_id = list_first_source_id.get(node_id)
+        if source_id:
+            source_node = facts.get("units", {}).get(source_id) or facts.get("containers", {}).get(source_id) or {}
+            source_ref = source_node.get("source_ref") if isinstance(source_node, Mapping) else None
+            if isinstance(source_ref, Mapping):
+                return copy.deepcopy(dict(source_ref))
+        return None
+
+    for ordinal, appendix in enumerate(semantics.get("ranges", []), 1):
+        appendix_id = str(appendix.get("appendix_id") or chr(64 + ordinal)).upper()
+        title_id = str(appendix.get("title_node_id") or "")
+        if not title_id:
+            title_candidates = [
+                candidate for candidate in semantics.get("candidates", [])
+                if candidate.get("appendix_id") == appendix_id
+            ]
+            title_id = str(title_candidates[0].get("node_id")) if title_candidates else ""
+        if not title_id or title_id not in document["blocks"]:
+            continue
+        title_ref = _ast_source_ref(source_ast, title_id)
+        if title_ref is None:
+            continue
+
+        container_id = f"native-appendix-{appendix_id.casefold()}"
+        suffix = 2
+        while container_id in used_container_ids:
+            container_id = f"native-appendix-{appendix_id.casefold()}-{suffix}"
+            suffix += 1
+        used_container_ids.add(container_id)
+        semantic_scope_id = f"semantic:appendix:{appendix_id}"
+        start_order = int(appendix.get("start_order") or 0)
+        root_node_ids = [
+            node_id for node_id in appendix.get("root_node_ids", [])
+            if (node_id in root_children or node_id in list_first_source_id)
+            and node_id != document["root_id"]
+        ]
+        if not root_node_ids:
+            continue
+        source_classification = _appendix_classification(appendix.get("classification"))
+        container = {
+            "kind": "appendix",
+            "source_classification": source_classification,
+            "title_ref": title_id,
+            "source_ref": copy.deepcopy(title_ref),
+            "appendix_id": appendix_id,
+            "semantic_scope_id": semantic_scope_id,
+            "source_range": {
+                "start_order": start_order,
+                "end_order": int(appendix.get("end_order") or start_order),
+            },
+            "source_number_preserved": True,
+            "page_break_before": bool(appendix.get("page_break_before", True)),
+        }
+        candidates.append(_appendix_candidate(
+            f"appendix-range-{appendix_id}",
+            [container_id],
+            [title_ref],
+            {
+                "operation": "create_node",
+                "property_scope": ["children"],
+                "value": {
+                    "node_id": container_id,
+                    "parent_id": document["root_id"],
+                    "index": start_order,
+                    "node": container,
+                },
+            },
+            rationale="appendix range materialized from immutable SourceFacts semantics",
+            evidence=[{"kind": "format_contract", "source": "appendix_range"}],
+        ))
+
+        for index, node_id in enumerate(root_node_ids):
+            node_ref = node_source_ref(node_id)
+            if node_ref is None:
+                continue
+            candidates.append(_appendix_candidate(
+                f"appendix-move-{appendix_id}-{node_id}",
+                [node_id],
+                [node_ref],
+                {
+                    "operation": "move_node",
+                    "property_scope": ["children", "semantics"],
+                    "value": {
+                        "new_parent_id": container_id,
+                        "index": index,
+                        "semantic_metadata": {
+                            "appendix_id": appendix_id,
+                            "semantic_scope_id": semantic_scope_id,
+                            "source_number_preserved": True,
+                        },
+                    },
+                },
+                rationale="appendix root range assigned to its semantic container",
+                evidence=[{"kind": "structural", "source": "appendix_range"}],
+            ))
+
+        title_value = {
+            "semantic_role": "appendix_title",
+            "appendix_role": "title",
+            "appendix_id": appendix_id,
+            "semantic_scope_id": semantic_scope_id,
+            "page_break_before": bool(appendix.get("page_break_before", True)),
+            "source_number_preserved": True,
+        }
+        candidates.append(_appendix_candidate(
+            f"appendix-title-{title_id}",
+            [title_id],
+            [title_ref],
+            {"operation": "update_node_semantics", "property_scope": ["semantics"], "value": title_value},
+            rationale="appendix title role resolved from SourceFacts appendix semantics",
+        ))
+
+        for heading in appendix.get("heading_decisions", []):
+            heading_id = str(heading.get("node_id") or "")
+            heading_ref = _ast_source_ref(source_ast, heading_id)
+            if not heading_id or heading_ref is None:
+                continue
+            heading_value = {
+                "semantic_role": "appendix_heading",
+                "appendix_role": "heading",
+                "appendix_id": appendix_id,
+                "semantic_scope_id": semantic_scope_id,
+                "appendix_relative_level": int(heading.get("relative_level") or 1),
+                "source_heading_level": heading.get("source_heading_level"),
+            }
+            candidates.append(_appendix_candidate(
+                f"appendix-heading-{heading_id}",
+                [heading_id],
+                [heading_ref],
+                {"operation": "update_node_semantics", "property_scope": ["semantics"], "value": heading_value},
+                rationale="appendix heading relative level resolved from source hierarchy",
+            ))
+
+    return candidates
+
+
+def audit_native_appendix(
+    source_ast: Mapping[str, Any],
+    semantics: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Audit appendix containers, range ownership and relative heading metadata."""
+
+    validate_ast(source_ast)
+    document = source_ast["document"]
+    root_children = set(document["children"].get(document["root_id"], []))
+    issues: list[dict[str, Any]] = []
+    checked = 0
+    for appendix in semantics.get("ranges", []):
+        appendix_id = str(appendix.get("appendix_id") or "").upper()
+        containers = [
+            (node_id, node)
+            for node_id, node in document["containers"].items()
+            if node.get("kind") == "appendix" and str(node.get("appendix_id") or "").upper() == appendix_id
+        ]
+        if len(containers) != 1:
+            issues.append({"code": "appendix_container_count", "appendix_id": appendix_id, "count": len(containers)})
+            continue
+        checked += 1
+        container_id, container = containers[0]
+        expected_nodes = set(appendix.get("root_node_ids") or [])
+        actual_nodes = set(document["children"].get(container_id, []))
+        if expected_nodes != actual_nodes:
+            issues.append({"code": "appendix_range_mismatch", "appendix_id": appendix_id, "expected": sorted(expected_nodes), "actual": sorted(actual_nodes)})
+        if expected_nodes & root_children:
+            issues.append({"code": "appendix_range_leak", "appendix_id": appendix_id, "node_ids": sorted(expected_nodes & root_children)})
+        if container.get("title_ref") not in actual_nodes:
+            issues.append({"code": "appendix_title_not_owned", "appendix_id": appendix_id, "title_id": container.get("title_ref")})
+        if container.get("semantic_scope_id") != f"semantic:appendix:{appendix_id}":
+            issues.append({"code": "appendix_semantic_scope_mismatch", "appendix_id": appendix_id})
+        if container.get("page_break_before") is not True:
+            issues.append({"code": "appendix_page_boundary_missing", "appendix_id": appendix_id})
+        title = document["blocks"].get(container.get("title_ref"), {})
+        if (
+            title.get("appendix_id") != appendix_id
+            or title.get("appendix_role") != "title"
+            or title.get("semantic_scope_id") != f"semantic:appendix:{appendix_id}"
+        ):
+            issues.append({"code": "appendix_title_metadata_mismatch", "appendix_id": appendix_id, "title_id": container.get("title_ref")})
+        for heading in appendix.get("heading_decisions", []):
+            block = document["blocks"].get(heading.get("node_id"), {})
+            if block.get("appendix_id") != appendix_id or block.get("appendix_relative_level") != heading.get("relative_level"):
+                issues.append({"code": "appendix_heading_metadata_mismatch", "appendix_id": appendix_id, "node_id": heading.get("node_id")})
+        descendants = set(actual_nodes)
+        frontier = list(actual_nodes)
+        while frontier:
+            current = frontier.pop()
+            children = document["children"].get(current, [])
+            for child in children:
+                if child not in descendants:
+                    descendants.add(child)
+                    frontier.append(child)
+        for node_id in sorted(descendants):
+            node = document["blocks"].get(node_id) or document["containers"].get(node_id) or {}
+            if node.get("appendix_id") != appendix_id or node.get("semantic_scope_id") != f"semantic:appendix:{appendix_id}":
+                issues.append({"code": "appendix_scope_metadata_missing", "appendix_id": appendix_id, "node_id": node_id})
+
+    return {"passed": not issues, "checked_appendix_count": checked, "issue_count": len(issues), "issues": issues}
+
+
+__all__ = [
+    "annotate_appendix_ranges",
+    "audit_native_appendix",
+    "collect_appendix_candidates",
+    "collect_native_appendix_candidates",
+    "collect_source_appendix_semantics",
+    "prepare_native_appendix_semantics",
+]

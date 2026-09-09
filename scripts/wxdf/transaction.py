@@ -98,7 +98,7 @@ def _order_stage_decisions(snapshot: StageSnapshot, decisions: Sequence[Mapping[
         ready.sort(
             key=lambda item: (
                 str((item[1].get("value") or {}).get("parent_id")),
-                int((item[1].get("value") or {}).get("index", 10**9)),
+                -int((item[1].get("value") or {}).get("index", 10**9)),
                 str((item[1].get("value") or {}).get("node_id")),
                 item[0],
             )
@@ -109,7 +109,16 @@ def _order_stage_decisions(snapshot: StageSnapshot, decisions: Sequence[Mapping[
             if isinstance(node_id, str):
                 available.add(node_id)
             pending = [item for item in pending if item[0] != original_index]
-    return [*ordered, *other_decisions]
+    move_decisions = [decision for decision in other_decisions if decision.get("operation") == "move_node"]
+    remaining_decisions = [decision for decision in other_decisions if decision.get("operation") != "move_node"]
+    move_decisions.sort(
+        key=lambda decision: (
+            str((decision.get("value") or {}).get("new_parent_id")),
+            int((decision.get("value") or {}).get("index", 10**9)),
+            str((decision.get("target_node_ids") or [""])[0]),
+        )
+    )
+    return [*ordered, *move_decisions, *remaining_decisions]
 
 
 def _parent_map(ast: Mapping[str, Any]) -> dict[str, str]:
@@ -163,6 +172,17 @@ def _apply_update_node_semantics(ast: dict[str, Any], decision: Mapping[str, Any
             node["semantic_paragraph_id"] = value["paragraph_id"]
         if isinstance(value.get("list_parent_id"), str):
             node["semantic_list_parent_id"] = value["list_parent_id"]
+        for field in (
+            "appendix_id",
+            "appendix_role",
+            "appendix_relative_level",
+            "semantic_scope_id",
+            "source_heading_level",
+            "page_break_before",
+            "source_number_preserved",
+        ):
+            if field in value:
+                node[field] = copy.deepcopy(value[field])
 
 
 def _apply_move_node(ast: dict[str, Any], decision: Mapping[str, Any]) -> None:
@@ -201,6 +221,31 @@ def _apply_move_node(ast: dict[str, Any], decision: Mapping[str, Any]) -> None:
         destination.insert(max(0, min(index, len(destination))), node_id)
     else:
         destination.append(node_id)
+    metadata: dict[str, Any] = {}
+    destination_node = nodes.get(new_parent_id)
+    if isinstance(destination_node, Mapping):
+        for field in ("appendix_id", "semantic_scope_id", "source_number_preserved"):
+            if field in destination_node:
+                metadata[field] = copy.deepcopy(destination_node[field])
+    destination_parent = parent.get(new_parent_id)
+    while destination_parent is not None:
+        ancestor = nodes.get(destination_parent)
+        if isinstance(ancestor, Mapping):
+            for field in ("appendix_id", "semantic_scope_id", "source_number_preserved"):
+                if field in ancestor and field not in metadata:
+                    metadata[field] = copy.deepcopy(ancestor[field])
+        destination_parent = parent.get(destination_parent)
+    explicit_metadata = value.get("semantic_metadata")
+    if isinstance(explicit_metadata, Mapping):
+        metadata.update(copy.deepcopy(dict(explicit_metadata)))
+    if metadata:
+        for descendant_id in descendants:
+            descendant = nodes.get(descendant_id)
+            if descendant is None:
+                continue
+            for field in ("appendix_id", "semantic_scope_id", "source_number_preserved"):
+                if field in metadata:
+                    descendant[field] = copy.deepcopy(metadata[field])
 
 
 def _apply_update_association(ast: dict[str, Any], decision: Mapping[str, Any]) -> None:

@@ -792,6 +792,7 @@ class ConversionKernel:
         candidates: list[Mapping[str, Any]],
         decision_set: Mapping[str, Any],
         list_result: Mapping[str, Any],
+        appendix_semantics: Mapping[str, Any] | None,
         store: Any,
         metrics: Any,
         staging_path: Path,
@@ -802,6 +803,7 @@ class ConversionKernel:
         from .normalization import normalize
         from .registry import build_native_v2_registry
         from .rendering import render
+        from .semantics.appendices import audit_native_appendix
         from .template import load_template_bundle
         from .transaction import apply_stage_batch, make_snapshot
 
@@ -811,6 +813,7 @@ class ConversionKernel:
             "candidates": candidates,
             "decision_set": decision_set,
             "list_result": list_result,
+            "appendix_semantics": appendix_semantics,
             "request": request,
             "metrics": metrics,
             "store": store,
@@ -896,14 +899,25 @@ class ConversionKernel:
             with metrics.stage("audit"):
                 model_findings = check_model(runtime["normalized"])
                 saved_findings = check_saved_output(staging_path, runtime["normalized"], runtime["render_result"]["render_map"])
+                appendix_findings = (
+                    audit_native_appendix(runtime["normalized"]["source_ast"], runtime["appendix_semantics"])
+                    if runtime.get("appendix_semantics") is not None
+                    else {"passed": True, "issues": []}
+                )
             runtime["model_findings"] = model_findings
             runtime["saved_findings"] = saved_findings
+            runtime["appendix_findings"] = appendix_findings
             runtime["artifacts"]["model_audit"] = model_findings
             runtime["artifacts"]["saved_output_audit"] = saved_findings
-            return {"model": model_findings, "saved": saved_findings}
+            runtime["artifacts"]["appendix_audit"] = appendix_findings
+            return {"model": model_findings, "saved": saved_findings, "appendix": appendix_findings}
 
         def publisher(runtime: dict[str, Any]) -> bool:
-            audits_passed = runtime["model_findings"].get("passed") is True and runtime["saved_findings"].get("passed") is True
+            audits_passed = (
+                runtime["model_findings"].get("passed") is True
+                and runtime["saved_findings"].get("passed") is True
+                and runtime["appendix_findings"].get("passed") is True
+            )
             fatal_diagnostics = [
                 item for item in runtime["list_result"].get("diagnostics", [])
                 if item.get("severity") in {"error", "warning"}
@@ -942,6 +956,7 @@ class ConversionKernel:
             "render_result": context["render_result"],
             "model_findings": context["model_findings"],
             "saved_findings": context["saved_findings"],
+            "appendix_findings": context["appendix_findings"],
         }
 
     def _convert_modular_native_v2(self, request: ConversionRequest) -> RunResult:
@@ -954,7 +969,12 @@ class ConversionKernel:
         from .metrics import MetricsCollector
         from .parsers import digest_source_facts, parse, summarize_source_facts
         from .resolver import resolve
-        from .semantics.appendices import collect_source_appendix_semantics
+        from .semantics.appendices import (
+            audit_native_appendix,
+            collect_native_appendix_candidates,
+            collect_source_appendix_semantics,
+            prepare_native_appendix_semantics,
+        )
         from .semantics.captions import collect_caption_candidates
         from .semantics.lists import analyze_lists
         from .semantics.protected import collect_protected_candidates
@@ -996,6 +1016,9 @@ class ConversionKernel:
                 list_result = analyze_lists(facts)
                 source_ast = self._facts_to_ast(facts)
                 source_ast, list_candidates, item_map = self._materialize_list_semantics(source_ast, facts, list_result)
+                appendix_semantics = collect_source_appendix_semantics(facts)
+                appendix_semantics = prepare_native_appendix_semantics(facts, source_ast, appendix_semantics, list_result)
+                appendix_candidates = collect_native_appendix_candidates(facts, source_ast, appendix_semantics, list_result)
                 table_source = collect_source_table_semantics(facts)
                 table_candidates = collect_table_candidates(source_ast)
                 caption_candidates = collect_caption_candidates(source_ast)
@@ -1005,6 +1028,7 @@ class ConversionKernel:
                 *structure_candidates,
                 *protected_candidates,
                 *list_candidates,
+                *appendix_candidates,
                 *table_candidates,
                 *caption_candidates,
             ]
@@ -1016,6 +1040,7 @@ class ConversionKernel:
                 candidates,
                 decision_set,
                 list_result,
+                appendix_semantics,
                 store,
                 metrics,
                 staging_path,
@@ -1046,6 +1071,31 @@ class ConversionKernel:
             render_result = native_run["render_result"]
             model_findings = native_run["model_findings"]
             saved_findings = native_run["saved_findings"]
+            appendix_audit = native_run["appendix_findings"]
+            appendix_range_candidate_ids = {
+                str(candidate.get("candidate_id"))
+                for candidate in appendix_candidates
+                if str(candidate.get("candidate_id", "")).startswith("appendix-range-")
+            }
+            appendix_heading_candidate_ids = {
+                str(candidate.get("candidate_id"))
+                for candidate in appendix_candidates
+                if str(candidate.get("candidate_id", "")).startswith("appendix-heading-")
+            }
+            appendix_decision_ids = {
+                str(candidate_id)
+                for decision in decision_set.get("decisions", [])
+                for candidate_id in decision.get("candidate_ids", [])
+            }
+            appendix_consumption = {
+                "candidate_count": len(appendix_candidates),
+                "range_candidate_count": len(appendix_range_candidate_ids),
+                "range_consumed_count": len(appendix_range_candidate_ids & appendix_decision_ids),
+                "heading_candidate_count": len(appendix_heading_candidate_ids),
+                "heading_consumed_count": len(appendix_heading_candidate_ids & appendix_decision_ids),
+                "unmatched_count": len(appendix_range_candidate_ids | appendix_heading_candidate_ids) - len((appendix_range_candidate_ids | appendix_heading_candidate_ids) & appendix_decision_ids),
+                "ambiguous_count": len(decision_set.get("unresolved") or []),
+            }
 
             diagnostics = list(list_result.get("diagnostics") or [])
             if not source_facts_immutable:
@@ -1057,13 +1107,19 @@ class ConversionKernel:
             diagnostics.extend(decision_set.get("unresolved") or [])
             diagnostics.extend(model_findings.get("issues") or [])
             diagnostics.extend(saved_findings.get("issues") or [])
-            audits_passed = model_findings.get("passed") is True and saved_findings.get("passed") is True
+            diagnostics.extend(appendix_audit.get("issues") or [])
+            audits_passed = (
+                model_findings.get("passed") is True
+                and saved_findings.get("passed") is True
+                and appendix_audit.get("passed") is True
+            )
             blocking_diagnostics = [
                 item
                 for item in diagnostics
                 if item in (decision_set.get("unresolved") or [])
                 or item in (model_findings.get("issues") or [])
                 or item in (saved_findings.get("issues") or [])
+                or item in (appendix_audit.get("issues") or [])
                 or item.get("severity") in {"error", "warning"}
             ]
             if native_run["status"] != "published" or not audits_passed or blocking_diagnostics:
@@ -1076,6 +1132,9 @@ class ConversionKernel:
                     "decision_set": decision_set,
                     "model_audit": model_findings,
                     "saved_output_audit": saved_findings,
+                    "appendix_semantics": appendix_semantics,
+                    "appendix_semantics_consumption": appendix_consumption,
+                    "appendix_preservation_audit": appendix_audit,
                     "execution_plan": {
                         "profile": "wx_full_rules-native-v2",
                         "modules": self._native_execution_plan_report(execution_plan),
@@ -1095,9 +1154,9 @@ class ConversionKernel:
                 "list_semantics": self._native_capability_status("list_semantics", candidates, decision_set, committed, audits_passed),
                 "table_semantics": self._native_capability_status("table_semantics", candidates, decision_set, committed, audits_passed),
                 "caption_semantics": self._native_capability_status("caption_semantics", candidates, decision_set, committed, audits_passed),
+                "appendix_semantics": self._native_capability_status("appendix_semantics", candidates, decision_set, committed, audits_passed),
             }
             capability_status["source_parser"] = "consumed" if audits_passed else "consumed_mismatch"
-            capability_status["appendix_semantics"] = "delivered"
             item_candidate_ids = {
                 str(candidate.get("candidate_id"))
                 for candidate in list_candidates
@@ -1166,7 +1225,9 @@ class ConversionKernel:
                     "ambiguous_count": len(decision_set.get("unresolved") or []),
                 },
                 "table_semantics": {"candidate_count": len(table_candidates), "source_count": len(table_source)},
-                "appendix_semantics": collect_source_appendix_semantics(facts),
+                "appendix_semantics": appendix_semantics,
+                "appendix_semantics_consumption": appendix_consumption,
+                "appendix_preservation_audit": appendix_audit,
                 "native_transaction": {
                     "status": committed.status,
                     "transaction_id": committed.transaction_id,

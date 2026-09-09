@@ -112,6 +112,12 @@ def _write_inline(paragraph: Any, inline_content: list[Mapping[str, Any]], resou
 
 
 def _style_for_block(block: Mapping[str, Any], styles: Mapping[str, str]) -> str | None:
+    appendix_role = block.get("appendix_role")
+    if appendix_role == "title":
+        return styles.get("appendix_title", "附录标题")
+    if appendix_role == "heading":
+        level = int(block.get("appendix_relative_level") or block.get("level") or 1)
+        return styles.get(f"appendix_heading_{level}", f"附录{level}级标题")
     role = block.get("role")
     if role == "title":
         return styles.get("title", "文档标题")
@@ -160,6 +166,7 @@ def render(
     paragraph_counter = 0
     table_counter = 0
     initial_cell_paragraphs: set[int] = set()
+    pending_page_break = False
 
     def add_paragraph(
         node_id: str,
@@ -169,7 +176,7 @@ def render(
         numbering: Mapping[str, Any] | None = None,
         parent: Any | None = None,
     ) -> Any:
-        nonlocal paragraph_counter
+        nonlocal paragraph_counter, pending_page_break
         style = list_style or _style_for_block(block, styles)
         if parent is None:
             try:
@@ -195,6 +202,9 @@ def render(
                 except KeyError:
                     paragraph = parent.add_paragraph()
         _write_inline(paragraph, block.get("inline_content", []), resources)
+        if pending_page_break:
+            paragraph.paragraph_format.page_break_before = True
+            pending_page_break = False
         actual_style = paragraph.style.name if paragraph.style is not None else ""
         paragraph_counter += 1
         render_map[node_id] = {
@@ -359,6 +369,7 @@ def render(
             render_node(child_id, parent=parent)
 
     def render_node(node_id: str, *, parent: Any | None = None) -> None:
+        nonlocal pending_page_break
         if node_id in document["blocks"]:
             render_block(node_id, parent=parent)
             return
@@ -368,6 +379,8 @@ def render(
         if container.get("kind") == "list_item":
             render_list_item(node_id, parent=parent)
             return
+        if container.get("kind") == "appendix" and container.get("page_break_before") is True:
+            pending_page_break = True
         render_children(node_id, parent=parent)
 
     render_children(document["root_id"])

@@ -50,6 +50,30 @@ def _scope_for_node(
     return "scope:document"
 
 
+def _semantic_scope_for_node(
+    document: Mapping[str, Any],
+    indexes: Any,
+    node_id: str,
+) -> str:
+    node = document["containers"].get(node_id) or document["blocks"].get(node_id) or {}
+    explicit = node.get("semantic_scope_id")
+    if isinstance(explicit, str) and explicit:
+        return explicit
+    current = node_id
+    while current is not None:
+        container = document["containers"].get(current, {})
+        kind = container.get("kind")
+        if kind == "appendix":
+            appendix_id = str(container.get("appendix_id") or current)
+            return str(container.get("semantic_scope_id") or f"semantic:appendix:{appendix_id}")
+        if kind == "section":
+            return f"semantic:section:{current}"
+        if kind in {"table_cell", "quote"}:
+            return f"semantic:{kind}:{current}"
+        current = indexes.parent_by_id.get(current)
+    return "semantic:main"
+
+
 def _list_contexts(ast: Mapping[str, Any], indexes: Any) -> dict[str, dict[str, Any]]:
     document = ast["document"]
     contexts: dict[str, dict[str, Any]] = {}
@@ -62,10 +86,13 @@ def _list_contexts(ast: Mapping[str, Any], indexes: Any) -> dict[str, dict[str, 
             current = indexes.parent_by_id[current]
             if document["containers"].get(current, {}).get("kind") == "list":
                 depth += 1
-        scope_id = _scope_for_node(document, indexes, list_id)
+        numbering_scope_id = _scope_for_node(document, indexes, list_id)
+        semantic_scope_id = _semantic_scope_for_node(document, indexes, list_id)
         contexts[list_id] = {
             "depth": depth,
-            "scope_id": scope_id,
+            "scope_id": numbering_scope_id,
+            "numbering_scope_id": numbering_scope_id,
+            "semantic_scope_id": semantic_scope_id,
             "list_kind": container.get("list_kind", "ordered"),
             "source_sequence_id": container.get("source_sequence_id", list_id),
             "source_start": max(1, int(container.get("source_start") or 1)),
@@ -151,7 +178,7 @@ def normalize(
         marker_anchor, generated = _anchor(ast, item_id)
         item_by_node[item_id] = {
             "marker_anchor": marker_anchor,
-            "target_sequence": list_info["scope_id"] if strategy == "wx-default-v2" else list_info["source_sequence_id"],
+            "target_sequence": list_info["numbering_scope_id"] if strategy == "wx-default-v2" else list_info["source_sequence_id"],
             "target_level": target_level,
             "marker_kind": list_info["list_kind"],
             "source_marker": container.get("source_marker"),
@@ -161,6 +188,8 @@ def normalize(
             "restart": False,
             "style_role": _style_role(list_info["list_kind"], target_level),
             "scope_id": list_info["scope_id"],
+            "numbering_scope_id": list_info["numbering_scope_id"],
+            "semantic_scope_id": list_info["semantic_scope_id"],
             "generated_anchor": bool(generated),
         }
 
@@ -174,6 +203,7 @@ def normalize(
         if block is not None and (
             block.get("block_type") == "heading"
             or block.get("role") in {"heading", "appendix_title"}
+            or block.get("appendix_role") in {"title", "heading"}
         ):
             scope_id = heading_scope(node_id)
             if scope_id is not None:
