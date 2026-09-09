@@ -615,6 +615,93 @@ class ConversionKernel:
         validate_ast(ast)
         return ast, candidates, item_map
 
+    @staticmethod
+    def _native_preflight(source_ast: Mapping[str, Any], source_type: str, list_policy: str) -> Any:
+        """Validate the native module contract before candidate execution."""
+
+        from .contracts import AST_BLOCK_TYPES, AST_CONTAINER_KINDS
+        from .registry import ModuleDescriptor, build_plan
+
+        supported_nodes = tuple(sorted(set(AST_BLOCK_TYPES) | set(AST_CONTAINER_KINDS)))
+        common = {
+            "contract_version": "2.0",
+            "supported_source_types": ("markdown", "docx", "text"),
+            "supported_node_kinds": supported_nodes,
+            "failure_policy": "fail",
+        }
+        descriptors = (
+            ModuleDescriptor("native-source-parser", "2.0", ("source",), (), ("source_facts",), **common),
+            ModuleDescriptor("native-candidate-set", "2.0", ("scope", "role", "relation"), ("source_facts",), ("candidate_set",), **common),
+            ModuleDescriptor("native-resolver", "2.0", ("relation",), ("candidate_set",), ("decision_set",), **common),
+            ModuleDescriptor("native-transaction", "2.0", ("relation",), ("decision_set",), ("source_ast_revision",), **common),
+            ModuleDescriptor("native-normalizer", "2.0", ("normalize",), ("source_ast_revision",), ("normalized",), **common),
+            ModuleDescriptor("native-renderer", "2.0", ("render",), ("normalized",), ("render_plan",), **common),
+            ModuleDescriptor(
+                "native-auditor",
+                "2.0",
+                ("audit",),
+                ("render_plan",),
+                ("model_audit", "saved_output_audit"),
+                required_audits=("model_audit", "saved_output_audit"),
+                **common,
+            ),
+            ModuleDescriptor(
+                "native-publisher",
+                "2.0",
+                ("publish",),
+                ("saved_output_audit",),
+                ("published_output",),
+                **common,
+            ),
+        )
+        node_kinds = {
+            str(node.get("block_type") or node.get("kind"))
+            for collection in (source_ast["document"]["blocks"], source_ast["document"]["containers"])
+            for node in collection.values()
+            if node.get("block_type") or node.get("kind")
+        }
+        return build_plan(
+            {
+                "pipeline": "modular",
+                "list_policy": list_policy,
+                "source_type": source_type,
+                "node_kinds": sorted(node_kinds),
+                "available_audits": ("model_audit", "saved_output_audit"),
+            },
+            descriptors,
+        )
+
+    @staticmethod
+    def _native_capability_status(
+        module_id: str,
+        candidates: list[Mapping[str, Any]],
+        decision_set: Mapping[str, Any],
+        committed: Any,
+        audits_passed: bool,
+    ) -> str:
+        """Derive delivery state from candidate IDs, resolution and commit evidence."""
+
+        module_candidates = [candidate for candidate in candidates if candidate.get("module_id") == module_id]
+        if not module_candidates:
+            return "delivered"
+        candidate_ids = {str(candidate.get("candidate_id")) for candidate in module_candidates}
+        decision_ids = {
+            str(candidate_id)
+            for decision in decision_set.get("decisions", [])
+            for candidate_id in decision.get("candidate_ids", [])
+            if candidate_id is not None
+        }
+        unresolved_ids = {
+            str(candidate_id)
+            for unresolved in decision_set.get("unresolved", [])
+            for candidate_id in unresolved.get("candidate_ids", [])
+        }
+        if unresolved_ids & candidate_ids or not candidate_ids.issubset(decision_ids):
+            return "partial"
+        if committed.status in {"committed", "already_committed"} and audits_passed:
+            return "consumed"
+        return "consumed_mismatch"
+
     def _convert_modular_native_v2(self, request: ConversionRequest) -> RunResult:
         """Run the modular source, decision, transaction and render chain."""
 
@@ -669,6 +756,8 @@ class ConversionKernel:
                 table_source = collect_source_table_semantics(facts)
                 table_candidates = collect_table_candidates(source_ast)
                 caption_candidates = collect_caption_candidates(source_ast)
+
+            execution_plan = self._native_preflight(source_ast, facts["source"]["source_type"], request.list_policy)
 
             candidates = [
                 *regions.get("candidates", []),
@@ -733,12 +822,23 @@ class ConversionKernel:
             diagnostics.extend(decision_set.get("unresolved") or [])
             diagnostics.extend(model_findings.get("issues") or [])
             diagnostics.extend(saved_findings.get("issues") or [])
-            list_audit_passed = (
-                not list_result.get("diagnostics")
-                and model_findings.get("passed") is True
-                and saved_findings.get("passed") is True
+            audits_passed = model_findings.get("passed") is True and saved_findings.get("passed") is True
+            capability_status = {
+                "source_region": self._native_capability_status("source_regions", candidates, decision_set, committed, audits_passed),
+                "document_structure": self._native_capability_status("source_structure", candidates, decision_set, committed, audits_passed),
+                "protected_content": self._native_capability_status("protected_content", candidates, decision_set, committed, audits_passed),
+                "list_semantics": self._native_capability_status("list_semantics", candidates, decision_set, committed, audits_passed),
+                "table_semantics": self._native_capability_status("table_semantics", candidates, decision_set, committed, audits_passed),
+                "caption_semantics": self._native_capability_status("caption_semantics", candidates, decision_set, committed, audits_passed),
+            }
+            capability_status["source_parser"] = "consumed" if audits_passed else "consumed_mismatch"
+            capability_status["appendix_semantics"] = "delivered"
+            list_candidate_ids = {str(candidate.get("candidate_id")) for candidate in list_candidates}
+            list_consumed_count = sum(
+                1
+                for decision in decision_set.get("decisions", [])
+                if list_candidate_ids.intersection(str(item) for item in decision.get("candidate_ids", []))
             )
-            capability_state = "consumed" if committed.status in {"committed", "already_committed"} and list_audit_passed else "consumed_mismatch"
             status = "completed" if not diagnostics else "completed_with_warnings"
             report.update({
                 "status": status,
@@ -765,11 +865,11 @@ class ConversionKernel:
                 "list_semantics_consumption": {
                     "candidate_count": len(list_candidates),
                     "item_candidate_count": len(list_result["items"]),
-                    "item_consumed_count": len(list_candidates),
+                    "item_consumed_count": list_consumed_count,
                     "continuation_candidate_count": len(list_result["continuations"]),
-                    "continuation_consumed_count": len(list_result["continuations"]),
+                    "continuation_consumed_count": 0,
                     "unmatched_count": 0,
-                    "ambiguous_count": 0,
+                    "ambiguous_count": len(decision_set.get("unresolved") or []),
                 },
                 "table_semantics": {"candidate_count": len(table_candidates), "source_count": len(table_source)},
                 "appendix_semantics": collect_source_appendix_semantics(facts),
@@ -785,17 +885,14 @@ class ConversionKernel:
                     "presentation_overrides": snapshot.presentation_overrides,
                 },
                 "decision_set": decision_set,
+                "execution_plan": {
+                    "profile": "wx_full_rules-native-v2",
+                    "modules": [{"module_id": module.module_id, "version": module.version} for module in execution_plan.modules],
+                },
                 "model_audit": model_findings,
                 "saved_output_audit": saved_findings,
                 "capability_migration": {
-                    "source_parser": "consumed",
-                    "source_region": "consumed",
-                    "document_structure": "consumed",
-                    "protected_content": "consumed",
-                    "list_semantics": capability_state,
-                    "table_semantics": "consumed",
-                    "caption_semantics": "consumed",
-                    "appendix_semantics": "consumed",
+                    **capability_status,
                 },
             })
             artifacts = {"docx": str(request.output_path)}

@@ -1244,7 +1244,11 @@ def _modular_native_v2_enabled(args) -> bool:
 
     if args.llm_enhance != "off" or args.resume or args.generate_requests:
         return False
-    if args.list_policy != "wx-default-v2" or args.input is None:
+    if args.input is None:
+        return False
+    if args.modular_profile == "native-v2":
+        return True
+    if args.list_policy != "wx-default-v2":
         return False
     if args.input.suffix.lower() == ".docx":
         return True
@@ -1360,6 +1364,7 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
     parser.add_argument("--output", type=Path, help="Output .docx path (optional when --resume is used)")
     parser.add_argument("--template", type=Path, default=None, help="DOCX template driving styles and numbering.")
     parser.add_argument("--pipeline", choices=["legacy", "modular"], default="legacy")
+    parser.add_argument("--modular-profile", choices=["legacy-full-v1", "native-v2"], default="legacy-full-v1")
     parser.add_argument("--list-policy", choices=["legacy", "wx-default-v2"], default="legacy")
     parser.add_argument("--strict-normalize", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--report", type=Path, default=None)

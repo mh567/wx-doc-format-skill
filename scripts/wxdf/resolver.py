@@ -75,7 +75,11 @@ def _decision_from_candidate(candidate: Mapping[str, Any], expected_revision: in
         if isinstance(list_item_id, str) and isinstance(list_parent_id, str):
             operation = "move_node"
             target_node_ids = [list_item_id]
-            value = {"new_parent_id": list_parent_id, "source_semantics": "preserved"}
+            value = {
+                "new_parent_id": list_parent_id,
+                "source_operation": "retype_list_item",
+                "source_semantics": "list_item",
+            }
     property_scope = list(proposal.get("property_scope") or candidate.get("property_scope") or [])
     if operation == "set_presentation_override" and not property_scope:
         property_scope = ["presentation"]
