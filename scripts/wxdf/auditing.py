@@ -120,6 +120,7 @@ def check_saved_output(path: Path | str, expected: Mapping[str, Any], render_map
                     parsed_ilvl = 0
                 style_num_info[style_id] = (parsed_num_id, parsed_ilvl)
     expected_numbered_style_ids = {style_id for style_id, name in style_names.items() if name in expected_numbered_styles}
+    expected_style_ids_by_name = {name: style_id for style_id, name in style_names.items() if name in expected_numbered_styles}
     valid_num_fmts = {"decimal", "decimalZero", "lowerLetter", "upperLetter", "lowerRoman", "upperRoman", "bullet"}
     numbering_num_to_abstract: dict[int, int] = {}
     numbering_levels: dict[int, dict[int, str]] = {}
@@ -215,6 +216,9 @@ def check_saved_output(path: Path | str, expected: Mapping[str, Any], render_map
         numbering = expected_item.get("numbering") or {}
         expected_kind = numbering.get("marker_kind")
         expected_level = numbering.get("target_level")
+        expected_style_id = expected_style_ids_by_name.get(str(expected_item.get("style") or ""))
+        if expected_style_id in style_num_info:
+            expected_level = style_num_info[expected_style_id][1]
         expected_fmt = None
         if expected_kind == "unordered":
             expected_fmt = "bullet"
