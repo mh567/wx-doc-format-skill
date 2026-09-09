@@ -169,6 +169,40 @@ P1 聚焦回归：
 
 最终双轴 review：Standards 通过，Spec 通过。未跟踪 `_build/` 和 `paseo.json` 保持原状，未纳入提交。列表语义物化时点和通用 Resolver protected-node 集合属于后续架构复核项，当前 L11 验收不阻断。
 
+## L12 正文标题、附录和编号作用域验收
+
+2026-09-10 增加 `tests/test_issue5_acceptance.py`，覆盖 Markdown 和动态 DOCX 两类输入。用例包含正文标题、两个附录、附录内相对标题、附录内列表、附录标题样式、附录分页，以及 DOCX 普通正文“附录 A 一”这类相似文本的误识别防护。
+
+初始红灯：
+
+1. 新增验收首先因 SourceFacts 附录范围缺少 root 节点映射失败。
+2. DOCX 列表段落同时命中列表关系和附录移动候选，Resolver 出现 `candidate_conflict`。
+3. 生成列表容器在附录移动后才接收源段落，附录范围审计发现节点作用域元数据缺失。
+
+修复内容：
+
+1. SourceFacts 附录范围记录起止 root 节点和标题节点，native 候选通过 create、move 和语义更新操作进入 Resolver 与单批事务。DOCX 生成列表容器先映射到附录范围，避免与列表关系候选争用同一源段落。
+2. 附录标题候选使用 Heading、专用附录样式、空标题标记或分类后缀作为证据，普通正文相似文本不会开启新附录范围。
+3. 事务对同一父容器内的 create 和 move 决策按源位置稳定排序。移动时向目标节点及后代传播 `appendix_id`、`semantic_scope_id` 和源编号保真标记，附录审计逐节点核对范围归属、标题元数据、相对层级和分页边界。
+4. Normalize 展示节点同时保留 `numbering_scope_id` 和 `semantic_scope_id`。模板编号继续按 document scope 计算，附录语义通过独立 semantic scope 记录。Renderer 使用附录标题和一级至三级附录标题样式，并将唯一分页边界写入输出段落。
+5. 附录审计在 native Audit 阶段执行并纳入 Publisher 门禁，审计失败时不替换最终输出。
+
+验证：
+
+专项测试：`scripts/.venv/bin/python3 -m pytest tests/test_issue5_acceptance.py -q`，退出码 `0`，`2 passed`。
+
+附录和 native 相关回归：`scripts/.venv/bin/python3 -m pytest tests/test_issue5_acceptance.py tests/test_modular_appendix_consumption.py tests/test_modular_semantics.py tests/test_modular_normalization.py tests/test_modular_lists.py tests/test_modular_rendering.py tests/test_modular_conversion.py tests/test_modular_kernel.py -q`，退出码 `0`，`40 passed`。
+
+完整回归：`scripts/.venv/bin/python3 -m pytest tests/ -q`，退出码 `0`，`450 passed in 28.77s`。
+
+差异检查：`git diff --check`，退出码 `0`。
+
+最终审查：Standards reviewer 发现范围普通块缺少显式附录归属和审计覆盖，已修复并由专项测试验证。规格审查按 L12 条款完成本地核对，候选消费、DOCX/Markdown 范围、编号与语义作用域分离、节点元数据和保存后分页均通过。reviewer 自动实例在限定时间内未返回规格终稿，未将其记为通过。
+
+提交：`acd6ed2`。当前未推送远程。
+
+下一步：开始 L13 验收。
+
 ## 真实转换证据
 
 Markdown `input/benchmark_report.md` 通过显式 `--modular-profile native-v2` 转换成功，命令退出码为 `0`。报告路径为 `/tmp/wx-issue1-native-p1-markdown-report.json`，报告显示 `execution_plan.profile=wx_full_rules-native-v2`、八个 native 模块均列入执行计划、事务状态 `committed`、决策数 `21`、模型审计和保存后审计均通过。输出路径为 `/tmp/wx-issue1-native-p1-markdown.docx`，`unzip -t` 退出码为 `0`。
