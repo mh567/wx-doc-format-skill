@@ -11,6 +11,7 @@ from zipfile import ZipFile
 from docx import Document
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
+from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from lxml import etree
 
 from table_formatting import normalize_table
@@ -88,27 +89,73 @@ def _attach_image_artifact_metadata(output_path: Path, render_map: dict[str, dic
         target_index += count
 
 
+def _apply_marks(run: Any, item: Mapping[str, Any]) -> None:
+    marks = set(item.get("marks", []))
+    if "strong" in marks:
+        run.bold = True
+    if "emphasis" in marks:
+        run.italic = True
+
+
+def _write_image(paragraph: Any, resource_id: Any, resources: Mapping[str, Any]) -> Any:
+    resource = resources.get(resource_id)
+    run = paragraph.add_run()
+    if isinstance(resource, (bytes, bytearray)):
+        run.add_picture(io.BytesIO(resource))
+    elif isinstance(resource, (str, Path)):
+        run.add_picture(str(resource))
+    else:
+        raise RenderError(f"resource {resource_id!r} has no renderable bytes or path")
+    return run
+
+
+def _move_run_to_hyperlink(paragraph: Any, hyperlink: Any, run: Any) -> None:
+    paragraph._p.remove(run._r)
+    hyperlink.append(run._r)
+
+
+def _write_link(paragraph: Any, item: Mapping[str, Any], resources: Mapping[str, Any]) -> None:
+    target = str(item.get("target") or "")
+    hyperlink = OxmlElement("w:hyperlink")
+    if target.startswith("#"):
+        hyperlink.set(qn("w:anchor"), target[1:])
+    else:
+        relationship_id = paragraph.part.relate_to(target, RT.HYPERLINK, is_external=True)
+        hyperlink.set(qn("r:id"), relationship_id)
+    paragraph._p.append(hyperlink)
+    for child in item.get("children", []):
+        kind = child.get("kind")
+        if kind == "text":
+            run = paragraph.add_run(str(child.get("text") or ""))
+            _apply_marks(run, child)
+            run.underline = True
+            _move_run_to_hyperlink(paragraph, hyperlink, run)
+        elif kind == "break":
+            run = paragraph.add_run()
+            run.add_break()
+            _move_run_to_hyperlink(paragraph, hyperlink, run)
+        elif kind == "tab":
+            run = paragraph.add_run("\t")
+            _move_run_to_hyperlink(paragraph, hyperlink, run)
+        elif kind == "image":
+            run = _write_image(paragraph, child.get("resource_id"), resources)
+            _move_run_to_hyperlink(paragraph, hyperlink, run)
+
+
 def _write_inline(paragraph: Any, inline_content: list[Mapping[str, Any]], resources: Mapping[str, Any]) -> None:
     for item in inline_content:
         kind = item.get("kind")
         if kind == "text":
-            paragraph.add_run(str(item.get("text") or ""))
+            run = paragraph.add_run(str(item.get("text") or ""))
+            _apply_marks(run, item)
         elif kind == "break":
             paragraph.add_run().add_break()
         elif kind == "tab":
             paragraph.add_run("\t")
         elif kind == "link":
-            run = paragraph.add_run(_text(item.get("children", []), resources))
-            run.underline = True
+            _write_link(paragraph, item, resources)
         elif kind == "image":
-            resource_id = item.get("resource_id")
-            resource = resources.get(resource_id)
-            if isinstance(resource, (bytes, bytearray)):
-                paragraph.add_run().add_picture(io.BytesIO(resource))
-            elif isinstance(resource, (str, Path)):
-                paragraph.add_run().add_picture(str(resource))
-            else:
-                raise RenderError(f"resource {resource_id!r} has no renderable bytes or path")
+            _write_image(paragraph, item.get("resource_id"), resources)
 
 
 def _style_for_block(block: Mapping[str, Any], styles: Mapping[str, str]) -> str | None:
@@ -211,6 +258,7 @@ def render(
             "kind": "paragraph",
             "paragraph": paragraph_counter,
             "text": paragraph.text,
+            "inline_content": block.get("inline_content", []),
             "role": block.get("role"),
             "style": actual_style,
             "numbered": actual_style in {"List Number", "List Bullet"} or "列项" in actual_style,

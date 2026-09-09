@@ -359,14 +359,23 @@ def _docx_inline_content(paragraph: Any, handle: SourceHandle, node_path: list[s
     from docx.oxml.ns import qn
 
     content: list[dict[str, Any]] = []
-    if paragraph.text:
-        content.append({"kind": "text", "text": paragraph.text, "marks": []})
-    for element in paragraph._p.iter():
-        if not str(element.tag).endswith("}blip"):
-            continue
-        relationship_id = element.get(qn("r:embed"))
+    image_tags = {qn("a:blip"), "{urn:schemas-microsoft-com:vml}imagedata"}
+
+    def run_marks(run: Any) -> list[str]:
+        marks: list[str] = []
+        properties = run.find(qn("w:rPr"))
+        if properties is None:
+            return marks
+        if properties.find(qn("w:b")) is not None:
+            marks.append("strong")
+        if properties.find(qn("w:i")) is not None:
+            marks.append("emphasis")
+        return marks
+
+    def append_image(blip: Any, path: list[str | int], target: list[dict[str, Any]]) -> None:
+        relationship_id = blip.get(qn("r:embed")) or blip.get(qn("r:id"))
         if not relationship_id:
-            continue
+            return
         resource_id = _stable_id("res", handle.source_id, relationship_id)
         if resource_id not in resources:
             part = paragraph.part.related_parts.get(relationship_id)
@@ -374,11 +383,51 @@ def _docx_inline_content(paragraph: Any, handle: SourceHandle, node_path: list[s
             media_part = str(getattr(part, "partname", "word/media/unknown")).lstrip("/")
             resources[resource_id] = {
                 "kind": "image",
-                "source_ref": _source_ref(handle, media_part, node_path=[*node_path, "drawing", relationship_id], parser_version=parser_version),
+                "source_ref": _source_ref(handle, media_part, node_path=[*path, relationship_id], parser_version=parser_version),
                 "content_sha256": _digest(blob),
                 "dependencies": [],
             }
-        content.append({"kind": "image", "resource_id": resource_id, "alt_text": ""})
+        target.append({"kind": "image", "resource_id": resource_id, "alt_text": ""})
+
+    def parse_children(parent: Any, target: list[dict[str, Any]], path: list[str | int]) -> None:
+        for index, child in enumerate(list(parent)):
+            tag = child.tag
+            child_path = [*path, index]
+            if tag == qn("w:r"):
+                marks = run_marks(child)
+                for run_child in list(child):
+                    run_tag = run_child.tag
+                    if run_tag == qn("w:rPr"):
+                        continue
+                    if run_tag == qn("w:t"):
+                        target.append({"kind": "text", "text": run_child.text or "", "marks": list(marks)})
+                    elif run_tag == qn("w:tab"):
+                        target.append({"kind": "tab"})
+                    elif run_tag in {qn("w:br"), qn("w:cr")}:
+                        target.append({"kind": "break"})
+                    elif run_tag in {qn("w:drawing"), qn("w:pict")} or any(
+                        element.tag in image_tags for element in run_child.iter()
+                    ):
+                        for image_ref in run_child.iter():
+                            if image_ref.tag in image_tags:
+                                append_image(image_ref, child_path, target)
+            elif tag == qn("w:hyperlink"):
+                relationship_id = child.get(qn("r:id"))
+                relationship = paragraph.part.rels.get(relationship_id) if relationship_id else None
+                target_url = getattr(relationship, "target_ref", None) if relationship is not None else None
+                if not target_url:
+                    anchor = child.get(qn("w:anchor"))
+                    target_url = f"#{anchor}" if anchor else None
+                children: list[dict[str, Any]] = []
+                parse_children(child, children, child_path)
+                if target_url and children:
+                    target.append({"kind": "link", "target": str(target_url), "children": children})
+                else:
+                    target.extend(children)
+            elif tag != qn("w:pPr"):
+                parse_children(child, target, child_path)
+
+    parse_children(paragraph._p, content, node_path)
     return content
 
 

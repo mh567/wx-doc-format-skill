@@ -38,6 +38,71 @@ def _expected_paragraph_texts(expected: Mapping[str, Any], render_map: Mapping[s
     return [str(item.get("text") or "") for item in render_map.values() if item.get("kind") == "paragraph"]
 
 
+def _inline_signature(inline_content: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    signature: list[dict[str, Any]] = []
+    for item in inline_content:
+        kind = item.get("kind")
+        if kind == "text":
+            signature.append({"kind": "text", "text": str(item.get("text") or "")})
+        elif kind in {"break", "tab", "image"}:
+            signature.append({"kind": str(kind)})
+        elif kind == "link":
+            signature.append(
+                {
+                    "kind": "link",
+                    "target": str(item.get("target") or ""),
+                    "children": _inline_signature(list(item.get("children") or [])),
+                }
+            )
+    return signature
+
+
+def _xml_inline_signature(element: Any, hyperlink_targets: Mapping[str, str]) -> list[dict[str, Any]]:
+    signature: list[dict[str, Any]] = []
+    text_tag = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t"
+    tab_tag = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}tab"
+    break_tags = {
+        "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}br",
+        "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}cr",
+    }
+    for child in list(element):
+        local_name = child.tag.rsplit("}", 1)[-1]
+        if local_name in {"pPr", "rPr"}:
+            continue
+        if local_name == "hyperlink":
+            relation_id = child.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id")
+            target = hyperlink_targets.get(relation_id or "")
+            if target is None:
+                anchor = child.get("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}anchor")
+                target = f"#{anchor}" if anchor else ""
+            signature.append(
+                {
+                    "kind": "link",
+                    "target": target,
+                    "children": _xml_inline_signature(child, hyperlink_targets),
+                }
+            )
+            continue
+        if local_name == "r":
+            for run_child in list(child):
+                if run_child.tag == text_tag:
+                    signature.append({"kind": "text", "text": run_child.text or ""})
+                elif run_child.tag == tab_tag:
+                    signature.append({"kind": "tab"})
+                elif run_child.tag in break_tags:
+                    signature.append({"kind": "break"})
+                elif any(node.tag.rsplit("}", 1)[-1] == "blip" for node in run_child.iter()):
+                    blip_count = sum(1 for node in run_child.iter() if node.tag.rsplit("}", 1)[-1] == "blip")
+                    signature.extend({"kind": "image"} for _ in range(blip_count))
+            continue
+        signature.extend(_xml_inline_signature(child, hyperlink_targets))
+    return signature
+
+
+def _has_inline_contract(inline_content: list[Mapping[str, Any]]) -> bool:
+    return any(item.get("kind") in {"image", "link", "break", "tab"} for item in inline_content)
+
+
 def check_saved_output(path: Path | str, expected: Mapping[str, Any], render_map: Mapping[str, Any]) -> dict[str, Any]:
     issues: list[dict[str, Any]] = []
     output = Path(path)
@@ -107,6 +172,45 @@ def check_saved_output(path: Path | str, expected: Mapping[str, Any], render_map
     expected_texts = [text for text in _expected_paragraph_texts(expected, render_map) if text]
     if actual_texts != expected_texts:
         issues.append({"code": "paragraph_order_changed", "expected": expected_texts, "actual": actual_texts})
+    hyperlink_targets: dict[str, str] = {}
+    if relationships_xml is not None:
+        relationships_root = ElementTree.fromstring(relationships_xml)
+        hyperlink_targets = {
+            relationship.get("Id"): relationship.get("Target") or ""
+            for relationship in relationships_root
+            if relationship.get("Type", "").endswith("/hyperlink")
+        }
+    used_paragraph_indexes: set[int] = set()
+    for node_id, item in render_map.items():
+        if item.get("kind") != "paragraph" or not _has_inline_contract(item.get("inline_content", [])):
+            continue
+        expected_signature = _inline_signature(item.get("inline_content", []))
+        expected_text = str(item.get("text") or "")
+        if not expected_text:
+            continue
+        candidate = next(
+            (
+                (index, paragraph)
+                for index, paragraph in enumerate(xml_paragraphs)
+                if index not in used_paragraph_indexes and paragraph_text(paragraph) == expected_text
+            ),
+            None,
+        )
+        if candidate is None:
+            issues.append({"code": "inline_paragraph_missing", "node_id": node_id, "expected_text": expected_text})
+            continue
+        index, paragraph = candidate
+        used_paragraph_indexes.add(index)
+        actual_signature = _xml_inline_signature(paragraph, hyperlink_targets)
+        if actual_signature != expected_signature:
+            issues.append(
+                {
+                    "code": "inline_content_changed",
+                    "node_id": node_id,
+                    "expected": expected_signature,
+                    "actual": actual_signature,
+                }
+            )
     expected_tables = expected.get("expected_table_count")
     if expected_tables is None:
         expected_tables = sum(1 for item in render_map.values() if item.get("kind") == "table")
