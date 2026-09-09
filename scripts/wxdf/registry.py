@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Mapping
 
 from .contracts import AST_BLOCK_TYPES, AST_CONTAINER_KINDS, SOURCE_TYPES, STAGES
 
@@ -115,9 +115,12 @@ class ModuleRegistry:
         return results
 
 
-def build_native_v2_registry() -> ModuleRegistry:
+def build_native_v2_registry(
+    bindings: Mapping[str, Callable[[Any], Any]] | None = None,
+) -> ModuleRegistry:
     """Return the registered contract for the direct native-v2 stage chain."""
 
+    bindings = dict(bindings or {})
     supported_nodes = tuple(sorted(set(AST_BLOCK_TYPES) | set(AST_CONTAINER_KINDS)))
     common = {
         "contract_version": "2.0",
@@ -126,33 +129,40 @@ def build_native_v2_registry() -> ModuleRegistry:
         "failure_policy": "fail",
     }
 
-    def bind(_context: Any) -> None:
-        """Bind a native stage contract to the direct kernel implementation."""
+    def binding_for(module_id: str) -> Callable[[Any], Any]:
+        binding = bindings.get(module_id)
+        if binding is not None:
+            return binding
+
+        def missing_binding(_context: Any) -> None:
+            raise PlanError(f"native module {module_id} has no runtime binding")
+
+        return missing_binding
 
     return ModuleRegistry([
         RegisteredModule(
             ModuleDescriptor("native-source-parser", "2.0", ("source",), (), ("source_facts",), **common),
-            bind,
+            binding_for("native-source-parser"),
         ),
         RegisteredModule(
             ModuleDescriptor("native-candidate-set", "2.0", ("scope", "role", "relation"), ("source_facts",), ("candidate_set",), **common),
-            bind,
+            binding_for("native-candidate-set"),
         ),
         RegisteredModule(
             ModuleDescriptor("native-resolver", "2.0", ("relation",), ("candidate_set",), ("decision_set",), **common),
-            bind,
+            binding_for("native-resolver"),
         ),
         RegisteredModule(
             ModuleDescriptor("native-transaction", "2.0", ("relation",), ("decision_set",), ("source_ast_revision",), **common),
-            bind,
+            binding_for("native-transaction"),
         ),
         RegisteredModule(
             ModuleDescriptor("native-normalizer", "2.0", ("normalize",), ("source_ast_revision",), ("normalized",), **common),
-            bind,
+            binding_for("native-normalizer"),
         ),
         RegisteredModule(
             ModuleDescriptor("native-renderer", "2.0", ("render",), ("normalized",), ("render_plan",), **common),
-            bind,
+            binding_for("native-renderer"),
         ),
         RegisteredModule(
             ModuleDescriptor(
@@ -164,7 +174,7 @@ def build_native_v2_registry() -> ModuleRegistry:
                 required_audits=("model_audit", "saved_output_audit"),
                 **common,
             ),
-            bind,
+            binding_for("native-auditor"),
         ),
         RegisteredModule(
             ModuleDescriptor(
@@ -175,7 +185,7 @@ def build_native_v2_registry() -> ModuleRegistry:
                 ("published_output",),
                 **common,
             ),
-            bind,
+            binding_for("native-publisher"),
         ),
     ])
 

@@ -328,6 +328,10 @@ def _candidate(index: int, legacy_id: str, entry: Mapping[str, Any], node_id: st
         "negative_evidence": [],
         "scope": {"legacy_id": legacy_id, "mapping_kind": entry.get("mapping_kind", "direct")},
         "constraints": constraints or [],
+        "preconditions": [
+            {"kind": "target_source_ref", "value": copy.deepcopy(ref)}
+            for ref in source_refs
+        ],
         "rationale": rationale,
         "confidence": None,
     }

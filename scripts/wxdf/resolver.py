@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import copy
 from collections import defaultdict
 from typing import Any, Mapping, Sequence
 
@@ -88,6 +89,12 @@ def _decision_from_candidate(candidate: Mapping[str, Any], expected_revision: in
         property_scope = ["presentation"]
     if not property_scope:
         property_scope = ["role"] if operation == "update_role" else ["overlay"]
+    preconditions = list(proposal.get("preconditions") or candidate.get("preconditions") or [])
+    preconditions.extend(
+        {"kind": "candidate_constraint", "value": copy.deepcopy(dict(constraint))}
+        for constraint in candidate.get("constraints") or []
+        if isinstance(constraint, Mapping)
+    )
     return {
         "decision_id": "decision-" + hashlib.sha256(_canonical(candidate).encode("utf-8")).hexdigest()[:16],
         "candidate_id": str(candidate.get("candidate_id")),
@@ -98,7 +105,7 @@ def _decision_from_candidate(candidate: Mapping[str, Any], expected_revision: in
         "expected_revision": expected_revision,
         "property_scope": property_scope,
         "value": value,
-        "preconditions": list(proposal.get("preconditions") or candidate.get("preconditions") or []),
+        "preconditions": preconditions,
         "evidence": list(candidate.get("positive_evidence") or []),
         "invalidates": list(proposal.get("invalidates") or []),
     }

@@ -19,7 +19,7 @@ from wxdf.parsers import parse
 from wxdf.registry import ModuleDescriptor, PlanError, build_native_v2_registry
 from wxdf.resolver import resolve
 from wxdf.semantics.lists import analyze_lists
-from wxdf.transaction import apply_stage_batch, make_snapshot
+from wxdf.transaction import TransactionConflict, apply_stage_batch, make_snapshot
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -324,6 +324,60 @@ def test_native_unresolved_decisions_do_not_create_a_published_docx(tmp_path: Pa
     assert result.exit_code == 1
     assert result.diagnostics[0]["code"] == "candidate_conflict"
     assert not request.output_path.exists()
+
+
+def test_native_audit_failure_does_not_create_a_published_docx(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = tmp_path / "audit-failure.md"
+    source.write_text("正文\n", encoding="utf-8")
+
+    monkeypatch.setattr("wxdf.auditing.check_model", lambda *_args, **_kwargs: {"passed": False, "issues": [{"code": "model_audit_failed"}]})
+    request = _native_request(source, tmp_path)
+    result = ConversionKernel().convert(request)
+
+    assert result.status == "failed"
+    assert result.exit_code == 1
+    assert result.diagnostics[0]["code"] == "model_audit_failed"
+    assert not request.output_path.exists()
+
+
+def test_legacy_candidate_source_reference_is_rechecked_at_commit() -> None:
+    ast = _ast(0)
+    source_ref = {
+        "source_id": "list",
+        "part": "document.md",
+        "content_sha256": "sha256:" + "a" * 64,
+        "span": {"start": 0, "end": 2, "unit": "unicode_code_point"},
+    }
+    ast["document"]["containers"].update({
+        "list0": {"kind": "list", "list_kind": "ordered", "source_start": 1, "source_sequence_id": "seq0"},
+        "item0": {
+            "kind": "list_item",
+            "legacy_id": "old-item",
+            "source_marker": "1.",
+            "source_ordinal": 1,
+            "source_sequence_id": "seq0",
+            "source_ref": source_ref,
+        },
+    })
+    ast["document"]["blocks"]["p0"] = {
+        "block_type": "paragraph",
+        "role": "body",
+        "inline_content": [{"kind": "text", "text": "列表项", "marks": []}],
+        "source_ref": source_ref,
+    }
+    ast["document"]["children"] = {"root": ["list0"], "list0": ["item0"], "item0": ["p0"]}
+    bundle = make_view(ast)
+    translated = translate(
+        {"schema_version": "1.0", "decisions": [{"block_id": "old-item", "operation": "set_restart", "to": {"restart": True}}]},
+        bundle.target_map,
+        ast,
+    )
+    decision_set = resolve(translated["candidates"], {"revision": ast["revision"]})
+    changed = json.loads(json.dumps(ast))
+    changed["document"]["blocks"]["p0"]["source_ref"]["span"] = {"start": 10, "end": 11, "unit": "unicode_code_point"}
+
+    with pytest.raises(TransactionConflict, match="source reference precondition"):
+        apply_stage_batch(make_snapshot(changed), decision_set["decisions"], expected_revision=changed["revision"])
 
 
 def test_explicit_legacy_profile_cannot_be_overridden_by_list_text(tmp_path: Path) -> None:

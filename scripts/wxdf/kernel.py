@@ -708,7 +708,7 @@ class ConversionKernel:
         return ast, candidates, item_map
 
     @staticmethod
-    def _native_preflight(source_ast: Mapping[str, Any], source_type: str, list_policy: str) -> Any:
+    def _native_preflight(source_ast: Mapping[str, Any], source_type: str, list_policy: str, *, registry: Any = None) -> Any:
         """Validate the native module contract before candidate execution."""
 
         from .registry import build_native_v2_registry
@@ -719,7 +719,8 @@ class ConversionKernel:
             for node in collection.values()
             if node.get("block_type") or node.get("kind")
         }
-        return build_native_v2_registry().build(
+        registry = registry or build_native_v2_registry()
+        return registry.build(
             {
                 "pipeline": "modular",
                 "list_policy": list_policy,
@@ -780,6 +781,166 @@ class ConversionKernel:
             return "consumed"
         return "consumed_mismatch"
 
+    def _execute_native_stage_chain(
+        self,
+        request: ConversionRequest,
+        facts: Mapping[str, Any],
+        source_ast: Mapping[str, Any],
+        candidates: list[Mapping[str, Any]],
+        decision_set: Mapping[str, Any],
+        list_result: Mapping[str, Any],
+        store: Any,
+        metrics: Any,
+        staging_path: Path,
+    ) -> dict[str, Any]:
+        """Execute the native stage implementations through the registered chain."""
+
+        from .auditing import check_model, check_saved_output
+        from .normalization import normalize
+        from .registry import build_native_v2_registry
+        from .rendering import render
+        from .template import load_template_bundle
+        from .transaction import apply_stage_batch, make_snapshot
+
+        context: dict[str, Any] = {
+            "facts": facts,
+            "source_ast": source_ast,
+            "candidates": candidates,
+            "decision_set": decision_set,
+            "list_result": list_result,
+            "request": request,
+            "metrics": metrics,
+            "store": store,
+            "staging_path": staging_path,
+        }
+
+        def source_parser(runtime: dict[str, Any]) -> dict[str, Any]:
+            runtime["artifacts"] = {"source_facts": runtime["facts"]}
+            return runtime["facts"]
+
+        def candidate_set(runtime: dict[str, Any]) -> list[Mapping[str, Any]]:
+            runtime["artifacts"]["candidate_set"] = runtime["candidates"]
+            return runtime["candidates"]
+
+        def resolver(runtime: dict[str, Any]) -> Mapping[str, Any]:
+            runtime["artifacts"]["decision_set"] = runtime["decision_set"]
+            return runtime["decision_set"]
+
+        def transaction(runtime: dict[str, Any]) -> Any:
+            with metrics.stage("transaction"):
+                committed = apply_stage_batch(
+                    make_snapshot(runtime["source_ast"]),
+                    runtime["decision_set"]["decisions"],
+                    expected_revision=runtime["source_ast"]["revision"],
+                )
+            runtime["committed"] = committed
+            runtime["artifacts"]["source_ast_revision"] = committed.snapshot.ast["revision"]
+            return committed
+
+        def normalizer(runtime: dict[str, Any]) -> Mapping[str, Any]:
+            committed = runtime["committed"]
+            with metrics.stage("normalize"):
+                template = load_template_bundle(request.template_path) if request.template_path else {
+                    "resolved_styles": {
+                        "list_letter": "List Number",
+                        "list_decimal": "List Number 2",
+                        "list_dash": "List Bullet",
+                        "list_bullet": "List Bullet 2",
+                    },
+                    "numbering_ids": {},
+                }
+                normalized = normalize(
+                    committed.snapshot.ast,
+                    template,
+                    strategy=request.list_policy,
+                    overlay=committed.snapshot.overlays,
+                    presentation_override=committed.snapshot.presentation_overrides,
+                    context={"transaction_id": committed.transaction_id, "decision_set_version": decision_set["decision_set_version"]},
+                )
+            resources: dict[str, Any] = {}
+            for resource_id, resource in facts.get("resources", {}).items():
+                source_ref = resource.get("source_ref") if isinstance(resource, Mapping) else None
+                if not isinstance(source_ref, Mapping):
+                    continue
+                try:
+                    payload = store.resolve(dict(source_ref))
+                    if isinstance(payload, bytes):
+                        resources[resource_id] = payload
+                except Exception:
+                    part = source_ref.get("part")
+                    if isinstance(part, str):
+                        candidate_path = request.input_path.parent / part
+                        if candidate_path.is_file():
+                            resources[resource_id] = candidate_path
+            runtime["template"] = template
+            runtime["normalized"] = normalized
+            runtime["resources"] = resources
+            runtime["artifacts"]["normalized"] = normalized
+            return normalized
+
+        def renderer(runtime: dict[str, Any]) -> Mapping[str, Any]:
+            with metrics.stage("render"):
+                if hasattr(runtime["template"], "path"):
+                    result = render(runtime["normalized"], staging_path, template_bundle=runtime["template"], resources=runtime["resources"])
+                else:
+                    result = render(runtime["normalized"], staging_path, resources=runtime["resources"])
+                metrics.record_render()
+            runtime["render_result"] = result
+            runtime["artifacts"]["render_plan"] = result["render_map"]
+            return result
+
+        def auditor(runtime: dict[str, Any]) -> dict[str, Any]:
+            with metrics.stage("audit"):
+                model_findings = check_model(runtime["normalized"])
+                saved_findings = check_saved_output(staging_path, runtime["normalized"], runtime["render_result"]["render_map"])
+            runtime["model_findings"] = model_findings
+            runtime["saved_findings"] = saved_findings
+            runtime["artifacts"]["model_audit"] = model_findings
+            runtime["artifacts"]["saved_output_audit"] = saved_findings
+            return {"model": model_findings, "saved": saved_findings}
+
+        def publisher(runtime: dict[str, Any]) -> bool:
+            audits_passed = runtime["model_findings"].get("passed") is True and runtime["saved_findings"].get("passed") is True
+            fatal_diagnostics = [
+                item for item in runtime["list_result"].get("diagnostics", [])
+                if item.get("severity") in {"error", "warning"}
+            ]
+            if not audits_passed or fatal_diagnostics:
+                return False
+            staging_path.replace(request.output_path)
+            runtime["artifacts"]["published_output"] = str(request.output_path)
+            return True
+
+        bindings = {
+            "native-source-parser": source_parser,
+            "native-candidate-set": candidate_set,
+            "native-resolver": resolver,
+            "native-transaction": transaction,
+            "native-normalizer": normalizer,
+            "native-renderer": renderer,
+            "native-auditor": auditor,
+            "native-publisher": publisher,
+        }
+        registry = build_native_v2_registry(bindings)
+        execution_plan = self._native_preflight(
+            source_ast,
+            facts["source"]["source_type"],
+            request.list_policy,
+            registry=registry,
+        )
+        if self._native_should_block_publish(execution_plan, decision_set):
+            return {"status": "blocked", "execution_plan": execution_plan}
+        registry.execute(execution_plan, context)
+        return {
+            "status": "published" if context["artifacts"].get("published_output") else "failed",
+            "execution_plan": execution_plan,
+            "committed": context["committed"],
+            "normalized": context["normalized"],
+            "render_result": context["render_result"],
+            "model_findings": context["model_findings"],
+            "saved_findings": context["saved_findings"],
+        }
+
     def _convert_modular_native_v2(self, request: ConversionRequest) -> RunResult:
         """Run the modular source, decision, transaction and render chain."""
 
@@ -787,11 +948,8 @@ class ConversionKernel:
         if not request.input_path.is_file():
             return RunResult(status="failed", exit_code=1, diagnostics=[{"code": "INPUT_NOT_FOUND", "message": str(request.input_path)}])
 
-        from .auditing import check_model, check_saved_output
         from .metrics import MetricsCollector
-        from .normalization import normalize
         from .parsers import parse, summarize_source_facts
-        from .rendering import render
         from .resolver import resolve
         from .semantics.appendices import collect_source_appendix_semantics
         from .semantics.captions import collect_caption_candidates
@@ -801,8 +959,6 @@ class ConversionKernel:
         from .semantics.structure import collect_structure_candidates
         from .semantics.tables import collect_source_table_semantics, collect_table_candidates
         from .source_store import SourceStore
-        from .template import load_template_bundle
-        from .transaction import apply_stage_batch, make_snapshot
 
         metrics = MetricsCollector()
         report: dict[str, Any] = {
@@ -816,6 +972,7 @@ class ConversionKernel:
                 "TransactionManagerSourceAST", "NormalizationPolicy", "RenderPlan", "Renderer", "AuditModule", "Publisher",
             ],
         }
+        staging_path = request.output_path.with_name(f".{request.output_path.name}.native-v2.staging")
         store = SourceStore()
         try:
             with metrics.stage("source"):
@@ -835,8 +992,6 @@ class ConversionKernel:
                 table_candidates = collect_table_candidates(source_ast)
                 caption_candidates = collect_caption_candidates(source_ast)
 
-            execution_plan = self._native_preflight(source_ast, facts["source"]["source_type"], request.list_policy)
-
             candidates = [
                 *regions.get("candidates", []),
                 *structure_candidates,
@@ -846,7 +1001,19 @@ class ConversionKernel:
                 *caption_candidates,
             ]
             decision_set = resolve(candidates, {"revision": source_ast["revision"]})
-            if self._native_should_block_publish(execution_plan, decision_set):
+            native_run = self._execute_native_stage_chain(
+                request,
+                facts,
+                source_ast,
+                candidates,
+                decision_set,
+                list_result,
+                store,
+                metrics,
+                staging_path,
+            )
+            execution_plan = native_run["execution_plan"]
+            if native_run["status"] == "blocked":
                 report.update({
                     "status": "failed",
                     "source_ast_revision": source_ast["revision"],
@@ -863,61 +1030,45 @@ class ConversionKernel:
                     diagnostics=list(decision_set.get("unresolved") or []),
                     metrics=metrics.snapshot(),
                 )
-            with metrics.stage("transaction"):
-                committed = apply_stage_batch(
-                    make_snapshot(source_ast),
-                    decision_set["decisions"],
-                    expected_revision=source_ast["revision"],
-                )
+            committed = native_run["committed"]
             snapshot = committed.snapshot
-            with metrics.stage("normalize"):
-                template = load_template_bundle(request.template_path) if request.template_path else {
-                    "resolved_styles": {
-                        "list_letter": "List Number",
-                        "list_decimal": "List Number 2",
-                        "list_dash": "List Bullet",
-                        "list_bullet": "List Bullet 2",
-                    },
-                    "numbering_ids": {},
-                }
-                normalized = normalize(
-                    snapshot.ast,
-                    template,
-                    strategy=request.list_policy,
-                    overlay=snapshot.overlays,
-                    presentation_override=snapshot.presentation_overrides,
-                    context={"transaction_id": committed.transaction_id, "decision_set_version": decision_set["decision_set_version"]},
-                )
-            resources: dict[str, Any] = {}
-            for resource_id, resource in facts.get("resources", {}).items():
-                source_ref = resource.get("source_ref") if isinstance(resource, Mapping) else None
-                if not isinstance(source_ref, Mapping):
-                    continue
-                try:
-                    payload = store.resolve(dict(source_ref))
-                    if isinstance(payload, bytes):
-                        resources[resource_id] = payload
-                except Exception:
-                    part = source_ref.get("part")
-                    if isinstance(part, str):
-                        candidate_path = request.input_path.parent / part
-                        if candidate_path.is_file():
-                            resources[resource_id] = candidate_path
-            with metrics.stage("render"):
-                if hasattr(template, "path"):
-                    render_result = render(normalized, request.output_path, template_bundle=template, resources=resources)
-                else:
-                    render_result = render(normalized, request.output_path, resources=resources)
-                metrics.record_render()
-            with metrics.stage("audit"):
-                model_findings = check_model(normalized)
-                saved_findings = check_saved_output(request.output_path, normalized, render_result["render_map"])
+            normalized = native_run["normalized"]
+            render_result = native_run["render_result"]
+            model_findings = native_run["model_findings"]
+            saved_findings = native_run["saved_findings"]
 
             diagnostics = list(list_result.get("diagnostics") or [])
             diagnostics.extend(decision_set.get("unresolved") or [])
             diagnostics.extend(model_findings.get("issues") or [])
             diagnostics.extend(saved_findings.get("issues") or [])
             audits_passed = model_findings.get("passed") is True and saved_findings.get("passed") is True
+            blocking_diagnostics = [
+                item
+                for item in diagnostics
+                if item in (decision_set.get("unresolved") or [])
+                or item in (model_findings.get("issues") or [])
+                or item in (saved_findings.get("issues") or [])
+                or item.get("severity") in {"error", "warning"}
+            ]
+            if native_run["status"] != "published" or not audits_passed or blocking_diagnostics:
+                report.update({
+                    "status": "failed",
+                    "source_ast_revision": snapshot.ast["revision"],
+                    "decision_set": decision_set,
+                    "model_audit": model_findings,
+                    "saved_output_audit": saved_findings,
+                    "execution_plan": {
+                        "profile": "wx_full_rules-native-v2",
+                        "modules": self._native_execution_plan_report(execution_plan),
+                    },
+                })
+                return RunResult(
+                    status="failed",
+                    exit_code=1,
+                    report=report,
+                    diagnostics=diagnostics,
+                    metrics=metrics.snapshot(),
+                )
             capability_status = {
                 "source_region": self._native_capability_status("source_regions", candidates, decision_set, committed, audits_passed),
                 "document_structure": self._native_capability_status("source_structure", candidates, decision_set, committed, audits_passed),
@@ -1044,6 +1195,8 @@ class ConversionKernel:
                 metrics=metrics.snapshot(),
             )
         finally:
+            if staging_path.is_file():
+                staging_path.unlink()
             store.close()
 
     def _convert_modular_native_experimental(self, request: ConversionRequest) -> RunResult:

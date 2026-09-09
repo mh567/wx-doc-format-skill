@@ -15,7 +15,7 @@ if str(SCRIPTS) not in sys.path:
 from wxdf.kernel import ConversionKernel, ConversionRequest, RunResult
 from wxdf.legacy_pipeline import LegacyPipeline
 from wxdf.metrics import MetricsCollector
-from wxdf.registry import ModuleDescriptor, ModuleRegistry, PlanError, RegisteredModule, build_plan
+from wxdf.registry import ModuleDescriptor, ModuleRegistry, PlanError, RegisteredModule, build_native_v2_registry, build_plan
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -85,6 +85,38 @@ def test_executable_registry_rejects_missing_required_capability_and_runs_plan()
 
     assert results == ["done"]
     assert calls == ["run-1"]
+
+
+def test_native_registry_executes_bound_stage_implementations() -> None:
+    calls: list[str] = []
+    bindings = {
+        module_id: (lambda _context, module_id=module_id: calls.append(module_id) or module_id)
+        for module_id in (
+            "native-source-parser",
+            "native-candidate-set",
+            "native-resolver",
+            "native-transaction",
+            "native-normalizer",
+            "native-renderer",
+            "native-auditor",
+            "native-publisher",
+        )
+    }
+    registry = build_native_v2_registry(bindings)
+    plan = registry.build(
+        {
+            "pipeline": "modular",
+            "list_policy": "wx-default-v2",
+            "source_type": "markdown",
+            "node_kinds": ["document"],
+            "available_audits": ["model_audit", "saved_output_audit"],
+        },
+    )
+
+    results = registry.execute(plan, {})
+
+    assert results == calls
+    assert calls == [module.module_id for module in plan.modules]
 
 
 def test_kernel_rejects_modular_conversion_without_complete_capability_adapter(tmp_path: Path) -> None:

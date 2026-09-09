@@ -57,6 +57,23 @@ def _node_map(ast: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
     return result
 
 
+def _source_ref_matches(expected: Mapping[str, Any], current: Mapping[str, Any]) -> bool:
+    return all(current.get(field) == expected.get(field) for field in ("source_id", "part", "content_sha256", "span"))
+
+
+def _validate_source_preconditions(ast: Mapping[str, Any], decision: Mapping[str, Any]) -> None:
+    if decision.get("operation") == "create_node":
+        return
+    expected_refs = [ref for ref in decision.get("target_source_refs", []) if isinstance(ref, Mapping)]
+    if not expected_refs:
+        return
+    nodes = _node_map(ast)
+    target_nodes = [nodes.get(str(target_id)) for target_id in decision.get("target_node_ids", [])]
+    current_refs = [node.get("source_ref") for node in target_nodes if isinstance(node, Mapping) and isinstance(node.get("source_ref"), Mapping)]
+    if not current_refs or not all(any(_source_ref_matches(expected, current) for current in current_refs) for expected in expected_refs):
+        raise TransactionConflict("source reference precondition failed")
+
+
 def _order_stage_decisions(snapshot: StageSnapshot, decisions: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
     """Apply structure creation dependencies before edits in one stage batch."""
 
@@ -269,6 +286,7 @@ def _apply_presentation_override(snapshot: StageSnapshot, decision: Mapping[str,
 
 def _apply_decision(snapshot: StageSnapshot, decision: Mapping[str, Any]) -> None:
     ast = snapshot.ast
+    _validate_source_preconditions(ast, decision)
     operation = decision.get("operation")
     if operation == "update_role":
         _apply_update_role(ast, decision)
