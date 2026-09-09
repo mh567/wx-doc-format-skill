@@ -50,6 +50,31 @@ P1 聚焦回归：
 
 退出码：`0`。
 
+## L01 端到端验收基线
+
+2026-09-09 增加 `tests/test_issue1_acceptance.py`，以真实 CLI 分别转换 Markdown 和动态生成的 DOCX 夹具。夹具覆盖一级有序、二级无序、三级有序和第二个一级项，要求源文件保持不变，legacy 默认入口继续可用。
+
+初始红灯：
+
+`scripts/.venv/bin/python3 -m pytest tests/test_issue1_acceptance.py -q`
+
+结果：严格验收断言新增后 `2 failed, 1 passed`，暴露 native 列表项按节点 ID 排序导致源阅读顺序反转，以及默认 legacy 报告缺少 native 链路特征。
+
+修复：
+
+1. 移除 `scripts/wxdf/semantics/lists.py` 中对列表、列表项和候选的节点 ID 排序，保留 SourceFacts 的源阅读顺序。
+2. 验收断言覆盖 SourceFacts 摘要、Source AST 容器关系和列表族、规范化后的源 AST 保真、RenderPlan 顺序和编号、完整 native 模块链、事务提交、模型与保存后审计。
+3. 保存后回读 `numbering.xml`、`styles.xml` 和 `document.xml`，校验 `numId`、`ilvl`、`abstractNumId`、`numFmt`，并执行 ZIP 完整性检查。
+4. 增加不带 pipeline 参数的 legacy 默认入口真实转换检查。
+
+验证：
+
+`scripts/.venv/bin/python3 -m pytest tests/test_issue1_acceptance.py -q`，`3 passed`。
+
+`scripts/.venv/bin/python3 -m pytest tests/test_issue1_acceptance.py tests/test_modular_lists.py tests/test_modular_list_consumption.py tests/test_modular_normalization.py tests/test_modular_rendering.py tests/test_modular_kernel.py tests/test_modular_conversion.py tests/test_modular_baseline.py -q`，`41 passed`。
+
+提交：`96083d3`、`8fad0b3`。当前未推送远程。
+
 ## 真实转换证据
 
 Markdown `input/benchmark_report.md` 通过显式 `--modular-profile native-v2` 转换成功，命令退出码为 `0`。报告路径为 `/tmp/wx-issue1-native-p1-markdown-report.json`，报告显示 `execution_plan.profile=wx_full_rules-native-v2`、八个 native 模块均列入执行计划、事务状态 `committed`、决策数 `21`、模型审计和保存后审计均通过。输出路径为 `/tmp/wx-issue1-native-p1-markdown.docx`，`unzip -t` 退出码为 `0`。
