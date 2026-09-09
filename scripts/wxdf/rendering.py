@@ -44,6 +44,17 @@ def _text(inline_content: list[Mapping[str, Any]], resources: Mapping[str, Any])
     return "".join(parts)
 
 
+def _image_resource_ids(inline_content: list[Mapping[str, Any]]) -> list[str]:
+    resource_ids: list[str] = []
+    for item in inline_content:
+        kind = item.get("kind")
+        if kind == "image" and item.get("resource_id") is not None:
+            resource_ids.append(str(item["resource_id"]))
+        elif kind == "link":
+            resource_ids.extend(_image_resource_ids(item.get("children", [])))
+    return resource_ids
+
+
 def _write_inline(paragraph: Any, inline_content: list[Mapping[str, Any]], resources: Mapping[str, Any]) -> None:
     for item in inline_content:
         kind = item.get("kind")
@@ -161,6 +172,9 @@ def render(
             "style": actual_style,
             "numbered": actual_style in {"List Number", "List Bullet"} or "列项" in actual_style,
         }
+        image_resource_ids = _image_resource_ids(block.get("inline_content", []))
+        if image_resource_ids:
+            render_map[node_id]["image_resources"] = image_resource_ids
         if numbering:
             render_map[node_id]["numbering"] = dict(numbering)
         return paragraph
@@ -256,7 +270,12 @@ def render(
             else:
                 paragraph.add_run().add_picture(str(resource))
             paragraph_counter += 1
-            render_map[block_id] = {"kind": "image", "paragraph": paragraph_counter, "text": paragraph.text}
+            render_map[block_id] = {
+                "kind": "image",
+                "paragraph": paragraph_counter,
+                "text": paragraph.text,
+                "image_resources": [str(resource_id)],
+            }
         elif block.get("block_type") == "opaque":
             diagnostics.append({"code": "opaque_node_skipped", "node_id": block_id})
 

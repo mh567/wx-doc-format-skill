@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import posixpath
 from pathlib import Path
 from typing import Any, Mapping
 from zipfile import BadZipFile, ZipFile
@@ -41,6 +43,8 @@ def check_saved_output(path: Path | str, expected: Mapping[str, Any], render_map
     output = Path(path)
     styles_xml = None
     numbering_xml = None
+    document_xml = None
+    relationships_xml = None
     try:
         with ZipFile(output) as archive:
             bad = archive.testzip()
@@ -53,6 +57,10 @@ def check_saved_output(path: Path | str, expected: Mapping[str, Any], render_map
                 styles_xml = archive.read("word/styles.xml")
             if "word/numbering.xml" in names:
                 numbering_xml = archive.read("word/numbering.xml")
+            if "word/document.xml" in names:
+                document_xml = archive.read("word/document.xml")
+            if "word/_rels/document.xml.rels" in names:
+                relationships_xml = archive.read("word/_rels/document.xml.rels")
     except (OSError, BadZipFile) as exc:
         return {"passed": False, "issues": [{"code": "invalid_docx", "message": str(exc)}]}
 
@@ -92,6 +100,43 @@ def check_saved_output(path: Path | str, expected: Mapping[str, Any], render_map
         expected_tables = sum(1 for item in render_map.values() if item.get("kind") == "table")
     if table_count != expected_tables:
         issues.append({"code": "table_count_changed", "expected": expected_tables, "actual": table_count})
+    expected_image_hashes: list[tuple[str, str]] = []
+    source_resources = expected.get("source_ast", {}).get("document", {}).get("resources", {})
+    if isinstance(source_resources, Mapping):
+        for item in render_map.values():
+            for resource_id in item.get("image_resources", []):
+                resource = source_resources.get(resource_id)
+                if isinstance(resource, Mapping) and resource.get("content_sha256"):
+                    expected_image_hashes.append((str(resource_id), str(resource["content_sha256"])))
+                else:
+                    issues.append({"code": "image_resource_missing", "resource_id": resource_id})
+    if document_xml is not None and relationships_xml is not None:
+        document_root = ElementTree.fromstring(document_xml)
+        drawing_namespace = "http://schemas.openxmlformats.org/drawingml/2006/main"
+        rel_namespace = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+        relationship_root = ElementTree.fromstring(relationships_xml)
+        relationships = {
+            relationship.get("Id"): relationship.get("Target")
+            for relationship in relationship_root
+            if relationship.get("Type", "").endswith("/image")
+        }
+        actual_image_hashes: list[tuple[str | None, str | None]] = []
+        with ZipFile(output) as archive:
+            names = set(archive.namelist())
+            for blip in document_root.findall(f".//{{{drawing_namespace}}}blip"):
+                relationship_id = blip.get(f"{{{rel_namespace}}}embed")
+                target = relationships.get(relationship_id)
+                package_path = posixpath.normpath(posixpath.join("word", target.lstrip("/"))) if target else None
+                if package_path is None or package_path not in names:
+                    actual_image_hashes.append((relationship_id, None))
+                    issues.append({"code": "image_relationship_missing", "relationship_id": relationship_id, "target": target})
+                    continue
+                actual_image_hashes.append((relationship_id, "sha256:" + hashlib.sha256(archive.read(package_path)).hexdigest()))
+        if len(actual_image_hashes) != len(expected_image_hashes):
+            issues.append({"code": "image_count_changed", "expected": len(expected_image_hashes), "actual": len(actual_image_hashes)})
+        for index, ((resource_id, expected_hash), (_, actual_hash)) in enumerate(zip(expected_image_hashes, actual_image_hashes)):
+            if actual_hash != expected_hash:
+                issues.append({"code": "image_resource_mismatch", "index": index, "resource_id": resource_id, "expected": expected_hash, "actual": actual_hash})
     expected_numbered_items = [item for item in render_map.values() if item.get("numbered")]
     expected_numbered_texts = [str(item.get("text") or "") for item in expected_numbered_items if str(item.get("text") or "")]
     expected_numbered_styles = {str(item.get("style") or "") for item in expected_numbered_items if item.get("style")}

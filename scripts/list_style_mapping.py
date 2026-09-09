@@ -58,6 +58,10 @@ def wx_numbering_abstract_key(list_type: str | None, level: int) -> str | None:
     normalized = normalize_wx_list_type(list_type, level)
     if normalized == "lower_letter_paren":
         return "list_letter_abstract"
+    if normalized == "dash":
+        return "list_dash_abstract"
     if normalized == "decimal_paren":
         return "list_decimal_abstract"
+    if normalized == "bullet_dot":
+        return "list_bullet_abstract"
     return None

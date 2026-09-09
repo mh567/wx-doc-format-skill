@@ -15,6 +15,9 @@ from .source_store import SourceHandle, SourceStore
 from .validation import validate_source_facts
 
 
+MARKDOWN_PARSER_VERSION = "1.1.0"
+
+
 def _digest(value: bytes | str) -> str:
     raw = value if isinstance(value, bytes) else value.encode("utf-8")
     return "sha256:" + hashlib.sha256(raw).hexdigest()
@@ -74,7 +77,7 @@ def _line_offsets(text: str) -> list[int]:
     return offsets
 
 
-def _inline_nodes(tokens: Iterable[Any], handle: SourceHandle, part: str, resources: dict[str, Any], diagnostics: list[dict[str, Any]], source_ref: dict[str, Any]) -> list[dict[str, Any]]:
+def _inline_nodes(tokens: Iterable[Any], handle: SourceHandle, part: str, resources: dict[str, Any], diagnostics: list[dict[str, Any]], source_ref: dict[str, Any], parser_version: str | None = None) -> list[dict[str, Any]]:
     tokens = list(tokens)
 
     def parse_range(start: int, stop_kind: str | None = None, marks: list[str] | None = None) -> tuple[list[dict[str, Any]], int]:
@@ -124,7 +127,7 @@ def _inline_nodes(tokens: Iterable[Any], handle: SourceHandle, part: str, resour
                     resource_content = resource_bytes if resource_bytes is not None else target
                     resources[resource_id] = {
                         "kind": "image",
-                        "source_ref": _source_ref(handle, target, node_path=["inline", target]),
+                        "source_ref": _source_ref(handle, target, node_path=["inline", target], parser_version=parser_version),
                         "content_sha256": _digest(resource_content),
                         "dependencies": [],
                     }
@@ -179,7 +182,14 @@ class _MarkdownFactsBuilder:
 
     def _ref(self, token: Any) -> dict[str, Any]:
         start, end = self._span(token)
-        return _source_ref(self.handle, self.part, start=start, end=end, content=self.source_text[start:end])
+        return _source_ref(
+            self.handle,
+            self.part,
+            start=start,
+            end=end,
+            content=self.source_text[start:end],
+            parser_version=self.facts["parser"]["version"],
+        )
 
     def _append(self, node_id: str) -> None:
         self.facts["children"].setdefault(self.stack[-1], []).append(node_id)
@@ -300,7 +310,15 @@ class _MarkdownFactsBuilder:
             elif token_type == "inline" and self.pending is not None:
                 role, level = self.pending
                 ref = self._ref(token)
-                inline_content = _inline_nodes(token.children or [], self.handle, self.part, self.facts["resources"], self.facts["diagnostics"], ref)
+                inline_content = _inline_nodes(
+                    token.children or [],
+                    self.handle,
+                    self.part,
+                    self.facts["resources"],
+                    self.facts["diagnostics"],
+                    ref,
+                    self.facts["parser"]["version"],
+                )
                 fields: dict[str, Any] = {"role": role, "inline_content": inline_content}
                 if level is not None:
                     fields["level"] = level
@@ -331,6 +349,7 @@ def _parse_markdown(source: Path | str, *, store: SourceStore, text: str | None 
         source_text = source_text.decode(handle.encoding or "utf-8")
     parser = MarkdownIt("commonmark", {"html": False}).enable("table")
     builder = _MarkdownFactsBuilder(str(source_text), handle, handle.path.name)
+    builder.facts["parser"]["version"] = MARKDOWN_PARSER_VERSION
     facts = builder.consume(parser.parse(str(source_text)))
     validate_source_facts(facts)
     return facts

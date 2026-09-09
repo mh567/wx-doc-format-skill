@@ -2,22 +2,25 @@ from __future__ import annotations
 
 import base64
 import io
+import sys
 from pathlib import Path
 from zipfile import ZipFile
 from xml.etree import ElementTree
 
 from docx import Document
 
+SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
+
 from modular_support import _append_numbering_definition, _set_numbering
 from test_issue1_acceptance import _paragraph_text, _run_native
 from test_issue2_acceptance import _assert_native_completed, _item_by_text, _parent_by_child, _write_markdown
-from test_modular_normalization import _ast, _profile
 from wxdf.auditing import check_saved_output
-from wxdf.normalization import normalize
 from wxdf.parsers import parse
 from wxdf.rendering import render
 from wxdf.transaction import _source_ref_matches
-from wxdf.validation import validate_ast
+from template_profile import load_template_profile
 
 
 PNG_1X1 = base64.b64decode(
@@ -185,38 +188,42 @@ def test_l07_first_table_and_sublist_get_one_evidenced_anchor(tmp_path: Path) ->
         assert b">A<" in archive.read("word/document.xml")
 
 
-def test_l07_block_image_first_child_gets_generated_anchor(tmp_path: Path) -> None:
-    ast = _ast()
-    source_ref = ast["document"]["blocks"]["p3"]["source_ref"]
-    ast["document"]["resources"]["image-1"] = {
-        "kind": "image",
-        "source_ref": source_ref,
-        "content_sha256": source_ref["content_sha256"],
-    }
-    ast["document"]["blocks"]["image-1"] = {
-        "block_type": "image",
-        "resource_id": "image-1",
-        "alt_text": "块图片",
-        "source_ref": source_ref,
-    }
-    ast["document"]["blocks"].pop("p3")
-    ast["document"]["children"]["i3"] = ["image-1"]
-    validate_ast(ast)
+def test_l07_image_content_runs_real_parser_chain(tmp_path: Path) -> None:
+    image = tmp_path / "pixel.png"
+    image.write_bytes(PNG_1X1)
+    source = _write_markdown(tmp_path, "l07-image", ["1. ![块图片](pixel.png)", ""])
 
-    normalized = normalize(ast, _profile(), strategy="wx-default-v2")
+    report, source_ast, normalized, output = _run_native(source, tmp_path, "l07-image")
 
-    presentation = normalized["presentation"]["nodes"]["i3"]
-    assert presentation["generated_anchor"] is True
-    assert presentation["marker_anchor"] == "generated-anchor-i3"
-    assert [node["node_id"] for node in normalized["generated_nodes"]] == ["generated-anchor-i3"]
-    output = tmp_path / "l07-block-image.docx"
-    result = render(normalized, output, resources={"image-1": PNG_1X1})
-    operation_kinds = [operation["kind"] for operation in result["render_plan"]["operations"]]
-    assert "list_item" in operation_kinds
-    assert any(operation["kind"] == "image" and operation["node_id"] == "image-1" for operation in result["render_plan"]["operations"])
+    _assert_native_completed(report, output)
+    image_items = [
+        item_id
+        for item_id, children in source_ast["document"]["children"].items()
+        if source_ast["document"]["containers"].get(item_id, {}).get("kind") == "list_item"
+        and any(
+            source_ast["document"]["blocks"].get(child, {}).get("inline_content", [{}])[0].get("kind") == "image"
+            for child in children
+            if child in source_ast["document"]["blocks"]
+        )
+    ]
+    assert len(image_items) == 1
+    assert normalized["presentation"]["nodes"][image_items[0]]["generated_anchor"] is False
+    assert len(source_ast["document"]["resources"]) == 1
     assert len(Document(output).inline_shapes) == 1
-    findings = check_saved_output(output, normalized, result["render_map"])
-    assert findings["passed"] is True
+    assert report["saved_output_audit"]["passed"] is True
+
+
+def test_markdown_source_refs_carry_parser_version(tmp_path: Path) -> None:
+    source = _write_markdown(tmp_path, "markdown-parser-version", ["1. Markdown", ""])
+    facts = parse(source)
+
+    assert facts["parser"]["version"] == "1.1.0"
+    assert all(
+        node.get("source_ref", {}).get("parser_version") == "1.1.0"
+        for collection in (facts["units"], facts["containers"], facts["resources"])
+        for node in collection.values()
+        if node.get("source_ref")
+    )
 
 
 def test_l08_empty_item_generates_anchor_while_inline_image_keeps_paragraph(tmp_path: Path) -> None:
@@ -353,6 +360,48 @@ def test_saved_output_audit_rejects_missing_numbering_definition(tmp_path: Path)
     assert any(issue["code"] == "list_numbering_mapping_mismatch" for issue in abstract_findings["issues"])
 
 
+def test_saved_output_audit_rejects_tampered_image_part(tmp_path: Path) -> None:
+    image = tmp_path / "pixel.png"
+    image.write_bytes(PNG_1X1)
+    source = _write_markdown(tmp_path, "image-audit", ["1. ![内嵌图](pixel.png)", ""])
+    _, _, normalized, output = _run_native(source, tmp_path, "image-audit")
+    resource_id = next(iter(normalized["source_ast"]["document"]["resources"]))
+    rerendered = render(
+        normalized,
+        tmp_path / "image-audit-rerendered.docx",
+        template_path=Path(__file__).resolve().parents[1] / "assets" / "wx_template.docx",
+        resources={resource_id: image.read_bytes()},
+    )
+    with ZipFile(output) as archive:
+        document_xml = ElementTree.fromstring(archive.read("word/document.xml"))
+        relationships_xml = ElementTree.fromstring(archive.read("word/_rels/document.xml.rels"))
+        drawing_namespace = "http://schemas.openxmlformats.org/drawingml/2006/main"
+        rel_namespace = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+        image_relationships = {
+            relationship.get("Id"): relationship.get("Target")
+            for relationship in relationships_xml
+            if relationship.get("Type", "").endswith("/image")
+        }
+        relationship_id = document_xml.find(f".//{{{drawing_namespace}}}blip").get(f"{{{rel_namespace}}}embed")
+        media_part = "word/" + image_relationships[relationship_id].lstrip("/")
+    tampered = tmp_path / "image-audit-tampered.docx"
+    _rewrite_docx_part(output, tampered, media_part, lambda data: b"tampered-image")
+
+    findings = check_saved_output(tampered, normalized, rerendered["render_map"])
+    assert findings["passed"] is False
+    assert any(issue["code"] == "image_resource_mismatch" for issue in findings["issues"])
+
+
+def test_template_numbering_ids_include_unordered_mappings() -> None:
+    profile = load_template_profile(Path(__file__).resolve().parents[1] / "assets" / "wx_template.docx")
+    numbering_ids = profile["numbering_ids"]
+
+    assert all(
+        key in numbering_ids
+        for key in ("list_dash", "list_dash_abstract", "list_bullet", "list_bullet_abstract")
+    )
+
+
 def test_l09_merged_and_nested_table_cells_are_unique_and_scope_local(tmp_path: Path) -> None:
     source = _build_l09_docx(tmp_path)
 
@@ -369,6 +418,15 @@ def test_l09_merged_and_nested_table_cells_are_unique_and_scope_local(tmp_path: 
     tables = [node_id for node_id, node in document["blocks"].items() if node.get("block_type") == "table"]
     assert len(tables) == 2
     outer = next(table_id for table_id in tables if any(document["containers"].get(child, {}).get("kind") == "table_row" for child in document["children"].get(table_id, [])))
+    root_labels = []
+    for child_id in document["children"]["root"]:
+        if child_id in document["blocks"]:
+            block = document["blocks"][child_id]
+            if block.get("block_type") == "table":
+                root_labels.append(("table", None))
+            else:
+                root_labels.append(("block", _paragraph_text(block)))
+    assert root_labels == [("block", "外部一"), ("table", None), ("block", "外部二")]
     first_row = document["children"][outer][0]
     first_row_cells = document["children"][first_row]
     assert len(first_row_cells) == 2
@@ -396,6 +454,15 @@ def test_l09_merged_and_nested_table_cells_are_unique_and_scope_local(tmp_path: 
     nested_scope = presentations[next(item for item, text in item_ids.items() if text == "嵌套列表")]["scope_id"]
     assert merged_scope.startswith("scope:") and merged_scope != "scope:document"
     assert nested_scope.startswith("scope:") and nested_scope not in {merged_scope, "scope:document"}
+    nested_table = next(table_id for table_id in tables if table_id != outer)
+    nested_cell = _parent_by_child(source_ast)[nested_table]
+    nested_labels = [
+        "table" if child == nested_table else _paragraph_text(document["blocks"][child])
+        if child in document["blocks"]
+        else document["containers"].get(child, {}).get("kind")
+        for child in document["children"][nested_cell]
+    ]
+    assert [label for label in nested_labels if label] == ["table", "外层单元格"]
     assert report["table_semantics"]["source_count"] == 2
     rendered_outer = Document(output).tables[0]
     assert [paragraph.text for paragraph in rendered_outer.cell(0, 0).paragraphs if paragraph.text] == [

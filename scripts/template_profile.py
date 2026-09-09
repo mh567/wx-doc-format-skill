@@ -163,16 +163,24 @@ def style_numbering(profile: dict, style_name: str | None) -> dict | None:
 def template_numbering_ids(profile: dict) -> dict:
     heading = style_numbering(profile, resolve_style(profile, "heading_1") or "heading 1")
     letter = style_numbering(profile, resolve_style(profile, "list_letter"))
+    dash = style_numbering(profile, resolve_style(profile, "list_dash"))
     decimal = style_numbering(profile, resolve_style(profile, "list_decimal"))
+    bullet = style_numbering(profile, resolve_style(profile, "list_bullet"))
     result = {}
     if heading:
         result["heading"] = heading["num_id"]
     if letter:
         result["list_letter"] = letter["num_id"]
         result["list_letter_abstract"] = letter["abstract_id"]
+    if dash:
+        result["list_dash"] = dash["num_id"]
+        result["list_dash_abstract"] = dash["abstract_id"]
     if decimal:
         result["list_decimal"] = decimal["num_id"]
         result["list_decimal_abstract"] = decimal["abstract_id"]
+    if bullet:
+        result["list_bullet"] = bullet["num_id"]
+        result["list_bullet_abstract"] = bullet["abstract_id"]
     return {key: value for key, value in result.items() if value is not None}
 
 
