@@ -191,7 +191,7 @@ def test_l07_first_table_and_sublist_get_one_evidenced_anchor(tmp_path: Path) ->
 def test_l07_image_content_runs_real_parser_chain(tmp_path: Path) -> None:
     image = tmp_path / "pixel.png"
     image.write_bytes(PNG_1X1)
-    source = _write_markdown(tmp_path, "l07-image", ["1. ![块图片](pixel.png)", ""])
+    source = _write_markdown(tmp_path, "l07-image", ["1.", "   ![块图片](pixel.png)", "2. 后续", ""])
 
     report, source_ast, normalized, output = _run_native(source, tmp_path, "l07-image")
 
