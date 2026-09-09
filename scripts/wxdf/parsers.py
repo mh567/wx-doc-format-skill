@@ -259,7 +259,12 @@ class _MarkdownFactsBuilder:
             elif token_type == "blockquote_open":
                 self.stack.append(self._new_container("quote", token))
             elif token_type == "table_open":
-                self.stack.append(self._new_container("table", token))
+                table_id = self._new_container("table", token)
+                self.facts["evidence"][table_id] = {
+                    "line_start": (getattr(token, "map", None) or [0])[0] + 1,
+                    "source_token": token_type,
+                }
+                self.stack.append(table_id)
             elif token_type == "tr_open":
                 table_id = self.stack[-1]
                 row_index = len(self.facts["children"].get(table_id, []))
@@ -277,6 +282,7 @@ class _MarkdownFactsBuilder:
                         col=col_index,
                         row_span=1,
                         col_span=1,
+                        cell_role="header" if token_type == "th_open" else "body",
                     )
                 )
                 self.pending = ("body", None)
@@ -358,6 +364,8 @@ def _parse_docx(source: Path | str, *, store: SourceStore) -> dict[str, Any]:
     from docx.text.paragraph import Paragraph
     from docx.oxml.ns import qn
     from list_detector import analyze_docx_lists
+    from table_semantics import classify_docx_table
+    from .semantics.tables import capture_docx_table_layout
 
     handle = store.open_source(source)
     document = Document(str(handle.path))
@@ -380,20 +388,28 @@ def _parse_docx(source: Path | str, *, store: SourceStore) -> dict[str, Any]:
         evidence = {"source_position": source_position, "style": paragraph.style.name if paragraph.style is not None else None}
         if descriptor is not None:
             evidence.update({
-                "marker_kind": "ordered" if descriptor.get("num_fmt") != "bullet" else "unordered",
-                "marker_text": descriptor.get("lvl_text"),
-                "ordinal": descriptor.get("start"),
-                "explicit_depth": descriptor.get("ilvl", 0),
+                "numbering_status": descriptor.get("status"),
+                "num_fmt": descriptor.get("num_fmt"),
+                "lvl_text": descriptor.get("lvl_text"),
+                "source_list_type": descriptor.get("source_list_type"),
+                "numbering_evidence": list(descriptor.get("evidence") or []),
                 "indent_value": descriptor.get("layout", {}).get("left_twips", 0),
                 "indent_unit": "twips",
                 "numbering_definition_ref": {
                     "num_id": descriptor.get("num_id"),
                     "abstract_num_id": descriptor.get("abstract_num_id"),
                 },
-                "restart_hint": descriptor.get("restart"),
                 "blank_before": False,
                 "continuation_hint": False,
             })
+            if descriptor.get("status") == "detected":
+                evidence.update({
+                    "marker_kind": "ordered" if descriptor.get("num_fmt") != "bullet" else "unordered",
+                    "marker_text": descriptor.get("lvl_text"),
+                    "ordinal": descriptor.get("start"),
+                    "explicit_depth": descriptor.get("ilvl", 0),
+                    "restart_hint": descriptor.get("restart"),
+                })
         facts["evidence"][unit_id] = evidence
 
     for child_index, child in enumerate(body.iterchildren()):
@@ -404,7 +420,13 @@ def _parse_docx(source: Path | str, *, store: SourceStore) -> dict[str, Any]:
         elif child.tag == qn("w:tbl"):
             table = Table(child, document)
             table_id = _stable_id("c", handle.source_id, "table", child_index)
-            facts["containers"][table_id] = {"kind": "table", "source_ref": _source_ref(handle, "word/document.xml", node_path=["body", child_index, "w:tbl"])}
+            table_semantics = classify_docx_table(table)
+            facts["containers"][table_id] = {
+                "kind": "table",
+                "source_ref": _source_ref(handle, "word/document.xml", node_path=["body", child_index, "w:tbl"]),
+                "table_semantics": table_semantics.as_source_record(),
+                "layout": capture_docx_table_layout(table),
+            }
             facts["children"][table_id] = []
             facts["children"]["root"].append(table_id)
             for row_index, row in enumerate(table.rows):

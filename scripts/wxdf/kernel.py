@@ -202,10 +202,16 @@ class ConversionKernel:
 
         from .builtin_modules import (
             ModuleExecutionContext,
+            appendix_semantics_module,
+            caption_semantics_module,
             document_structure_module,
             legacy_full_adapter_module,
             semantic_equivalence_module,
             source_parser_equivalence_module,
+            source_projection_module,
+            protected_content_module,
+            list_semantics_module,
+            table_semantics_module,
             source_facts_module,
             source_region_module,
         )
@@ -213,7 +219,13 @@ class ConversionKernel:
         registry = ModuleRegistry([
             source_facts_module(),
             source_region_module(),
+            source_projection_module(),
             document_structure_module(),
+            protected_content_module(),
+            list_semantics_module(),
+            table_semantics_module(),
+            caption_semantics_module(),
+            appendix_semantics_module(),
             legacy_full_adapter_module(
                 self._modular_runner,
                 provides=tuple(
@@ -221,7 +233,13 @@ class ConversionKernel:
                     for capability in _WX_FULL_RULE_CAPABILITIES
                     if capability not in {
                         "source_region",
+                        "source_parser",
                         "document_structure",
+                        "protected_content",
+                        "list_semantics",
+                        "table_semantics",
+                        "caption_semantics",
+                        "appendix_semantics",
                         "semantic_equivalence_audit",
                         "source_parser_equivalence_audit",
                     }
@@ -271,6 +289,27 @@ class ConversionKernel:
             "mismatch": "shadow_mismatch",
             "unobserved": "shadow_unobserved",
         }.get(parser_equivalence_audit.get("status"), "shadow_unobserved")
+        parser_consumption = result.report.get("source_parser_consumption") or {}
+        parser_consumed = bool(parser_consumption)
+        parser_complete = (
+            parser_consumed
+            and int(parser_consumption.get("unmatched_count", 0)) == 0
+            and int(parser_consumption.get("ambiguous_count", 0)) == 0
+            and int(parser_consumption.get("paragraph_candidate_count", 0))
+            == int(parser_consumption.get("paragraph_consumed_count", -1))
+            and int(parser_consumption.get("table_candidate_count", 0))
+            == int(parser_consumption.get("table_consumed_count", -1))
+        )
+        if parser_complete:
+            parser_state = {
+                "equivalent": "native_consumed",
+                "mismatch": "native_consumed_mismatch",
+                "unobserved": "native_consumed_unobserved",
+            }.get(parser_equivalence_audit.get("status"), "native_consumed_unobserved")
+        elif parser_consumed:
+            parser_state = "native_partial"
+        else:
+            parser_state = shadow_state
         structure_consumption = result.report.get("structure_decision_consumption") or {}
         structure_consumed = bool(structure_consumption)
         structure_complete = (
@@ -305,6 +344,102 @@ class ConversionKernel:
             region_state = "native_partial"
         else:
             region_state = "native_delivered"
+        protected_consumption = result.report.get("protected_content_consumption") or {}
+        protected_consumed = bool(protected_consumption)
+        protected_complete = (
+            protected_consumed
+            and int(protected_consumption.get("unmatched_count", 0)) == 0
+            and int(protected_consumption.get("ambiguous_count", 0)) == 0
+            and int(protected_consumption.get("candidate_count", 0))
+            == (
+                int(protected_consumption.get("applied_count", 0))
+                + int(protected_consumption.get("unchanged_count", 0))
+            )
+        )
+        if protected_complete:
+            protected_state = "native_consumed"
+        elif protected_consumed:
+            protected_state = "native_partial"
+        else:
+            protected_state = "native_delivered"
+        list_consumption = result.report.get("list_semantics_consumption") or {}
+        list_consumed = bool(list_consumption)
+        list_complete = (
+            list_consumed
+            and int(list_consumption.get("unmatched_count", 0)) == 0
+            and int(list_consumption.get("ambiguous_count", 0)) == 0
+            and int(list_consumption.get("item_candidate_count", 0))
+            == int(list_consumption.get("item_consumed_count", -1))
+            and int(list_consumption.get("continuation_candidate_count", 0))
+            == int(list_consumption.get("continuation_consumed_count", -1))
+        )
+        list_audit = result.report.get("list_preservation_audit") or {}
+        if list_complete and list_audit.get("passed") is True:
+            list_state = "native_consumed"
+        elif list_complete:
+            list_state = "native_consumed_mismatch"
+        elif list_consumed:
+            list_state = "native_partial"
+        else:
+            list_state = "native_delivered"
+        table_consumption = result.report.get("table_semantics_consumption") or {}
+        table_consumed = bool(table_consumption)
+        table_complete = (
+            table_consumed
+            and int(table_consumption.get("unmatched_count", 0)) == 0
+            and int(table_consumption.get("ambiguous_count", 0)) == 0
+            and int(table_consumption.get("candidate_count", 0))
+            == int(table_consumption.get("consumed_count", -1))
+        )
+        table_audit = result.report.get("table_semantics_audit") or {}
+        if table_complete and table_audit.get("passed") is True:
+            table_state = "native_consumed"
+        elif table_complete:
+            table_state = "native_consumed_mismatch"
+        elif table_consumed:
+            table_state = "native_partial"
+        else:
+            table_state = "native_delivered"
+        caption_consumption = result.report.get("caption_semantics_consumption") or {}
+        caption_consumed = bool(caption_consumption)
+        caption_complete = (
+            caption_consumed
+            and int(caption_consumption.get("unmatched_count", 0)) == 0
+            and int(caption_consumption.get("ambiguous_count", 0)) == 0
+            and int(caption_consumption.get("candidate_count", 0))
+            == int(caption_consumption.get("consumed_count", -1))
+            and int(caption_consumption.get("candidate_count", 0))
+            == int(caption_consumption.get("associated_count", -1))
+        )
+        caption_audit = result.report.get("caption_placement_model_audit") or {}
+        if caption_complete and caption_audit.get("passed") is True:
+            caption_state = "native_consumed"
+        elif caption_complete:
+            caption_state = "native_consumed_mismatch"
+        elif caption_consumed:
+            caption_state = "native_partial"
+        else:
+            caption_state = "native_delivered"
+        appendix_consumption = result.report.get("appendix_semantics_consumption") or {}
+        appendix_consumed = bool(appendix_consumption)
+        appendix_complete = (
+            appendix_consumed
+            and int(appendix_consumption.get("unmatched_count", 0)) == 0
+            and int(appendix_consumption.get("ambiguous_count", 0)) == 0
+            and int(appendix_consumption.get("range_candidate_count", 0))
+            == int(appendix_consumption.get("range_consumed_count", -1))
+            and int(appendix_consumption.get("heading_candidate_count", 0))
+            == int(appendix_consumption.get("heading_consumed_count", -1))
+        )
+        appendix_audit = result.report.get("appendix_preservation_audit") or {}
+        if appendix_complete and appendix_audit.get("passed") is True:
+            appendix_state = "native_consumed"
+        elif appendix_complete:
+            appendix_state = "native_consumed_mismatch"
+        elif appendix_consumed:
+            appendix_state = "native_partial"
+        else:
+            appendix_state = "native_delivered"
         result.report.update({
             "pipeline": "modular",
             "list_policy": request.list_policy,
@@ -313,9 +448,14 @@ class ConversionKernel:
             "semantic_equivalence_audit": copy.deepcopy(equivalence_audit),
             "source_parser_equivalence_audit": copy.deepcopy(parser_equivalence_audit),
             "capability_migration": {
-                "source_parser": shadow_state,
+                "source_parser": parser_state,
                 "source_region": region_state,
                 "document_structure": structure_state,
+                "protected_content": protected_state,
+                "list_semantics": list_state,
+                "table_semantics": table_state,
+                "caption_semantics": caption_state,
+                "appendix_semantics": appendix_state,
             },
             "execution_plan": {
                 "profile": "wx_full_rules",

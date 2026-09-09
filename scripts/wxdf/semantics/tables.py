@@ -6,11 +6,98 @@ import copy
 from typing import Any, Mapping
 
 from ..contracts import TABLE_TYPES
-from ..validation import validate_ast
+from ..validation import validate_ast, validate_source_facts
 
 
 def table_caption_eligible(table_type: str | None) -> bool:
     return str(table_type or "unknown") == "data"
+
+
+def capture_docx_table_layout(table: Any) -> dict[str, Any]:
+    """Capture source layout facts needed to preserve layout tables."""
+
+    from docx.oxml.ns import qn
+
+    tbl_pr = table._tbl.tblPr
+    result: dict[str, Any] = {}
+    width = tbl_pr.find(qn("w:tblW")) if tbl_pr is not None else None
+    if width is not None:
+        result["source_width"] = {
+            "value": width.get(qn("w:w")),
+            "type": width.get(qn("w:type")),
+        }
+    margins = tbl_pr.find(qn("w:tblCellMar")) if tbl_pr is not None else None
+    if margins is not None:
+        result["source_margins"] = {
+            name: {
+                "value": child.get(qn("w:w")),
+                "type": child.get(qn("w:type")),
+            }
+            for name in ("top", "left", "bottom", "right")
+            for child in [margins.find(qn(f"w:{name}"))]
+            if child is not None
+        }
+    row_heights = []
+    for row in table.rows:
+        tr_pr = row._tr.find(qn("w:trPr"))
+        height = tr_pr.find(qn("w:trHeight")) if tr_pr is not None else None
+        row_heights.append({
+            "value": height.get(qn("w:val")) if height is not None else None,
+            "rule": height.get(qn("w:hRule")) if height is not None else None,
+        })
+    if any(item["value"] is not None or item["rule"] is not None for item in row_heights):
+        result["row_heights"] = row_heights
+    borders = tbl_pr.find(qn("w:tblBorders")) if tbl_pr is not None else None
+    if borders is not None:
+        result["borders"] = {
+            name: {
+                "val": edge.get(qn("w:val")),
+                "sz": edge.get(qn("w:sz")),
+                "space": edge.get(qn("w:space")),
+                "color": edge.get(qn("w:color")),
+            }
+            for name in ("top", "left", "bottom", "right", "insideH", "insideV")
+            for edge in [borders.find(qn(f"w:{name}"))]
+            if edge is not None
+        }
+    if table.autofit is not None:
+        result["autofit"] = bool(table.autofit)
+    return result
+
+
+def collect_source_table_semantics(facts: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Read table roles and layout contracts from SourceFacts in document order."""
+
+    validate_source_facts(facts)
+    result: list[dict[str, Any]] = []
+
+    def walk(node_id: str) -> None:
+        for child_id in facts["children"].get(node_id, []):
+            container = facts["containers"].get(child_id, {})
+            if container.get("kind") == "table":
+                source = dict(container.get("table_semantics") or {})
+                table_type = str(source.get("table_type") or "data")
+                row_ids = facts["children"].get(child_id, [])
+                inferred_headers = 1 if row_ids and all(
+                    facts["containers"].get(cell_id, {}).get("cell_role") == "header"
+                    for cell_id in facts["children"].get(row_ids[0], [])
+                ) else 0
+                header_rows = int(source.get("header_rows", inferred_headers) or 0)
+                result.append({
+                    "node_id": child_id,
+                    "source_position": facts["evidence"].get(child_id, {}).get("source_position"),
+                    "table_type": table_type,
+                    "header_rows": header_rows,
+                    "caption_eligible": bool(source.get("caption_eligible", table_caption_eligible(table_type))),
+                    "confidence": source.get("confidence"),
+                    "evidence": list(source.get("evidence") or []),
+                    "layout_contract": copy.deepcopy(dict(container.get("layout") or {})),
+                })
+            if child_id in facts["containers"]:
+                walk(child_id)
+
+    walk("root")
+    return result
 
 
 def _layout_contract(block: Mapping[str, Any]) -> dict[str, Any]:
@@ -95,4 +182,10 @@ def audit_table_semantics(ast: Mapping[str, Any]) -> dict[str, Any]:
     return {"passed": not issues, "issues": issues, "tables": tables}
 
 
-__all__ = ["audit_table_semantics", "collect_table_candidates", "table_caption_eligible"]
+__all__ = [
+    "audit_table_semantics",
+    "capture_docx_table_layout",
+    "collect_source_table_semantics",
+    "collect_table_candidates",
+    "table_caption_eligible",
+]

@@ -83,11 +83,15 @@ def normalize_caption_placement(
         caption_id = str(caption.get("id") or f"caption-at-{index}")
         caption_type = _caption_type(caption)
         candidates: list[dict[str, Any]] = []
-        for candidate_index in (index - 1, index + 1):
-            if 0 <= candidate_index < len(blocks):
-                candidate = blocks[candidate_index]
-                if _compatible(caption_type, candidate):
-                    candidates.append(candidate)
+        native_target_id = str(caption.get("native_caption_decision", {}).get("target_block_id") or "")
+        if native_target_id and native_target_id in object_by_id and _compatible(caption_type, object_by_id[native_target_id]):
+            candidates = [object_by_id[native_target_id]]
+        else:
+            for candidate_index in (index - 1, index + 1):
+                if 0 <= candidate_index < len(blocks):
+                    candidate = blocks[candidate_index]
+                    if _compatible(caption_type, candidate):
+                        candidates.append(candidate)
 
         previous_object_id = str(caption.get("association", {}).get("object_id") or "")
         if previous_object_id and previous_object_id in object_by_id:

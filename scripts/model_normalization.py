@@ -71,6 +71,10 @@ def normalize_document_model_simple(
         source_style = str(source.get("style") or "")
         appendix_source_role = appendix_role_from_style(source_style)
 
+        if source.get("protected") is True:
+            active_list_signatures.clear()
+            continue
+
         if source.get("semantic_origin") == "markdown_token" and (
             block_type == "separator" or block_type == "body"
             or block.get("role") in {"code_block", "quote"}

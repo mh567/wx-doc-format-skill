@@ -12,6 +12,9 @@ _INDENT_CLUSTER_TWIPS = 120
 
 
 def _source_level(block: dict[str, Any]) -> tuple[int, bool]:
+    native = block.get("native_list_decision", {})
+    if isinstance(native.get("level"), int):
+        return max(0, int(native["level"])), True
     numbering = block.get("source", {}).get("numbering", {})
     try:
         if "ilvl" in numbering:
@@ -22,6 +25,9 @@ def _source_level(block: dict[str, Any]) -> tuple[int, bool]:
 
 
 def _source_family(block: dict[str, Any]) -> str:
+    native = block.get("native_list_decision", {})
+    if native.get("list_kind") in {"ordered", "unordered"}:
+        return str(native["list_kind"])
     numbering = block.get("source", {}).get("numbering", {})
     source_type = numbering.get("source_list_type")
     if source_type in _UNORDERED_TYPES:
@@ -113,14 +119,19 @@ def _resolve_run(
             evidence.append("level_jump_clamped")
 
         family = _source_family(block)
-        list_type = normalize_wx_list_type(
+        native = block.get("native_list_decision", {})
+        list_type = str(native.get("list_type")) if native.get("list_type") else normalize_wx_list_type(
             "dash" if family == "unordered" else "lower_letter_paren",
             level,
         )
         parent_id = active_parents.get(level - 1) if level else None
         sequence_key = (parent_id, level, list_type)
         source_numbering = block.setdefault("source", {}).setdefault("numbering", {})
-        restart = bool(source_numbering.get("restart")) or sequence_key not in seen_sequences
+        restart = (
+            bool(native.get("restart"))
+            if "restart" in native
+            else bool(source_numbering.get("restart")) or sequence_key not in seen_sequences
+        )
         seen_sequences.add(sequence_key)
 
         old_level = int(block.get("level") or 0)

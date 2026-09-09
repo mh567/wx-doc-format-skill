@@ -119,6 +119,8 @@ def test_kernel_executes_native_source_region_and_structure_modules_before_adapt
         assert request.options["_native_structure_context"]["source_facts"]["facts_schema_version"] == "1.0"
         assert request.options["_native_structure_context"]["candidates"]
         assert request.options["_native_region_context"]["excluded_source_positions"] == [1]
+        assert request.options["_native_protected_context"]["source_facts"]["facts_schema_version"] == "1.0"
+        assert request.options["_native_list_context"]["semantics"]["schema_version"] == "1.0"
         output.write_bytes(b"adapter-output")
         facts = parse(source)
         ast = ConversionKernel._facts_to_ast(facts)
@@ -163,7 +165,13 @@ def test_kernel_executes_native_source_region_and_structure_modules_before_adapt
     assert [item["module_id"] for item in result.report["execution_plan"]["modules"]] == [
         "source-facts-parser",
         "source-region",
+        "source-projection",
         "document-structure",
+        "protected-content",
+        "list-semantics",
+        "table-semantics",
+        "caption-semantics",
+        "appendix-semantics",
         "legacy-full-adapter",
         "source-parser-equivalence-audit",
         "semantic-equivalence-audit",
@@ -171,12 +179,23 @@ def test_kernel_executes_native_source_region_and_structure_modules_before_adapt
     native = result.report["native_module_evidence"]
     assert native["source-facts-parser"]["unit_count"] == 3
     assert native["source-region"]["excluded_node_count"] == 1
+    assert native["source-projection"]["paragraph_count"] == 2
     assert native["document-structure"]["title_candidate_count"] == 1
     assert native["document-structure"]["heading_candidate_count"] == 0
     assert native["document-structure"]["body_candidate_count"] == 1
+    assert native["protected-content"]["candidate_count"] == 0
+    assert native["list-semantics"]["item_count"] == 0
+    assert native["table-semantics"]["table_count"] == 0
+    assert native["caption-semantics"]["caption_count"] == 0
+    assert native["appendix-semantics"]["range_count"] == 0
     assert result.report["semantic_equivalence_audit"]["status"] == "equivalent"
     assert result.report["capability_migration"]["source_region"] == "native_consumed"
     assert result.report["capability_migration"]["document_structure"] == "native_consumed"
+    assert result.report["capability_migration"]["protected_content"] == "native_delivered"
+    assert result.report["capability_migration"]["list_semantics"] == "native_delivered"
+    assert result.report["capability_migration"]["table_semantics"] == "native_delivered"
+    assert result.report["capability_migration"]["caption_semantics"] == "native_delivered"
+    assert result.report["capability_migration"]["appendix_semantics"] == "native_delivered"
 
 
 def test_kernel_audits_source_parser_from_internal_adapter_artifact(tmp_path: Path) -> None:

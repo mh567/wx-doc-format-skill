@@ -13,6 +13,12 @@ from .semantics.regions import resolve_source_regions
 from .semantics.structure import collect_structure_candidates
 from .semantics.equivalence import compare_structure_equivalence
 from .semantics.parser_equivalence import compare_parser_equivalence
+from .semantics.source_projection import project_source_facts
+from .semantics.protected import collect_protected_candidates
+from .semantics.lists import analyze_lists
+from .semantics.tables import collect_source_table_semantics
+from .semantics.captions import collect_source_caption_semantics
+from .semantics.appendices import collect_source_appendix_semantics
 
 
 @dataclass
@@ -117,6 +123,197 @@ def document_structure_module() -> RegisteredModule:
     )
 
 
+def source_projection_module() -> RegisteredModule:
+    def execute(context: ModuleExecutionContext) -> dict[str, Any]:
+        projection = project_source_facts(
+            context.require("source_facts"),
+            context.require("source_regions"),
+        )
+        context.provide("source_projection", projection)
+        evidence = {
+            "paragraph_count": len(projection["paragraphs"]),
+            "table_count": len(projection["tables"]),
+            "image_count": projection["image_count"],
+            "list_item_count": projection["list_item_count"],
+        }
+        context.evidence["source-projection"] = evidence
+        context.provide("source_parser", evidence)
+        return evidence
+
+    return RegisteredModule(
+        descriptor=ModuleDescriptor(
+            module_id="source-projection",
+            version="1.0",
+            stages=("role",),
+            requires=("source_facts", "source_regions"),
+            provides=("source_projection", "source_parser"),
+        ),
+        execute=execute,
+    )
+
+
+def protected_content_module() -> RegisteredModule:
+    def execute(context: ModuleExecutionContext) -> dict[str, Any]:
+        candidates = collect_protected_candidates(context.require("source_facts"))
+        context.provide("protected_content_candidates", candidates)
+        evidence = {
+            "candidate_count": len(candidates),
+            "note_count": sum(
+                item.get("proposal", {}).get("value", {}).get("reason") == "note"
+                for item in candidates
+            ),
+            "opaque_count": sum(
+                str(item.get("proposal", {}).get("value", {}).get("reason") or "").startswith("opaque_")
+                for item in candidates
+            ),
+        }
+        context.evidence["protected-content"] = evidence
+        context.provide("protected_content", evidence)
+        return evidence
+
+    return RegisteredModule(
+        descriptor=ModuleDescriptor(
+            module_id="protected-content",
+            version="1.0",
+            stages=("role",),
+            requires=("source_facts",),
+            provides=("protected_content_candidates", "protected_content"),
+        ),
+        execute=execute,
+    )
+
+
+def list_semantics_module() -> RegisteredModule:
+    def execute(context: ModuleExecutionContext) -> dict[str, Any]:
+        protected_ids = {
+            str(node_id)
+            for candidate in context.require("protected_content_candidates")
+            for node_id in candidate.get("target_node_ids", [])
+        }
+        structure_ids = {
+            str(node_id)
+            for candidate in context.require("document_structure_candidates")
+            if candidate.get("proposal", {}).get("value", {}).get("role") in {"title", "heading"}
+            for node_id in candidate.get("target_node_ids", [])
+        }
+        semantics = analyze_lists(
+            context.require("source_facts"),
+            context={"protected_node_ids": sorted(protected_ids | structure_ids)},
+        )
+        context.provide("list_semantics_result", semantics)
+        evidence = {
+            "status": semantics["status"],
+            "list_count": len(semantics["lists"]),
+            "item_count": len(semantics["items"]),
+            "continuation_count": len(semantics["continuations"]),
+            "diagnostic_count": len(semantics["diagnostics"]),
+        }
+        context.evidence["list-semantics"] = evidence
+        context.provide("list_semantics", evidence)
+        return evidence
+
+    return RegisteredModule(
+        descriptor=ModuleDescriptor(
+            module_id="list-semantics",
+            version="1.0",
+            stages=("relation",),
+            requires=(
+                "source_facts",
+                "document_structure_candidates",
+                "protected_content_candidates",
+            ),
+            provides=("list_semantics_result", "list_semantics"),
+        ),
+        execute=execute,
+    )
+
+
+def table_semantics_module() -> RegisteredModule:
+    def execute(context: ModuleExecutionContext) -> dict[str, Any]:
+        semantics = collect_source_table_semantics(context.require("source_facts"))
+        context.provide("table_semantics_result", semantics)
+        evidence = {
+            "table_count": len(semantics),
+            "data_count": sum(item.get("table_type") == "data" for item in semantics),
+            "layout_count": sum(item.get("table_type") == "layout" for item in semantics),
+            "code_sample_count": sum(item.get("table_type") == "code_sample" for item in semantics),
+            "caption_eligible_count": sum(bool(item.get("caption_eligible")) for item in semantics),
+        }
+        context.evidence["table-semantics"] = evidence
+        context.provide("table_semantics", evidence)
+        return evidence
+
+    return RegisteredModule(
+        descriptor=ModuleDescriptor(
+            module_id="table-semantics",
+            version="1.0",
+            stages=("relation",),
+            requires=("source_facts",),
+            provides=("table_semantics_result", "table_semantics"),
+        ),
+        execute=execute,
+    )
+
+
+def caption_semantics_module() -> RegisteredModule:
+    def execute(context: ModuleExecutionContext) -> dict[str, Any]:
+        semantics = collect_source_caption_semantics(
+            context.require("source_facts"),
+            context.require("table_semantics_result"),
+        )
+        context.provide("caption_semantics_result", semantics)
+        captions = semantics["captions"]
+        evidence = {
+            "caption_count": len(captions),
+            "table_caption_count": sum(item.get("caption_type") == "table" for item in captions),
+            "figure_caption_count": sum(item.get("caption_type") == "figure" for item in captions),
+            "associated_count": sum(item.get("status") == "associated" for item in captions),
+            "issue_count": len(semantics["issues"]),
+        }
+        context.evidence["caption-semantics"] = evidence
+        context.provide("caption_semantics", evidence)
+        return evidence
+
+    return RegisteredModule(
+        descriptor=ModuleDescriptor(
+            module_id="caption-semantics",
+            version="1.0",
+            stages=("relation",),
+            requires=("source_facts", "table_semantics_result"),
+            provides=("caption_semantics_result", "caption_semantics"),
+        ),
+        execute=execute,
+    )
+
+
+def appendix_semantics_module() -> RegisteredModule:
+    def execute(context: ModuleExecutionContext) -> dict[str, Any]:
+        semantics = collect_source_appendix_semantics(context.require("source_facts"))
+        context.provide("appendix_semantics_result", semantics)
+        evidence = {
+            "candidate_count": len(semantics["candidates"]),
+            "accepted_count": sum(bool(item.get("accepted")) for item in semantics["candidates"]),
+            "rejected_count": sum(not bool(item.get("accepted")) for item in semantics["candidates"]),
+            "range_count": len(semantics["ranges"]),
+            "heading_count": sum(len(item.get("heading_decisions") or []) for item in semantics["ranges"]),
+            "issue_count": len(semantics["issues"]),
+        }
+        context.evidence["appendix-semantics"] = evidence
+        context.provide("appendix_semantics", evidence)
+        return evidence
+
+    return RegisteredModule(
+        descriptor=ModuleDescriptor(
+            module_id="appendix-semantics",
+            version="1.0",
+            stages=("relation",),
+            requires=("source_facts",),
+            provides=("appendix_semantics_result", "appendix_semantics"),
+        ),
+        execute=execute,
+    )
+
+
 def legacy_full_adapter_module(
     runner: Callable[[Any], Any],
     *,
@@ -133,6 +330,27 @@ def legacy_full_adapter_module(
         options["_native_region_context"] = {
             **context.require("source_region"),
             "source_facts": context.require("source_facts"),
+        }
+        options["_native_source_context"] = {
+            "source_facts": context.require("source_facts"),
+            "projection": context.require("source_projection"),
+        }
+        options["_native_protected_context"] = {
+            "source_facts": context.require("source_facts"),
+            "candidates": context.require("protected_content_candidates"),
+        }
+        options["_native_list_context"] = {
+            "source_facts": context.require("source_facts"),
+            "semantics": context.require("list_semantics_result"),
+        }
+        options["_native_table_context"] = {
+            "semantics": context.require("table_semantics_result"),
+        }
+        options["_native_caption_context"] = {
+            "semantics": context.require("caption_semantics_result"),
+        }
+        options["_native_appendix_context"] = {
+            "semantics": context.require("appendix_semantics_result"),
         }
         adapter_request = replace(context.request, options=options)
         result = runner(adapter_request)
@@ -155,7 +373,16 @@ def legacy_full_adapter_module(
             module_id="legacy-full-adapter",
             version="1.0",
             stages=("normalize", "render", "audit", "publish"),
-            requires=("source_region", "document_structure_candidates"),
+            requires=(
+                "source_region",
+                "source_projection",
+                "document_structure_candidates",
+                "protected_content_candidates",
+                "list_semantics_result",
+                "table_semantics_result",
+                "caption_semantics_result",
+                "appendix_semantics_result",
+            ),
             provides=(*provides, "legacy_run_result", "legacy_source_ast"),
             exclusive_group="full-conversion-adapter",
         ),
@@ -236,10 +463,16 @@ def source_parser_equivalence_module() -> RegisteredModule:
 
 __all__ = [
     "ModuleExecutionContext",
+    "appendix_semantics_module",
+    "caption_semantics_module",
     "document_structure_module",
     "legacy_full_adapter_module",
+    "list_semantics_module",
     "semantic_equivalence_module",
     "source_parser_equivalence_module",
+    "source_projection_module",
+    "protected_content_module",
     "source_facts_module",
     "source_region_module",
+    "table_semantics_module",
 ]

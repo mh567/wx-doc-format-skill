@@ -749,7 +749,21 @@ def extract_template_toc_fragment(doc) -> list:
 def insert_template_toc_fragment(doc, fragment: list) -> dict:
     body = doc.element.body
     for index, child in enumerate(fragment):
-        body.insert(index, deepcopy(child))
+        inserted = deepcopy(child)
+        for instruction in inserted.iter(qn("w:instrText")):
+            value = instruction.text or ""
+            if not re.search(r"\bTOC\b", value, re.I):
+                continue
+            value = re.sub(
+                r'\\o\s+"1-\d+"',
+                lambda _: f'\\o "1-{TOC_MAX_LEVEL}"',
+                value,
+                flags=re.I,
+            )
+            value = re.sub(r'\\t\s+"[^"]*"', "", value, flags=re.I)
+            instruction.text = f"{value.rstrip()} {toc_custom_style_switch()} "
+            instruction.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+        body.insert(index, inserted)
     settings = doc.settings.element
     update_fields = settings.find(qn("w:updateFields"))
     if update_fields is None:

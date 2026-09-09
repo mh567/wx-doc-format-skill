@@ -5,9 +5,17 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import re
 from typing import Any, Mapping
 
+from text_utils import caption_parts
+
+from ..model import inline_text_projection
 from ..validation import validate_ast
+from ..validation import validate_source_facts
+
+
+_RAW_NUMBER_RE = re.compile(r"^\s*(?:表|图)\s*(?P<number>(?:[A-Z]\s*[.．]\s*)?\d+(?:\s*[.．]\s*\d+)*)")
 
 
 def _digest(value: Any) -> str:
@@ -112,4 +120,95 @@ def collect_caption_candidates(ast: Mapping[str, Any]) -> list[dict[str, Any]]:
     return result
 
 
-__all__ = ["audit_caption_placement", "build_caption_overlay", "collect_caption_candidates", "invalidate_overlay"]
+def _source_location(facts: Mapping[str, Any], node_id: str) -> dict[str, Any] | None:
+    evidence = facts.get("evidence", {}).get(node_id, {})
+    for key in ("source_position", "line_start"):
+        value = evidence.get(key)
+        if isinstance(value, int) and value >= 0:
+            return {"kind": key, "value": value}
+    return None
+
+
+def _raw_number(text: str) -> str | None:
+    match = _RAW_NUMBER_RE.match(text)
+    if match is None:
+        return None
+    return re.sub(r"\s+", "", match.group("number")).replace("．", ".")
+
+
+def collect_source_caption_semantics(
+    facts: Mapping[str, Any],
+    table_semantics: list[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Resolve authored caption roles and target relationships from SourceFacts."""
+
+    validate_source_facts(facts)
+    tables = {str(item.get("node_id")): item for item in table_semantics}
+    objects: list[dict[str, Any]] = []
+    captions: list[dict[str, Any]] = []
+    for order, node_id in enumerate(facts["children"].get("root", [])):
+        unit = facts["units"].get(node_id)
+        container = facts["containers"].get(node_id, {})
+        if unit is not None and unit.get("kind") == "paragraph":
+            inline = list(unit.get("inline_content") or [])
+            image_count = sum(item.get("kind") == "image" for item in inline)
+            if image_count:
+                objects.append({
+                    "node_id": node_id,
+                    "kind": "figure",
+                    "order": order,
+                    "location": _source_location(facts, node_id),
+                })
+            source_text = inline_text_projection(inline).strip()
+            caption_type, label, _, text = caption_parts(source_text)
+            if caption_type in {"table", "figure"}:
+                captions.append({
+                    "node_id": node_id,
+                    "order": order,
+                    "location": _source_location(facts, node_id),
+                    "caption_type": caption_type,
+                    "label": label,
+                    "raw_number": _raw_number(source_text),
+                    "text": text,
+                })
+        elif container.get("kind") == "table":
+            semantic = tables.get(str(node_id), {})
+            if semantic.get("caption_eligible"):
+                objects.append({
+                    "node_id": node_id,
+                    "kind": "table",
+                    "order": order,
+                    "location": _source_location(facts, node_id),
+                })
+
+    assigned: set[str] = set()
+    issues: list[dict[str, Any]] = []
+    for caption in captions:
+        caption_type = str(caption["caption_type"])
+        if caption_type == "table":
+            candidates = [item for item in objects if item["kind"] == "table" and item["order"] > caption["order"]]
+            candidates.sort(key=lambda item: item["order"])
+            required = "before"
+        else:
+            candidates = [item for item in objects if item["kind"] == "figure" and item["order"] < caption["order"]]
+            candidates.sort(key=lambda item: item["order"], reverse=True)
+            required = "after"
+        target = next((item for item in candidates if item["node_id"] not in assigned), None)
+        if target is None:
+            caption.update({"target_location": None, "required_placement": required, "source_placement": None, "status": "orphan"})
+            issues.append({"code": "caption_target_missing", "node_id": caption["node_id"], "caption_type": caption_type})
+            continue
+        assigned.add(str(target["node_id"]))
+        caption.update({
+            "target_node_id": target["node_id"],
+            "target_location": copy.deepcopy(target["location"]),
+            "required_placement": required,
+            "source_placement": "before" if caption["order"] < target["order"] else "after",
+            "status": "associated",
+        })
+    for caption in captions:
+        caption.pop("order", None)
+    return {"captions": captions, "issues": issues}
+
+
+__all__ = ["audit_caption_placement", "build_caption_overlay", "collect_caption_candidates", "collect_source_caption_semantics", "invalidate_overlay"]

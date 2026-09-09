@@ -580,10 +580,126 @@ def _apply_native_markdown_regions(
     return applied.model
 
 
+def _apply_native_source_projection(
+    source_model: dict,
+    report: dict,
+    runtime_context: dict | None,
+) -> dict:
+    context = (runtime_context or {}).get("native_source")
+    if not isinstance(context, dict):
+        return source_model
+    from wxdf.semantics.source_projection_bridge import apply_source_projection
+
+    applied = apply_source_projection(
+        source_model,
+        context.get("projection") or {},
+    )
+    report["source_parser_consumption"] = applied.evidence
+    return applied.model
+
+
+def _apply_native_protected_context(
+    source_model: dict,
+    report: dict,
+    runtime_context: dict | None,
+) -> dict:
+    context = (runtime_context or {}).get("native_protected")
+    if not isinstance(context, dict):
+        return source_model
+    from wxdf.semantics.protected_bridge import apply_protected_candidates
+
+    applied = apply_protected_candidates(
+        source_model,
+        context.get("source_facts") or {},
+        list(context.get("candidates") or []),
+    )
+    report["protected_content_consumption"] = applied.evidence
+    return applied.model
+
+
+def _apply_native_list_context(
+    source_model: dict,
+    report: dict,
+    runtime_context: dict | None,
+) -> dict:
+    context = (runtime_context or {}).get("native_list")
+    if not isinstance(context, dict):
+        return source_model
+    from wxdf.semantics.list_bridge import apply_list_semantics
+
+    applied = apply_list_semantics(
+        source_model,
+        context.get("source_facts") or {},
+        context.get("semantics") or {},
+    )
+    report["list_semantics_consumption"] = applied.evidence
+    return applied.model
+
+
+def _apply_native_table_context(
+    source_model: dict,
+    report: dict,
+    runtime_context: dict | None,
+) -> dict:
+    context = (runtime_context or {}).get("native_table")
+    if not isinstance(context, dict):
+        return source_model
+    from wxdf.semantics.table_bridge import apply_table_semantics
+
+    applied = apply_table_semantics(
+        source_model,
+        list(context.get("semantics") or []),
+    )
+    report["table_semantics_consumption"] = applied.evidence
+    return applied.model
+
+
+def _apply_native_caption_context(
+    source_model: dict,
+    report: dict,
+    runtime_context: dict | None,
+) -> dict:
+    context = (runtime_context or {}).get("native_caption")
+    if not isinstance(context, dict):
+        return source_model
+    from wxdf.semantics.caption_bridge import apply_caption_semantics
+
+    applied = apply_caption_semantics(
+        source_model,
+        context.get("semantics") or {},
+    )
+    report["caption_semantics_consumption"] = applied.evidence
+    return applied.model
+
+
+def _apply_native_appendix_context(
+    source_model: dict,
+    report: dict,
+    runtime_context: dict | None,
+) -> dict:
+    context = (runtime_context or {}).get("native_appendix")
+    if not isinstance(context, dict):
+        return source_model
+    from wxdf.semantics.appendix_bridge import apply_appendix_semantics
+
+    applied = apply_appendix_semantics(
+        source_model,
+        context.get("semantics") or {},
+    )
+    report["appendix_semantics_consumption"] = applied.evidence
+    return applied.model
+
+
 def convert_md(src: Path, doc, report: dict, row_height_cm: float, row_height_rule: str, numbering_ids: dict, args=None, file_protocol_ctx=None, runtime_context=None) -> dict:
     source_model = parse_md_to_model(src, report, skill_version=skill_version)
     source_model = _apply_native_markdown_regions(source_model, report, runtime_context)
+    source_model = _apply_native_source_projection(source_model, report, runtime_context)
+    source_model = _apply_native_protected_context(source_model, report, runtime_context)
     source_model = _apply_native_structure_context(source_model, report, runtime_context)
+    source_model = _apply_native_list_context(source_model, report, runtime_context)
+    source_model = _apply_native_table_context(source_model, report, runtime_context)
+    source_model = _apply_native_caption_context(source_model, report, runtime_context)
+    source_model = _apply_native_appendix_context(source_model, report, runtime_context)
     summarize_source_document_model(report, source_model)
 
     # ── LLM Enhancement ──
@@ -690,7 +806,13 @@ def convert_docx(src: Path, dst_doc, row_height_cm: float, row_height_rule: str,
     )
     report["parse_report"] = source_model.get("parse_report", {})
     source_model = inject_document_title(source_model, front_matter_context)
+    source_model = _apply_native_source_projection(source_model, report, runtime_context)
+    source_model = _apply_native_protected_context(source_model, report, runtime_context)
     source_model = _apply_native_structure_context(source_model, report, runtime_context)
+    source_model = _apply_native_list_context(source_model, report, runtime_context)
+    source_model = _apply_native_table_context(source_model, report, runtime_context)
+    source_model = _apply_native_caption_context(source_model, report, runtime_context)
+    source_model = _apply_native_appendix_context(source_model, report, runtime_context)
     summarize_source_document_model(report, source_model)
 
     # ── LLM Enhancement ──
@@ -1126,6 +1248,12 @@ def _run_legacy_full_adapter(args, request: ConversionRequest) -> RunResult:
             runtime_context={
                 "native_structure": request.options.get("_native_structure_context"),
                 "native_region": request.options.get("_native_region_context"),
+                "native_source": request.options.get("_native_source_context"),
+                "native_protected": request.options.get("_native_protected_context"),
+                "native_list": request.options.get("_native_list_context"),
+                "native_table": request.options.get("_native_table_context"),
+                "native_caption": request.options.get("_native_caption_context"),
+                "native_appendix": request.options.get("_native_appendix_context"),
                 "adapter_artifacts": request.options.get("_adapter_artifacts"),
             },
         )

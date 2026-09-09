@@ -2,7 +2,7 @@
   "plan_version": "3.0-execution-1",
   "design_path": "docs/modular-pipeline-design-v3.md",
   "design_sha256": "c083884277ca6df4fb82426210fd3860242606cdf18691ff7bd5199da2f8d764",
-  "observed_head": "cd68200d521146508c306ca7f62f32590d729587",
+  "observed_head": "7074afbe285d46be286cacb8eb72675f96cf2153",
   "observed_skill_version": "0.12.19",
   "implementation_started": true,
   "current_task": "T16",
@@ -259,6 +259,10 @@
       "next_action": "开始 T14",
       "tests": [
         "tests/test_modular_structure.py",
+        "tests/test_modular_source_projection.py",
+        "tests/test_modular_source_consumption.py",
+        "tests/test_modular_protected_consumption.py",
+        "tests/test_modular_list_consumption.py",
         "tests/test_front_matter.py",
         "tests/test_toc_regions.py",
         "tests/test_list_semantics.py"
@@ -279,6 +283,9 @@
       "next_action": "开始 T15",
       "tests": [
         "tests/test_modular_semantics.py",
+        "tests/test_modular_table_consumption.py",
+        "tests/test_modular_caption_consumption.py",
+        "tests/test_modular_appendix_consumption.py",
         "tests/test_table_semantics.py",
         "tests/test_caption_placement.py",
         "tests/test_appendix_semantics.py"
@@ -312,7 +319,7 @@
       "card": "tasks/T16.md",
       "evidence": "evidence/T16.md",
       "review": "codex_self_review_passed",
-      "blocker": "pending_external: Kylin V10 ARM64 和 Windows x86_64 目标验收，页面视觉抽检 pending",
+      "blocker": "pending_external: Kylin V10 ARM64 目标验收；Windows x86_64 已退出后续范围",
       "next_action": "按 handoff.md 完成外部平台验收，获得授权后再评估默认切换",
       "tests": [
         "tests/test_modular_distribution.py",

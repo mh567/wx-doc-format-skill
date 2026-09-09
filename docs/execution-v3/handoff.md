@@ -2,65 +2,58 @@
 
 ## 当前交付
 
-T00 至 T16 已完成源码实现、合同测试、模块化纯规则路径、本机性能候选和 macOS ARM64 编译门禁。默认入口仍为 legacy。完整状态见 `docs/execution-v3/status.json`，T16 证据见 `docs/execution-v3/evidence/T16.md`。
+T00 至 T16 的本地开发项已完成。八项源语义能力已由原生 Provider 进入真实 ExecutionPlan，并在真实 Markdown 与真实 DOCX 上完成消费和审计。默认入口保持 legacy，3.0 路径需显式指定 `--pipeline modular --list-policy wx-default-v2`。
 
-本机发布包：
+当前本机构建产物：
 
 `dist/local/wx-doc-format-skill-0.12.19-macos-arm64.tar.gz`
 
-该包已完成版本检查、报告脱敏检查、真实 Markdown 转换、显式 modular 转换、legacy 文件式恢复和 DOCX ZIP 完整性检查。包内模块清单显示源码和编译运行时均为 33 个 `wxdf` 模块，合同版本和模式清单已写入 `manifest.json`。
+包内 45 个源码模块与 45 个编译运行时模块完全匹配。macOS ARM64 已完成全量测试、ASCII 安装冒烟、真实 DOCX 转换、DOCX ZIP 检查、专项审计和 6 页页面抽检。
 
-## 未决能力
+## 当前验证结果
 
-- `modular_online`：closed，候选接受内核接入尚未完成。
-- `modular_file`：closed，模块化 CLI 检查点恢复接入尚未完成。
-- `modular_review`：closed，模块化审计后复核重渲染接入尚未完成。
-- Kylin V10 ARM64：`pending_external`，需要目标 ARM64 真机安装和转换验收。
-- Windows x86_64：`pending_external`，需要目标主机和 Python 3.13 工具链验收。
-- 页面视觉抽检：`visual_pending`。
+- 全量测试：402 passed。
+- 真实 Markdown：八项能力均为 `native_consumed`，2 张表均有表头，2 个自动表题位置正确，风险为空。
+- 真实 DOCX：八项能力均为 `native_consumed`，表格、题注、列表、附录、目录和样式审计通过。
+- 编译产物：显式 modular 真实 DOCX 验收通过，`unexpected_styles=[]`。
+- 公式 layout 表：源与输出的宽度、边距、无框线、行高和 OMML 数量一致。
+- 性能：同配置复测三档均满足候选门槛，默认未切换。
 
-## 测试与性能
+## 使用方式
 
-- 全量测试：349 passed。
-- T16 发行聚焦：43 passed。
-- T16 相关回归：47 passed。
-- T15 基准报告：`wx_output/modular-v3/benchmark.json`。
-- 最终候选资格：small、medium、large 三档均通过 5% 时间和 10% 内存门槛，`global_default_changed=false`。
-
-## 当前默认与回退命令
-
-默认行为保持 legacy，旧调用可继续使用：
+legacy 默认路径：
 
 ```bash
-env -u WX_DOC_FORMAT_RELEASE -u WX_DOC_LLM_ENHANCE \
-  scripts/.venv/bin/python3 scripts/main.py \
+scripts/.venv/bin/python3 scripts/main.py \
   --input input/test_baseline.md \
-  --output wx_output/modular-v3/handoff-legacy.docx \
+  --output /tmp/wxdf-legacy.docx \
   --template assets/wx_template.docx \
   --pipeline legacy \
   --list-policy legacy \
   --llm-enhance off \
-  --report wx_output/modular-v3/handoff-legacy.json
+  --report /tmp/wxdf-legacy.json
 ```
 
-显式试用已开放的 modular 纯规则路径：
+3.0 modular 纯规则路径：
 
 ```bash
-env -u WX_DOC_FORMAT_RELEASE -u WX_DOC_LLM_ENHANCE \
-  scripts/.venv/bin/python3 scripts/main.py \
+scripts/.venv/bin/python3 scripts/main.py \
   --input input/test_baseline.md \
-  --output wx_output/modular-v3/handoff-modular.docx \
+  --output /tmp/wxdf-modular.docx \
   --template assets/wx_template.docx \
   --pipeline modular \
   --list-policy wx-default-v2 \
   --llm-enhance off \
-  --report wx_output/modular-v3/handoff-modular.json
+  --report /tmp/wxdf-modular.json
 ```
 
-发行包安装目录必须使用可打印 ASCII。工作区路径含中文时，先将归档解压到合规目录，再执行包内 `scripts/run.sh` 或 `scripts/run.ps1`。
+发行包必须解压到仅含可打印 ASCII 字符的安装目录。当前工作区路径含中文，直接启动编译程序会返回 134。
 
-## 平台状态
+## 剩余外部门禁
 
-本机 macOS ARM64 构建日志：`wx_output/modular-v3/T16/macos-build.txt`。Nuitka 报告显示 standalone 二进制的 `minos 26.0`。本地发布包只代表 macOS ARM64 证据，不能替代 Kylin V10 ARM64 或 Windows x86_64 验收。
+- Kylin V10 ARM64 真机安装与转换验收。
+- Windows x86_64 已退出后续打包、验收和发布范围，现有入口仅作历史兼容保留。
+- 默认切换需用户明确授权，并在跨平台结果完成后重新评估。
+- `modular_online`、`modular_file`、`modular_review` 继续保持 closed。
 
-本轮未执行远程推送、标签、Release、公开树替换或安装副本同步。后续若要发布，先完成两个外部平台验收和页面视觉抽检，再按 `docs/development-workflow.md` 执行发布流程，并重新确认默认切换授权。
+本轮未推送、未创建标签或 Release，未替换公开仓库和本机安装副本。

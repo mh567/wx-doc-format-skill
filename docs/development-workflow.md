@@ -70,7 +70,7 @@ GitHub Actions 额度受限期间，发布制品使用本地构建。
 |---|---|---|
 | macOS ARM64 | `packaging/nuitka/build-local-macos-arm64.sh` | 可构建，发布前检查 Mach-O `minos` |
 | Linux ARM64 | `packaging/nuitka/build-local-linux-arm64.sh` | 可构建，Kylin V10 保持真机验收门禁 |
-| Windows x86_64 | `packaging/nuitka/build-local-windows-x86_64.ps1` | 入口已就绪，制品可暂缺 |
+| Windows x86_64 | `packaging/nuitka/build-local-windows-x86_64.ps1` | 已退出后续打包与验收范围，入口仅作历史兼容保留 |
 
 每个构建入口负责锁定依赖、执行测试、编译 standalone、组装平台包并执行真实转换冒烟。产物位于 `dist/local/`。
 
@@ -80,7 +80,7 @@ GitHub Actions 额度受限期间，发布制品使用本地构建。
 
 ## 4. 生成公开 Skill
 
-当前允许 macOS ARM64 和 Linux ARM64 先行发布，Windows 制品缺失不阻断组装。
+当前发布目标仅包含 macOS ARM64 和 Linux ARM64。Windows x86_64 不再进入打包、验收或发布门禁。
 
 ```bash
 scripts/.venv/bin/python3 packaging/nuitka/assemble_public_skill.py \

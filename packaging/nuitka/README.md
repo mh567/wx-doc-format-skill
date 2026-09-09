@@ -1,6 +1,6 @@
 # Nuitka 本地构建
 
-本目录提供 macOS ARM64、Linux ARM64 和 Windows x86_64 三个本地构建入口。每个入口都会安装锁定依赖、运行测试、编译 standalone 运行时、组装离线包并执行真实转换冒烟。
+本目录当前交付 macOS ARM64 和 Linux ARM64 两个平台。历史上建立的 Windows x86_64 入口继续保留兼容，不再进入后续打包、验收或发布范围。有效构建入口会安装锁定依赖、运行测试、编译 standalone 运行时、组装离线包并执行真实转换冒烟。
 
 ## macOS ARM64
 
@@ -30,6 +30,8 @@ packaging/nuitka/build-local-linux-arm64.sh
 
 ## Windows x86_64
 
+该入口仅作历史兼容保留，后续不再执行 Windows x86_64 打包和验收。
+
 需要 Windows x86_64、Python 3.13 和 Nuitka 支持的 C 编译工具链。
 
 ```powershell
@@ -49,14 +51,13 @@ packaging/nuitka/build-local-linux-arm64.sh
 ```text
 wx-doc-format-skill-<version>-macos-arm64.tar.gz
 wx-doc-format-skill-<version>-kylin-v10-arm64.tar.gz
-wx-doc-format-skill-<version>-windows-x86_64.zip
 ```
 
 发布包的安装目录必须只包含可打印 ASCII 字符。安装器会验证 `SHA256SUMS.txt`、完整文件集和运行时版本。调用 `scripts/run.sh` 或 `scripts/run.ps1` 时也会重新检查安装路径。
 
 ## 组装公开 Skill
 
-公开仓库只保留薄 Skill 和平台运行时引导脚本。组装时可以要求已经完成的平台，未生成的 Windows 制品会记录为暂不可用：
+公开仓库只保留薄 Skill 和平台运行时引导脚本。组装时要求当前交付的 macOS ARM64 和 Linux ARM64 平台：
 
 ```bash
 scripts/.venv/bin/python3 packaging/nuitka/assemble_public_skill.py \

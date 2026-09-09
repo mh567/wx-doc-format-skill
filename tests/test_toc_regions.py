@@ -17,7 +17,7 @@ if str(SCRIPTS) not in sys.path:
 
 from llm_enhancer import enhance_document_model, normalize_mode, validate_patch
 from toc_detector import audit_toc_replacement, detect_toc_regions, selected_source_positions
-from template_finalizer import insert_table_of_contents
+from template_finalizer import extract_template_toc_fragment, insert_table_of_contents, insert_template_toc_fragment
 
 
 def _manual_toc_document() -> Document:
@@ -138,6 +138,29 @@ def test_toc_field_maps_appendix_styles_to_toc_levels() -> None:
     assert '\\t "附录标题,2,附录一级标题,2,附录二级标题,3,附录三级标题,4"' in instruction
     assert audit["custom_style_mapping_issues"] == []
     assert audit["passed"] is True
+
+
+def test_template_toc_fragment_is_upgraded_to_canonical_levels_and_appendix_mapping() -> None:
+    template = Document()
+    control = OxmlElement("w:sdt")
+    content = OxmlElement("w:sdtContent")
+    paragraph = OxmlElement("w:p")
+    run = OxmlElement("w:r")
+    instruction = OxmlElement("w:instrText")
+    instruction.text = 'TOC \\o "1-3" \\h \\u'
+    run.append(instruction)
+    paragraph.append(run)
+    content.append(paragraph)
+    control.append(content)
+    template.element.body.insert(0, control)
+
+    fragment = extract_template_toc_fragment(template)
+    output = Document()
+    insert_template_toc_fragment(output, fragment)
+
+    text = next(output.element.body.iter(qn("w:instrText"))).text
+    assert '\\o "1-4"' in text
+    assert '\\t "附录标题,2,附录一级标题,2,附录二级标题,3,附录三级标题,4"' in text
 
 
 def test_word_toc_field_is_strong_evidence() -> None:
