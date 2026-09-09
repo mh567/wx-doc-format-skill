@@ -91,6 +91,33 @@ P1 聚焦回归：
 
 提交：`96083d3`、`8fad0b3`、`9645173`、`ffa0b0a`、`875d16f`、`e843d47`、`121647e`。当前未推送远程。
 
+## L02 至 L06 层级与序列验收
+
+2026-09-09 增加 `tests/test_issue2_acceptance.py`，使用真实 CLI 覆盖 L02 至 L06。Markdown 夹具覆盖最近有效父项、多个续段、外部正文、跳号和标题重启、连续空行与制表符；DOCX 夹具覆盖多级编号跳级及未决发布阻断。
+
+初始红灯：
+
+`scripts/.venv/bin/python3 -m pytest tests/test_issue2_acceptance.py -q`
+
+结果：`2 failed, 4 passed`。L03 暴露多个续段都指向同一 source item 的 AST 合同冲突，L05 暴露标题后的目标编号未重启。
+
+修复：
+
+1. 续段关联改为 owner → continuation → continuation 链，保持每个源节点最多一个 continuation target。
+2. 正文标题和附录标题按所属作用域重置 wx-default-v2 目标计数，列表项内部标题不污染外层计数。
+3. 列表项直属普通 block 由 Renderer 直接写入，续段保留正文样式且不继承编号承载。
+4. 测试共享 CLI runner 和作用域 helper，失败路径检查报告存在并保留 stderr。
+
+验证：
+
+`scripts/.venv/bin/python3 -m pytest tests/test_issue2_acceptance.py -q`，`6 passed`。
+
+`scripts/.venv/bin/python3 -m pytest tests/test_issue1_acceptance.py tests/test_issue2_acceptance.py tests/test_modular_lists.py tests/test_modular_list_consumption.py tests/test_modular_normalization.py tests/test_modular_rendering.py tests/test_modular_kernel.py tests/test_modular_conversion.py tests/test_modular_baseline.py tests/test_modular_source_facts.py -q`，`51 passed`。
+
+全量回归：`scripts/.venv/bin/python3 -m pytest tests/ -q`，`427 passed in 29.64s`。
+
+提交：`4da79d0`、`fb7dc21`。当前未推送远程。
+
 ## 真实转换证据
 
 Markdown `input/benchmark_report.md` 通过显式 `--modular-profile native-v2` 转换成功，命令退出码为 `0`。报告路径为 `/tmp/wx-issue1-native-p1-markdown-report.json`，报告显示 `execution_plan.profile=wx_full_rules-native-v2`、八个 native 模块均列入执行计划、事务状态 `committed`、决策数 `21`、模型审计和保存后审计均通过。输出路径为 `/tmp/wx-issue1-native-p1-markdown.docx`，`unzip -t` 退出码为 `0`。
@@ -105,6 +132,6 @@ DOCX 最小列表夹具 `/tmp/wx-issue1-input.docx` 通过 `scripts/main.py --mo
 
 双轴审查固定点为 `4b595c0`，原始实现提交为 `b44de5f`。本轮已补充显式 profile 路由、列表结构单批事务、续段关系、生成锚点、legacy retype 标准语义更新、注册表实际执行绑定、source reference 预条件校验和 failure policy 发布阻断。
 
-L02 至 L16 的逐项双 parser、RenderPlan、`numbering.xml`、段落 `numPr` 和保存后 OOXML 矩阵尚未在本轮补齐，不能据此宣称 Issue #1 全部验收完成。Kylin V10 ARM64 真机、页面视觉和发布流程仍属于外部门禁。远程推送、标签、Release 和公开 Skill 同步均未执行。
+L07 至 L16 的逐项双 parser、RenderPlan、`numbering.xml`、段落 `numPr` 和保存后 OOXML 矩阵尚未在本轮补齐，不能据此宣称 Issue #1 全部验收完成。Kylin V10 ARM64 真机、页面视觉和发布流程仍属于外部门禁。远程推送、标签、Release 和公开 Skill 同步均未执行。
 
 下一步：补齐 L01 至 L16 双 parser 验收矩阵及编号 XML 证据，再根据外部平台验收结果评估默认策略切换。
