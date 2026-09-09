@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import io
+import posixpath
 from pathlib import Path
 from typing import Any, Mapping
+from zipfile import ZipFile
 
 from docx import Document
 from docx.oxml import OxmlElement
@@ -53,6 +55,36 @@ def _image_resource_ids(inline_content: list[Mapping[str, Any]]) -> list[str]:
         elif kind == "link":
             resource_ids.extend(_image_resource_ids(item.get("children", [])))
     return resource_ids
+
+
+def _attach_image_artifact_metadata(output_path: Path, render_map: dict[str, dict[str, Any]]) -> None:
+    with ZipFile(output_path) as archive:
+        document_root = etree.fromstring(archive.read("word/document.xml"))
+        relationships_root = etree.fromstring(archive.read("word/_rels/document.xml.rels"))
+        drawing_namespace = "http://schemas.openxmlformats.org/drawingml/2006/main"
+        relationship_namespace = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+        relationships = {
+            relationship.get("Id"): relationship.get("Target")
+            for relationship in relationships_root
+            if relationship.get("Type", "").endswith("/image")
+        }
+        image_targets = []
+        for blip in document_root.findall(f".//{{{drawing_namespace}}}blip"):
+            target = relationships.get(blip.get(f"{{{relationship_namespace}}}embed"))
+            image_targets.append(
+                posixpath.normpath(posixpath.join("word", target.lstrip("/"))) if target else None
+            )
+        media_parts = sorted(name for name in archive.namelist() if name.startswith("word/media/"))
+
+    target_index = 0
+    for item in render_map.values():
+        resource_ids = item.get("image_resources", [])
+        if not resource_ids:
+            continue
+        count = len(resource_ids)
+        item["image_targets"] = image_targets[target_index:target_index + count]
+        item["media_parts"] = media_parts
+        target_index += count
 
 
 def _write_inline(paragraph: Any, inline_content: list[Mapping[str, Any]], resources: Mapping[str, Any]) -> None:
@@ -329,4 +361,5 @@ def render(
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
     doc.save(output)
+    _attach_image_artifact_metadata(output, render_map)
     return {"output_path": str(output), "render_map": render_map, "render_plan": plan, "diagnostics": diagnostics}

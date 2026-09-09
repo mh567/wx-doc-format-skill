@@ -101,6 +101,8 @@ def check_saved_output(path: Path | str, expected: Mapping[str, Any], render_map
     if table_count != expected_tables:
         issues.append({"code": "table_count_changed", "expected": expected_tables, "actual": table_count})
     expected_image_hashes: list[tuple[str, str]] = []
+    expected_image_targets: list[str | None] = []
+    expected_media_parts: set[str] | None = None
     source_resources = expected.get("source_ast", {}).get("document", {}).get("resources", {})
     if isinstance(source_resources, Mapping):
         for item in render_map.values():
@@ -110,6 +112,12 @@ def check_saved_output(path: Path | str, expected: Mapping[str, Any], render_map
                     expected_image_hashes.append((str(resource_id), str(resource["content_sha256"])))
                 else:
                     issues.append({"code": "image_resource_missing", "resource_id": resource_id})
+            if item.get("image_resources"):
+                expected_image_targets.extend(item.get("image_targets", []))
+                if item.get("media_parts") is not None and expected_media_parts is None:
+                    expected_media_parts = set(item["media_parts"])
+    if expected_image_hashes and (document_xml is None or relationships_xml is None):
+        issues.append({"code": "image_relationships_missing"})
     if document_xml is not None and relationships_xml is not None:
         document_root = ElementTree.fromstring(document_xml)
         drawing_namespace = "http://schemas.openxmlformats.org/drawingml/2006/main"
@@ -120,7 +128,7 @@ def check_saved_output(path: Path | str, expected: Mapping[str, Any], render_map
             for relationship in relationship_root
             if relationship.get("Type", "").endswith("/image")
         }
-        actual_image_hashes: list[tuple[str | None, str | None]] = []
+        actual_image_hashes: list[tuple[str | None, str | None, str | None]] = []
         with ZipFile(output) as archive:
             names = set(archive.namelist())
             for blip in document_root.findall(f".//{{{drawing_namespace}}}blip"):
@@ -128,15 +136,22 @@ def check_saved_output(path: Path | str, expected: Mapping[str, Any], render_map
                 target = relationships.get(relationship_id)
                 package_path = posixpath.normpath(posixpath.join("word", target.lstrip("/"))) if target else None
                 if package_path is None or package_path not in names:
-                    actual_image_hashes.append((relationship_id, None))
+                    actual_image_hashes.append((relationship_id, package_path, None))
                     issues.append({"code": "image_relationship_missing", "relationship_id": relationship_id, "target": target})
                     continue
-                actual_image_hashes.append((relationship_id, "sha256:" + hashlib.sha256(archive.read(package_path)).hexdigest()))
+                actual_image_hashes.append((relationship_id, package_path, "sha256:" + hashlib.sha256(archive.read(package_path)).hexdigest()))
         if len(actual_image_hashes) != len(expected_image_hashes):
             issues.append({"code": "image_count_changed", "expected": len(expected_image_hashes), "actual": len(actual_image_hashes)})
-        for index, ((resource_id, expected_hash), (_, actual_hash)) in enumerate(zip(expected_image_hashes, actual_image_hashes)):
+        if expected_media_parts is not None:
+            actual_media_parts = {name for name in names if name.startswith("word/media/")}
+            if actual_media_parts != expected_media_parts:
+                issues.append({"code": "image_media_parts_changed", "expected": sorted(expected_media_parts), "actual": sorted(actual_media_parts)})
+        for index, ((resource_id, expected_hash), actual) in enumerate(zip(expected_image_hashes, actual_image_hashes)):
+            _, actual_target, actual_hash = actual
             if actual_hash != expected_hash:
                 issues.append({"code": "image_resource_mismatch", "index": index, "resource_id": resource_id, "expected": expected_hash, "actual": actual_hash})
+            if index < len(expected_image_targets) and expected_image_targets[index] != actual_target:
+                issues.append({"code": "image_relationship_target_mismatch", "index": index, "resource_id": resource_id, "expected": expected_image_targets[index], "actual": actual_target})
     expected_numbered_items = [item for item in render_map.values() if item.get("numbered")]
     expected_numbered_texts = [str(item.get("text") or "") for item in expected_numbered_items if str(item.get("text") or "")]
     expected_numbered_styles = {str(item.get("style") or "") for item in expected_numbered_items if item.get("style")}
@@ -166,7 +181,7 @@ def check_saved_output(path: Path | str, expected: Mapping[str, Any], render_map
                 style_num_info[style_id] = (parsed_num_id, parsed_ilvl)
     expected_numbered_style_ids = {style_id for style_id, name in style_names.items() if name in expected_numbered_styles}
     expected_style_ids_by_name = {name: style_id for style_id, name in style_names.items() if name in expected_numbered_styles}
-    valid_num_fmts = {"decimal", "decimalZero", "lowerLetter", "upperLetter", "lowerRoman", "upperRoman", "bullet"}
+    valid_num_fmts = {"decimal", "decimalZero", "lowerLetter", "upperLetter", "lowerRoman", "upperRoman", "bullet", "none"}
     numbering_num_to_abstract: dict[int, int] = {}
     numbering_levels: dict[int, dict[int, str]] = {}
     numbering_overrides: dict[int, dict[int, str]] = {}
@@ -266,7 +281,7 @@ def check_saved_output(path: Path | str, expected: Mapping[str, Any], render_map
             expected_level = style_num_info[expected_style_id][1]
         expected_fmt = None
         if expected_kind == "unordered":
-            expected_fmt = "bullet"
+            expected_fmt = "none" if numbering.get("style_role") == "list_dash" else "bullet"
         elif expected_kind == "ordered":
             expected_fmt = "lowerLetter" if expected_level in {None, 0} else "decimal"
         expected_num_id = expected_numbering_ids.get(numbering.get("style_role")) if isinstance(expected_numbering_ids, Mapping) else None

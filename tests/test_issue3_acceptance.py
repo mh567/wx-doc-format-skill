@@ -392,6 +392,84 @@ def test_saved_output_audit_rejects_tampered_image_part(tmp_path: Path) -> None:
     assert any(issue["code"] == "image_resource_mismatch" for issue in findings["issues"])
 
 
+def test_saved_output_audit_rejects_retargeted_image_relationship(tmp_path: Path) -> None:
+    image = tmp_path / "pixel.png"
+    image.write_bytes(PNG_1X1)
+    source = _write_markdown(tmp_path, "image-target-audit", ["1. ![内嵌图](pixel.png)", ""])
+    _, _, normalized, output = _run_native(source, tmp_path, "image-target-audit")
+    resource_id = next(iter(normalized["source_ast"]["document"]["resources"]))
+    rerendered = render(
+        normalized,
+        tmp_path / "image-target-audit-rerendered.docx",
+        template_path=Path(__file__).resolve().parents[1] / "assets" / "wx_template.docx",
+        resources={resource_id: image.read_bytes()},
+    )
+    with ZipFile(output) as archive:
+        document_xml = ElementTree.fromstring(archive.read("word/document.xml"))
+        relationships_xml = ElementTree.fromstring(archive.read("word/_rels/document.xml.rels"))
+        drawing_namespace = "http://schemas.openxmlformats.org/drawingml/2006/main"
+        relationship_namespace = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+        image_relationships = {
+            relationship.get("Id"): relationship.get("Target")
+            for relationship in relationships_xml
+            if relationship.get("Type", "").endswith("/image")
+        }
+        relationship_id = document_xml.find(f".//{{{drawing_namespace}}}blip").get(f"{{{relationship_namespace}}}embed")
+        original_target = image_relationships[relationship_id]
+        original_part = "word/" + original_target.lstrip("/")
+        alternate_part = next(
+            name for name in archive.namelist()
+            if name.startswith("word/media/") and name != original_part
+        )
+        original_blob = archive.read(original_part)
+
+    same_content = tmp_path / "image-target-audit-same-content.docx"
+    _rewrite_docx_part(output, same_content, alternate_part, lambda data: original_blob)
+
+    def retarget(data: bytes) -> bytes:
+        root = ElementTree.fromstring(data)
+        for relationship in root:
+            if relationship.get("Id") == relationship_id:
+                relationship.set("Target", alternate_part.removeprefix("word/"))
+        return ElementTree.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    retargeted = tmp_path / "image-target-audit-retargeted.docx"
+    _rewrite_docx_part(same_content, retargeted, "word/_rels/document.xml.rels", retarget)
+
+    findings = check_saved_output(retargeted, normalized, rerendered["render_map"])
+    assert findings["passed"] is False
+    assert any(issue["code"] == "image_relationship_target_mismatch" for issue in findings["issues"])
+
+
+def test_saved_output_audit_rejects_unordered_numbering_mapping(tmp_path: Path) -> None:
+    source = _write_markdown(tmp_path, "unordered-numbering", ["- 一级无序", "  - 二级无序", ""])
+    _, _, normalized, output = _run_native(source, tmp_path, "unordered-numbering")
+    numbering_ids = normalized["presentation"]["profile"]["numbering_ids"]
+    rerendered = render(
+        normalized,
+        tmp_path / "unordered-numbering-rerendered.docx",
+        template_path=Path(__file__).resolve().parents[1] / "assets" / "wx_template.docx",
+    )
+    corrupted = tmp_path / "unordered-numbering-corrupt.docx"
+    namespace = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    ns = {"w": namespace}
+
+    def remap_unordered(data: bytes) -> bytes:
+        root = ElementTree.fromstring(data)
+        for number in root.findall("w:num", ns):
+            if number.get(f"{{{namespace}}}numId") == str(numbering_ids["list_dash"]):
+                number.find("w:abstractNumId", ns).set(
+                    f"{{{namespace}}}val",
+                    str(numbering_ids["list_bullet_abstract"]),
+                )
+        return ElementTree.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    _rewrite_docx_part(output, corrupted, "word/numbering.xml", remap_unordered)
+    findings = check_saved_output(corrupted, normalized, rerendered["render_map"])
+    assert findings["passed"] is False
+    assert any(issue["code"] == "list_numbering_mapping_mismatch" for issue in findings["issues"])
+
+
 def test_template_numbering_ids_include_unordered_mappings() -> None:
     profile = load_template_profile(Path(__file__).resolve().parents[1] / "assets" / "wx_template.docx")
     numbering_ids = profile["numbering_ids"]
