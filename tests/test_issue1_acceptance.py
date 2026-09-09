@@ -17,6 +17,7 @@ PYTHON = ROOT / "scripts" / ".venv" / "bin" / "python3"
 TEMPLATE = ROOT / "assets" / "wx_template.docx"
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 NS = {"w": W_NS}
+NESTED_MARKDOWN = "1. 一级有序\n   - 二级无序\n     1. 三级有序\n2. 第二个一级\n"
 
 
 def _build_l01_docx(tmp_path: Path) -> Path:
@@ -241,7 +242,7 @@ def _run_legacy_default(source: Path, tmp_path: Path) -> tuple[dict, Path]:
 def test_l01_nested_ordered_unordered_ordered_runs_full_native_acceptance(tmp_path: Path, source_kind: str) -> None:
     if source_kind == "markdown":
         source = tmp_path / "l01.md"
-        source.write_text("1. 一级有序\n   - 二级无序\n     1. 三级有序\n2. 第二个一级\n", encoding="utf-8")
+        source.write_text(NESTED_MARKDOWN, encoding="utf-8")
     else:
         source = _build_l01_docx(tmp_path)
 
@@ -281,6 +282,8 @@ def test_l01_nested_ordered_unordered_ordered_runs_full_native_acceptance(tmp_pa
     assert report["saved_output_audit"]["passed"] is True
     assert report["source_facts_summary"]["unit_count"] == 4
     assert set(report["source_facts_summary"]["marker_kinds"]) == {"ordered", "unordered"}
+    assert report["source_facts_immutable"] is True
+    assert report["source_facts_digest"] == report["source_facts_digest_after"]
     assert report["list_semantics"]["item_count"] == 4
     assert report["list_semantics_consumption"]["item_consumed_count"] == 4
     _assert_nested_source_ast(source_ast)
@@ -292,12 +295,13 @@ def test_l01_nested_ordered_unordered_ordered_runs_full_native_acceptance(tmp_pa
 
 def test_legacy_remains_the_default_cli_pipeline(tmp_path: Path) -> None:
     source = tmp_path / "legacy.md"
-    source.write_text("普通正文\n", encoding="utf-8")
+    source.write_text(NESTED_MARKDOWN, encoding="utf-8")
 
     report, output = _run_legacy_default(source, tmp_path)
 
     assert "module_chain" not in report
     assert report["source_document_model_summary"]["schema_version"] == "1.0"
     assert report["markdown_source_audit"]["adapter"] == "markdown-it-py"
+    assert report["markdown_source_audit"]["list_items"] == 4
     with ZipFile(output) as archive:
         assert archive.testzip() is None

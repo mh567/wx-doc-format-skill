@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -475,3 +476,10 @@ def summarize_source_facts(facts: dict[str, Any]) -> dict[str, Any]:
         "diagnostic_codes": [item["code"] for item in facts["diagnostics"]],
         "marker_kinds": sorted({item.get("marker_kind") for item in facts["evidence"].values() if item.get("marker_kind")}),
     }
+
+
+def digest_source_facts(facts: dict[str, Any]) -> str:
+    """Return a stable digest for the immutable SourceFacts contract."""
+    validate_source_facts(facts)
+    payload = json.dumps(facts, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return _digest(payload)

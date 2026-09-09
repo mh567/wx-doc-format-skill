@@ -949,7 +949,7 @@ class ConversionKernel:
             return RunResult(status="failed", exit_code=1, diagnostics=[{"code": "INPUT_NOT_FOUND", "message": str(request.input_path)}])
 
         from .metrics import MetricsCollector
-        from .parsers import parse, summarize_source_facts
+        from .parsers import digest_source_facts, parse, summarize_source_facts
         from .resolver import resolve
         from .semantics.appendices import collect_source_appendix_semantics
         from .semantics.captions import collect_caption_candidates
@@ -979,6 +979,7 @@ class ConversionKernel:
                 facts = parse(request.input_path, {"source_store": store})
                 metrics.record_source_opened()
                 source_summary = summarize_source_facts(facts)
+                source_facts_digest = digest_source_facts(facts)
             with metrics.stage("scope"):
                 regions = resolve_source_regions(request.input_path, facts)
             with metrics.stage("role"):
@@ -1031,6 +1032,8 @@ class ConversionKernel:
                     metrics=metrics.snapshot(),
                 )
             committed = native_run["committed"]
+            source_facts_digest_after = digest_source_facts(facts)
+            source_facts_immutable = source_facts_digest == source_facts_digest_after
             snapshot = committed.snapshot
             normalized = native_run["normalized"]
             render_result = native_run["render_result"]
@@ -1038,6 +1041,12 @@ class ConversionKernel:
             saved_findings = native_run["saved_findings"]
 
             diagnostics = list(list_result.get("diagnostics") or [])
+            if not source_facts_immutable:
+                diagnostics.append({
+                    "code": "SOURCE_FACTS_MUTATED",
+                    "severity": "error",
+                    "message": "SourceFacts changed during native pipeline execution",
+                })
             diagnostics.extend(decision_set.get("unresolved") or [])
             diagnostics.extend(model_findings.get("issues") or [])
             diagnostics.extend(saved_findings.get("issues") or [])
@@ -1054,6 +1063,9 @@ class ConversionKernel:
                 report.update({
                     "status": "failed",
                     "source_ast_revision": snapshot.ast["revision"],
+                    "source_facts_digest": source_facts_digest,
+                    "source_facts_digest_after": source_facts_digest_after,
+                    "source_facts_immutable": source_facts_immutable,
                     "decision_set": decision_set,
                     "model_audit": model_findings,
                     "saved_output_audit": saved_findings,
@@ -1113,6 +1125,9 @@ class ConversionKernel:
             report.update({
                 "status": status,
                 "source_facts_summary": source_summary,
+                "source_facts_digest": source_facts_digest,
+                "source_facts_digest_after": source_facts_digest_after,
+                "source_facts_immutable": source_facts_immutable,
                 "source_ast_revision": snapshot.ast["revision"],
                 "semantic_digest": normalized["semantic_digest"],
                 "presentation_digest": normalized["presentation_digest"],
