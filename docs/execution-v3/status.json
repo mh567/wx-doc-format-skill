@@ -2,7 +2,7 @@
   "plan_version": "3.0-execution-1",
   "design_path": "docs/modular-pipeline-design-v3.md",
   "design_sha256": "c083884277ca6df4fb82426210fd3860242606cdf18691ff7bd5199da2f8d764",
-  "observed_head": "20bba2368d3a706ea5c5bc499fbb8746d5d8b20d",
+  "observed_head": "6cf60f584d1dbf0cba8da103325b55dbfac9fbcb",
   "observed_skill_version": "0.12.19",
   "implementation_started": true,
   "current_task": "T16",
@@ -10,7 +10,7 @@
   "issue1_remediation": {
     "status": "implemented_with_external_gates",
     "evidence": "evidence/ISSUE1.md",
-    "last_commit": "20bba2368d3a706ea5c5bc499fbb8746d5d8b20d",
+    "last_commit": "6cf60f584d1dbf0cba8da103325b55dbfac9fbcb",
     "verified_on": "2026-09-10",
     "tests": {
       "issue1": "3 passed",
@@ -25,17 +25,20 @@
       "l14_related": "38 passed",
       "l15": "2 passed",
       "l15_related": "20 passed",
-      "full": "460 passed"
+      "l16": "21 passed",
+      "l16_related": "37 passed",
+      "full": "481 passed"
     },
     "acceptance_tests": [
       "tests/test_issue4_acceptance.py",
       "tests/test_issue5_acceptance.py",
       "tests/test_issue6_acceptance.py",
       "tests/test_issue7_acceptance.py",
-      "tests/test_issue8_acceptance.py"
+      "tests/test_issue8_acceptance.py",
+      "tests/test_issue9_acceptance.py"
     ],
-    "review": "standards_pass_spec_pass_after_l14_fixes",
-    "next_action": "开始 L16 验收"
+    "review": "standards_pass_spec_pass_after_l16_fixes",
+    "next_action": "按 handoff.md 完成外部平台验收，获得授权后再评估默认切换"
   },
   "tasks": [
     {

@@ -306,6 +306,32 @@ Python 编译检查：`scripts/.venv/bin/python3 -m py_compile tests/test_issue8
 
 下一步：开始 L16 验收。
 
+## L16 决策账本重放、检查点事务完整性与交付门禁补强
+
+2026-09-10 完成 L16 修复，覆盖决策账本在 native-v2 流水线中的重放、SourceFacts 绑定、检查点恢复和事务完整性。决策账本现在要求 native 重放携带完整 SourceFacts 摘要及解析器配置合同，源事实变化会持久化失效状态并清理旧的派生 AST、规范化结果、目标映射、覆盖项和事务状态。
+
+本轮修复内容：
+
+1. `DecisionLedger` 在解析后的 Source AST 进入规范化、渲染和发布前接入 native-v2，支持全部合法操作的重放及重复重放幂等。
+2. 多目标覆盖项逐目标核对，已记录事务在部分状态丢失时允许安全重放，覆盖项写回保留内部 `node_id`、`target_node_id` 和 `list_item_id`。
+3. 同一事务批次支持多个修订，并保存批次内容摘要。跨事务的相同决策不会丢失事务身份，冲突事务仍明确拒绝。
+4. 检查点的 `applied_transactions` 与 `transaction_content_digests` 逐项校验摘要一致性，`complete_pending_response()` 绑定运行标识、源事实、账本、响应内容和事务摘要，已完成状态也必须经过绑定校验。
+5. Checkpoint 2.0 JSON Schema 增加事务状态字段，与运行时校验保持一致。
+
+验证：
+
+专项测试：`scripts/.venv/bin/python3 -m pytest tests/test_issue9_acceptance.py -q`，退出码 `0`，`21 passed`。
+
+L16 相关回归：`scripts/.venv/bin/python3 -m pytest tests/test_issue9_acceptance.py tests/test_modular_resume.py tests/test_modular_ledger.py tests/test_modular_contracts.py -q`，退出码 `0`，`37 passed`。
+
+完整回归：`scripts/.venv/bin/python3 -m pytest tests/ -q`，退出码 `0`，`481 passed in 31.29s`。
+
+差异检查：`git diff --check` 与 `git diff --cached --check` 均通过。验收文件原被 `.gitignore` 的 `tests/*` 规则忽略，已使用强制暂存纳入提交。`_build/` 和 `paseo.json` 未纳入提交。
+
+最终双轴 review：Standards PASS，Spec PASS。两轴均在固定点 `aa2e22b` 上复核当前 L16 变更，确认 SourceFacts 绑定、事务批次和摘要、覆盖项多目标重放、源变化清理、完成快照身份校验及 Checkpoint schema 同步均无可执行缺陷。外部副作用是否真实发生仍需由调用方提供证据，本地检查点只校验快照、响应、事务和身份绑定。
+
+源码及验收测试提交：`6cf60f5`。当前未推送远程。未跟踪 `_build/` 和 `paseo.json` 保持原状，未纳入提交。
+
 ## 真实转换证据
 
 Markdown `input/benchmark_report.md` 通过显式 `--modular-profile native-v2` 转换成功，命令退出码为 `0`。报告路径为 `/tmp/wx-issue1-native-p1-markdown-report.json`，报告显示 `execution_plan.profile=wx_full_rules-native-v2`、八个 native 模块均列入执行计划、事务状态 `committed`、决策数 `21`、模型审计和保存后审计均通过。输出路径为 `/tmp/wx-issue1-native-p1-markdown.docx`，`unzip -t` 退出码为 `0`。
@@ -320,6 +346,6 @@ DOCX 最小列表夹具 `/tmp/wx-issue1-input.docx` 通过 `scripts/main.py --mo
 
 双轴审查固定点为 `4b595c0`，原始实现提交为 `b44de5f`。本轮已补充显式 profile 路由、列表结构单批事务、续段关系、生成锚点、legacy retype 标准语义更新、注册表实际执行绑定、source reference 预条件校验和 failure policy 发布阻断。
 
-L11 至 L16 的逐项双 parser、页面视觉和外部平台矩阵仍未在本轮补齐，不能据此宣称 Issue #1 全部验收完成。Kylin V10 ARM64 真机和发布流程仍属于外部门禁。远程推送、标签、Release 和公开 Skill 同步均未执行。
+L11 至 L16 的逐项双 parser、页面视觉和外部平台矩阵仍未在本轮补齐，不能据此宣称 Issue #1 全部验收完成。Kylin V10 ARM64 真机和发布流程仍属于外部门禁。远程推送、标签、Release 和公开 Skill 同步均未执行。L16 代码与回归门禁已完成，外部平台门禁保持未完成。
 
 下一步：补齐 L11 至 L16 验收矩阵及外部平台证据，再根据外部平台验收结果评估默认策略切换。
