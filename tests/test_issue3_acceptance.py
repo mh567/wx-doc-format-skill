@@ -213,6 +213,8 @@ def test_l07_block_image_first_child_gets_generated_anchor(tmp_path: Path) -> No
     assert "list_item" in operation_kinds
     assert any(operation["kind"] == "image" and operation["node_id"] == "image-1" for operation in result["render_plan"]["operations"])
     assert len(Document(output).inline_shapes) == 1
+    findings = check_saved_output(output, normalized, result["render_map"])
+    assert findings["passed"] is True
 
 
 def test_l08_empty_item_generates_anchor_while_inline_image_keeps_paragraph(tmp_path: Path) -> None:
@@ -311,6 +313,19 @@ def test_saved_output_audit_rejects_missing_numbering_definition(tmp_path: Path)
     findings = check_saved_output(corrupted, normalized, rerendered["render_map"])
     assert findings["passed"] is False
     assert any(issue["code"] == "list_numbering_definition_invalid" for issue in findings["issues"])
+
+    wrong_format = tmp_path / "numbering-definition-format-corrupt.docx"
+
+    def invalidate_format(data: bytes) -> bytes:
+        root = ElementTree.fromstring(data)
+        for num_fmt in root.findall(".//w:numFmt", ns):
+            num_fmt.set(f"{{{namespace}}}val", "bullet")
+        return ElementTree.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    _rewrite_docx_part(output, wrong_format, "word/numbering.xml", invalidate_format)
+    format_findings = check_saved_output(wrong_format, normalized, rerendered["render_map"])
+    assert format_findings["passed"] is False
+    assert any(issue["code"] == "list_numbering_mapping_mismatch" for issue in format_findings["issues"])
 
 
 def test_l09_merged_and_nested_table_cells_are_unique_and_scope_local(tmp_path: Path) -> None:

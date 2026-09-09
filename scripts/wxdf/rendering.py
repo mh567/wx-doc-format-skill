@@ -122,6 +122,7 @@ def render(
         block: Mapping[str, Any],
         *,
         list_style: str | None = None,
+        numbering: Mapping[str, Any] | None = None,
         parent: Any | None = None,
     ) -> Any:
         nonlocal paragraph_counter
@@ -160,6 +161,8 @@ def render(
             "style": actual_style,
             "numbered": actual_style in {"List Number", "List Bullet"} or "列项" in actual_style,
         }
+        if numbering:
+            render_map[node_id]["numbering"] = dict(numbering)
         return paragraph
 
     def add_table(node_id: str, block_id: str, *, parent: Any | None = None) -> None:
@@ -266,10 +269,22 @@ def render(
             generated = next((item for item in normalized.get("generated_nodes", []) if item.get("node_id") == anchor_id), None)
             anchor_block = generated or {"block_type": "paragraph", "role": "body", "inline_content": []}
         if presentation.get("marker_kind") == "ordered":
-            list_style = styles.get("list_letter" if presentation.get("target_level", 0) == 0 else "list_decimal", "List Number")
+            style_role = "list_letter" if presentation.get("target_level", 0) == 0 else "list_decimal"
+            list_style = styles.get(style_role, "List Number")
         else:
-            list_style = styles.get("list_dash" if presentation.get("target_level", 0) == 0 else "list_bullet", "List Bullet")
-        add_paragraph(child_id, anchor_block, list_style=list_style, parent=parent)
+            style_role = "list_dash" if presentation.get("target_level", 0) == 0 else "list_bullet"
+            list_style = styles.get(style_role, "List Bullet")
+        add_paragraph(
+            child_id,
+            anchor_block,
+            list_style=list_style,
+            numbering={
+                "marker_kind": presentation.get("marker_kind"),
+                "target_level": presentation.get("target_level", 0),
+                "style_role": style_role,
+            },
+            parent=parent,
+        )
         for nested_child in children:
             if nested_child == anchor_id:
                 continue

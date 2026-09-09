@@ -95,6 +95,8 @@ def check_saved_output(path: Path | str, expected: Mapping[str, Any], render_map
     expected_numbered_items = [item for item in render_map.values() if item.get("numbered")]
     expected_numbered_texts = [str(item.get("text") or "") for item in expected_numbered_items if str(item.get("text") or "")]
     expected_numbered_styles = {str(item.get("style") or "") for item in expected_numbered_items if item.get("style")}
+    expected_profile = expected.get("presentation", {}).get("profile", {})
+    expected_numbering_ids = expected_profile.get("numbering_ids", {}) if isinstance(expected_profile, Mapping) else {}
     style_names: dict[str, str] = {}
     style_num_info: dict[str, tuple[int | None, int]] = {}
     if styles_xml is not None:
@@ -160,6 +162,7 @@ def check_saved_output(path: Path | str, expected: Mapping[str, Any], render_map
             if overrides:
                 numbering_overrides[num_id] = overrides
     numbered_paragraphs: list[Any] = []
+    actual_numbering: list[dict[str, Any]] = []
     invalid_numbering: list[dict[str, Any]] = []
     for paragraph in xml_paragraphs:
         direct = paragraph.find("w:pPr/w:numPr", ns)
@@ -187,6 +190,7 @@ def check_saved_output(path: Path | str, expected: Mapping[str, Any], render_map
                 num_fmt = numbering_levels.get(abstract_id, {}).get(ilvl)
             if num_id is None or abstract_id is None or num_fmt not in valid_num_fmts:
                 invalid_numbering.append({"text": text, "num_id": num_id, "ilvl": ilvl, "abstract_num_id": abstract_id, "num_fmt": num_fmt})
+            actual_numbering.append({"text": text, "num_id": num_id, "ilvl": ilvl, "abstract_num_id": abstract_id, "num_fmt": num_fmt})
     actual_numbered_texts = [
         "".join(node.text or "" for node in paragraph.findall(".//w:t", ns))
         for paragraph in numbered_paragraphs
@@ -204,4 +208,26 @@ def check_saved_output(path: Path | str, expected: Mapping[str, Any], render_map
         )
     if invalid_numbering:
         issues.append({"code": "list_numbering_definition_invalid", "items": invalid_numbering})
+    mapping_mismatches: list[dict[str, Any]] = []
+    for index, expected_item in enumerate(expected_numbered_items):
+        if index >= len(actual_numbering):
+            break
+        numbering = expected_item.get("numbering") or {}
+        expected_kind = numbering.get("marker_kind")
+        expected_level = numbering.get("target_level")
+        expected_fmt = None
+        if expected_kind == "unordered":
+            expected_fmt = "bullet"
+        elif expected_kind == "ordered":
+            expected_fmt = "lowerLetter" if expected_level in {None, 0} else "decimal"
+        expected_num_id = expected_numbering_ids.get(numbering.get("style_role")) if isinstance(expected_numbering_ids, Mapping) else None
+        actual = actual_numbering[index]
+        if expected_fmt is not None and actual.get("num_fmt") != expected_fmt:
+            mapping_mismatches.append({"text": actual.get("text"), "field": "num_fmt", "expected": expected_fmt, "actual": actual.get("num_fmt")})
+        if isinstance(expected_level, int) and actual.get("ilvl") != expected_level:
+            mapping_mismatches.append({"text": actual.get("text"), "field": "ilvl", "expected": expected_level, "actual": actual.get("ilvl")})
+        if isinstance(expected_num_id, int) and actual.get("num_id") != expected_num_id:
+            mapping_mismatches.append({"text": actual.get("text"), "field": "num_id", "expected": expected_num_id, "actual": actual.get("num_id")})
+    if mapping_mismatches:
+        issues.append({"code": "list_numbering_mapping_mismatch", "items": mapping_mismatches})
     return {"passed": not issues, "issues": issues, "paragraph_texts": actual_texts, "table_count": table_count}
