@@ -203,6 +203,42 @@ P1 聚焦回归：
 
 下一步：开始 L13 验收。
 
+## L13 同级列表切换和缺失编号定义验收
+
+2026-09-10 增加 `tests/test_issue6_acceptance.py`，覆盖动态 DOCX 的同级有序、无序、再有序切换，缺失编号定义，嵌套表格缺失定义，以及未知标记后的深层父项隔离。
+
+初始红灯：
+
+1. 同级类型切换虽能拆组，Source AST 没有记录组边界证据。
+2. 缺失 `numId` 定义只保留为 ignored，没有在列表语义报告中明确正文降级。
+3. 缺失定义的公共编号证据没有统一保留，未知 `marker_kind` 会默认按有序处理。
+4. 未知标记跳过后活动父项未清理，嵌套表格中的缺失定义编号没有按单元格重算。
+
+修复内容：
+
+1. 列表组记录 `run_start`、`same_level_list_kind_switch` 和 `parent_item_switch` 边界，native AST 与报告均保留该证据。同级有序、无序、再有序形成三个明确兄弟组。
+2. DOCX 编号证据统一保留 marker 文本、源序号、源层级、缩进单位、重启提示和编号定义引用。缺失或无效定义输出 `missing_numbering_definition` 或 `invalid_numbering_definition`，保留源内容并声明 `body_paragraph` 降级。
+3. 未知标记类型不再默认归入有序列表，输出 `unknown_list_marker_kind` 诊断并保留正文。跳过未知标记时清理对应深度的活动父项，防止后续深层项错误继承。
+4. 嵌套表格编号按单元格、编号实例、层级和格式重算 `ordinal` 与 `restart`，缺失定义场景的证据与顶层场景一致。
+
+验证：
+
+专项测试：`scripts/.venv/bin/python3 -m pytest tests/test_issue6_acceptance.py -q`，退出码 `0`，`4 passed`。
+
+列表及 native 相关回归：`scripts/.venv/bin/python3 -m pytest tests/test_issue6_acceptance.py tests/test_modular_lists.py tests/test_modular_list_consumption.py tests/test_modular_kernel.py tests/test_modular_contracts.py -q`，退出码 `0`，`28 passed in 3.10s`。
+
+完整回归：`scripts/.venv/bin/python3 -m pytest tests/ -q`，退出码 `0`，`454 passed in 29.51s`。
+
+Python 编译检查：`scripts/.venv/bin/python3 -m py_compile scripts/wxdf/parsers.py scripts/wxdf/semantics/lists.py scripts/wxdf/kernel.py`，退出码 `0`。
+
+差异检查：`git diff --check`，退出码 `0`。验收文件原被 `.gitignore` 的 `tests/*` 规则忽略，已使用强制暂存纳入提交。
+
+最终双轴 review：Standards PASS，未发现 AGENTS.md 硬性规范违反或可明确归类的 Fowler smell。Spec PASS，确认同级切换建组、缺失定义显式降级、编号证据保留和未知标记保真处理符合 `acceptance.md:54`、`modular-pipeline-design-v3.md:105,107,209,288-309`。review 发现的全部问题均已修复并由最终复审确认。
+
+源代码及验收测试提交：`826ede9de0ca35e425596b49e8b5d10ac4ba542e`。当前未推送远程。未跟踪 `_build/` 和 `paseo.json` 保持原状，未纳入提交。
+
+下一步：开始 L14 验收。
+
 ## 真实转换证据
 
 Markdown `input/benchmark_report.md` 通过显式 `--modular-profile native-v2` 转换成功，命令退出码为 `0`。报告路径为 `/tmp/wx-issue1-native-p1-markdown-report.json`，报告显示 `execution_plan.profile=wx_full_rules-native-v2`、八个 native 模块均列入执行计划、事务状态 `committed`、决策数 `21`、模型审计和保存后审计均通过。输出路径为 `/tmp/wx-issue1-native-p1-markdown.docx`，`unzip -t` 退出码为 `0`。
