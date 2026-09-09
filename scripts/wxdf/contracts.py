@@ -49,6 +49,7 @@ CHECKPOINT_STATUSES = (
 )
 PATCH_OPERATIONS = (
     "create_node",
+    "update_node_semantics",
     "update_role",
     "move_node",
     "update_association",
@@ -57,6 +58,7 @@ PATCH_OPERATIONS = (
     "set_presentation_override",
 )
 SAFE_PROPERTY_SCOPES = (
+    "semantics",
     "role",
     "level",
     "caption_type",

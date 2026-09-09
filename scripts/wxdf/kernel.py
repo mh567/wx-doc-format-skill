@@ -632,6 +632,76 @@ class ConversionKernel:
             mapped["target_node_ids"] = [source_item_id]
             candidates.append(mapped)
 
+        existing_associations = {
+            (str(association.get("kind")), str(association.get("source_id")), str(association.get("target_id")))
+            for association in document.get("associations", [])
+            if isinstance(association, Mapping)
+        }
+        for continuation in list_result.get("continuations", []):
+            source_item_id = str(continuation.get("owner_item_id"))
+            source_id = item_map.get(source_item_id, source_item_id)
+            target_id = str(continuation.get("node_id"))
+            association = {
+                "kind": "sequence_continuation",
+                "source_id": source_id,
+                "target_id": target_id,
+            }
+            if (association["kind"], source_id, target_id) in existing_associations:
+                continue
+            target_ref = source_ref(target_id)
+            candidates.append({
+                "candidate_id": f"list-continuation-{source_id}-{target_id}",
+                "module_id": "list_semantics",
+                "module_version": "1.0",
+                "target_source_refs": [target_ref] if target_ref is not None else [],
+                "target_node_ids": [target_id],
+                "proposal": {
+                    "operation": "update_association",
+                    "property_scope": ["association"],
+                    "value": {"association": association},
+                },
+                "positive_evidence": [{"kind": "structural", "source": "source_facts_list_continuation"}],
+                "negative_evidence": [],
+                "scope": {"stages": ["relation"], "scope_id": continuation.get("scope_id")},
+                "constraints": [{"kind": "preserve_list_owner", "owner_item_id": source_id}],
+                "rationale": "continuation association derived from list item ownership",
+            })
+
+        for relation in list_result.get("items", []):
+            if not relation.get("generated_anchor_required"):
+                continue
+            source_item_id = str(relation.get("item_id"))
+            item_id = item_map.get(source_item_id, source_item_id)
+            anchor_id = f"generated-anchor-{item_id}"
+            if anchor_id in nodes:
+                continue
+            anchor_reason = str(relation.get("anchor_reason") or "list_item_anchor")
+            anchor_node = {
+                "block_type": "paragraph",
+                "role": "body",
+                "inline_content": [],
+                "generated_by": "list_semantics.marker_anchor",
+                "generation_basis": [source_item_id, anchor_reason],
+            }
+            anchor_ref = source_ref(source_item_id)
+            candidates.append({
+                "candidate_id": f"list-anchor-{item_id}",
+                "module_id": "list_semantics",
+                "module_version": "1.0",
+                "target_source_refs": [anchor_ref] if anchor_ref is not None else [],
+                "target_node_ids": [anchor_id],
+                "proposal": {
+                    "operation": "create_node",
+                    "property_scope": ["children"],
+                    "value": {"node_id": anchor_id, "parent_id": item_id, "index": 0, "node": anchor_node},
+                },
+                "positive_evidence": [{"kind": "structural", "source": "source_facts_list_anchor"}],
+                "negative_evidence": [],
+                "scope": {"stages": ["relation"], "scope_id": relation.get("scope_id")},
+                "constraints": [{"kind": "single_marker_anchor", "reason": anchor_reason}],
+                "rationale": "generated marker anchor required by list semantics",
+            })
+
         from .validation import validate_ast
 
         validate_ast(ast)
@@ -855,11 +925,35 @@ class ConversionKernel:
             }
             capability_status["source_parser"] = "consumed" if audits_passed else "consumed_mismatch"
             capability_status["appendix_semantics"] = "delivered"
-            list_candidate_ids = {str(candidate.get("candidate_id")) for candidate in list_candidates}
-            list_consumed_count = sum(
+            item_candidate_ids = {
+                str(candidate.get("candidate_id"))
+                for candidate in list_candidates
+                if str(candidate.get("candidate_id", "")).startswith("list-relation-")
+            }
+            continuation_candidate_ids = {
+                str(candidate.get("candidate_id"))
+                for candidate in list_candidates
+                if ((candidate.get("proposal") or {}).get("value") or {}).get("association", {}).get("kind") == "sequence_continuation"
+            }
+            anchor_candidate_ids = {
+                str(candidate.get("candidate_id"))
+                for candidate in list_candidates
+                if str(candidate.get("candidate_id", "")).startswith("list-anchor-")
+            }
+            item_consumed_count = sum(
                 1
                 for decision in decision_set.get("decisions", [])
-                if list_candidate_ids.intersection(str(item) for item in decision.get("candidate_ids", []))
+                if item_candidate_ids.intersection(str(item) for item in decision.get("candidate_ids", []))
+            )
+            continuation_consumed_count = sum(
+                1
+                for decision in decision_set.get("decisions", [])
+                if continuation_candidate_ids.intersection(str(item) for item in decision.get("candidate_ids", []))
+            )
+            anchor_consumed_count = sum(
+                1
+                for decision in decision_set.get("decisions", [])
+                if anchor_candidate_ids.intersection(str(item) for item in decision.get("candidate_ids", []))
             )
             status = "completed" if not diagnostics else "completed_with_warnings"
             report.update({
@@ -887,9 +981,11 @@ class ConversionKernel:
                 "list_semantics_consumption": {
                     "candidate_count": len(list_candidates),
                     "item_candidate_count": len(list_result["items"]),
-                    "item_consumed_count": list_consumed_count,
+                    "item_consumed_count": item_consumed_count,
                     "continuation_candidate_count": len(list_result["continuations"]),
-                    "continuation_consumed_count": 0,
+                    "continuation_consumed_count": continuation_consumed_count,
+                    "anchor_candidate_count": len(anchor_candidate_ids),
+                    "anchor_consumed_count": anchor_consumed_count,
                     "unmatched_count": 0,
                     "ambiguous_count": len(decision_set.get("unresolved") or []),
                 },

@@ -122,6 +122,144 @@ def test_legacy_list_patch_uses_standard_transaction_operations() -> None:
     assert committed.snapshot.ast["revision"] == ast["revision"] + 1
 
 
+def test_legacy_list_retype_preserves_semantic_intent_in_standard_transaction() -> None:
+    ast = _ast(0)
+    source_ref = {
+        "source_id": "list",
+        "part": "document.md",
+        "content_sha256": "sha256:" + "a" * 64,
+        "span": {"start": 0, "end": 2, "unit": "unicode_code_point"},
+    }
+    ast["document"]["containers"].update({
+        "list0": {"kind": "list", "list_kind": "ordered", "source_start": 1, "source_sequence_id": "seq0"},
+        "item0": {
+            "kind": "list_item",
+            "legacy_id": "old-item",
+            "source_marker": "a)",
+            "source_ordinal": 1,
+            "source_sequence_id": "seq0",
+            "source_ref": source_ref,
+        },
+    })
+    ast["document"]["blocks"]["li0"] = {
+        "block_type": "paragraph",
+        "role": "body",
+        "inline_content": [{"kind": "text", "text": "列表项", "marks": []}],
+        "source_ref": source_ref,
+    }
+    ast["document"]["children"] = {"root": ["list0"], "list0": ["item0"], "item0": ["li0"]}
+
+    bundle = make_view(ast)
+    translated = translate(
+        {"schema_version": "1.0", "decisions": [{"block_id": "old-item", "operation": "retype", "to": {"role": "list_item"}}]},
+        bundle.target_map,
+        ast,
+    )
+    proposal = translated["candidates"][0]["proposal"]
+
+    assert proposal["operation"] == "retype_list_item"
+    assert proposal["value"]["adapter_id"] == "legacy-list-retype-v1"
+    decision_set = resolve(translated["candidates"], {"revision": ast["revision"]})
+    decision = decision_set["decisions"][0]
+
+    assert decision["operation"] == "update_node_semantics"
+    assert decision["value"]["source_operation"] == "retype_list_item"
+    assert decision["value"]["semantic_role"] == "list_item"
+    committed = apply_stage_batch(make_snapshot(ast), decision_set["decisions"], expected_revision=ast["revision"])
+
+    assert committed.status == "committed"
+    assert committed.snapshot.ast["document"]["containers"]["item0"]["semantic_role"] == "list_item"
+    assert committed.snapshot.ast["document"]["containers"]["item0"]["semantic_adapter"] == "legacy-list-retype-v1"
+
+
+def _list_facts(*, continuation: bool = False, empty_item: bool = False) -> dict:
+    units = {} if empty_item else {
+        "p1": {
+            "kind": "paragraph",
+            "source_ref": {"source_id": "source", "part": "document.md", "content_sha256": "sha256:" + "a" * 64, "span": {"start": 0, "end": 1, "unit": "unicode_code_point"}},
+            "inline_content": [{"kind": "text", "text": "第一项", "marks": []}],
+        },
+    }
+    children = {"root": ["list"], "list": ["item"], "item": [] if empty_item else ["p1"]}
+    evidence = {"item": {"marker_kind": "ordered", "marker_text": "1.", "ordinal": 1, "explicit_depth": 0}}
+    if continuation:
+        units["p1b"] = {
+            "kind": "paragraph",
+            "source_ref": {"source_id": "source", "part": "document.md", "content_sha256": "sha256:" + "a" * 64, "span": {"start": 1, "end": 2, "unit": "unicode_code_point"}},
+            "inline_content": [{"kind": "text", "text": "续段", "marks": []}],
+        }
+        children["item"].append("p1b")
+        evidence["p1b"] = {"continuation_hint": True}
+    return {
+        "facts_schema_version": "1.0",
+        "source": {"source_id": "source", "source_type": "markdown", "content_sha256": "sha256:" + "a" * 64},
+        "parser": {"id": "test", "version": "1.0", "dialect": "fixture", "config_sha256": "sha256:" + "b" * 64},
+        "units": units,
+        "containers": {
+            "root": {"kind": "document"},
+            "list": {"kind": "list", "list_kind": "ordered", "source_start": 1, "source_sequence_id": "seq0"},
+            "item": {"kind": "list_item", "source_marker": "1.", "source_ordinal": 1, "source_sequence_id": "seq0"},
+        },
+        "children": children,
+        "evidence": evidence,
+        "resources": {},
+        "diagnostics": [],
+        "extensions": {},
+    }
+
+
+def test_list_continuation_is_materialized_as_an_association_transaction() -> None:
+    facts = _list_facts(continuation=True)
+    source_ast = ConversionKernel._facts_to_ast(facts)
+    list_result = analyze_lists(facts)
+
+    materialized, candidates, _ = ConversionKernel._materialize_list_semantics(source_ast, facts, list_result)
+    continuation_candidates = [
+        candidate
+        for candidate in candidates
+        if candidate["proposal"]["operation"] == "update_association"
+        and candidate["proposal"]["value"]["association"]["kind"] == "sequence_continuation"
+    ]
+
+    assert len(continuation_candidates) == 1
+    assert continuation_candidates[0]["proposal"]["value"]["association"] == {
+        "kind": "sequence_continuation",
+        "source_id": "item",
+        "target_id": "p1b",
+    }
+    decision_set = resolve(candidates, {"revision": source_ast["revision"]})
+    committed = apply_stage_batch(make_snapshot(materialized), decision_set["decisions"], expected_revision=source_ast["revision"])
+
+    assert committed.snapshot.ast["document"]["associations"] == [{
+        "kind": "sequence_continuation",
+        "source_id": "item",
+        "target_id": "p1b",
+    }]
+
+
+def test_generated_list_anchor_is_created_by_the_transaction() -> None:
+    facts = _list_facts(empty_item=True)
+    source_ast = ConversionKernel._facts_to_ast(facts)
+    list_result = analyze_lists(facts)
+
+    materialized, candidates, _ = ConversionKernel._materialize_list_semantics(source_ast, facts, list_result)
+    anchor_candidates = [
+        candidate
+        for candidate in candidates
+        if candidate["proposal"]["operation"] == "create_node"
+        and candidate["proposal"]["value"]["node"].get("generated_by") == "list_semantics.marker_anchor"
+    ]
+
+    assert len(anchor_candidates) == 1
+    assert anchor_candidates[0]["proposal"]["value"]["parent_id"] == "item"
+    decision_set = resolve(candidates, {"revision": source_ast["revision"]})
+    committed = apply_stage_batch(make_snapshot(materialized), decision_set["decisions"], expected_revision=source_ast["revision"])
+    anchor_id = anchor_candidates[0]["proposal"]["value"]["node_id"]
+
+    assert committed.snapshot.ast["document"]["children"]["item"] == [anchor_id]
+    assert committed.snapshot.ast["document"]["blocks"][anchor_id]["generation_basis"] == ["item", "empty_list_item"]
+
+
 def test_module_descriptor_preflight_declares_contract_and_audits() -> None:
     descriptor = ModuleDescriptor(
         "lists",

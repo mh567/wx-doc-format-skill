@@ -118,6 +118,32 @@ def _apply_update_role(ast: dict[str, Any], decision: Mapping[str, Any]) -> None
             node["level"] = 1
 
 
+def _apply_update_node_semantics(ast: dict[str, Any], decision: Mapping[str, Any]) -> None:
+    value = decision.get("value") or {}
+    if not isinstance(value, Mapping):
+        raise TransactionConflict("update_node_semantics requires a mapping value")
+    semantic_role = value.get("semantic_role")
+    if not isinstance(semantic_role, str) or not semantic_role:
+        raise TransactionConflict("update_node_semantics requires value.semantic_role")
+    nodes = _node_map(ast)
+    target_ids = list(decision.get("target_node_ids") or [])
+    if not target_ids:
+        raise TransactionConflict("update_node_semantics requires at least one target")
+    for target_id in target_ids:
+        node = nodes.get(target_id)
+        if node is None:
+            raise TransactionConflict(f"unknown update_node_semantics target {target_id}")
+        node["semantic_role"] = semantic_role
+        if isinstance(value.get("source_operation"), str):
+            node["semantic_source_operation"] = value["source_operation"]
+        if isinstance(value.get("adapter_id"), str):
+            node["semantic_adapter"] = value["adapter_id"]
+        if isinstance(value.get("paragraph_id"), str):
+            node["semantic_paragraph_id"] = value["paragraph_id"]
+        if isinstance(value.get("list_parent_id"), str):
+            node["semantic_list_parent_id"] = value["list_parent_id"]
+
+
 def _apply_move_node(ast: dict[str, Any], decision: Mapping[str, Any]) -> None:
     target_ids = decision.get("target_node_ids", [])
     value = decision.get("value") or {}
@@ -246,6 +272,8 @@ def _apply_decision(snapshot: StageSnapshot, decision: Mapping[str, Any]) -> Non
     operation = decision.get("operation")
     if operation == "update_role":
         _apply_update_role(ast, decision)
+    elif operation == "update_node_semantics":
+        _apply_update_node_semantics(ast, decision)
     elif operation == "move_node":
         _apply_move_node(ast, decision)
     elif operation == "update_association":

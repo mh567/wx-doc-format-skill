@@ -28,6 +28,9 @@ class LegacyCapabilityError(ValueError):
         super().__init__(f"{code}: {message}")
 
 
+LEGACY_LIST_RETYPE_ADAPTER_ID = "legacy-list-retype-v1"
+
+
 class _FrozenDict(dict):
     """A JSON-friendly deep immutable mapping whose deepcopy is isolated."""
 
@@ -404,7 +407,7 @@ def translate(patch: Mapping[str, Any], target_map: Mapping[str, Any], snapshot:
             if role == "list_item":
                 _require_list_context(entry, ast, legacy_id)
                 list_item_id, list_parent_id = _require_list_context(entry, ast, legacy_id)
-                candidates.append(_candidate(index, legacy_id, entry, node_id, {"operation": "retype_list_item", "value": {"list_item_id": list_item_id, "list_parent_id": list_parent_id, "paragraph_id": node_id}}, constraints=[{"kind": "preserve_list_parent"}, {"kind": "rebuild_list_relationship"}], rationale="legacy list-item retype with evidenced parent"))
+                candidates.append(_candidate(index, legacy_id, entry, node_id, {"operation": "retype_list_item", "property_scope": ["semantics"], "value": {"list_item_id": list_item_id, "list_parent_id": list_parent_id, "paragraph_id": node_id, "adapter_id": LEGACY_LIST_RETYPE_ADAPTER_ID}}, constraints=[{"kind": "preserve_list_parent"}, {"kind": "rebuild_list_relationship"}], rationale="legacy list-item retype with evidenced parent"))
             elif role in {"body", "heading", "caption", "note", "numbered_note"}:
                 value = {"role": role}
                 if role == "heading" and "level" in values:
