@@ -115,6 +115,71 @@ class ModuleRegistry:
         return results
 
 
+def build_native_v2_registry() -> ModuleRegistry:
+    """Return the registered contract for the direct native-v2 stage chain."""
+
+    supported_nodes = tuple(sorted(set(AST_BLOCK_TYPES) | set(AST_CONTAINER_KINDS)))
+    common = {
+        "contract_version": "2.0",
+        "supported_source_types": ("markdown", "docx"),
+        "supported_node_kinds": supported_nodes,
+        "failure_policy": "fail",
+    }
+
+    def bind(_context: Any) -> None:
+        """Bind a native stage contract to the direct kernel implementation."""
+
+    return ModuleRegistry([
+        RegisteredModule(
+            ModuleDescriptor("native-source-parser", "2.0", ("source",), (), ("source_facts",), **common),
+            bind,
+        ),
+        RegisteredModule(
+            ModuleDescriptor("native-candidate-set", "2.0", ("scope", "role", "relation"), ("source_facts",), ("candidate_set",), **common),
+            bind,
+        ),
+        RegisteredModule(
+            ModuleDescriptor("native-resolver", "2.0", ("relation",), ("candidate_set",), ("decision_set",), **common),
+            bind,
+        ),
+        RegisteredModule(
+            ModuleDescriptor("native-transaction", "2.0", ("relation",), ("decision_set",), ("source_ast_revision",), **common),
+            bind,
+        ),
+        RegisteredModule(
+            ModuleDescriptor("native-normalizer", "2.0", ("normalize",), ("source_ast_revision",), ("normalized",), **common),
+            bind,
+        ),
+        RegisteredModule(
+            ModuleDescriptor("native-renderer", "2.0", ("render",), ("normalized",), ("render_plan",), **common),
+            bind,
+        ),
+        RegisteredModule(
+            ModuleDescriptor(
+                "native-auditor",
+                "2.0",
+                ("audit",),
+                ("render_plan",),
+                ("model_audit", "saved_output_audit"),
+                required_audits=("model_audit", "saved_output_audit"),
+                **common,
+            ),
+            bind,
+        ),
+        RegisteredModule(
+            ModuleDescriptor(
+                "native-publisher",
+                "2.0",
+                ("publish",),
+                ("saved_output_audit",),
+                ("published_output",),
+                **common,
+            ),
+            bind,
+        ),
+    ])
+
+
 def build_plan(config: dict, module_descriptors: Iterable[ModuleDescriptor]) -> ExecutionPlan:
     pipeline = config.get("pipeline", "legacy")
     list_policy = config.get("list_policy", "legacy")

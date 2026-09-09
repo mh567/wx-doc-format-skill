@@ -16,7 +16,7 @@ from test_modular_ast import _ast
 from wxdf.kernel import ConversionKernel, ConversionRequest
 from wxdf.legacy_capability import make_view, translate
 from wxdf.parsers import parse
-from wxdf.registry import ModuleDescriptor, PlanError
+from wxdf.registry import ModuleDescriptor, PlanError, build_native_v2_registry
 from wxdf.resolver import resolve
 from wxdf.semantics.lists import analyze_lists
 from wxdf.transaction import apply_stage_batch, make_snapshot
@@ -281,6 +281,49 @@ def test_module_descriptor_preflight_declares_contract_and_audits() -> None:
 def test_native_preflight_rejects_text_source_type() -> None:
     with pytest.raises(PlanError, match="does not support source type text"):
         ConversionKernel._native_preflight(_ast(0), "text", "wx-default-v2")
+
+
+def test_native_v2_preflight_builds_plan_from_registered_modules() -> None:
+    registry = build_native_v2_registry()
+    plan = ConversionKernel._native_preflight(_ast(0), "markdown", "wx-default-v2")
+
+    assert [module.module_id for module in plan.modules] == [
+        "native-source-parser",
+        "native-candidate-set",
+        "native-resolver",
+        "native-transaction",
+        "native-normalizer",
+        "native-renderer",
+        "native-auditor",
+        "native-publisher",
+    ]
+    assert [module.module_id for module in registry.build({"pipeline": "modular", "list_policy": "wx-default-v2", "source_type": "markdown", "node_kinds": ["document"], "available_audits": ["model_audit", "saved_output_audit"]}).modules] == [module.module_id for module in plan.modules]
+    assert all(module.failure_policy == "fail" for module in plan.modules)
+    assert plan.modules[-1].required_audits == ()
+
+
+def test_native_fail_policy_blocks_unresolved_decisions_before_publish() -> None:
+    plan = ConversionKernel._native_preflight(_ast(0), "markdown", "wx-default-v2")
+
+    assert ConversionKernel._native_should_block_publish(plan, {"unresolved": [{"code": "candidate_conflict"}]}) is True
+    assert ConversionKernel._native_should_block_publish(plan, {"unresolved": []}) is False
+
+
+def test_native_unresolved_decisions_do_not_create_a_published_docx(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = tmp_path / "blocked.md"
+    source.write_text("正文\n", encoding="utf-8")
+
+    def unresolved(*_args: object, **_kwargs: object) -> dict:
+        return {"decisions": [], "unresolved": [{"code": "candidate_conflict", "candidate_ids": ["c1"]}]}
+
+    monkeypatch.setattr("wxdf.resolver.resolve", unresolved)
+    request = _native_request(source, tmp_path)
+    result = ConversionKernel().convert(request)
+
+    assert result.status == "failed"
+    assert result.exit_code == 1
+    assert result.diagnostics[0]["code"] == "candidate_conflict"
+    assert not request.output_path.exists()
 
 
 def test_explicit_legacy_profile_cannot_be_overridden_by_list_text(tmp_path: Path) -> None:

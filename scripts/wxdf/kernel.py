@@ -711,48 +711,15 @@ class ConversionKernel:
     def _native_preflight(source_ast: Mapping[str, Any], source_type: str, list_policy: str) -> Any:
         """Validate the native module contract before candidate execution."""
 
-        from .contracts import AST_BLOCK_TYPES, AST_CONTAINER_KINDS
-        from .registry import ModuleDescriptor, build_plan
+        from .registry import build_native_v2_registry
 
-        supported_nodes = tuple(sorted(set(AST_BLOCK_TYPES) | set(AST_CONTAINER_KINDS)))
-        common = {
-            "contract_version": "2.0",
-            "supported_source_types": ("markdown", "docx"),
-            "supported_node_kinds": supported_nodes,
-            "failure_policy": "fail",
-        }
-        descriptors = (
-            ModuleDescriptor("native-source-parser", "2.0", ("source",), (), ("source_facts",), **common),
-            ModuleDescriptor("native-candidate-set", "2.0", ("scope", "role", "relation"), ("source_facts",), ("candidate_set",), **common),
-            ModuleDescriptor("native-resolver", "2.0", ("relation",), ("candidate_set",), ("decision_set",), **common),
-            ModuleDescriptor("native-transaction", "2.0", ("relation",), ("decision_set",), ("source_ast_revision",), **common),
-            ModuleDescriptor("native-normalizer", "2.0", ("normalize",), ("source_ast_revision",), ("normalized",), **common),
-            ModuleDescriptor("native-renderer", "2.0", ("render",), ("normalized",), ("render_plan",), **common),
-            ModuleDescriptor(
-                "native-auditor",
-                "2.0",
-                ("audit",),
-                ("render_plan",),
-                ("model_audit", "saved_output_audit"),
-                required_audits=("model_audit", "saved_output_audit"),
-                **common,
-            ),
-            ModuleDescriptor(
-                "native-publisher",
-                "2.0",
-                ("publish",),
-                ("saved_output_audit",),
-                ("published_output",),
-                **common,
-            ),
-        )
         node_kinds = {
             str(node.get("block_type") or node.get("kind"))
             for collection in (source_ast["document"]["blocks"], source_ast["document"]["containers"])
             for node in collection.values()
             if node.get("block_type") or node.get("kind")
         }
-        return build_plan(
+        return build_native_v2_registry().build(
             {
                 "pipeline": "modular",
                 "list_policy": list_policy,
@@ -760,8 +727,27 @@ class ConversionKernel:
                 "node_kinds": sorted(node_kinds),
                 "available_audits": ("model_audit", "saved_output_audit"),
             },
-            descriptors,
         )
+
+    @staticmethod
+    def _native_should_block_publish(execution_plan: Any, decision_set: Mapping[str, Any]) -> bool:
+        """Apply the registered failure policy before a transaction or publish step."""
+
+        unresolved = decision_set.get("unresolved") or []
+        return bool(unresolved) and any(module.failure_policy == "fail" for module in execution_plan.modules)
+
+    @staticmethod
+    def _native_execution_plan_report(execution_plan: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "module_id": module.module_id,
+                "version": module.version,
+                "contract_version": module.contract_version,
+                "failure_policy": module.failure_policy,
+                "required_audits": list(module.required_audits),
+            }
+            for module in execution_plan.modules
+        ]
 
     @staticmethod
     def _native_capability_status(
@@ -860,6 +846,23 @@ class ConversionKernel:
                 *caption_candidates,
             ]
             decision_set = resolve(candidates, {"revision": source_ast["revision"]})
+            if self._native_should_block_publish(execution_plan, decision_set):
+                report.update({
+                    "status": "failed",
+                    "source_ast_revision": source_ast["revision"],
+                    "decision_set": decision_set,
+                    "execution_plan": {
+                        "profile": "wx_full_rules-native-v2",
+                        "modules": self._native_execution_plan_report(execution_plan),
+                    },
+                })
+                return RunResult(
+                    status="failed",
+                    exit_code=1,
+                    report=report,
+                    diagnostics=list(decision_set.get("unresolved") or []),
+                    metrics=metrics.snapshot(),
+                )
             with metrics.stage("transaction"):
                 committed = apply_stage_batch(
                     make_snapshot(source_ast),
@@ -1005,7 +1008,7 @@ class ConversionKernel:
                 "decision_set": decision_set,
                 "execution_plan": {
                     "profile": "wx_full_rules-native-v2",
-                    "modules": [{"module_id": module.module_id, "version": module.version} for module in execution_plan.modules],
+                    "modules": self._native_execution_plan_report(execution_plan),
                 },
                 "model_audit": model_findings,
                 "saved_output_audit": saved_findings,
