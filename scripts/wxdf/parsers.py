@@ -49,7 +49,7 @@ def _empty_facts(handle: SourceHandle, parser_id: str, parser_config: str, *, pa
     }
 
 
-def _source_ref(handle: SourceHandle, part: str, *, start: int | None = None, end: int | None = None, node_path: list[str | int] | None = None, content: bytes | str | None = None) -> dict[str, Any]:
+def _source_ref(handle: SourceHandle, part: str, *, start: int | None = None, end: int | None = None, node_path: list[str | int] | None = None, content: bytes | str | None = None, parser_version: str | None = None) -> dict[str, Any]:
     ref: dict[str, Any] = {
         "source_id": handle.source_id,
         "part": part,
@@ -61,6 +61,8 @@ def _source_ref(handle: SourceHandle, part: str, *, start: int | None = None, en
         ref["node_path"] = node_path
     else:
         ref["span"] = {"start": 0, "end": 0, "unit": "unicode_code_point"}
+    if parser_version is not None:
+        ref["parser_version"] = parser_version
     return ref
 
 
@@ -333,7 +335,7 @@ def _parse_markdown(source: Path | str, *, store: SourceStore, text: str | None 
     return facts
 
 
-def _docx_inline_content(paragraph: Any, handle: SourceHandle, node_path: list[str | int], resources: dict[str, Any]) -> list[dict[str, Any]]:
+def _docx_inline_content(paragraph: Any, handle: SourceHandle, node_path: list[str | int], resources: dict[str, Any], parser_version: str) -> list[dict[str, Any]]:
     from docx.oxml.ns import qn
 
     content: list[dict[str, Any]] = []
@@ -351,7 +353,7 @@ def _docx_inline_content(paragraph: Any, handle: SourceHandle, node_path: list[s
             blob = getattr(part, "blob", b"")
             resources[resource_id] = {
                 "kind": "image",
-                "source_ref": _source_ref(handle, getattr(part, "partname", "word/media/unknown"), node_path=[*node_path, "drawing", relationship_id]),
+                "source_ref": _source_ref(handle, getattr(part, "partname", "word/media/unknown"), node_path=[*node_path, "drawing", relationship_id], parser_version=parser_version),
                 "content_sha256": _digest(blob),
                 "dependencies": [],
             }
@@ -371,6 +373,7 @@ def _parse_docx(source: Path | str, *, store: SourceStore) -> dict[str, Any]:
     handle = store.open_source(source)
     document = Document(str(handle.path))
     facts = _empty_facts(handle, "docx-source-facts", "docx-ooxml", parser_version="1.1.0")
+    parser_version = facts["parser"]["version"]
     report: dict[str, Any] = {}
     numbering = analyze_docx_lists(document, report)
     body = document.element.body
@@ -379,11 +382,11 @@ def _parse_docx(source: Path | str, *, store: SourceStore) -> dict[str, Any]:
 
     def add_unit(parent_id: str, paragraph: Any, node_path: list[str | int], source_position: int, descriptor: dict[str, Any] | None = None) -> None:
         unit_id = _stable_id("u", handle.source_id, "paragraph", *node_path)
-        ref = _source_ref(handle, "word/document.xml", node_path=node_path)
+        ref = _source_ref(handle, "word/document.xml", node_path=node_path, parser_version=parser_version)
         facts["units"][unit_id] = {
             "kind": "paragraph",
             "source_ref": ref,
-            "inline_content": _docx_inline_content(paragraph, handle, node_path, facts["resources"]),
+            "inline_content": _docx_inline_content(paragraph, handle, node_path, facts["resources"], parser_version),
             "style": paragraph.style.name if paragraph.style is not None else None,
         }
         facts["children"].setdefault(parent_id, []).append(unit_id)
@@ -440,7 +443,7 @@ def _parse_docx(source: Path | str, *, store: SourceStore) -> dict[str, Any]:
         table_semantics = classify_docx_table(table)
         facts["containers"][table_id] = {
             "kind": "table",
-            "source_ref": _source_ref(handle, "word/document.xml", node_path=node_path),
+            "source_ref": _source_ref(handle, "word/document.xml", node_path=node_path, parser_version=parser_version),
             "table_semantics": table_semantics.as_source_record(),
             "layout": capture_docx_table_layout(table),
         }
@@ -452,7 +455,7 @@ def _parse_docx(source: Path | str, *, store: SourceStore) -> dict[str, Any]:
             row_id = _stable_id("c", handle.source_id, "row", *row_path)
             facts["containers"][row_id] = {
                 "kind": "table_row",
-                "source_ref": _source_ref(handle, "word/document.xml", node_path=row_path),
+                "source_ref": _source_ref(handle, "word/document.xml", node_path=row_path, parser_version=parser_version),
             }
             facts["children"][row_id] = []
             facts["children"][table_id].append(row_id)
@@ -480,7 +483,7 @@ def _parse_docx(source: Path | str, *, store: SourceStore) -> dict[str, Any]:
                     "col": col_index,
                     "row_span": 1,
                     "col_span": col_span,
-                    "source_ref": _source_ref(handle, "word/document.xml", node_path=cell_path),
+                    "source_ref": _source_ref(handle, "word/document.xml", node_path=cell_path, parser_version=parser_version),
                 }
                 facts["children"][cell_id] = []
                 facts["children"][row_id].append(cell_id)

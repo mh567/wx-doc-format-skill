@@ -89,7 +89,9 @@ def check_saved_output(path: Path | str, expected: Mapping[str, Any], render_map
         expected_tables = sum(1 for item in render_map.values() if item.get("kind") == "table")
     if table_count != expected_tables:
         issues.append({"code": "table_count_changed", "expected": expected_tables, "actual": table_count})
-    expected_numbered = any(item.get("numbered") for item in render_map.values())
+    expected_numbered_items = [item for item in render_map.values() if item.get("numbered")]
+    expected_numbered_texts = [str(item.get("text") or "") for item in expected_numbered_items if str(item.get("text") or "")]
+    expected_numbered_styles = {str(item.get("style") or "") for item in expected_numbered_items if item.get("style")}
     style_names: dict[str, str] = {}
     if styles_xml is not None:
         styles_root = ElementTree.fromstring(styles_xml)
@@ -98,17 +100,30 @@ def check_saved_output(path: Path | str, expected: Mapping[str, Any], render_map
             name = style.find("w:name", ns)
             if style_id and name is not None:
                 style_names[style_id] = name.get(f"{{{namespace}}}val") or ""
-    rendered_numbered = False
+    expected_numbered_style_ids = {style_id for style_id, name in style_names.items() if name in expected_numbered_styles}
+    numbered_paragraphs: list[Any] = []
     for paragraph in xml_paragraphs:
-        if paragraph.find("w:pPr/w:numPr", ns) is not None:
-            rendered_numbered = True
-            break
+        direct = paragraph.find("w:pPr/w:numPr", ns)
+        direct_num_id = direct.find("w:numId", ns) if direct is not None else None
         style = paragraph.find("w:pPr/w:pStyle", ns)
-        style_name = style_names.get(style.get(f"{{{namespace}}}val"), "") if style is not None else ""
+        style_id = style.get(f"{{{namespace}}}val") if style is not None else None
         text = "".join(node.text or "" for node in paragraph.findall(".//w:t", ns))
-        if style_name in {"List Number", "List Bullet"} or "列项" in style_name:
-            rendered_numbered = True
-            break
-    if expected_numbered and not rendered_numbered:
-        issues.append({"code": "list_numbering_missing"})
+        direct_numbering = direct_num_id is not None and direct_num_id.get(f"{{{namespace}}}val") not in {None, "0"}
+        if style_id in expected_numbered_style_ids or (direct_numbering and text in expected_numbered_texts):
+            numbered_paragraphs.append(paragraph)
+    actual_numbered_texts = [
+        "".join(node.text or "" for node in paragraph.findall(".//w:t", ns))
+        for paragraph in numbered_paragraphs
+        if "".join(node.text or "" for node in paragraph.findall(".//w:t", ns))
+    ]
+    if len(numbered_paragraphs) != len(expected_numbered_items) or actual_numbered_texts != expected_numbered_texts:
+        issues.append(
+            {
+                "code": "list_numbering_missing",
+                "expected_count": len(expected_numbered_items),
+                "actual_count": len(numbered_paragraphs),
+                "expected_texts": expected_numbered_texts,
+                "actual_texts": actual_numbered_texts,
+            }
+        )
     return {"passed": not issues, "issues": issues, "paragraph_texts": actual_texts, "table_count": table_count}

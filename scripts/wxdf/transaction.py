@@ -58,7 +58,11 @@ def _node_map(ast: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
 
 
 def _source_ref_matches(expected: Mapping[str, Any], current: Mapping[str, Any]) -> bool:
-    return all(current.get(field) == expected.get(field) for field in ("source_id", "part", "content_sha256", "span"))
+    for field in ("source_id", "part", "content_sha256", "span", "node_path", "parser_version"):
+        if field in expected or field in current:
+            if current.get(field) != expected.get(field):
+                return False
+    return True
 
 
 def _validate_source_preconditions(ast: Mapping[str, Any], decision: Mapping[str, Any]) -> None:

@@ -13,22 +13,14 @@ from test_issue2_acceptance import _assert_native_completed, _item_by_text, _par
 from test_modular_normalization import _ast, _profile
 from wxdf.auditing import check_saved_output
 from wxdf.normalization import normalize
+from wxdf.rendering import render
+from wxdf.transaction import _source_ref_matches
 from wxdf.validation import validate_ast
 
 
 PNG_1X1 = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL9xQAAAABJRU5ErkJggg=="
 )
-
-
-def _first_non_generated_child(ast: dict, item_id: str) -> str:
-    document = ast["document"]
-    generated = {
-        node["node_id"]
-        for node in ast.get("generated_nodes", [])
-        if node.get("node_id")
-    }
-    return next(child_id for child_id in document["children"].get(item_id, []) if child_id not in generated)
 
 
 def _build_l09_docx(tmp_path: Path) -> Path:
@@ -96,6 +88,29 @@ def _assert_numbered_texts(output: Path, texts: set[str]) -> None:
     assert seen == texts
 
 
+def _assert_numbered_image_paragraph(output: Path) -> None:
+    namespace = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    ns = {"w": namespace}
+    with ZipFile(output) as archive:
+        document = ElementTree.fromstring(archive.read("word/document.xml"))
+        styles = ElementTree.fromstring(archive.read("word/styles.xml"))
+    numbered_style_ids = {
+        style.get(f"{{{namespace}}}styleId")
+        for style in styles.findall("w:style", ns)
+        if style.find("w:pPr/w:numPr/w:numId", ns) is not None
+        and style.find("w:pPr/w:numPr/w:numId", ns).get(f"{{{namespace}}}val") not in {None, "0"}
+    }
+    image_paragraphs = [paragraph for paragraph in document.findall(".//w:p", ns) if paragraph.find(".//w:drawing", ns) is not None]
+    assert len(image_paragraphs) == 1
+    paragraph = image_paragraphs[0]
+    style = paragraph.find("w:pPr/w:pStyle", ns)
+    style_id = style.get(f"{{{namespace}}}val") if style is not None else None
+    direct = paragraph.find("w:pPr/w:numPr/w:numId", ns)
+    assert style_id in numbered_style_ids or (
+        direct is not None and direct.get(f"{{{namespace}}}val") not in {None, "0"}
+    )
+
+
 def test_l07_first_table_and_sublist_get_one_evidenced_anchor(tmp_path: Path) -> None:
     source = _write_markdown(
         tmp_path,
@@ -122,12 +137,7 @@ def test_l07_first_table_and_sublist_get_one_evidenced_anchor(tmp_path: Path) ->
         for parent_id, children in document["children"].items()
         if table_id in children and document["containers"].get(parent_id, {}).get("kind") == "list_item"
     )
-    table_child = next(
-        child_id
-        for child_id in document["children"][first_item]
-        if child_id not in normalized["presentation"]["nodes"][first_item]["marker_anchor"]
-        and not child_id.startswith("generated-anchor-")
-    )
+    table_child = next(child_id for child_id in document["children"][first_item] if not child_id.startswith("generated-anchor-"))
     assert document["blocks"][table_child]["block_type"] == "table"
     nested_item = items["子列表"]
     nested_list = next(parent for parent, children in document["children"].items() if nested_item in children)
@@ -148,7 +158,7 @@ def test_l07_first_table_and_sublist_get_one_evidenced_anchor(tmp_path: Path) ->
         assert b">A<" in archive.read("word/document.xml")
 
 
-def test_l07_block_image_first_child_gets_generated_anchor() -> None:
+def test_l07_block_image_first_child_gets_generated_anchor(tmp_path: Path) -> None:
     ast = _ast()
     source_ref = ast["document"]["blocks"]["p3"]["source_ref"]
     ast["document"]["resources"]["image-1"] = {
@@ -172,6 +182,12 @@ def test_l07_block_image_first_child_gets_generated_anchor() -> None:
     assert presentation["generated_anchor"] is True
     assert presentation["marker_anchor"] == "generated-anchor-i3"
     assert [node["node_id"] for node in normalized["generated_nodes"]] == ["generated-anchor-i3"]
+    output = tmp_path / "l07-block-image.docx"
+    result = render(normalized, output, resources={"image-1": PNG_1X1})
+    operation_kinds = [operation["kind"] for operation in result["render_plan"]["operations"]]
+    assert "list_item" in operation_kinds
+    assert any(operation["kind"] == "image" and operation["node_id"] == "image-1" for operation in result["render_plan"]["operations"])
+    assert len(Document(output).inline_shapes) == 1
 
 
 def test_l08_empty_item_generates_anchor_while_inline_image_keeps_paragraph(tmp_path: Path) -> None:
@@ -205,6 +221,7 @@ def test_l08_empty_item_generates_anchor_while_inline_image_keeps_paragraph(tmp_
     assert normalized["presentation"]["nodes"][image_item]["marker_anchor"] in source_ast["document"]["blocks"]
     assert len(normalized["generated_nodes"]) == 1
     assert len(Document(output).inline_shapes) == 1
+    _assert_numbered_image_paragraph(output)
     assert report["list_semantics_consumption"]["anchor_consumed_count"] == 1
 
 
@@ -215,6 +232,12 @@ def test_l09_merged_and_nested_table_cells_are_unique_and_scope_local(tmp_path: 
 
     _assert_native_completed(report, output)
     document = source_ast["document"]
+    assert all(
+        node.get("source_ref", {}).get("parser_version") == "1.1.0"
+        for collection in (document["blocks"], document["containers"])
+        for node in collection.values()
+        if node.get("source_ref")
+    )
     tables = [node_id for node_id, node in document["blocks"].items() if node.get("block_type") == "table"]
     assert len(tables) == 2
     outer = next(table_id for table_id in tables if any(document["containers"].get(child, {}).get("kind") == "table_row" for child in document["children"].get(table_id, [])))
@@ -259,6 +282,16 @@ def test_l09_merged_and_nested_table_cells_are_unique_and_scope_local(tmp_path: 
     ]
     assert rendered_outer.cell(0, 2).text == "纵向合并"
     assert rendered_outer.cell(1, 2).text == "纵向合并"
+    with ZipFile(output) as archive:
+        document_xml = ElementTree.fromstring(archive.read("word/document.xml"))
+    namespace = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    ns = {"w": namespace}
+    assert any(node.get(f"{{{namespace}}}val") == "2" for node in document_xml.findall(".//w:gridSpan", ns))
+    assert any(node.get(f"{{{namespace}}}val") == "restart" for node in document_xml.findall(".//w:vMerge", ns))
+    assert any(node.get(f"{{{namespace}}}val") in {None, "continue"} for node in document_xml.findall(".//w:vMerge", ns))
+    for text in ("合并列表一", "合并列表二", "嵌套列表"):
+        item_id = next(item for item, item_text in item_ids.items() if item_text == text)
+        assert normalized["presentation"]["nodes"][item_id]["generated_anchor"] is False
 
 
 def test_l10_quote_and_list_scopes_do_not_consume_each_other(tmp_path: Path) -> None:
@@ -308,6 +341,13 @@ def test_l10_quote_and_list_scopes_do_not_consume_each_other(tmp_path: Path) -> 
         if items["外部一"] in children
     )
     assert document["containers"][outer_list]["kind"] == "list"
+    assert outer_list in document["children"]["root"]
+    local_quote = next(
+        child_id
+        for child_id in document["children"][items["外部一"]]
+        if document["containers"].get(child_id, {}).get("kind") == "quote"
+    )
+    assert local_quote in document["children"][items["外部一"]]
     operations = [
         operation
         for operation in report["model_audit"]["render_plan"]["operations"]
@@ -315,6 +355,9 @@ def test_l10_quote_and_list_scopes_do_not_consume_each_other(tmp_path: Path) -> 
     ]
     assert {operation["node_id"] for operation in operations} == set(presentations)
     _assert_numbered_texts(output, {"引用一", "引用二", "引用三", "外部一", "外部二"})
+    saved_texts = [paragraph.text for paragraph in Document(output).paragraphs]
+    positions = [saved_texts.index(text) for text in ("外部一", "局部标题", "引用内一", "外部二")]
+    assert positions == sorted(positions)
     assert report["list_semantics"]["diagnostics"] == []
 
 
@@ -332,3 +375,38 @@ def test_saved_output_audit_rejects_plain_styled_text_as_numbered(tmp_path: Path
 
     assert findings["passed"] is False
     assert any(issue["code"] == "list_numbering_missing" for issue in findings["issues"])
+
+
+def test_saved_output_audit_checks_each_numbered_text(tmp_path: Path) -> None:
+    output = tmp_path / "partial-numbering.docx"
+    document = Document()
+    document.add_paragraph("第一", style="List Number")
+    document.add_paragraph("第二")
+    document.save(output)
+
+    findings = check_saved_output(
+        output,
+        {"expected_texts": ["第一", "第二"]},
+        {
+            "first": {"kind": "paragraph", "text": "第一", "style": "List Number", "numbered": True},
+            "second": {"kind": "paragraph", "text": "第二", "style": "List Number", "numbered": True},
+        },
+    )
+
+    assert findings["passed"] is False
+    assert any(issue["code"] == "list_numbering_missing" for issue in findings["issues"])
+
+
+def test_transaction_source_refs_invalidate_path_or_parser_changes() -> None:
+    reference = {
+        "source_id": "source",
+        "part": "word/document.xml",
+        "content_sha256": "sha256:" + "a" * 64,
+        "node_path": ["body", 0, "w:p"],
+        "parser_version": "1.1.0",
+    }
+    assert _source_ref_matches(reference, dict(reference))
+    changed_path = dict(reference, node_path=["body", 1, "w:p"])
+    changed_parser = dict(reference, parser_version="1.2.0")
+    assert not _source_ref_matches(reference, changed_path)
+    assert not _source_ref_matches(reference, changed_parser)

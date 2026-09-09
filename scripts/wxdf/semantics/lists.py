@@ -101,6 +101,14 @@ def _list_family(evidence: Mapping[str, Any], container: Mapping[str, Any] | Non
 
 
 def _anchor_info(item_id: str, facts: Mapping[str, Any]) -> tuple[bool, str]:
+    if item_id in facts["units"]:
+        unit = facts["units"][item_id]
+        if unit.get("kind") == "paragraph":
+            has_inline_image = any(item.get("kind") == "image" for item in unit.get("inline_content", []))
+            if _unit_text(unit).strip() or has_inline_image:
+                return False, "paragraph_first"
+            return True, "empty_first_paragraph"
+        return True, f"unit_{unit.get('kind') or 'unknown'}"
     children = facts["children"].get(item_id, [])
     if not children:
         return True, "empty_list_item"
