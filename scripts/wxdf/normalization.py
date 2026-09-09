@@ -56,6 +56,7 @@ def _list_contexts(ast: Mapping[str, Any], indexes: Any) -> dict[str, dict[str, 
             "scope_id": scope_id,
             "list_kind": container.get("list_kind", "ordered"),
             "source_sequence_id": container.get("source_sequence_id", list_id),
+            "source_start": max(1, int(container.get("source_start") or 1)),
         }
     return contexts
 
@@ -143,7 +144,9 @@ def normalize(
             "marker_kind": list_info["list_kind"],
             "source_marker": container.get("source_marker"),
             "source_ordinal": container.get("source_ordinal"),
+            "source_start": list_info["source_start"],
             "target_ordinal": None if list_info["list_kind"] == "unordered" else (container.get("source_ordinal") if strategy == "legacy" else None),
+            "restart": False,
             "style_role": _style_role(list_info["list_kind"], target_level),
             "scope_id": list_info["scope_id"],
             "generated_anchor": bool(generated),
@@ -157,6 +160,13 @@ def normalize(
         scope_id = node["scope_id"]
         counters[scope_id] = counters.get(scope_id, 0) + 1
         node["target_ordinal"] = counters[scope_id]
+        node["restart"] = node["target_ordinal"] == 1
+
+    for node in item_by_node.values():
+        if node["marker_kind"] == "unordered":
+            node["restart"] = node["source_ordinal"] in {None, 1}
+        elif strategy == "legacy":
+            node["restart"] = node["source_ordinal"] == node.get("source_start")
 
     override = presentation_override or {}
     for node_id, values in override.items():

@@ -150,6 +150,7 @@ def _assert_render_plan(report: dict, source_ast: dict) -> None:
     ]
     assert [item["target_level"] for item in presentations] == [0, 1, 0, 0]
     assert [item["target_ordinal"] for item in presentations] == [1, None, 2, 3]
+    assert [item["restart"] for item in presentations] == [True, True, False, False]
 
 
 def _assert_saved_numbering(output: Path) -> None:
