@@ -70,6 +70,8 @@ def _build_l09_docx(tmp_path: Path) -> Path:
 def _build_l08_docx(tmp_path: Path) -> Path:
     document = Document()
     _append_numbering_definition(document, abstract_id=906, num_id=906, levels=[("decimal", "%1.")])
+    empty = document.add_paragraph()
+    _set_numbering(empty, num_id=906, level=0)
     image_only = document.add_paragraph()
     _set_numbering(image_only, num_id=906, level=0)
     image_only.add_run().add_picture(io.BytesIO(PNG_1X1))
@@ -260,12 +262,13 @@ def test_l08_docx_image_only_and_inline_image_lists_are_parsed(tmp_path: Path) -
     _assert_native_completed(report, output)
     document = source_ast["document"]
     list_items = [node_id for node_id, node in document["containers"].items() if node.get("kind") == "list_item"]
-    assert len(list_items) == 2
-    assert all(normalized["presentation"]["nodes"][item_id]["generated_anchor"] is False for item_id in list_items)
+    assert len(list_items) == 3
+    presented_items = [item_id for item_id in list_items if item_id in normalized["presentation"]["nodes"]]
+    assert sum(normalized["presentation"]["nodes"][item_id]["generated_anchor"] for item_id in presented_items) == 1
     assert len(document["resources"]) == 1
     assert len(Document(output).inline_shapes) == 2
     _assert_numbered_image_paragraph(output, expected_count=2)
-    assert report["list_semantics_consumption"]["anchor_consumed_count"] == 0
+    assert report["list_semantics_consumption"]["anchor_consumed_count"] == 1
 
 
 def test_docx_parser_reuses_numbering_maps_for_nested_content(monkeypatch, tmp_path: Path) -> None:
@@ -326,6 +329,28 @@ def test_saved_output_audit_rejects_missing_numbering_definition(tmp_path: Path)
     format_findings = check_saved_output(wrong_format, normalized, rerendered["render_map"])
     assert format_findings["passed"] is False
     assert any(issue["code"] == "list_numbering_mapping_mismatch" for issue in format_findings["issues"])
+
+    remapped_abstract = tmp_path / "numbering-definition-abstract-corrupt.docx"
+
+    def remap_abstract(data: bytes) -> bytes:
+        root = ElementTree.fromstring(data)
+        source_abstract = next(
+            abstract
+            for abstract in root.findall("w:abstractNum", ns)
+            if abstract.get(f"{{{namespace}}}abstractNumId") == "4"
+        )
+        duplicate = ElementTree.fromstring(ElementTree.tostring(source_abstract))
+        duplicate.set(f"{{{namespace}}}abstractNumId", "999")
+        root.append(duplicate)
+        for number in root.findall("w:num", ns):
+            if number.get(f"{{{namespace}}}numId") == "3":
+                number.find("w:abstractNumId", ns).set(f"{{{namespace}}}val", "999")
+        return ElementTree.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    _rewrite_docx_part(output, remapped_abstract, "word/numbering.xml", remap_abstract)
+    abstract_findings = check_saved_output(remapped_abstract, normalized, rerendered["render_map"])
+    assert abstract_findings["passed"] is False
+    assert any(issue["code"] == "list_numbering_mapping_mismatch" for issue in abstract_findings["issues"])
 
 
 def test_l09_merged_and_nested_table_cells_are_unique_and_scope_local(tmp_path: Path) -> None:

@@ -225,6 +225,7 @@ def check_saved_output(path: Path | str, expected: Mapping[str, Any], render_map
         elif expected_kind == "ordered":
             expected_fmt = "lowerLetter" if expected_level in {None, 0} else "decimal"
         expected_num_id = expected_numbering_ids.get(numbering.get("style_role")) if isinstance(expected_numbering_ids, Mapping) else None
+        expected_abstract_id = expected_numbering_ids.get(f"{numbering.get('style_role')}_abstract") if isinstance(expected_numbering_ids, Mapping) else None
         actual = actual_numbering[index]
         if expected_fmt is not None and actual.get("num_fmt") != expected_fmt:
             mapping_mismatches.append({"text": actual.get("text"), "field": "num_fmt", "expected": expected_fmt, "actual": actual.get("num_fmt")})
@@ -232,6 +233,8 @@ def check_saved_output(path: Path | str, expected: Mapping[str, Any], render_map
             mapping_mismatches.append({"text": actual.get("text"), "field": "ilvl", "expected": expected_level, "actual": actual.get("ilvl")})
         if isinstance(expected_num_id, int) and actual.get("num_id") != expected_num_id:
             mapping_mismatches.append({"text": actual.get("text"), "field": "num_id", "expected": expected_num_id, "actual": actual.get("num_id")})
+        if isinstance(expected_abstract_id, int) and actual.get("abstract_num_id") != expected_abstract_id:
+            mapping_mismatches.append({"text": actual.get("text"), "field": "abstract_num_id", "expected": expected_abstract_id, "actual": actual.get("abstract_num_id")})
     if mapping_mismatches:
         issues.append({"code": "list_numbering_mapping_mismatch", "items": mapping_mismatches})
     return {"passed": not issues, "issues": issues, "paragraph_texts": actual_texts, "table_count": table_count}

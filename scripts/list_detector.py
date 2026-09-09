@@ -356,6 +356,7 @@ def analyze_docx_lists(
                 evidence.append("direct_num_pr")
             if candidate.get("has_drawing"):
                 evidence.append("image_content")
+            has_content = bool(candidate.get("text") or candidate.get("has_drawing"))
 
             note_role = source_note_role(style_name, candidate, candidate.get("text"))
             protected = (
@@ -364,11 +365,12 @@ def analyze_docx_lists(
                 or note_role is not None
             )
             valid = candidate.get("abstract_num_id") is not None and num_fmt in _LIST_FORMATS
+            if not has_content and valid and ("list_style" in evidence or candidate.get("numbering_source") == "direct"):
+                evidence.append("empty_list_item")
             high = valid and bool({
-                "list_style", "consecutive_numbering_sequence", "visible_list_marker",
+                "list_style", "consecutive_numbering_sequence", "visible_list_marker", "empty_list_item",
             } & set(evidence))
-            has_content = bool(candidate.get("text") or candidate.get("has_drawing"))
-            if protected or num_fmt == "none" or not valid or not has_content:
+            if protected or num_fmt == "none" or not valid or (not has_content and "empty_list_item" not in evidence):
                 status = "ignored"
                 confidence = 0.0
                 if protected:
@@ -468,7 +470,10 @@ def describe_docx_paragraph(
         evidence.append("direct_num_pr")
     protected = _is_protected_style(style_name)
     valid = abstract_id is not None and num_fmt in _LIST_FORMATS
-    if protected or num_fmt == "none" or not valid or not (paragraph.text.strip() or has_drawing):
+    has_content = bool(paragraph.text.strip() or has_drawing)
+    if not has_content and valid and ("list_style" in evidence or numbering_source == "direct"):
+        evidence.append("empty_list_item")
+    if protected or num_fmt == "none" or not valid or (not has_content and "empty_list_item" not in evidence):
         status = "ignored"
         confidence = 0.0
         if protected:
