@@ -239,6 +239,42 @@ Python 编译检查：`scripts/.venv/bin/python3 -m py_compile scripts/wxdf/pars
 
 下一步：开始 L14 验收。
 
+## L14 混合 inline 内容顺序和资源关系验收
+
+2026-09-10 增加 `tests/test_issue7_acceptance.py`，覆盖 Markdown 和 DOCX 的文字、行内图片、超链接、文字、软换行组合，覆盖 DrawingML 与 VML 两种 DOCX 图片嵌入形式，并覆盖篡改超链接目标后的保存产物审计拒绝。
+
+初始红灯：
+
+1. DOCX inline 解析把段落文字整体放在图片之前，丢失文字、图片、链接和换行的源顺序。
+2. DOCX 超链接没有进入 SourceFacts，渲染阶段只生成带下划线的普通文字，目标关系没有写回输出。
+3. 保存产物审计没有比较 inline 结构顺序和超链接目标。
+4. VML `v:imagedata r:id` 图片引用未被识别。
+
+修复内容：
+
+1. `scripts/wxdf/parsers.py` 按 XML 子节点顺序读取文字、制表符、换行、DrawingML `a:blip`、VML `v:imagedata` 和超链接，统一保留图片资源哈希与超链接目标。
+2. `scripts/wxdf/rendering.py` 为外部链接建立 DOCX hyperlink relationship，将链接子节点按源顺序写入超链接容器，图片、文字和换行均保留在正确位置。
+3. `scripts/wxdf/auditing.py` 对混合 inline 段落比较文字、图片、链接、换行和制表符结构，并核对超链接关系目标；原有图片哈希和媒体关系审计继续生效。
+4. RenderMap 记录 inline 内容，验收测试覆盖 DrawingML、VML、Markdown、DOCX 和篡改输出负例。
+
+验证：
+
+专项测试：`scripts/.venv/bin/python3 -m pytest tests/test_issue7_acceptance.py -q`，退出码 `0`，`4 passed`。
+
+相关回归：`scripts/.venv/bin/python3 -m pytest tests/test_issue7_acceptance.py tests/test_issue3_acceptance.py tests/test_issue6_acceptance.py tests/test_modular_source_facts.py tests/test_modular_source_consumption.py tests/test_modular_rendering.py -q`，退出码 `0`，`38 passed in 4.33s`。
+
+完整回归：`scripts/.venv/bin/python3 -m pytest tests/ -q`，退出码 `0`，`458 passed in 30.54s`。
+
+Python 编译检查：`scripts/.venv/bin/python3 -m py_compile scripts/wxdf/parsers.py scripts/wxdf/rendering.py scripts/wxdf/auditing.py`，退出码 `0`。
+
+差异检查：`git diff --check`，退出码 `0`。验收文件原被 `.gitignore` 的 `tests/*` 规则忽略，已使用强制暂存纳入提交。
+
+最终双轴 review：Standards PASS，未发现 AGENTS.md 硬性规范违反或明确 Fowler smell。Spec PASS，确认 Markdown、DOCX、DrawingML、VML、SourceFacts、Source AST、规范化、渲染和保存产物审计均满足 `acceptance.md:55` 的顺序与资源关系要求。Spec 初审指出的 VML 图片缺口已修复，复审确认通过。
+
+源代码及验收测试提交：`10bc9ff`。当前未推送远程。未跟踪 `_build/` 和 `paseo.json` 保持原状，未纳入提交。
+
+下一步：开始 L15 验收。
+
 ## 真实转换证据
 
 Markdown `input/benchmark_report.md` 通过显式 `--modular-profile native-v2` 转换成功，命令退出码为 `0`。报告路径为 `/tmp/wx-issue1-native-p1-markdown-report.json`，报告显示 `execution_plan.profile=wx_full_rules-native-v2`、八个 native 模块均列入执行计划、事务状态 `committed`、决策数 `21`、模型审计和保存后审计均通过。输出路径为 `/tmp/wx-issue1-native-p1-markdown.docx`，`unzip -t` 退出码为 `0`。
