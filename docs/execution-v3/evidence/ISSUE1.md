@@ -124,20 +124,20 @@ P1 聚焦回归：
 
 初始 review 暴露的问题包括 DOCX 原生列表项多余空锚点、保存后编号审计只检查全局存在性、垂直合并缺少 OOXML 证据、嵌套表格顺序反转、嵌套表格 RenderMap 定位重复、DOCX 图片段落被忽略和编号定义缺少校验。
 
-修复提交链：`ded9112`、`fb2b7c7`、`e8e0761`、`9a03ba9`、`a708b71`、`f4ae8d8`。
+修复提交链：`ded9112`、`fb2b7c7`、`e8e0761`、`9a03ba9`、`a708b71`、`f4ae8d8`、`fe269be`。
 
 验收结果：
 
 1. SourceFacts、Source AST、Normalize、RenderPlan、渲染和保存后审计均有专项断言。DOCX 解析器为源引用写入 `parser_version=1.1.0`，事务校验同时比较 `node_path` 和 parser version。
-2. DOCX 原生图片列项允许图片段落参与编号检测，资源路径统一到 DOCX 包内路径，动态 DOCX 夹具验证图片资源、编号样式和输出 `document.xml`。
-3. 空列项继续生成唯一 marker anchor，已有文字或行内图片的段落直接承担编号承载。块图片节点由 AST 合同表达，当前 parser 以 inline image 形式输出。动态 DOCX 图片列项作为等价 parser 入口，覆盖完整 CLI、RenderPlan 和保存后审计。
+2. DOCX 原生图片列项允许图片段落参与编号检测，资源路径统一到 DOCX 包内路径，动态 DOCX 夹具验证图片资源、编号样式和输出 `document.xml`。真正空的 DOCX 编号段落也进入列表语义识别。
+3. 空列项继续生成唯一 marker anchor，已有文字或行内图片的段落直接承担编号承载。块图片节点由 AST 合同表达，当前 parser 以 inline image 形式输出。动态 DOCX 图片列项和空编号段落作为等价 parser 入口，覆盖完整 CLI、RenderPlan 和保存后审计。
 4. 合并单元格通过 `gridSpan` 和 `vMerge` 保存后 OOXML 验收。嵌套表格保持源顺序，RenderMap 使用递增的唯一表格定位值。
-5. `check_saved_output()` 逐项核对列表文本、样式、`numId`、`abstractNumId`、`numFmt` 和有效层级，编号定义缺失或格式篡改会阻断发布。
+5. `check_saved_output()` 逐项核对列表文本、样式、`numId`、`abstractNumId`、`numFmt` 和有效层级，并校验 `numId` 到 `abstractNumId` 的期望映射，编号定义缺失或格式篡改会阻断发布。
 6. quote 容器、外部列表项和局部标题的父子关系写入 AST 验收，保存后段落顺序保持。
 
 专项测试：`scripts/.venv/bin/python3 -m pytest tests/test_issue3_acceptance.py -q`，`11 passed`。
 
-相关回归：`scripts/.venv/bin/python3 -m pytest tests/test_issue1_acceptance.py tests/test_issue2_acceptance.py tests/test_issue3_acceptance.py tests/test_modular_rendering.py tests/test_list_numbering.py tests/test_list_semantics.py -q`，`68 passed`。
+相关回归：`scripts/.venv/bin/python3 -m pytest tests/test_issue1_acceptance.py tests/test_issue2_acceptance.py tests/test_issue3_acceptance.py tests/test_modular_rendering.py tests/test_list_numbering.py tests/test_list_semantics.py -q`，`67 passed`。
 
 完整回归：`scripts/.venv/bin/python3 -m pytest tests/ -q`，`438 passed`。
 
