@@ -275,6 +275,37 @@ Python 编译检查：`scripts/.venv/bin/python3 -m py_compile scripts/wxdf/pars
 
 下一步：开始 L15 验收。
 
+## L15 父项语义修复和 no_effect 验收
+
+2026-09-10 增加 `tests/test_issue8_acceptance.py`，使用真实 AST 列表父子关系、`move_node` 事务和 `normalize(wx-default-v2)` 验证父项语义修复。专项测试覆盖修复后呈现摘要保持不变、语义摘要发生变化、接受结果保留新父归属，以及完全相同结果才返回 `no_effect`。
+
+初始 review 发现：第一版专项夹具只修改手工摘要，没有修改 `document.children`，finding 与事务目标还错误指向不存在的 `p0`，旧父节点移除也没有断言。该版本未作为通过结果记录。
+
+修复内容：
+
+1. 构造包含有序外层列表、两个父项和无序子列表的合法 AST，基线把 `nested-list` 放在 `parent-item` 下。
+2. 通过 `apply_stage_batch()` 实际执行 `move_node`，将 `nested-list` 移到 `second-item`，并断言旧父节点移除、新父节点加入。
+3. 对基线和事务候选分别执行真实 `normalize()`，确认 `presentation_digest` 相同、`semantic_digest` 不同。
+4. 统一 finding、decision 和事务目标为 `nested-list`，确认 `accept_candidate()` 返回的源 AST 和规范化 AST 保留修复结果。
+
+验证：
+
+专项测试：`scripts/.venv/bin/python3 -m pytest tests/test_issue8_acceptance.py -q`，退出码 `0`，`2 passed`。
+
+L15 相关回归：`scripts/.venv/bin/python3 -m pytest tests/test_issue8_acceptance.py tests/test_modular_review.py tests/test_modular_resume.py tests/test_modular_conversion.py -q`，退出码 `0`，`20 passed in 3.62s`。
+
+完整回归：`scripts/.venv/bin/python3 -m pytest tests/ -q`，退出码 `0`，`460 passed in 30.70s`。
+
+Python 编译检查：`scripts/.venv/bin/python3 -m py_compile tests/test_issue8_acceptance.py`，退出码 `0`。
+
+差异检查：`git diff --check`，退出码 `0`。验收文件原被 `.gitignore` 的 `tests/*` 规则忽略，已使用强制暂存纳入提交。
+
+最终双轴 review：首次 Spec review 识别出合成摘要、未执行实际父项修复和旧父归属未断言，Standards 无硬性问题。修复后第三轮 Standards PASS、Spec PASS，确认真实事务、Source AST 结构、规范化摘要、接受结果和 `no_effect` 规则符合 `acceptance.md:56`、T12 和方案 3.0 第 6.1 节。
+
+专项测试提交：`20bba23`。当前未推送远程。未跟踪 `_build/` 和 `paseo.json` 保持原状，未纳入提交。
+
+下一步：开始 L16 验收。
+
 ## 真实转换证据
 
 Markdown `input/benchmark_report.md` 通过显式 `--modular-profile native-v2` 转换成功，命令退出码为 `0`。报告路径为 `/tmp/wx-issue1-native-p1-markdown-report.json`，报告显示 `execution_plan.profile=wx_full_rules-native-v2`、八个 native 模块均列入执行计划、事务状态 `committed`、决策数 `21`、模型审计和保存后审计均通过。输出路径为 `/tmp/wx-issue1-native-p1-markdown.docx`，`unzip -t` 退出码为 `0`。
