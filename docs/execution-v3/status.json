@@ -2,11 +2,23 @@
   "plan_version": "3.0-execution-1",
   "design_path": "docs/modular-pipeline-design-v3.md",
   "design_sha256": "c083884277ca6df4fb82426210fd3860242606cdf18691ff7bd5199da2f8d764",
-  "observed_head": "7074afbe285d46be286cacb8eb72675f96cf2153",
+  "observed_head": "d05365339407e1a61ae32dc51bcc736d0006e688",
   "observed_skill_version": "0.12.19",
   "implementation_started": true,
   "current_task": "T16",
   "next_task": null,
+  "issue1_remediation": {
+    "status": "implemented_with_external_gates",
+    "evidence": "evidence/ISSUE1.md",
+    "last_commit": "d05365339407e1a61ae32dc51bcc736d0006e688",
+    "verified_on": "2026-09-09",
+    "tests": {
+      "issue1": "15 passed",
+      "focused": "26 passed",
+      "full": "418 passed"
+    },
+    "next_action": "补齐 L01 至 L16 双 parser 验收矩阵、编号 XML 证据和外部平台验收"
+  },
   "tasks": [
     {
       "id": "T00",
