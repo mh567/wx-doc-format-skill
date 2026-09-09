@@ -637,9 +637,10 @@ class ConversionKernel:
             for association in document.get("associations", [])
             if isinstance(association, Mapping)
         }
+        continuation_tails: dict[str, str] = {}
         for continuation in list_result.get("continuations", []):
             source_item_id = str(continuation.get("owner_item_id"))
-            source_id = item_map.get(source_item_id, source_item_id)
+            source_id = continuation_tails.get(source_item_id, item_map.get(source_item_id, source_item_id))
             target_id = str(continuation.get("node_id"))
             association = {
                 "kind": "sequence_continuation",
@@ -666,6 +667,7 @@ class ConversionKernel:
                 "constraints": [{"kind": "preserve_list_owner", "owner_item_id": source_id}],
                 "rationale": "continuation association derived from list item ownership",
             })
+            continuation_tails[source_item_id] = target_id
 
         for relation in list_result.get("items", []):
             if not relation.get("generated_anchor_required"):

@@ -153,7 +153,29 @@ def normalize(
         }
 
     counters: dict[str, int] = {}
+
+    def heading_scope(node_id: str) -> str | None:
+        current = indexes.parent_by_id.get(node_id)
+        while current is not None:
+            container = document["containers"].get(current, {})
+            kind = container.get("kind")
+            if kind == "list_item":
+                return None
+            if kind in {"table_cell", "quote"}:
+                return f"scope:{current}"
+            current = indexes.parent_by_id.get(current)
+        return "scope:document"
+
     for node_id in _reading_order(ast):
+        block = document["blocks"].get(node_id)
+        if block is not None and (
+            block.get("block_type") == "heading"
+            or block.get("role") in {"heading", "appendix_title"}
+        ):
+            scope_id = heading_scope(node_id)
+            if scope_id is not None:
+                counters[scope_id] = 0
+            continue
         node = item_by_node.get(node_id)
         if node is None or strategy != "wx-default-v2" or node["marker_kind"] != "ordered":
             continue
