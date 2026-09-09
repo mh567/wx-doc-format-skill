@@ -120,26 +120,26 @@ P1 聚焦回归：
 
 ## L07 至 L10 特殊承载与局部作用域验收
 
-2026-09-09 增加 `tests/test_issue3_acceptance.py`，覆盖列表首块为表格、子列表或图片，真正空列项、行内图片、DOCX 图片列项、合并单元格、嵌套表格、quote 内列表和列表内 quote。
+2026-09-09 增加 `tests/test_issue3_acceptance.py`，覆盖列表首块为表格、子列表或真实 Markdown 图片内容，真正空列项、行内图片、DOCX 图片列项、合并单元格、嵌套表格、quote 内列表和列表内 quote。
 
 初始 review 暴露的问题包括 DOCX 原生列表项多余空锚点、保存后编号审计只检查全局存在性、垂直合并缺少 OOXML 证据、嵌套表格顺序反转、嵌套表格 RenderMap 定位重复、DOCX 图片段落被忽略和编号定义缺少校验。
 
-修复提交链：`ded9112`、`fb2b7c7`、`e8e0761`、`9a03ba9`、`a708b71`、`f4ae8d8`、`fe269be`。
+修复提交链：`ded9112`、`fb2b7c7`、`e8e0761`、`9a03ba9`、`a708b71`、`f4ae8d8`、`fe269be`、`b6dcefe`、`3f6a8c1`。
 
 验收结果：
 
 1. SourceFacts、Source AST、Normalize、RenderPlan、渲染和保存后审计均有专项断言。DOCX 解析器为源引用写入 `parser_version=1.1.0`，事务校验同时比较 `node_path` 和 parser version。
 2. DOCX 原生图片列项允许图片段落参与编号检测，资源路径统一到 DOCX 包内路径，动态 DOCX 夹具验证图片资源、编号样式和输出 `document.xml`。真正空的 DOCX 编号段落也进入列表语义识别。
-3. 空列项继续生成唯一 marker anchor，已有文字或行内图片的段落直接承担编号承载。块图片节点由 AST 合同表达，当前 parser 以 inline image 形式输出。动态 DOCX 图片列项和空编号段落作为等价 parser 入口，覆盖完整 CLI、RenderPlan 和保存后审计。
+3. 空列项继续生成唯一 marker anchor，已有文字或行内图片的段落直接承担编号承载。真实 Markdown 图片列项和动态 DOCX 图片列项均经过 parser、Source AST、RenderPlan 和保存后审计。独立 block image 节点继续由 AST 合同表达，当前 parser 对列表图片按 inline image 语义保留。
 4. 合并单元格通过 `gridSpan` 和 `vMerge` 保存后 OOXML 验收。嵌套表格保持源顺序，RenderMap 使用递增的唯一表格定位值。
-5. `check_saved_output()` 逐项核对列表文本、样式、`numId`、`abstractNumId`、`numFmt` 和有效层级，并校验 `numId` 到 `abstractNumId` 的期望映射，编号定义缺失或格式篡改会阻断发布。
+5. `check_saved_output()` 逐项核对列表文本、样式、`numId`、`abstractNumId`、`numFmt` 和有效层级，并校验 `numId` 到 `abstractNumId` 的期望映射。保存后图片审计核对图片关系、媒体 part 数量和内容摘要，编号或图片篡改会阻断发布。
 6. quote 容器、外部列表项和局部标题的父子关系写入 AST 验收，保存后段落顺序保持。
 
-专项测试：`scripts/.venv/bin/python3 -m pytest tests/test_issue3_acceptance.py -q`，`11 passed`。
+专项测试：`scripts/.venv/bin/python3 -m pytest tests/test_issue3_acceptance.py -q`，`14 passed`。
 
-相关回归：`scripts/.venv/bin/python3 -m pytest tests/test_issue1_acceptance.py tests/test_issue2_acceptance.py tests/test_issue3_acceptance.py tests/test_modular_rendering.py tests/test_list_numbering.py tests/test_list_semantics.py -q`，`67 passed`。
+相关回归：`scripts/.venv/bin/python3 -m pytest tests/test_issue1_acceptance.py tests/test_issue2_acceptance.py tests/test_issue3_acceptance.py tests/test_modular_rendering.py tests/test_list_numbering.py tests/test_list_semantics.py -q`，`70 passed`。
 
-完整回归：`scripts/.venv/bin/python3 -m pytest tests/ -q`，`438 passed`。
+完整回归：`scripts/.venv/bin/python3 -m pytest tests/ -q`，`441 passed`。
 
 双轴 review：Standards 通过。Spec review 在修复编号层级映射回归、补充块图片保存审计并同步本证据后通过，审查过程未修改文件。
 
