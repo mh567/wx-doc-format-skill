@@ -124,7 +124,7 @@ P1 聚焦回归：
 
 初始 review 暴露的问题包括 DOCX 原生列表项多余空锚点、保存后编号审计只检查全局存在性、垂直合并缺少 OOXML 证据、嵌套表格顺序反转、嵌套表格 RenderMap 定位重复、DOCX 图片段落被忽略和编号定义缺少校验。
 
-修复提交链：`ded9112`、`fb2b7c7`、`e8e0761`、`9a03ba9`、`a708b71`、`f4ae8d8`、`fe269be`、`b6dcefe`、`3f6a8c1`、`e62f8f3`。
+修复提交链：`ded9112`、`fb2b7c7`、`e8e0761`、`9a03ba9`、`a708b71`、`f4ae8d8`、`fe269be`、`b6dcefe`、`3f6a8c1`、`e62f8f3`、`d69cffe`。
 
 验收结果：
 
@@ -135,11 +135,11 @@ P1 聚焦回归：
 5. `check_saved_output()` 逐项核对列表文本、样式、`numId`、`abstractNumId`、`numFmt` 和有效层级，并校验 `numId` 到 `abstractNumId` 的期望映射。保存后图片审计核对图片关系目标、媒体 part 集合和内容摘要，编号或图片篡改会阻断发布。一级无序样式按模板的 `numFmt=none` 审计，二级无序样式按 `bullet` 审计。
 6. quote 容器、外部列表项和局部标题的父子关系写入 AST 验收，保存后段落顺序保持。
 
-专项测试：`scripts/.venv/bin/python3 -m pytest tests/test_issue3_acceptance.py -q`，`16 passed`。
+专项测试：`scripts/.venv/bin/python3 -m pytest tests/test_issue3_acceptance.py -q`，`17 passed`。
 
-相关回归：`scripts/.venv/bin/python3 -m pytest tests/test_issue1_acceptance.py tests/test_issue2_acceptance.py tests/test_issue3_acceptance.py tests/test_modular_rendering.py tests/test_list_numbering.py tests/test_list_semantics.py -q`，`72 passed`。
+相关回归：`scripts/.venv/bin/python3 -m pytest tests/test_issue1_acceptance.py tests/test_issue2_acceptance.py tests/test_issue3_acceptance.py tests/test_modular_rendering.py tests/test_list_numbering.py tests/test_list_semantics.py -q`，`73 passed`。
 
-完整回归：`scripts/.venv/bin/python3 -m pytest tests/ -q`，`443 passed`。
+完整回归：`scripts/.venv/bin/python3 -m pytest tests/ -q`，`444 passed`。
 
 双轴 review：Standards 通过。Spec review 在修复编号层级映射回归、补充块图片保存审计并同步本证据后通过，审查过程未修改文件。
 
