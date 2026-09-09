@@ -76,6 +76,7 @@ def _attach_image_artifact_metadata(output_path: Path, render_map: dict[str, dic
             )
         media_parts = sorted(name for name in archive.namelist() if name.startswith("word/media/"))
 
+    render_map["__artifact__"] = {"kind": "artifact", "media_parts": media_parts}
     target_index = 0
     for item in render_map.values():
         resource_ids = item.get("image_resources", [])

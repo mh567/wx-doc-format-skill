@@ -95,6 +95,13 @@ def _rewrite_docx_part(source: Path, target: Path, part_name: str, transform) ->
             rewritten.writestr(info, data)
 
 
+def _add_docx_part(source: Path, target: Path, part_name: str, data: bytes) -> None:
+    with ZipFile(source) as original, ZipFile(target, "w") as rewritten:
+        for info in original.infolist():
+            rewritten.writestr(info, original.read(info.filename))
+        rewritten.writestr(part_name, data)
+
+
 def _assert_numbered_texts(output: Path, texts: set[str]) -> None:
     namespace = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
     ns = {"w": namespace}
@@ -439,6 +446,22 @@ def test_saved_output_audit_rejects_retargeted_image_relationship(tmp_path: Path
     findings = check_saved_output(retargeted, normalized, rerendered["render_map"])
     assert findings["passed"] is False
     assert any(issue["code"] == "image_relationship_target_mismatch" for issue in findings["issues"])
+
+
+def test_saved_output_audit_rejects_unreferenced_media_part(tmp_path: Path) -> None:
+    source = _write_markdown(tmp_path, "media-set-audit", ["正文", ""])
+    _, _, normalized, output = _run_native(source, tmp_path, "media-set-audit")
+    rerendered = render(
+        normalized,
+        tmp_path / "media-set-audit-rerendered.docx",
+        template_path=Path(__file__).resolve().parents[1] / "assets" / "wx_template.docx",
+    )
+    tampered = tmp_path / "media-set-audit-tampered.docx"
+    _add_docx_part(output, tampered, "word/media/unreferenced.png", PNG_1X1)
+
+    findings = check_saved_output(tampered, normalized, rerendered["render_map"])
+    assert findings["passed"] is False
+    assert any(issue["code"] == "image_media_parts_changed" for issue in findings["issues"])
 
 
 def test_saved_output_audit_rejects_unordered_numbering_mapping(tmp_path: Path) -> None:

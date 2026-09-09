@@ -103,6 +103,9 @@ def check_saved_output(path: Path | str, expected: Mapping[str, Any], render_map
     expected_image_hashes: list[tuple[str, str]] = []
     expected_image_targets: list[str | None] = []
     expected_media_parts: set[str] | None = None
+    artifact_metadata = render_map.get("__artifact__")
+    if isinstance(artifact_metadata, Mapping) and artifact_metadata.get("media_parts") is not None:
+        expected_media_parts = set(artifact_metadata["media_parts"])
     source_resources = expected.get("source_ast", {}).get("document", {}).get("resources", {})
     if isinstance(source_resources, Mapping):
         for item in render_map.values():
