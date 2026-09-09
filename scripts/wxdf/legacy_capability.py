@@ -377,7 +377,7 @@ def translate(patch: Mapping[str, Any], target_map: Mapping[str, Any], snapshot:
     patch_version = patch.get("patch_schema_version", patch.get("schema_version", "1.0"))
     if patch_version not in {"1.0", "2.0"}:
         raise LegacyCapabilityError("legacy patch schema is unsupported", code="unsupported_patch")
-    if patch.get("target_map_sha256") and patch.get("target_map_sha256") != target_map.get("view_sha256"):
+    if patch.get("target_map_sha256") and patch.get("target_map_sha256") != target_map.get("target_map_sha256"):
         raise LegacyCapabilityError("patch was produced for another legacy view", code="view_digest_conflict")
     decisions = patch.get("decisions", patch.get("operations", []))
     if not isinstance(decisions, list):
@@ -403,7 +403,8 @@ def translate(patch: Mapping[str, Any], target_map: Mapping[str, Any], snapshot:
             role = str(values.get("role", values.get("block_type", "")))
             if role == "list_item":
                 _require_list_context(entry, ast, legacy_id)
-                candidates.append(_candidate(index, legacy_id, entry, node_id, {"operation": "retype_list_item", "value": {"list_item_id": entry.get("list_item_id"), "paragraph_id": node_id}}, constraints=[{"kind": "preserve_list_parent"}, {"kind": "rebuild_list_relationship"}], rationale="legacy list-item retype with evidenced parent"))
+                list_item_id, list_parent_id = _require_list_context(entry, ast, legacy_id)
+                candidates.append(_candidate(index, legacy_id, entry, node_id, {"operation": "retype_list_item", "value": {"list_item_id": list_item_id, "list_parent_id": list_parent_id, "paragraph_id": node_id}}, constraints=[{"kind": "preserve_list_parent"}, {"kind": "rebuild_list_relationship"}], rationale="legacy list-item retype with evidenced parent"))
             elif role in {"body", "heading", "caption", "note", "numbered_note"}:
                 value = {"role": role}
                 if role == "heading" and "level" in values:

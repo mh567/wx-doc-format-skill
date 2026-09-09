@@ -59,7 +59,26 @@ def _decision_from_candidate(candidate: Mapping[str, Any], expected_revision: in
     value = proposal.get("value")
     if value is None:
         value = {key: proposal[key] for key in ("role", "level", "caption_type", "target_id") if key in proposal}
+    value = dict(value) if isinstance(value, Mapping) else value
+    target_node_ids = list(candidate.get("target_node_ids") or [])
+    if operation in {"create_overlay", "update_overlay"}:
+        operation = "update_overlay"
+    elif operation == "adjust_list_level":
+        operation = "set_presentation_override"
+        if isinstance(value, dict):
+            if "level" in value and "target_level" not in value:
+                value["target_level"] = value["level"]
+            value.setdefault("source_semantics", "preserved")
+    elif operation == "retype_list_item":
+        list_item_id = value.get("list_item_id") if isinstance(value, Mapping) else None
+        list_parent_id = value.get("list_parent_id") if isinstance(value, Mapping) else None
+        if isinstance(list_item_id, str) and isinstance(list_parent_id, str):
+            operation = "move_node"
+            target_node_ids = [list_item_id]
+            value = {"new_parent_id": list_parent_id, "source_semantics": "preserved"}
     property_scope = list(proposal.get("property_scope") or candidate.get("property_scope") or [])
+    if operation == "set_presentation_override" and not property_scope:
+        property_scope = ["presentation"]
     if not property_scope:
         property_scope = ["role"] if operation == "update_role" else ["overlay"]
     return {
@@ -67,7 +86,8 @@ def _decision_from_candidate(candidate: Mapping[str, Any], expected_revision: in
         "candidate_id": str(candidate.get("candidate_id")),
         "candidate_ids": [str(candidate.get("candidate_id"))],
         "operation": operation,
-        "target_node_ids": list(candidate.get("target_node_ids") or []),
+        "target_node_ids": target_node_ids,
+        "target_source_refs": copy_source_refs(candidate.get("target_source_refs")),
         "expected_revision": expected_revision,
         "property_scope": property_scope,
         "value": value,
@@ -75,6 +95,14 @@ def _decision_from_candidate(candidate: Mapping[str, Any], expected_revision: in
         "evidence": list(candidate.get("positive_evidence") or []),
         "invalidates": list(proposal.get("invalidates") or []),
     }
+
+
+def copy_source_refs(value: Any) -> list[dict[str, Any]]:
+    """Copy source references without importing the broader contract model."""
+
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return []
+    return [dict(item) for item in value if isinstance(item, Mapping)]
 
 
 def _decision_from_revision(revision: Mapping[str, Any], expected_revision: int) -> dict[str, Any]:
@@ -86,6 +114,7 @@ def _decision_from_revision(revision: Mapping[str, Any], expected_revision: int)
             "candidate_id": None,
             "candidate_ids": [],
             "target_node_ids": list(revision.get("target_node_ids") or []),
+            "target_source_refs": copy_source_refs(revision.get("target_source_refs")),
             "expected_revision": expected_revision,
             "property_scope": list(revision.get("property_scope") or decision.get("property_scope") or []),
             "preconditions": list(revision.get("preconditions") or decision.get("preconditions") or []),
@@ -154,6 +183,8 @@ def resolve(
     unresolved.sort(key=lambda item: (item.get("code", ""), tuple(item.get("candidate_ids", [])), tuple(item.get("revision_ids", []))))
     transaction_payload = {"revision": expected_revision, "decisions": decisions, "unresolved": unresolved}
     transaction_id = "decision-set-" + hashlib.sha256(_canonical(transaction_payload).encode("utf-8")).hexdigest()[:20]
+    for decision in decisions:
+        decision["transaction_id"] = transaction_id
     return {
         "decision_set_version": "2.0",
         "transaction_id": transaction_id,

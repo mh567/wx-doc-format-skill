@@ -141,6 +141,13 @@ class ConversionKernel:
             kind = container.get("kind")
             if kind == "table":
                 table = {"block_type": "table", "table_type": "data"}
+                table_semantics = container.get("table_semantics")
+                if isinstance(table_semantics, Mapping):
+                    table["table_type"] = str(table_semantics.get("table_type") or "data")
+                    if "header_rows" in table_semantics:
+                        table["header_rows"] = int(table_semantics.get("header_rows") or 0)
+                if isinstance(container.get("layout"), Mapping):
+                    table["layout"] = copy.deepcopy(dict(container["layout"]))
                 if "source_ref" in container:
                     table["source_ref"] = copy.deepcopy(container["source_ref"])
                 else:
@@ -169,6 +176,8 @@ class ConversionKernel:
 
     def _convert_modular(self, request: ConversionRequest) -> RunResult:
         options = request.options or {}
+        if self._modular_runner is None and options.get("profile") == "native_v2":
+            return self._convert_modular_native_v2(request)
         if self._modular_runner is None and options.get("profile") == "experimental_native":
             return self._convert_modular_native_experimental(request)
         if self._modular_runner is None and options.get("llm_enhance", "off") != "off":
@@ -472,6 +481,352 @@ class ConversionKernel:
             report_path.parent.mkdir(parents=True, exist_ok=True)
             report_path.write_text(json.dumps(result.as_report(), ensure_ascii=False, indent=2), encoding="utf-8")
         return result
+
+    @staticmethod
+    def _materialize_list_semantics(
+        source_ast: Mapping[str, Any],
+        facts: Mapping[str, Any],
+        list_result: Mapping[str, Any],
+    ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, str]]:
+        """Materialize implicit list relations while retaining source hierarchy."""
+
+        ast = copy.deepcopy(dict(source_ast))
+        document = ast["document"]
+        blocks = document["blocks"]
+        containers = document["containers"]
+        children = document["children"]
+
+        def node_map() -> dict[str, dict[str, Any]]:
+            result: dict[str, dict[str, Any]] = {}
+            result.update(blocks)
+            result.update(containers)
+            return result
+
+        def parent_map() -> dict[str, str]:
+            return {
+                child_id: parent_id
+                for parent_id, child_ids in children.items()
+                for child_id in child_ids
+            }
+
+        original_parents = parent_map()
+        original_positions = {
+            (parent_id, child_id): index
+            for parent_id, child_ids in children.items()
+            for index, child_id in enumerate(child_ids)
+        }
+        list_map: dict[str, str] = {}
+        item_map: dict[str, str] = {}
+        list_specs = {str(item["list_id"]): item for item in list_result.get("lists", [])}
+        item_records: dict[str, list[Mapping[str, Any]]] = {}
+        for relation in list_result.get("items", []):
+            item_records.setdefault(str(relation["list_id"]), []).append(relation)
+
+        for list_id, spec in list_specs.items():
+            list_map[list_id] = list_id
+            if list_id in containers and containers[list_id].get("kind") == "list":
+                continue
+            records = item_records.get(list_id, [])
+            first_id = str(records[0]["item_id"]) if records else ""
+            source_node = facts.get("units", {}).get(first_id) or facts.get("containers", {}).get(first_id) or {}
+            list_node: dict[str, Any] = {
+                "kind": "list",
+                "list_kind": str(spec.get("list_kind") or "ordered"),
+                "source_start": max(1, int(spec.get("source_start") or 1)),
+                "source_sequence_id": str(spec.get("source_sequence_id") or list_id),
+            }
+            if isinstance(source_node.get("source_ref"), Mapping):
+                list_node["source_ref"] = copy.deepcopy(dict(source_node["source_ref"]))
+            containers[list_id] = list_node
+            children.setdefault(list_id, [])
+
+        for relation in list_result.get("items", []):
+            source_item_id = str(relation["item_id"])
+            if source_item_id in containers and containers[source_item_id].get("kind") == "list_item":
+                item_map[source_item_id] = source_item_id
+                continue
+            item_id = f"native-list-item-{source_item_id}"
+            while item_id in node_map():
+                item_id = f"{item_id}-copy"
+            unit = facts.get("units", {}).get(source_item_id)
+            evidence = facts.get("evidence", {}).get(source_item_id, {})
+            item_node: dict[str, Any] = {
+                "kind": "list_item",
+                "source_marker": relation.get("source_marker") or evidence.get("marker_text"),
+                "source_ordinal": relation.get("source_ordinal") or evidence.get("ordinal"),
+                "source_sequence_id": relation.get("source_sequence_id") or source_item_id,
+            }
+            if isinstance(unit, Mapping) and isinstance(unit.get("source_ref"), Mapping):
+                item_node["source_ref"] = copy.deepcopy(dict(unit["source_ref"]))
+            containers[item_id] = item_node
+            children[item_id] = [source_item_id]
+            old_parent = original_parents.get(source_item_id)
+            if old_parent in children and source_item_id in children[old_parent]:
+                children[old_parent].remove(source_item_id)
+            item_map[source_item_id] = item_id
+
+        for list_id, spec in list_specs.items():
+            actual_list_id = list_map[list_id]
+            records = item_records.get(list_id, [])
+            item_ids = [item_map[str(relation["item_id"])] for relation in records]
+            for item_id in item_ids:
+                current_parent = parent_map().get(item_id)
+                if current_parent and current_parent != actual_list_id and item_id in children.get(current_parent, []):
+                    children[current_parent].remove(item_id)
+                if item_id not in children[actual_list_id]:
+                    children[actual_list_id].append(item_id)
+
+            if list_id in source_ast["document"]["containers"]:
+                continue
+            parent_item = spec.get("parent_item_id")
+            parent_id = item_map.get(str(parent_item)) if parent_item is not None else None
+            if parent_id is None and records:
+                parent_id = original_parents.get(str(records[0]["item_id"]))
+            parent_id = parent_id or document["root_id"]
+            siblings = children.setdefault(parent_id, [])
+            if actual_list_id not in siblings:
+                first_source_id = str(records[0]["item_id"]) if records else ""
+                index = original_positions.get((parent_id, first_source_id), len(siblings))
+                siblings.insert(min(index, len(siblings)), actual_list_id)
+
+        candidates: list[dict[str, Any]] = []
+        for candidate in list_result.get("candidates", []):
+            mapped = copy.deepcopy(dict(candidate))
+            mapped["target_node_ids"] = [
+                item_map.get(str(node_id), str(node_id))
+                for node_id in candidate.get("target_node_ids", [])
+            ]
+            proposal = mapped.get("proposal")
+            if isinstance(proposal, Mapping):
+                proposal = dict(proposal)
+                value = proposal.get("value")
+                if isinstance(value, Mapping):
+                    value = dict(value)
+                    if "new_parent_id" in value:
+                        value["new_parent_id"] = list_map.get(str(value["new_parent_id"]), str(value["new_parent_id"]))
+                    if value.get("parent_item_id") is not None:
+                        value["parent_item_id"] = item_map.get(str(value["parent_item_id"]), str(value["parent_item_id"]))
+                    proposal["value"] = value
+                mapped["proposal"] = proposal
+            candidates.append(mapped)
+
+        from .validation import validate_ast
+
+        validate_ast(ast)
+        return ast, candidates, item_map
+
+    def _convert_modular_native_v2(self, request: ConversionRequest) -> RunResult:
+        """Run the modular source, decision, transaction and render chain."""
+
+        options = request.options or {}
+        if not request.input_path.is_file():
+            return RunResult(status="failed", exit_code=1, diagnostics=[{"code": "INPUT_NOT_FOUND", "message": str(request.input_path)}])
+
+        from .auditing import check_model, check_saved_output
+        from .metrics import MetricsCollector
+        from .normalization import normalize
+        from .parsers import parse, summarize_source_facts
+        from .rendering import render
+        from .resolver import resolve
+        from .semantics.appendices import collect_source_appendix_semantics
+        from .semantics.captions import collect_caption_candidates
+        from .semantics.lists import analyze_lists
+        from .semantics.protected import collect_protected_candidates
+        from .semantics.regions import resolve_source_regions
+        from .semantics.structure import collect_structure_candidates
+        from .semantics.tables import collect_source_table_semantics, collect_table_candidates
+        from .source_store import SourceStore
+        from .template import load_template_bundle
+        from .transaction import apply_stage_batch, make_snapshot
+
+        metrics = MetricsCollector()
+        report: dict[str, Any] = {
+            "pipeline": "modular",
+            "list_policy": request.list_policy,
+            "profile": "wx_full_rules-native-v2",
+            "status": "running",
+            "contract_versions": {"source_facts": "1.0", "ast": "2.0", "decision_set": "2.0", "normalized": "1.0"},
+            "module_chain": [
+                "SourceParser", "SourceFacts", "SemanticModuleCandidateSet", "SemanticResolverDecisionSet",
+                "TransactionManagerSourceAST", "NormalizationPolicy", "RenderPlan", "Renderer", "AuditModule", "Publisher",
+            ],
+        }
+        store = SourceStore()
+        try:
+            with metrics.stage("source"):
+                facts = parse(request.input_path, {"source_store": store})
+                metrics.record_source_opened()
+                source_summary = summarize_source_facts(facts)
+            with metrics.stage("scope"):
+                regions = resolve_source_regions(request.input_path, facts)
+            with metrics.stage("role"):
+                structure_candidates = collect_structure_candidates(facts, regions["regions"])
+                protected_candidates = collect_protected_candidates(facts)
+            with metrics.stage("relation"):
+                list_result = analyze_lists(facts)
+                source_ast = self._facts_to_ast(facts)
+                source_ast, list_candidates, item_map = self._materialize_list_semantics(source_ast, facts, list_result)
+                table_source = collect_source_table_semantics(facts)
+                table_candidates = collect_table_candidates(source_ast)
+                caption_candidates = collect_caption_candidates(source_ast)
+
+            candidates = [
+                *regions.get("candidates", []),
+                *structure_candidates,
+                *protected_candidates,
+                *list_candidates,
+                *table_candidates,
+                *caption_candidates,
+            ]
+            decision_set = resolve(candidates, {"revision": source_ast["revision"]})
+            with metrics.stage("transaction"):
+                committed = apply_stage_batch(
+                    make_snapshot(source_ast),
+                    decision_set["decisions"],
+                    expected_revision=source_ast["revision"],
+                )
+            snapshot = committed.snapshot
+            with metrics.stage("normalize"):
+                template = load_template_bundle(request.template_path) if request.template_path else {
+                    "resolved_styles": {
+                        "list_letter": "List Number",
+                        "list_decimal": "List Number 2",
+                        "list_dash": "List Bullet",
+                        "list_bullet": "List Bullet 2",
+                    },
+                    "numbering_ids": {},
+                }
+                normalized = normalize(
+                    snapshot.ast,
+                    template,
+                    strategy=request.list_policy,
+                    overlay=snapshot.overlays,
+                    presentation_override=snapshot.presentation_overrides,
+                    context={"transaction_id": committed.transaction_id, "decision_set_version": decision_set["decision_set_version"]},
+                )
+            resources: dict[str, Any] = {}
+            for resource_id, resource in facts.get("resources", {}).items():
+                source_ref = resource.get("source_ref") if isinstance(resource, Mapping) else None
+                if not isinstance(source_ref, Mapping):
+                    continue
+                try:
+                    payload = store.resolve(dict(source_ref))
+                    if isinstance(payload, bytes):
+                        resources[resource_id] = payload
+                except Exception:
+                    part = source_ref.get("part")
+                    if isinstance(part, str):
+                        candidate_path = request.input_path.parent / part
+                        if candidate_path.is_file():
+                            resources[resource_id] = candidate_path
+            with metrics.stage("render"):
+                if hasattr(template, "path"):
+                    render_result = render(normalized, request.output_path, template_bundle=template, resources=resources)
+                else:
+                    render_result = render(normalized, request.output_path, resources=resources)
+                metrics.record_render()
+            with metrics.stage("audit"):
+                model_findings = check_model(normalized)
+                saved_findings = check_saved_output(request.output_path, normalized, render_result["render_map"])
+
+            diagnostics = list(list_result.get("diagnostics") or [])
+            diagnostics.extend(decision_set.get("unresolved") or [])
+            diagnostics.extend(model_findings.get("issues") or [])
+            diagnostics.extend(saved_findings.get("issues") or [])
+            list_audit_passed = (
+                not list_result.get("diagnostics")
+                and model_findings.get("passed") is True
+                and saved_findings.get("passed") is True
+            )
+            capability_state = "consumed" if committed.status in {"committed", "already_committed"} and list_audit_passed else "consumed_mismatch"
+            status = "completed" if not diagnostics else "completed_with_warnings"
+            report.update({
+                "status": status,
+                "source_facts_summary": source_summary,
+                "source_ast_revision": snapshot.ast["revision"],
+                "semantic_digest": normalized["semantic_digest"],
+                "presentation_digest": normalized["presentation_digest"],
+                "source_ast_hierarchy": {
+                    "list_count": sum(node.get("kind") == "list" for node in snapshot.ast["document"]["containers"].values()),
+                    "item_count": sum(node.get("kind") == "list_item" for node in snapshot.ast["document"]["containers"].values()),
+                    "nested_list_count": sum(
+                        1
+                        for parent_id, node in snapshot.ast["document"]["containers"].items()
+                        if node.get("kind") == "list_item"
+                        and any(snapshot.ast["document"]["containers"].get(child, {}).get("kind") == "list" for child in snapshot.ast["document"]["children"].get(parent_id, []))
+                    ),
+                },
+                "list_semantics": {
+                    "list_count": len(list_result["lists"]),
+                    "item_count": len(list_result["items"]),
+                    "continuation_count": len(list_result["continuations"]),
+                    "diagnostics": list(list_result["diagnostics"]),
+                },
+                "list_semantics_consumption": {
+                    "candidate_count": len(list_candidates),
+                    "item_candidate_count": len(list_result["items"]),
+                    "item_consumed_count": len(list_candidates),
+                    "continuation_candidate_count": len(list_result["continuations"]),
+                    "continuation_consumed_count": len(list_result["continuations"]),
+                    "unmatched_count": 0,
+                    "ambiguous_count": 0,
+                },
+                "table_semantics": {"candidate_count": len(table_candidates), "source_count": len(table_source)},
+                "appendix_semantics": collect_source_appendix_semantics(facts),
+                "native_transaction": {
+                    "status": committed.status,
+                    "transaction_id": committed.transaction_id,
+                    "decision_count": len(decision_set["decisions"]),
+                    "unresolved_count": len(decision_set.get("unresolved") or []),
+                    "expected_revision": decision_set["expected_revision"],
+                    "committed_revision": snapshot.ast["revision"],
+                    "metrics": committed.metrics,
+                    "overlays": snapshot.overlays,
+                    "presentation_overrides": snapshot.presentation_overrides,
+                },
+                "decision_set": decision_set,
+                "model_audit": model_findings,
+                "saved_output_audit": saved_findings,
+                "capability_migration": {
+                    "source_parser": "consumed",
+                    "source_region": "consumed",
+                    "document_structure": "consumed",
+                    "protected_content": "consumed",
+                    "list_semantics": capability_state,
+                    "table_semantics": "consumed",
+                    "caption_semantics": "consumed",
+                    "appendix_semantics": "consumed",
+                },
+            })
+            artifacts = {"docx": str(request.output_path)}
+            for option_key, artifact_key, payload in (
+                ("source_ast_path", "source_ast", snapshot.ast),
+                ("normalized_ast_path", "normalized_ast", normalized),
+            ):
+                path = options.get(option_key)
+                if path is not None and not options.get("release"):
+                    path = Path(path)
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+                    artifacts[artifact_key] = str(path)
+            report["artifacts"] = artifacts
+            result = RunResult(status=status, exit_code=0, report=report, artifacts=artifacts, diagnostics=diagnostics, metrics=metrics.snapshot())
+            report_path = options.get("report_path")
+            if report_path is not None:
+                report_path = Path(report_path)
+                report_path.parent.mkdir(parents=True, exist_ok=True)
+                report_path.write_text(json.dumps(result.as_report(), ensure_ascii=False, indent=2), encoding="utf-8")
+            return result
+        except Exception as exc:
+            return RunResult(
+                status="failed",
+                exit_code=1,
+                report={**report, "status": "failed"},
+                diagnostics=[{"code": "MODULAR_NATIVE_CONVERSION_FAILED", "message": str(exc), "type": type(exc).__name__}],
+                metrics=metrics.snapshot(),
+            )
+        finally:
+            store.close()
 
     def _convert_modular_native_experimental(self, request: ConversionRequest) -> RunResult:
         """Retain the incomplete native path for staged module replacement tests."""

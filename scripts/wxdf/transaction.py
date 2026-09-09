@@ -20,6 +20,8 @@ class TransactionConflict(RuntimeError):
 class StageSnapshot:
     ast: dict[str, Any]
     transactions: dict[str, str] = field(default_factory=dict)
+    overlays: dict[str, dict[str, Any]] = field(default_factory=dict)
+    presentation_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -164,7 +166,39 @@ def _apply_delete_node(ast: dict[str, Any], decision: Mapping[str, Any]) -> None
         document["containers"].pop(node_id, None)
 
 
-def _apply_decision(ast: dict[str, Any], decision: Mapping[str, Any]) -> None:
+def _apply_overlay(snapshot: StageSnapshot, decision: Mapping[str, Any]) -> None:
+    value = decision.get("value")
+    if not isinstance(value, Mapping):
+        raise TransactionConflict("update_overlay requires a mapping value")
+    nodes = _node_map(snapshot.ast)
+    target_ids = list(decision.get("target_node_ids") or [])
+    if not target_ids:
+        raise TransactionConflict("update_overlay requires at least one target")
+    for target_id in target_ids:
+        if target_id not in nodes:
+            raise TransactionConflict(f"unknown update_overlay target {target_id}")
+        current = snapshot.overlays.setdefault(str(target_id), {})
+        current.update(copy.deepcopy(dict(value)))
+
+
+def _apply_presentation_override(snapshot: StageSnapshot, decision: Mapping[str, Any]) -> None:
+    value = decision.get("value")
+    if not isinstance(value, Mapping):
+        raise TransactionConflict("set_presentation_override requires a mapping value")
+    nodes = _node_map(snapshot.ast)
+    target_ids = list(decision.get("target_node_ids") or [])
+    if not target_ids:
+        raise TransactionConflict("set_presentation_override requires at least one target")
+    for target_id in target_ids:
+        if target_id not in nodes:
+            raise TransactionConflict(f"unknown presentation target {target_id}")
+        key = str(value.get("list_item_id") or target_id)
+        current = snapshot.presentation_overrides.setdefault(key, {})
+        current.update(copy.deepcopy(dict(value)))
+
+
+def _apply_decision(snapshot: StageSnapshot, decision: Mapping[str, Any]) -> None:
+    ast = snapshot.ast
     operation = decision.get("operation")
     if operation == "update_role":
         _apply_update_role(ast, decision)
@@ -176,8 +210,10 @@ def _apply_decision(ast: dict[str, Any], decision: Mapping[str, Any]) -> None:
         _apply_create_node(ast, decision)
     elif operation == "delete_node":
         _apply_delete_node(ast, decision)
-    elif operation in {"update_overlay", "set_presentation_override"}:
-        raise TransactionConflict(f"{operation} requires its stage adapter")
+    elif operation == "update_overlay":
+        _apply_overlay(snapshot, decision)
+    elif operation == "set_presentation_override":
+        _apply_presentation_override(snapshot, decision)
     else:
         raise TransactionConflict(f"unsupported stage operation {operation!r}")
 
@@ -206,7 +242,12 @@ def apply_stage_batch(
             transaction_id=transaction_id,
         )
 
-    isolated = copy.deepcopy(snapshot.ast)
+    isolated = StageSnapshot(
+        ast=copy.deepcopy(snapshot.ast),
+        transactions=dict(snapshot.transactions),
+        overlays=copy.deepcopy(snapshot.overlays),
+        presentation_overrides=copy.deepcopy(snapshot.presentation_overrides),
+    )
     metrics = {"full_model_copy_count": 1, "full_graph_validation_count": 0, "index_rebuild_count": 0}
     try:
         for decision in decisions:
@@ -214,16 +255,21 @@ def apply_stage_batch(
             if decision_revision != expected_revision:
                 raise TransactionConflict(f"decision revision conflict: expected {expected_revision}, got {decision_revision}")
             _apply_decision(isolated, decision)
-        isolated["revision"] = expected_revision + 1
-        validate_ast(isolated)
+        isolated.ast["revision"] = expected_revision + 1
+        validate_ast(isolated.ast)
         metrics["full_graph_validation_count"] = 1
-        build_indexes(isolated, validate=False)
+        build_indexes(isolated.ast, validate=False)
         metrics["index_rebuild_count"] = 1
     except Exception as exc:
         if isinstance(exc, TransactionConflict):
             raise
         raise TransactionConflict(f"stage batch rejected: {exc}") from exc
 
-    committed = StageSnapshot(ast=isolated, transactions=dict(snapshot.transactions))
+    committed = StageSnapshot(
+        ast=isolated.ast,
+        transactions=dict(snapshot.transactions),
+        overlays=isolated.overlays,
+        presentation_overrides=isolated.presentation_overrides,
+    )
     committed.transactions[transaction_id] = decision_digest
     return CommitResult(status="committed", snapshot=committed, metrics=metrics, transaction_id=transaction_id)

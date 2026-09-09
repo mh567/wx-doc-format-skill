@@ -189,7 +189,7 @@ def _emit_group(
                 "proposal": {
                     "operation": "move_node",
                     "property_scope": ["children"],
-                    "value": {"new_parent_id": list_id if parent_id is None else parent_id, "list_id": list_id, "parent_item_id": parent_id},
+                    "value": {"new_parent_id": list_id, "list_id": list_id, "parent_item_id": parent_id},
                 },
                 "positive_evidence": [{"kind": "structural", "source": "source_facts_list" if explicit else "bounded_list_run"}],
                 "negative_evidence": [],

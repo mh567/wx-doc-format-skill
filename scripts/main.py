@@ -1239,6 +1239,24 @@ def _legacy_adapter_argv(args) -> list[str]:
     return argv
 
 
+def _modular_native_v2_enabled(args) -> bool:
+    """Select the native modular seam for pure-rule sources with list evidence."""
+
+    if args.llm_enhance != "off" or args.resume or args.generate_requests:
+        return False
+    if args.list_policy != "wx-default-v2" or args.input is None:
+        return False
+    if args.input.suffix.lower() == ".docx":
+        return True
+    try:
+        import re
+
+        text = args.input.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+    return any(re.match(r"^[ \t]*(?:[-+*]|\d+[.)])[ \t]+", line) for line in text.splitlines())
+
+
 def _run_legacy_full_adapter(args, request: ConversionRequest) -> RunResult:
     """Execute all stable capabilities as one transitional modular module."""
 
@@ -1498,8 +1516,9 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
         modular_output_path = args.output
         if modular_output_path is None and args.generate_requests is not None:
             modular_output_path = args.generate_requests / ".pending-output.docx"
+        native_v2 = _modular_native_v2_enabled(args)
         result = ConversionKernel(
-            modular_runner=lambda request: _run_legacy_full_adapter(args, request),
+            modular_runner=None if native_v2 else lambda request: _run_legacy_full_adapter(args, request),
         ).convert(
             ConversionRequest(
                 input_path=args.input,
@@ -1514,6 +1533,7 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
                     "normalized_ast_path": args.ast,
                     "report_path": args.report,
                     "release": _os.environ.get("WX_DOC_FORMAT_RELEASE") == "1",
+                    "profile": "native_v2" if native_v2 else None,
                 },
             )
         )
