@@ -57,6 +57,40 @@ def _node_map(ast: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
     return result
 
 
+def _order_stage_decisions(snapshot: StageSnapshot, decisions: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    """Apply structure creation dependencies before edits in one stage batch."""
+
+    create_decisions = [decision for decision in decisions if decision.get("operation") == "create_node"]
+    other_decisions = [decision for decision in decisions if decision.get("operation") != "create_node"]
+    available = set(_node_map(snapshot.ast))
+    pending = list(enumerate(create_decisions))
+    ordered: list[Mapping[str, Any]] = []
+    while pending:
+        ready: list[tuple[int, Mapping[str, Any]]] = []
+        for original_index, decision in pending:
+            value = decision.get("value") or {}
+            parent_id = value.get("parent_id")
+            if isinstance(parent_id, str) and parent_id in available:
+                ready.append((original_index, decision))
+        if not ready:
+            raise TransactionConflict("create_node dependencies cannot be ordered")
+        ready.sort(
+            key=lambda item: (
+                str((item[1].get("value") or {}).get("parent_id")),
+                int((item[1].get("value") or {}).get("index", 10**9)),
+                str((item[1].get("value") or {}).get("node_id")),
+                item[0],
+            )
+        )
+        for original_index, decision in ready:
+            ordered.append(decision)
+            node_id = (decision.get("value") or {}).get("node_id")
+            if isinstance(node_id, str):
+                available.add(node_id)
+            pending = [item for item in pending if item[0] != original_index]
+    return [*ordered, *other_decisions]
+
+
 def _parent_map(ast: Mapping[str, Any]) -> dict[str, str]:
     parent: dict[str, str] = {}
     for parent_id, children in ast["document"]["children"].items():
@@ -114,7 +148,12 @@ def _apply_move_node(ast: dict[str, Any], decision: Mapping[str, Any]) -> None:
     if new_parent_id in descendants:
         raise TransactionConflict("move_node would create a cycle")
     document["children"][old_parent].remove(node_id)
-    document["children"].setdefault(new_parent_id, []).append(node_id)
+    destination = document["children"].setdefault(new_parent_id, [])
+    index = value.get("index")
+    if isinstance(index, int) and not isinstance(index, bool):
+        destination.insert(max(0, min(index, len(destination))), node_id)
+    else:
+        destination.append(node_id)
 
 
 def _apply_update_association(ast: dict[str, Any], decision: Mapping[str, Any]) -> None:
@@ -145,7 +184,12 @@ def _apply_create_node(ast: dict[str, Any], decision: Mapping[str, Any]) -> None
     else:
         raise TransactionConflict("create_node node requires block_type or kind")
     document["children"].setdefault(node_id, [])
-    document["children"].setdefault(parent_id, []).append(node_id)
+    siblings = document["children"].setdefault(parent_id, [])
+    index = value.get("index")
+    if isinstance(index, int) and not isinstance(index, bool):
+        siblings.insert(max(0, min(index, len(siblings))), node_id)
+    else:
+        siblings.append(node_id)
 
 
 def _apply_delete_node(ast: dict[str, Any], decision: Mapping[str, Any]) -> None:
@@ -250,7 +294,7 @@ def apply_stage_batch(
     )
     metrics = {"full_model_copy_count": 1, "full_graph_validation_count": 0, "index_rebuild_count": 0}
     try:
-        for decision in decisions:
+        for decision in _order_stage_decisions(isolated, decisions):
             decision_revision = decision.get("expected_revision", expected_revision)
             if decision_revision != expected_revision:
                 raise TransactionConflict(f"decision revision conflict: expected {expected_revision}, got {decision_revision}")

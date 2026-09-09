@@ -488,126 +488,148 @@ class ConversionKernel:
         facts: Mapping[str, Any],
         list_result: Mapping[str, Any],
     ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, str]]:
-        """Materialize implicit list relations while retaining source hierarchy."""
+        """Build list structure operations without changing the source revision."""
 
         ast = copy.deepcopy(dict(source_ast))
         document = ast["document"]
         blocks = document["blocks"]
         containers = document["containers"]
         children = document["children"]
-
-        def node_map() -> dict[str, dict[str, Any]]:
-            result: dict[str, dict[str, Any]] = {}
-            result.update(blocks)
-            result.update(containers)
-            return result
-
-        def parent_map() -> dict[str, str]:
-            return {
-                child_id: parent_id
-                for parent_id, child_ids in children.items()
-                for child_id in child_ids
-            }
-
-        original_parents = parent_map()
+        nodes = {**blocks, **containers}
+        original_parents = {
+            child_id: parent_id
+            for parent_id, child_ids in children.items()
+            for child_id in child_ids
+        }
         original_positions = {
             (parent_id, child_id): index
             for parent_id, child_ids in children.items()
             for index, child_id in enumerate(child_ids)
         }
-        list_map: dict[str, str] = {}
-        item_map: dict[str, str] = {}
         list_specs = {str(item["list_id"]): item for item in list_result.get("lists", [])}
         item_records: dict[str, list[Mapping[str, Any]]] = {}
         for relation in list_result.get("items", []):
             item_records.setdefault(str(relation["list_id"]), []).append(relation)
 
-        for list_id, spec in list_specs.items():
-            list_map[list_id] = list_id
-            if list_id in containers and containers[list_id].get("kind") == "list":
-                continue
-            records = item_records.get(list_id, [])
-            first_id = str(records[0]["item_id"]) if records else ""
-            source_node = facts.get("units", {}).get(first_id) or facts.get("containers", {}).get(first_id) or {}
-            list_node: dict[str, Any] = {
-                "kind": "list",
-                "list_kind": str(spec.get("list_kind") or "ordered"),
-                "source_start": max(1, int(spec.get("source_start") or 1)),
-                "source_sequence_id": str(spec.get("source_sequence_id") or list_id),
-            }
-            if isinstance(source_node.get("source_ref"), Mapping):
-                list_node["source_ref"] = copy.deepcopy(dict(source_node["source_ref"]))
-            containers[list_id] = list_node
-            children.setdefault(list_id, [])
-
+        item_map: dict[str, str] = {}
         for relation in list_result.get("items", []):
             source_item_id = str(relation["item_id"])
-            if source_item_id in containers and containers[source_item_id].get("kind") == "list_item":
+            source_node = containers.get(source_item_id)
+            if isinstance(source_node, Mapping) and source_node.get("kind") == "list_item":
                 item_map[source_item_id] = source_item_id
                 continue
             item_id = f"native-list-item-{source_item_id}"
-            while item_id in node_map():
+            while item_id in nodes or item_id in item_map.values():
                 item_id = f"{item_id}-copy"
-            unit = facts.get("units", {}).get(source_item_id)
-            evidence = facts.get("evidence", {}).get(source_item_id, {})
-            item_node: dict[str, Any] = {
-                "kind": "list_item",
-                "source_marker": relation.get("source_marker") or evidence.get("marker_text"),
-                "source_ordinal": relation.get("source_ordinal") or evidence.get("ordinal"),
-                "source_sequence_id": relation.get("source_sequence_id") or source_item_id,
-            }
-            if isinstance(unit, Mapping) and isinstance(unit.get("source_ref"), Mapping):
-                item_node["source_ref"] = copy.deepcopy(dict(unit["source_ref"]))
-            containers[item_id] = item_node
-            children[item_id] = [source_item_id]
-            old_parent = original_parents.get(source_item_id)
-            if old_parent in children and source_item_id in children[old_parent]:
-                children[old_parent].remove(source_item_id)
             item_map[source_item_id] = item_id
 
-        for list_id, spec in list_specs.items():
-            actual_list_id = list_map[list_id]
-            records = item_records.get(list_id, [])
-            item_ids = [item_map[str(relation["item_id"])] for relation in records]
-            for item_id in item_ids:
-                current_parent = parent_map().get(item_id)
-                if current_parent and current_parent != actual_list_id and item_id in children.get(current_parent, []):
-                    children[current_parent].remove(item_id)
-                if item_id not in children[actual_list_id]:
-                    children[actual_list_id].append(item_id)
+        def source_node(source_id: str) -> Mapping[str, Any]:
+            return facts.get("units", {}).get(source_id) or facts.get("containers", {}).get(source_id) or {}
 
-            if list_id in source_ast["document"]["containers"]:
-                continue
-            parent_item = spec.get("parent_item_id")
-            parent_id = item_map.get(str(parent_item)) if parent_item is not None else None
-            if parent_id is None and records:
-                parent_id = original_parents.get(str(records[0]["item_id"]))
-            parent_id = parent_id or document["root_id"]
-            siblings = children.setdefault(parent_id, [])
-            if actual_list_id not in siblings:
-                first_source_id = str(records[0]["item_id"]) if records else ""
-                index = original_positions.get((parent_id, first_source_id), len(siblings))
-                siblings.insert(min(index, len(siblings)), actual_list_id)
+        def source_ref(source_id: str) -> dict[str, Any] | None:
+            value = source_node(source_id).get("source_ref")
+            return copy.deepcopy(dict(value)) if isinstance(value, Mapping) else None
+
+        def parent_for_list(list_id: str, spec: Mapping[str, Any], records: list[Mapping[str, Any]]) -> tuple[str, int]:
+            parent_item_id = spec.get("parent_item_id")
+            if parent_item_id is not None:
+                parent_id = item_map.get(str(parent_item_id), str(parent_item_id))
+                return parent_id, len(children.get(parent_id, []))
+            first_source_id = str(records[0]["item_id"]) if records else ""
+            parent_id = original_parents.get(first_source_id, document["root_id"])
+            if parent_id in item_map:
+                parent_id = item_map[parent_id]
+            return parent_id, original_positions.get((parent_id, first_source_id), len(children.get(parent_id, [])))
 
         candidates: list[dict[str, Any]] = []
+        for list_id, spec in list_specs.items():
+            records = item_records.get(list_id, [])
+            if list_id not in containers:
+                parent_id, index = parent_for_list(list_id, spec, records)
+                first_source_id = str(records[0]["item_id"]) if records else ""
+                list_node: dict[str, Any] = {
+                    "kind": "list",
+                    "list_kind": str(spec.get("list_kind") or "ordered"),
+                    "source_start": max(1, int(spec.get("source_start") or 1)),
+                    "source_sequence_id": str(spec.get("source_sequence_id") or list_id),
+                }
+                ref = source_ref(first_source_id)
+                if ref is not None:
+                    list_node["source_ref"] = ref
+                candidates.append({
+                    "candidate_id": f"list-structure-{list_id}",
+                    "module_id": "list_semantics",
+                    "module_version": "1.0",
+                    "target_source_refs": [ref] if ref is not None else [],
+                    "target_node_ids": [list_id],
+                    "proposal": {
+                        "operation": "create_node",
+                        "property_scope": ["children"],
+                        "value": {"node_id": list_id, "parent_id": parent_id, "index": index, "node": list_node},
+                    },
+                    "positive_evidence": [{"kind": "structural", "source": "source_facts_list_structure"}],
+                    "negative_evidence": [],
+                    "scope": {"stages": ["relation"]},
+                    "constraints": [],
+                    "rationale": "list container derived from immutable source facts",
+                })
+
+            for index, relation in enumerate(records):
+                source_item_id = str(relation["item_id"])
+                item_id = item_map[source_item_id]
+                existing_item = item_id in containers and containers[item_id].get("kind") == "list_item"
+                if not existing_item:
+                    unit = source_node(source_item_id)
+                    evidence = facts.get("evidence", {}).get(source_item_id, {})
+                    item_node: dict[str, Any] = {
+                        "kind": "list_item",
+                        "source_marker": relation.get("source_marker") or evidence.get("marker_text"),
+                        "source_ordinal": relation.get("source_ordinal") or evidence.get("ordinal"),
+                        "source_sequence_id": relation.get("source_sequence_id") or source_item_id,
+                    }
+                    if isinstance(unit.get("source_ref"), Mapping):
+                        item_node["source_ref"] = copy.deepcopy(dict(unit["source_ref"]))
+                    candidates.append({
+                        "candidate_id": f"list-item-structure-{source_item_id}",
+                        "module_id": "list_semantics",
+                        "module_version": "1.0",
+                        "target_source_refs": [source_ref(source_item_id)] if source_ref(source_item_id) else [],
+                        "target_node_ids": [item_id],
+                        "proposal": {
+                            "operation": "create_node",
+                            "property_scope": ["children"],
+                            "value": {"node_id": item_id, "parent_id": list_id, "index": index, "node": item_node},
+                        },
+                        "positive_evidence": [{"kind": "structural", "source": "source_facts_list_item"}],
+                        "negative_evidence": [],
+                        "scope": {"stages": ["relation"]},
+                        "constraints": [],
+                        "rationale": "list item owner derived from immutable source facts",
+                    })
+
         for candidate in list_result.get("candidates", []):
             mapped = copy.deepcopy(dict(candidate))
-            mapped["target_node_ids"] = [
-                item_map.get(str(node_id), str(node_id))
-                for node_id in candidate.get("target_node_ids", [])
-            ]
-            proposal = mapped.get("proposal")
-            if isinstance(proposal, Mapping):
-                proposal = dict(proposal)
-                value = proposal.get("value")
-                if isinstance(value, Mapping):
-                    value = dict(value)
-                    if "new_parent_id" in value:
-                        value["new_parent_id"] = list_map.get(str(value["new_parent_id"]), str(value["new_parent_id"]))
-                    if value.get("parent_item_id") is not None:
-                        value["parent_item_id"] = item_map.get(str(value["parent_item_id"]), str(value["parent_item_id"]))
-                    proposal["value"] = value
-                mapped["proposal"] = proposal
+            target_ids = [str(node_id) for node_id in candidate.get("target_node_ids", [])]
+            if len(target_ids) != 1:
+                candidates.append(mapped)
+                continue
+            source_item_id = target_ids[0]
+            item_id = item_map.get(source_item_id, source_item_id)
+            proposal = dict(mapped.get("proposal") or {})
+            value = dict(proposal.get("value") or {})
+            list_id = str(value.get("list_id") or value.get("new_parent_id") or "")
+            existing_item = item_id in containers and containers[item_id].get("kind") == "list_item"
+            value["new_parent_id"] = list_id if existing_item else item_id
+            value["list_id"] = list_id
+            if value.get("parent_item_id") is not None:
+                value["parent_item_id"] = item_map.get(str(value["parent_item_id"]), str(value["parent_item_id"]))
+            value["index"] = next(
+                (index for index, relation in enumerate(item_records.get(list_id, [])) if str(relation.get("item_id")) == source_item_id),
+                0,
+            ) if existing_item else 0
+            proposal["value"] = value
+            mapped["proposal"] = proposal
+            mapped["target_node_ids"] = [source_item_id]
             candidates.append(mapped)
 
         from .validation import validate_ast

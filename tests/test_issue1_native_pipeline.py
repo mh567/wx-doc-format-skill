@@ -15,8 +15,10 @@ if str(SCRIPTS) not in sys.path:
 from test_modular_ast import _ast
 from wxdf.kernel import ConversionKernel, ConversionRequest
 from wxdf.legacy_capability import make_view, translate
+from wxdf.parsers import parse
 from wxdf.registry import ModuleDescriptor, PlanError
 from wxdf.resolver import resolve
+from wxdf.semantics.lists import analyze_lists
 from wxdf.transaction import apply_stage_batch, make_snapshot
 
 
@@ -167,3 +169,99 @@ def test_explicit_legacy_profile_cannot_be_overridden_by_list_text(tmp_path: Pat
     saved_report = json.loads(report.read_text(encoding="utf-8"))
     assert saved_report["migration_adapter"] == "legacy-full-v1"
     assert saved_report["execution_plan"]["profile"] == "wx_full_rules"
+
+
+def test_list_materialization_emits_structure_candidates_without_mutating_source_ast(tmp_path: Path) -> None:
+    source = tmp_path / "nested.md"
+    source.write_text("1. 父项\n2. 第二项\n", encoding="utf-8")
+    facts = parse(source)
+    source_list_id = next(
+        container_id
+        for container_id, container in facts["containers"].items()
+        if container.get("kind") == "list"
+    )
+    item_ids = list(facts["children"][source_list_id])
+    unit_ids = [facts["children"][item_id][0] for item_id in item_ids]
+    for item_id, unit_id in zip(item_ids, unit_ids):
+        item = facts["containers"][item_id]
+        facts["evidence"][unit_id] = {
+            "marker_kind": "ordered",
+            "marker_text": item["source_marker"],
+            "ordinal": item["source_ordinal"],
+            "explicit_depth": 0,
+        }
+    facts["containers"] = {"root": facts["containers"]["root"]}
+    facts["children"] = {"root": unit_ids}
+    facts["evidence"] = {unit_id: facts["evidence"][unit_id] for unit_id in unit_ids}
+    source_ast = ConversionKernel._facts_to_ast(facts)
+    baseline = json.loads(json.dumps(source_ast, ensure_ascii=False))
+
+    materialized, candidates, _ = ConversionKernel._materialize_list_semantics(
+        source_ast,
+        facts,
+        analyze_lists(facts),
+    )
+
+    assert materialized == baseline
+    assert any(candidate["proposal"]["operation"] == "create_node" for candidate in candidates)
+    assert any(
+        candidate["proposal"]["value"]["node"].get("kind") == "list_item"
+        for candidate in candidates
+        if candidate["proposal"]["operation"] == "create_node"
+    )
+    decision_set = resolve(candidates, {"revision": source_ast["revision"]})
+    committed = apply_stage_batch(
+        make_snapshot(materialized),
+        decision_set["decisions"],
+        expected_revision=source_ast["revision"],
+    )
+
+    assert committed.status == "committed"
+    committed_document = committed.snapshot.ast["document"]
+    assert any(node.get("kind") == "list" for node in committed_document["containers"].values())
+    assert any(node.get("kind") == "list_item" for node in committed_document["containers"].values())
+
+
+def test_transaction_orders_created_list_parent_before_child() -> None:
+    ast = _ast(0)
+    decisions = [
+        {
+            "decision_id": "create-item",
+            "transaction_id": "tx-parent-child",
+            "operation": "create_node",
+            "target_node_ids": ["item0"],
+            "expected_revision": ast["revision"],
+            "property_scope": ["children"],
+            "value": {
+                "node_id": "item0",
+                "parent_id": "list0",
+                "index": 0,
+                "node": {
+                    "kind": "list_item",
+                    "source_marker": "1.",
+                    "source_ordinal": 1,
+                    "source_sequence_id": "seq0",
+                },
+            },
+        },
+        {
+            "decision_id": "create-list",
+            "transaction_id": "tx-parent-child",
+            "operation": "create_node",
+            "target_node_ids": ["list0"],
+            "expected_revision": ast["revision"],
+            "property_scope": ["children"],
+            "value": {
+                "node_id": "list0",
+                "parent_id": "root",
+                "index": 0,
+                "node": {"kind": "list", "list_kind": "ordered", "source_start": 1, "source_sequence_id": "seq0"},
+            },
+        },
+    ]
+
+    committed = apply_stage_batch(make_snapshot(ast), decisions, expected_revision=ast["revision"])
+
+    assert committed.status == "committed"
+    assert committed.snapshot.ast["document"]["children"]["root"] == ["list0"]
+    assert committed.snapshot.ast["document"]["children"]["list0"] == ["item0"]
