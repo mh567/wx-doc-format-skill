@@ -32,6 +32,24 @@ def _node_map(ast: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
     return result
 
 
+def _scope_for_node(
+    document: Mapping[str, Any],
+    indexes: Any,
+    node_id: str,
+    *,
+    stop_at_list_item: bool = False,
+) -> str | None:
+    current = indexes.parent_by_id.get(node_id)
+    while current is not None:
+        kind = document["containers"].get(current, {}).get("kind")
+        if stop_at_list_item and kind == "list_item":
+            return None
+        if kind in {"table_cell", "quote"}:
+            return f"scope:{current}"
+        current = indexes.parent_by_id.get(current)
+    return "scope:document"
+
+
 def _list_contexts(ast: Mapping[str, Any], indexes: Any) -> dict[str, dict[str, Any]]:
     document = ast["document"]
     contexts: dict[str, dict[str, Any]] = {}
@@ -44,13 +62,7 @@ def _list_contexts(ast: Mapping[str, Any], indexes: Any) -> dict[str, dict[str, 
             current = indexes.parent_by_id[current]
             if document["containers"].get(current, {}).get("kind") == "list":
                 depth += 1
-        scope_id = "scope:document"
-        current = list_id
-        while current in indexes.parent_by_id:
-            current = indexes.parent_by_id[current]
-            if document["containers"].get(current, {}).get("kind") in {"table_cell", "quote"}:
-                scope_id = f"scope:{current}"
-                break
+        scope_id = _scope_for_node(document, indexes, list_id)
         contexts[list_id] = {
             "depth": depth,
             "scope_id": scope_id,
@@ -155,16 +167,7 @@ def normalize(
     counters: dict[str, int] = {}
 
     def heading_scope(node_id: str) -> str | None:
-        current = indexes.parent_by_id.get(node_id)
-        while current is not None:
-            container = document["containers"].get(current, {})
-            kind = container.get("kind")
-            if kind == "list_item":
-                return None
-            if kind in {"table_cell", "quote"}:
-                return f"scope:{current}"
-            current = indexes.parent_by_id.get(current)
-        return "scope:document"
+        return _scope_for_node(document, indexes, node_id, stop_at_list_item=True)
 
     for node_id in _reading_order(ast):
         block = document["blocks"].get(node_id)

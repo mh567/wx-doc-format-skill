@@ -4,16 +4,12 @@ import json
 import subprocess
 from pathlib import Path
 from zipfile import ZipFile
+from xml.etree import ElementTree
 
 from docx import Document
 
 from modular_support import _append_numbering_definition, _set_numbering
-from test_issue1_acceptance import _run_native, _paragraph_text
-
-
-ROOT = Path(__file__).resolve().parents[1]
-PYTHON = ROOT / "scripts" / ".venv" / "bin" / "python3"
-TEMPLATE = ROOT / "assets" / "wx_template.docx"
+from test_issue1_acceptance import _run_cli, _run_native, _paragraph_text
 
 
 def _write_markdown(tmp_path: Path, name: str, lines: list[str]) -> Path:
@@ -60,6 +56,47 @@ def _render_items(report: dict, source_ast: dict) -> list[tuple[str, dict]]:
     return result
 
 
+def _render_operations(report: dict, source_ast: dict) -> list[tuple[str, dict]]:
+    document = source_ast["document"]
+    result = []
+    for operation in report["model_audit"]["render_plan"]["operations"]:
+        node_id = operation["node_id"]
+        if node_id in document["blocks"]:
+            text = _paragraph_text(document["blocks"][node_id])
+        else:
+            block_id = next(
+                child_id
+                for child_id in document["children"].get(node_id, [])
+                if child_id in document["blocks"]
+            )
+            text = _paragraph_text(document["blocks"][block_id])
+        result.append((text, operation))
+    return result
+
+
+def _assert_unumbered_paragraphs(output: Path, texts: set[str]) -> None:
+    namespace = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    ns = {"w": namespace}
+    with ZipFile(output) as archive:
+        styles = ElementTree.fromstring(archive.read("word/styles.xml"))
+        document = ElementTree.fromstring(archive.read("word/document.xml"))
+    style_num_pr = {
+        style.get(f"{{{namespace}}}styleId"): style.find("w:pPr/w:numPr", ns)
+        for style in styles.findall("w:style", ns)
+    }
+    seen = set()
+    for paragraph in document.findall(".//w:p", ns):
+        text = "".join(node.text or "" for node in paragraph.findall(".//w:t", ns))
+        if text not in texts:
+            continue
+        seen.add(text)
+        assert paragraph.find("w:pPr/w:numPr", ns) is None
+        style = paragraph.find("w:pPr/w:pStyle", ns)
+        if style is not None:
+            assert style_num_pr.get(style.get(f"{{{namespace}}}val")) is None
+    assert seen == texts
+
+
 def _assert_native_completed(report: dict, output: Path) -> None:
     assert report["status"] == "completed"
     assert report["source_facts_immutable"] is True
@@ -86,25 +123,8 @@ def _build_l06_depth_jump_docx(tmp_path: Path) -> Path:
 
 
 def _run_native_expect_failure(source: Path, tmp_path: Path, name: str) -> tuple[subprocess.CompletedProcess[str], dict]:
-    output = tmp_path / f"{name}.output.docx"
-    report = tmp_path / f"{name}.report.json"
-    completed = subprocess.run(
-        [
-            str(PYTHON),
-            str(ROOT / "scripts" / "main.py"),
-            "--input", str(source),
-            "--output", str(output),
-            "--template", str(TEMPLATE),
-            "--pipeline", "modular",
-            "--modular-profile", "native-v2",
-            "--list-policy", "wx-default-v2",
-            "--llm-enhance", "off",
-            "--report", str(report),
-        ],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-    )
+    completed, report, _, _, _ = _run_cli(source, tmp_path, name, write_ast=False)
+    assert report.is_file(), completed.stderr
     return completed, json.loads(report.read_text(encoding="utf-8"))
 
 
@@ -159,6 +179,14 @@ def test_l03_continuation_paragraphs_keep_owner_and_do_not_get_markers(tmp_path:
         if _paragraph_text(block) in {"父项续段", "父项后续段"}
     ]
     assert {parents[block_id] for block_id in continuation_blocks} == {owner}
+    operations = _render_operations(report, source_ast)
+    assert [text for text, operation in operations if operation["kind"] == "list_item"] == ["父项", "子项", "第二项"]
+    assert all(
+        operation["kind"] == "paragraph" and operation["role"] == "body"
+        for text, operation in operations
+        if text in {"父项续段", "父项后续段"}
+    )
+    _assert_unumbered_paragraphs(output, {"父项续段", "父项后续段"})
 
 
 def test_l04_external_body_separates_list_groups_and_source_sequences(tmp_path: Path) -> None:
@@ -176,9 +204,13 @@ def test_l04_external_body_separates_list_groups_and_source_sequences(tmp_path: 
     ]
     root_blocks = [node_id for node_id in root_children if node_id in document["blocks"]]
     assert len(root_lists) == 2
+    assert [document["containers"].get(node_id, {}).get("kind", "paragraph") for node_id in root_children] == ["list", "paragraph", "list"]
     assert [_paragraph_text(document["blocks"][node_id]) for node_id in root_blocks] == ["正文段落"]
     assert document["containers"][root_lists[0]]["source_sequence_id"] != document["containers"][root_lists[1]]["source_sequence_id"]
-    assert [text for text, _ in _render_items(report, source_ast)] == ["第一项", "第二项"]
+    rendered = _render_items(report, source_ast)
+    assert [text for text, _ in rendered] == ["第一项", "第二项"]
+    assert [presentation["target_ordinal"] for _, presentation in rendered] == [1, 2]
+    assert [presentation["restart"] for _, presentation in rendered] == [True, False]
 
 
 def test_l05_source_numbering_is_preserved_and_heading_restarts_target_scope(tmp_path: Path) -> None:
@@ -204,7 +236,7 @@ def test_l06_tabs_blank_lines_and_multi_level_fallback_preserve_parent_chain(tmp
     source = _write_markdown(
         tmp_path,
         "l06-markdown",
-        ["1. 一级", "\t1. 二级", "\t\t1. 三级", "2. 返回一级", ""],
+        ["1. 一级", "", "", "\t1. 二级", "", "", "\t\t1. 三级", "", "", "2. 返回一级", ""],
     )
 
     report, source_ast, _, output = _run_native(source, tmp_path, "l06-markdown")

@@ -36,30 +36,47 @@ def _build_l01_docx(tmp_path: Path) -> Path:
     return output
 
 
-def _run_native(source: Path, tmp_path: Path, name: str) -> tuple[dict, dict, dict, Path]:
+def _run_cli(
+    source: Path,
+    tmp_path: Path,
+    name: str,
+    *,
+    pipeline: str | None = "modular",
+    modular_profile: str | None = "native-v2",
+    list_policy: str | None = "wx-default-v2",
+    write_ast: bool = True,
+) -> tuple[subprocess.CompletedProcess[str], Path, Path, Path, Path]:
     output = tmp_path / f"{name}.output.docx"
     report = tmp_path / f"{name}.report.json"
     source_ast = tmp_path / f"{name}.source.json"
     normalized_ast = tmp_path / f"{name}.normalized.json"
+    command = [
+        str(PYTHON),
+        str(ROOT / "scripts" / "main.py"),
+        "--input", str(source),
+        "--output", str(output),
+        "--template", str(TEMPLATE),
+    ]
+    if pipeline is not None:
+        command.extend(["--pipeline", pipeline])
+    if modular_profile is not None:
+        command.extend(["--modular-profile", modular_profile])
+    if list_policy is not None:
+        command.extend(["--list-policy", list_policy])
+    command.extend(["--llm-enhance", "off", "--report", str(report)])
+    if write_ast:
+        command.extend(["--source-ast", str(source_ast), "--ast", str(normalized_ast)])
     completed = subprocess.run(
-        [
-            str(PYTHON),
-            str(ROOT / "scripts" / "main.py"),
-            "--input", str(source),
-            "--output", str(output),
-            "--template", str(TEMPLATE),
-            "--pipeline", "modular",
-            "--modular-profile", "native-v2",
-            "--list-policy", "wx-default-v2",
-            "--llm-enhance", "off",
-            "--report", str(report),
-            "--source-ast", str(source_ast),
-            "--ast", str(normalized_ast),
-        ],
+        command,
         cwd=ROOT,
         capture_output=True,
         text=True,
     )
+    return completed, report, output, source_ast, normalized_ast
+
+
+def _run_native(source: Path, tmp_path: Path, name: str) -> tuple[dict, dict, dict, Path]:
+    completed, report, output, source_ast, normalized_ast = _run_cli(source, tmp_path, name)
     assert completed.returncode == 0, completed.stderr
     assert output.is_file()
     return (
@@ -218,21 +235,14 @@ def _assert_saved_numbering(output: Path) -> None:
 
 
 def _run_legacy_default(source: Path, tmp_path: Path) -> tuple[dict, Path]:
-    output = tmp_path / "legacy.output.docx"
-    report_path = tmp_path / "legacy.report.json"
-    completed = subprocess.run(
-        [
-            str(PYTHON),
-            str(ROOT / "scripts" / "main.py"),
-            "--input", str(source),
-            "--output", str(output),
-            "--template", str(TEMPLATE),
-            "--llm-enhance", "off",
-            "--report", str(report_path),
-        ],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
+    completed, report_path, output, _, _ = _run_cli(
+        source,
+        tmp_path,
+        "legacy",
+        pipeline=None,
+        modular_profile=None,
+        list_policy=None,
+        write_ast=False,
     )
     assert completed.returncode == 0, completed.stderr
     assert output.is_file()

@@ -163,6 +163,28 @@ def render(
             )
         render_map[node_id] = {"kind": "table", "table": len(doc.tables), "rows": row_count, "cols": column_count}
 
+    def render_block(block_id: str) -> None:
+        block = document["blocks"].get(block_id)
+        if block is None:
+            return
+        if block.get("block_type") == "paragraph":
+            add_paragraph(block_id, block)
+        elif block.get("block_type") == "table":
+            add_table(block_id, block_id)
+        elif block.get("block_type") == "image":
+            resource_id = block.get("resource_id")
+            resource = resources.get(resource_id)
+            if resource is None:
+                raise RenderError(f"resource {resource_id!r} is unavailable for rendering")
+            paragraph = doc.add_paragraph()
+            if isinstance(resource, (bytes, bytearray)):
+                paragraph.add_run().add_picture(io.BytesIO(resource))
+            else:
+                paragraph.add_run().add_picture(str(resource))
+            render_map[block_id] = {"kind": "image", "paragraph": len(doc.paragraphs), "text": paragraph.text}
+        elif block.get("block_type") == "opaque":
+            diagnostics.append({"code": "opaque_node_skipped", "node_id": block_id})
+
     def walk(node_id: str) -> None:
         for child_id in document["children"].get(node_id, []):
             if child_id in document["containers"]:
@@ -184,30 +206,14 @@ def render(
                     for nested_child in children:
                         if nested_child == anchor_id:
                             continue
-                        walk(nested_child)
+                        if nested_child in document["blocks"]:
+                            render_block(nested_child)
+                        else:
+                            walk(nested_child)
                 else:
                     walk(child_id)
                 continue
-            block = document["blocks"].get(child_id)
-            if block is None:
-                continue
-            if block.get("block_type") == "paragraph":
-                add_paragraph(child_id, block)
-            elif block.get("block_type") == "table":
-                add_table(child_id, child_id)
-            elif block.get("block_type") == "image":
-                resource_id = block.get("resource_id")
-                resource = resources.get(resource_id)
-                if resource is None:
-                    raise RenderError(f"resource {resource_id!r} is unavailable for rendering")
-                paragraph = doc.add_paragraph()
-                if isinstance(resource, (bytes, bytearray)):
-                    paragraph.add_run().add_picture(io.BytesIO(resource))
-                else:
-                    paragraph.add_run().add_picture(str(resource))
-                render_map[child_id] = {"kind": "image", "paragraph": len(doc.paragraphs), "text": paragraph.text}
-            elif block.get("block_type") == "opaque":
-                diagnostics.append({"code": "opaque_node_skipped", "node_id": child_id})
+            render_block(child_id)
 
     walk(document["root_id"])
     output = Path(output_path)
