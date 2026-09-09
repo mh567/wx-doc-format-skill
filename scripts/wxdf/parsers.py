@@ -24,7 +24,7 @@ def _stable_id(prefix: str, *parts: object) -> str:
     return f"{prefix}-{hashlib.sha256(payload.encode('utf-8')).hexdigest()[:16]}"
 
 
-def _empty_facts(handle: SourceHandle, parser_id: str, parser_config: str) -> dict[str, Any]:
+def _empty_facts(handle: SourceHandle, parser_id: str, parser_config: str, *, parser_version: str = "1.0.0") -> dict[str, Any]:
     return {
         "facts_schema_version": SOURCE_FACTS_SCHEMA_VERSION,
         "source": {
@@ -35,7 +35,7 @@ def _empty_facts(handle: SourceHandle, parser_id: str, parser_config: str) -> di
         },
         "parser": {
             "id": parser_id,
-            "version": "1.0.0",
+            "version": parser_version,
             "dialect": parser_config,
             "config_sha256": _digest(parser_config),
         },
@@ -361,7 +361,7 @@ def _docx_inline_content(paragraph: Any, handle: SourceHandle, node_path: list[s
 
 def _parse_docx(source: Path | str, *, store: SourceStore) -> dict[str, Any]:
     from docx import Document
-    from docx.table import Table
+    from docx.table import Table, _Cell
     from docx.text.paragraph import Paragraph
     from docx.oxml.ns import qn
     from list_detector import analyze_docx_lists, describe_docx_paragraph
@@ -370,7 +370,7 @@ def _parse_docx(source: Path | str, *, store: SourceStore) -> dict[str, Any]:
 
     handle = store.open_source(source)
     document = Document(str(handle.path))
-    facts = _empty_facts(handle, "docx-source-facts", "docx-ooxml")
+    facts = _empty_facts(handle, "docx-source-facts", "docx-ooxml", parser_version="1.1.0")
     report: dict[str, Any] = {}
     numbering = analyze_docx_lists(document, report)
     body = document.element.body
@@ -424,6 +424,15 @@ def _parse_docx(source: Path | str, *, store: SourceStore) -> dict[str, Any]:
         except (TypeError, ValueError):
             return 1
 
+    def _vertical_merge(cell: Any) -> str | None:
+        tc_pr = cell._tc.tcPr
+        if tc_pr is None:
+            return None
+        merge = tc_pr.find(qn("w:vMerge"))
+        if merge is None:
+            return None
+        return merge.get(qn("w:val")) or "continue"
+
     def add_table(parent_id: str, table: Any, node_path: list[str | int]) -> None:
         nonlocal position
         table_position = position
@@ -437,6 +446,7 @@ def _parse_docx(source: Path | str, *, store: SourceStore) -> dict[str, Any]:
         }
         facts["children"][table_id] = []
         facts["children"].setdefault(parent_id, []).append(table_id)
+        active_vertical_cells: dict[int, tuple[str, int]] = {}
         for row_index, row in enumerate(table.rows):
             row_path = [*node_path, row_index]
             row_id = _stable_id("c", handle.source_id, "row", *row_path)
@@ -446,26 +456,43 @@ def _parse_docx(source: Path | str, *, store: SourceStore) -> dict[str, Any]:
             }
             facts["children"][row_id] = []
             facts["children"][table_id].append(row_id)
-            seen_cells: dict[int, str] = {}
-            for col_index, cell in enumerate(row.cells):
-                cell_key = id(cell._tc)
-                if cell_key in seen_cells:
+            merged_cells: list[dict[str, Any]] = []
+            facts["containers"][row_id]["merged_cells"] = merged_cells
+            column_cursor = 0
+            raw_cells = [child for child in row._tr.iterchildren() if child.tag == qn("w:tc")]
+            for raw_cell in raw_cells:
+                cell = _Cell(raw_cell, table)
+                col_index = column_cursor
+                col_span = _grid_span(cell)
+                merge_state = _vertical_merge(cell)
+                if merge_state == "continue" and col_index in active_vertical_cells:
+                    anchor_id, start_row = active_vertical_cells[col_index]
+                    anchor = facts["containers"][anchor_id]
+                    anchor["row_span"] = row_index - start_row + 1
+                    merged_cells.append({"cell_id": anchor_id, "col": col_index, "col_span": col_span, "continuation": True})
+                    column_cursor += col_span
                     continue
                 cell_path = [*node_path, row_index, col_index]
                 cell_id = _stable_id("c", handle.source_id, "cell", *cell_path)
-                seen_cells[cell_key] = cell_id
                 facts["containers"][cell_id] = {
                     "kind": "table_cell",
                     "row": row_index,
                     "col": col_index,
                     "row_span": 1,
-                    "col_span": _grid_span(cell),
+                    "col_span": col_span,
                     "source_ref": _source_ref(handle, "word/document.xml", node_path=cell_path),
                 }
                 facts["children"][cell_id] = []
                 facts["children"][row_id].append(cell_id)
-                for child_index, child in enumerate(cell._tc.iterchildren()):
-                    child_path = [*cell_path, child_index]
+                if merge_state == "restart":
+                    for col in range(col_index, col_index + col_span):
+                        active_vertical_cells[col] = (cell_id, row_index)
+                else:
+                    for col in range(col_index, col_index + col_span):
+                        active_vertical_cells.pop(col, None)
+                paragraph_index = 0
+                nested_table_index = 0
+                for child in cell._tc.iterchildren():
                     if child.tag == qn("w:p"):
                         paragraph = Paragraph(child, cell)
                         descriptor = describe_docx_paragraph(document, paragraph)
@@ -476,9 +503,14 @@ def _parse_docx(source: Path | str, *, store: SourceStore) -> dict[str, Any]:
                             descriptor = dict(descriptor)
                             descriptor["start"] = ordinal
                             descriptor["restart"] = ordinal == 1
+                        child_path = [*cell_path, "w:p", paragraph_index]
                         add_unit(cell_id, paragraph, child_path, position, descriptor)
+                        paragraph_index += 1
                     elif child.tag == qn("w:tbl"):
+                        child_path = [*cell_path, "w:tbl", nested_table_index]
                         add_table(cell_id, Table(child, cell), child_path)
+                        nested_table_index += 1
+                column_cursor += col_span
         facts["evidence"][table_id] = {"source_position": table_position, "table_scope": "cell_local"}
 
     for child_index, child in enumerate(body.iterchildren()):

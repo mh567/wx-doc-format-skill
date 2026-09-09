@@ -3,12 +3,17 @@ from __future__ import annotations
 import base64
 from pathlib import Path
 from zipfile import ZipFile
+from xml.etree import ElementTree
 
 from docx import Document
 
 from modular_support import _append_numbering_definition, _set_numbering
 from test_issue1_acceptance import _paragraph_text, _run_native
 from test_issue2_acceptance import _assert_native_completed, _item_by_text, _parent_by_child, _write_markdown
+from test_modular_normalization import _ast, _profile
+from wxdf.auditing import check_saved_output
+from wxdf.normalization import normalize
+from wxdf.validation import validate_ast
 
 
 PNG_1X1 = base64.b64decode(
@@ -37,13 +42,16 @@ def _build_l09_docx(tmp_path: Path) -> Path:
     outside = document.add_paragraph("外部一")
     _set_numbering(outside, num_id=905, level=0)
 
-    table = document.add_table(rows=2, cols=2)
+    table = document.add_table(rows=3, cols=3)
     merged = table.cell(0, 0).merge(table.cell(0, 1))
     merged.paragraphs[0].text = "合并单元格"
     merged_item = merged.add_paragraph("合并列表一")
     _set_numbering(merged_item, num_id=905, level=0)
     merged_item_two = merged.add_paragraph("合并列表二")
     _set_numbering(merged_item_two, num_id=905, level=0)
+
+    vertical = table.cell(0, 2).merge(table.cell(1, 2))
+    vertical.text = "纵向合并"
 
     nested_host = table.cell(1, 0)
     nested_host.paragraphs[0].text = "外层单元格"
@@ -54,12 +62,38 @@ def _build_l09_docx(tmp_path: Path) -> Path:
     _set_numbering(nested_item, num_id=905, level=0)
 
     table.cell(1, 1).text = "另一单元格"
+    table.cell(2, 0).text = "底部一"
+    table.cell(2, 1).text = "底部二"
+    table.cell(2, 2).text = "底部三"
     outside_two = document.add_paragraph("外部二")
     _set_numbering(outside_two, num_id=905, level=0)
 
     output = tmp_path / "l09.docx"
     document.save(output)
     return output
+
+
+def _assert_numbered_texts(output: Path, texts: set[str]) -> None:
+    namespace = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    ns = {"w": namespace}
+    with ZipFile(output) as archive:
+        document = ElementTree.fromstring(archive.read("word/document.xml"))
+        styles = ElementTree.fromstring(archive.read("word/styles.xml"))
+    style_num_pr = {
+        style.get(f"{{{namespace}}}styleId"): style.find("w:pPr/w:numPr", ns)
+        for style in styles.findall("w:style", ns)
+    }
+    seen: set[str] = set()
+    for paragraph in document.findall(".//w:p", ns):
+        text = "".join(node.text or "" for node in paragraph.findall(".//w:t", ns))
+        if text not in texts:
+            continue
+        seen.add(text)
+        direct = paragraph.find("w:pPr/w:numPr", ns)
+        style = paragraph.find("w:pPr/w:pStyle", ns)
+        inherited = style_num_pr.get(style.get(f"{{{namespace}}}val")) if style is not None else None
+        assert direct is not None or inherited is not None
+    assert seen == texts
 
 
 def test_l07_first_table_and_sublist_get_one_evidenced_anchor(tmp_path: Path) -> None:
@@ -114,6 +148,32 @@ def test_l07_first_table_and_sublist_get_one_evidenced_anchor(tmp_path: Path) ->
         assert b">A<" in archive.read("word/document.xml")
 
 
+def test_l07_block_image_first_child_gets_generated_anchor() -> None:
+    ast = _ast()
+    source_ref = ast["document"]["blocks"]["p3"]["source_ref"]
+    ast["document"]["resources"]["image-1"] = {
+        "kind": "image",
+        "source_ref": source_ref,
+        "content_sha256": source_ref["content_sha256"],
+    }
+    ast["document"]["blocks"]["image-1"] = {
+        "block_type": "image",
+        "resource_id": "image-1",
+        "alt_text": "块图片",
+        "source_ref": source_ref,
+    }
+    ast["document"]["blocks"].pop("p3")
+    ast["document"]["children"]["i3"] = ["image-1"]
+    validate_ast(ast)
+
+    normalized = normalize(ast, _profile(), strategy="wx-default-v2")
+
+    presentation = normalized["presentation"]["nodes"]["i3"]
+    assert presentation["generated_anchor"] is True
+    assert presentation["marker_anchor"] == "generated-anchor-i3"
+    assert [node["node_id"] for node in normalized["generated_nodes"]] == ["generated-anchor-i3"]
+
+
 def test_l08_empty_item_generates_anchor_while_inline_image_keeps_paragraph(tmp_path: Path) -> None:
     image = tmp_path / "pixel.png"
     image.write_bytes(PNG_1X1)
@@ -160,9 +220,15 @@ def test_l09_merged_and_nested_table_cells_are_unique_and_scope_local(tmp_path: 
     outer = next(table_id for table_id in tables if any(document["containers"].get(child, {}).get("kind") == "table_row" for child in document["children"].get(table_id, [])))
     first_row = document["children"][outer][0]
     first_row_cells = document["children"][first_row]
-    assert len(first_row_cells) == 1
-    assert document["containers"][first_row_cells[0]]["col_span"] == 2
+    assert len(first_row_cells) == 2
+    assert [document["containers"][cell_id]["col_span"] for cell_id in first_row_cells] == [2, 1]
     assert sum(_paragraph_text(block) == "合并单元格" for block in document["blocks"].values()) == 1
+    vertical_cells = [
+        node for node in document["containers"].values()
+        if node.get("kind") == "table_cell" and node.get("row_span") == 2
+    ]
+    assert len(vertical_cells) == 1
+    assert sum(_paragraph_text(block) == "纵向合并" for block in document["blocks"].values()) == 1
 
     item_ids = {
         item_id: next(
@@ -191,6 +257,8 @@ def test_l09_merged_and_nested_table_cells_are_unique_and_scope_local(tmp_path: 
         "嵌套表格正文",
         "嵌套列表",
     ]
+    assert rendered_outer.cell(0, 2).text == "纵向合并"
+    assert rendered_outer.cell(1, 2).text == "纵向合并"
 
 
 def test_l10_quote_and_list_scopes_do_not_consume_each_other(tmp_path: Path) -> None:
@@ -229,4 +297,38 @@ def test_l10_quote_and_list_scopes_do_not_consume_each_other(tmp_path: Path) -> 
     assert [presentations[items[text]]["target_ordinal"] for text in ("引用一", "引用二", "引用三")] == [1, 2, 1]
     assert [presentations[items[text]]["target_ordinal"] for text in ("外部一", "外部二")] == [1, 2]
     assert presentations[items["引用一"]]["scope_id"] != presentations[items["外部一"]]["scope_id"]
+    parents = _parent_by_child(source_ast)
+    quote_list = parents[items["引用一"]]
+    quote_id = parents[quote_list]
+    assert document["containers"][quote_id]["kind"] == "quote"
+    assert items["引用一"] in document["children"][quote_list]
+    outer_list = next(
+        parent_id
+        for parent_id, children in document["children"].items()
+        if items["外部一"] in children
+    )
+    assert document["containers"][outer_list]["kind"] == "list"
+    operations = [
+        operation
+        for operation in report["model_audit"]["render_plan"]["operations"]
+        if operation["kind"] == "list_item"
+    ]
+    assert {operation["node_id"] for operation in operations} == set(presentations)
+    _assert_numbered_texts(output, {"引用一", "引用二", "引用三", "外部一", "外部二"})
     assert report["list_semantics"]["diagnostics"] == []
+
+
+def test_saved_output_audit_rejects_plain_styled_text_as_numbered(tmp_path: Path) -> None:
+    output = tmp_path / "plain.docx"
+    document = Document()
+    document.add_paragraph("条目", style="Heading 1")
+    document.save(output)
+
+    findings = check_saved_output(
+        output,
+        {"expected_texts": ["条目"]},
+        {"item": {"kind": "paragraph", "text": "条目", "numbered": True}},
+    )
+
+    assert findings["passed"] is False
+    assert any(issue["code"] == "list_numbering_missing" for issue in findings["issues"])

@@ -165,7 +165,15 @@ def render(
         block = document["blocks"][block_id]
         row_ids = document["children"].get(block_id, [])
         row_count = len(row_ids)
-        column_count = max((len(document["children"].get(row_id, [])) for row_id in row_ids), default=1)
+        column_count = max(
+            (
+                int(document["containers"].get(cell_id, {}).get("col") or 0)
+                + max(1, int(document["containers"].get(cell_id, {}).get("col_span") or 1))
+                for row_id in row_ids
+                for cell_id in document["children"].get(row_id, [])
+            ),
+            default=1,
+        )
         try:
             if parent is None:
                 table = doc.add_table(rows=max(1, row_count), cols=max(1, column_count), style="Table Grid")
@@ -178,16 +186,6 @@ def render(
                 table.style = "Table Grid"
             except (KeyError, ValueError):
                 pass
-        for row_index, row_id in enumerate(row_ids):
-            column_cursor = 0
-            for cell_id in document["children"].get(row_id, []):
-                source_cell = document["containers"].get(cell_id, {})
-                col_span = max(1, int(source_cell.get("col_span") or 1))
-                cell = table.cell(row_index, column_cursor)
-                if col_span > 1 and column_cursor + col_span <= column_count:
-                    cell = cell.merge(table.cell(row_index, column_cursor + col_span - 1))
-                render_children(cell_id, parent=cell)
-                column_cursor += col_span
         table_body_style = styles.get("table_body")
         if table_body_style and table_body_style in doc.styles:
             normalize_table(
@@ -198,6 +196,26 @@ def render(
                 role=str(block.get("table_type") or "data"),
                 path=str(len(doc.tables)),
             )
+        occupied: set[tuple[int, int]] = set()
+        for row_index, row_id in enumerate(row_ids):
+            column_cursor = 0
+            for cell_id in document["children"].get(row_id, []):
+                source_cell = document["containers"].get(cell_id, {})
+                column_cursor = max(column_cursor, int(source_cell.get("col") or 0))
+                while (row_index, column_cursor) in occupied:
+                    column_cursor += 1
+                col_span = max(1, int(source_cell.get("col_span") or 1))
+                row_span = max(1, int(source_cell.get("row_span") or 1))
+                cell = table.cell(row_index, column_cursor)
+                if row_span > 1 or col_span > 1:
+                    end_row = min(row_count - 1, row_index + row_span - 1)
+                    end_col = min(column_count - 1, column_cursor + col_span - 1)
+                    cell = cell.merge(table.cell(end_row, end_col))
+                for occupied_row in range(row_index + 1, min(row_count, row_index + row_span)):
+                    for occupied_col in range(column_cursor, column_cursor + col_span):
+                        occupied.add((occupied_row, occupied_col))
+                render_children(cell_id, parent=cell)
+                column_cursor += col_span
         render_map[node_id] = {"kind": "table", "table": len(doc.tables), "rows": row_count, "cols": column_count}
 
     def render_block(block_id: str, *, parent: Any | None = None) -> None:
@@ -249,35 +267,25 @@ def render(
         for nested_child in children:
             if nested_child == anchor_id:
                 continue
-            if nested_child in document["blocks"]:
-                render_block(nested_child, parent=parent)
-            else:
-                walk(nested_child, parent=parent)
+            render_node(nested_child, parent=parent)
 
     def render_children(node_id: str, *, parent: Any | None = None) -> None:
         for child_id in document["children"].get(node_id, []):
-            if child_id in document["blocks"]:
-                render_block(child_id, parent=parent)
-            elif child_id in document["containers"]:
-                container = document["containers"][child_id]
-                if container.get("kind") == "list_item":
-                    render_list_item(child_id, parent=parent)
-                else:
-                    render_children(child_id, parent=parent)
+            render_node(child_id, parent=parent)
 
-    def walk(node_id: str, *, parent: Any | None = None) -> None:
-        for child_id in document["children"].get(node_id, []):
-            if child_id in document["containers"]:
-                container = document["containers"][child_id]
-                kind = container.get("kind")
-                if kind == "list_item":
-                    render_list_item(child_id, parent=parent)
-                else:
-                    render_children(child_id, parent=parent)
-                continue
-            render_block(child_id, parent=parent)
+    def render_node(node_id: str, *, parent: Any | None = None) -> None:
+        if node_id in document["blocks"]:
+            render_block(node_id, parent=parent)
+            return
+        container = document["containers"].get(node_id)
+        if container is None:
+            return
+        if container.get("kind") == "list_item":
+            render_list_item(node_id, parent=parent)
+            return
+        render_children(node_id, parent=parent)
 
-    walk(document["root_id"])
+    render_children(document["root_id"])
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
     doc.save(output)

@@ -99,11 +99,6 @@ def check_saved_output(path: Path | str, expected: Mapping[str, Any], render_map
             if style_id and name is not None:
                 style_names[style_id] = name.get(f"{{{namespace}}}val") or ""
     rendered_numbered = False
-    expected_numbered_texts = {
-        str(item.get("text") or "")
-        for item in render_map.values()
-        if item.get("numbered") and item.get("text")
-    }
     for paragraph in xml_paragraphs:
         if paragraph.find("w:pPr/w:numPr", ns) is not None:
             rendered_numbered = True
@@ -111,7 +106,7 @@ def check_saved_output(path: Path | str, expected: Mapping[str, Any], render_map
         style = paragraph.find("w:pPr/w:pStyle", ns)
         style_name = style_names.get(style.get(f"{{{namespace}}}val"), "") if style is not None else ""
         text = "".join(node.text or "" for node in paragraph.findall(".//w:t", ns))
-        if style_name in {"List Number", "List Bullet"} or "列项" in style_name or (text in expected_numbered_texts and style is not None):
+        if style_name in {"List Number", "List Bullet"} or "列项" in style_name:
             rendered_numbered = True
             break
     if expected_numbered and not rendered_numbered:
