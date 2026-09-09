@@ -67,6 +67,7 @@ P1 聚焦回归：
 3. native kernel 对 SourceFacts 生成稳定 digest，在主链前后比对并将结果写入报告。digest 不一致时写入错误诊断，阻止转换完成。
 4. 保存后回读 `numbering.xml`、`styles.xml` 和 `document.xml`，校验 `numId`、`ilvl`、`abstractNumId`、`numFmt`，并执行 ZIP 完整性检查。
 5. 增加同一嵌套列表 Markdown 夹具的不带 pipeline 参数 legacy 默认入口真实转换检查。
+6. RenderPlan 的列表呈现信息显式记录 `restart`，L01 期望值为 `[true, true, false, false]`。
 
 验证：
 
@@ -74,7 +75,21 @@ P1 聚焦回归：
 
 `scripts/.venv/bin/python3 -m pytest tests/test_issue1_acceptance.py tests/test_modular_lists.py tests/test_modular_list_consumption.py tests/test_modular_normalization.py tests/test_modular_rendering.py tests/test_modular_kernel.py tests/test_modular_conversion.py tests/test_modular_baseline.py tests/test_modular_source_facts.py -q`，`45 passed`。
 
-提交：`96083d3`、`8fad0b3`、`ffa0b0a`。当前未推送远程。
+全量回归：
+
+`scripts/.venv/bin/python3 -m pytest tests/ -q`，`421 passed in 28.32s`。
+
+固定复现产物目录：`/tmp/wx-issue1-l01-20260909/`。
+
+| 场景 | 报告 | Source AST | Normalized AST | 输出 DOCX |
+| :--- | :--- | :--- | :--- | :--- |
+| Markdown native-v2 | `/tmp/wx-issue1-l01-20260909/l01.md.report.json` | `/tmp/wx-issue1-l01-20260909/l01.md.source.json` | `/tmp/wx-issue1-l01-20260909/l01.md.normalized.json` | `/tmp/wx-issue1-l01-20260909/l01.md.output.docx` |
+| DOCX native-v2 | `/tmp/wx-issue1-l01-20260909/l01.docx.report.json` | `/tmp/wx-issue1-l01-20260909/l01.docx.source.json` | `/tmp/wx-issue1-l01-20260909/l01.docx.normalized.json` | `/tmp/wx-issue1-l01-20260909/l01.docx.output.docx` |
+| Markdown legacy 默认 | `/tmp/wx-issue1-l01-20260909/l01.legacy.report.json` | 未生成 | 未生成 | `/tmp/wx-issue1-l01-20260909/l01.legacy.docx` |
+
+两份 native 报告均为 `status=completed`、`source_facts_immutable=true`、八个模块执行、`restart=[true,true,false,false]`。三份 DOCX 均通过 `unzip -t`。
+
+提交：`96083d3`、`8fad0b3`、`9645173`、`ffa0b0a`、`875d16f`、`e843d47`。当前未推送远程。
 
 ## 真实转换证据
 
