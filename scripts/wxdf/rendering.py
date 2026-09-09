@@ -113,20 +113,47 @@ def render(
             update_fields.set(qn("w:val"), "true")
     render_map: dict[str, dict[str, Any]] = {}
     diagnostics: list[dict[str, Any]] = []
+    paragraph_counter = 0
+    initial_cell_paragraphs: set[int] = set()
 
-    def add_paragraph(node_id: str, block: Mapping[str, Any], *, list_style: str | None = None) -> Any:
+    def add_paragraph(
+        node_id: str,
+        block: Mapping[str, Any],
+        *,
+        list_style: str | None = None,
+        parent: Any | None = None,
+    ) -> Any:
+        nonlocal paragraph_counter
         style = list_style or _style_for_block(block, styles)
-        try:
-            if style:
-                doc.styles[style]
-            paragraph = doc.add_paragraph(style=style) if style else doc.add_paragraph()
-        except KeyError:
-            paragraph = doc.add_paragraph()
+        if parent is None:
+            try:
+                if style:
+                    doc.styles[style]
+                paragraph = doc.add_paragraph(style=style) if style else doc.add_paragraph()
+            except KeyError:
+                paragraph = doc.add_paragraph()
+        else:
+            parent_key = id(parent._tc)
+            if parent_key not in initial_cell_paragraphs and parent.paragraphs:
+                paragraph = parent.paragraphs[0]
+                paragraph.clear()
+                try:
+                    if style:
+                        paragraph.style = style
+                except KeyError:
+                    pass
+                initial_cell_paragraphs.add(parent_key)
+            else:
+                try:
+                    paragraph = parent.add_paragraph(style=style) if style else parent.add_paragraph()
+                except KeyError:
+                    paragraph = parent.add_paragraph()
         _write_inline(paragraph, block.get("inline_content", []), resources)
         actual_style = paragraph.style.name if paragraph.style is not None else ""
+        paragraph_counter += 1
         render_map[node_id] = {
             "kind": "paragraph",
-            "paragraph": len(doc.paragraphs),
+            "paragraph": paragraph_counter,
             "text": paragraph.text,
             "role": block.get("role"),
             "style": actual_style,
@@ -134,23 +161,33 @@ def render(
         }
         return paragraph
 
-    def add_table(node_id: str, block_id: str) -> None:
+    def add_table(node_id: str, block_id: str, *, parent: Any | None = None) -> None:
         block = document["blocks"][block_id]
         row_ids = document["children"].get(block_id, [])
         row_count = len(row_ids)
         column_count = max((len(document["children"].get(row_id, [])) for row_id in row_ids), default=1)
         try:
-            table = doc.add_table(rows=max(1, row_count), cols=max(1, column_count), style="Table Grid")
+            if parent is None:
+                table = doc.add_table(rows=max(1, row_count), cols=max(1, column_count), style="Table Grid")
+            else:
+                table = parent.add_table(rows=max(1, row_count), cols=max(1, column_count))
         except (KeyError, ValueError):
-            table = doc.add_table(rows=max(1, row_count), cols=max(1, column_count))
+            table = parent.add_table(rows=max(1, row_count), cols=max(1, column_count)) if parent is not None else doc.add_table(rows=max(1, row_count), cols=max(1, column_count))
+        if parent is None:
+            try:
+                table.style = "Table Grid"
+            except (KeyError, ValueError):
+                pass
         for row_index, row_id in enumerate(row_ids):
-            for col_index, cell_id in enumerate(document["children"].get(row_id, [])):
-                paragraphs = [child for child in document["children"].get(cell_id, []) if child in document["blocks"]]
-                if not paragraphs:
-                    continue
-                cell_paragraph = table.cell(row_index, col_index).paragraphs[0]
-                cell_paragraph.clear()
-                _write_inline(cell_paragraph, document["blocks"][paragraphs[0]].get("inline_content", []), resources)
+            column_cursor = 0
+            for cell_id in document["children"].get(row_id, []):
+                source_cell = document["containers"].get(cell_id, {})
+                col_span = max(1, int(source_cell.get("col_span") or 1))
+                cell = table.cell(row_index, column_cursor)
+                if col_span > 1 and column_cursor + col_span <= column_count:
+                    cell = cell.merge(table.cell(row_index, column_cursor + col_span - 1))
+                render_children(cell_id, parent=cell)
+                column_cursor += col_span
         table_body_style = styles.get("table_body")
         if table_body_style and table_body_style in doc.styles:
             normalize_table(
@@ -163,57 +200,82 @@ def render(
             )
         render_map[node_id] = {"kind": "table", "table": len(doc.tables), "rows": row_count, "cols": column_count}
 
-    def render_block(block_id: str) -> None:
+    def render_block(block_id: str, *, parent: Any | None = None) -> None:
+        nonlocal paragraph_counter
         block = document["blocks"].get(block_id)
         if block is None:
             return
         if block.get("block_type") == "paragraph":
-            add_paragraph(block_id, block)
+            add_paragraph(block_id, block, parent=parent)
         elif block.get("block_type") == "table":
-            add_table(block_id, block_id)
+            add_table(block_id, block_id, parent=parent)
         elif block.get("block_type") == "image":
             resource_id = block.get("resource_id")
             resource = resources.get(resource_id)
             if resource is None:
                 raise RenderError(f"resource {resource_id!r} is unavailable for rendering")
-            paragraph = doc.add_paragraph()
+            if parent is None:
+                paragraph = doc.add_paragraph()
+            else:
+                parent_key = id(parent._tc)
+                if parent_key not in initial_cell_paragraphs and parent.paragraphs:
+                    paragraph = parent.paragraphs[0]
+                    paragraph.clear()
+                    initial_cell_paragraphs.add(parent_key)
+                else:
+                    paragraph = parent.add_paragraph()
             if isinstance(resource, (bytes, bytearray)):
                 paragraph.add_run().add_picture(io.BytesIO(resource))
             else:
                 paragraph.add_run().add_picture(str(resource))
-            render_map[block_id] = {"kind": "image", "paragraph": len(doc.paragraphs), "text": paragraph.text}
+            paragraph_counter += 1
+            render_map[block_id] = {"kind": "image", "paragraph": paragraph_counter, "text": paragraph.text}
         elif block.get("block_type") == "opaque":
             diagnostics.append({"code": "opaque_node_skipped", "node_id": block_id})
 
-    def walk(node_id: str) -> None:
+    def render_list_item(child_id: str, *, parent: Any | None = None) -> None:
+        presentation = normalized.get("presentation", {}).get("nodes", {}).get(child_id, {})
+        children = document["children"].get(child_id, [])
+        anchor_id = presentation.get("marker_anchor")
+        anchor_block = document["blocks"].get(anchor_id)
+        if anchor_block is None:
+            generated = next((item for item in normalized.get("generated_nodes", []) if item.get("node_id") == anchor_id), None)
+            anchor_block = generated or {"block_type": "paragraph", "role": "body", "inline_content": []}
+        if presentation.get("marker_kind") == "ordered":
+            list_style = styles.get("list_letter" if presentation.get("target_level", 0) == 0 else "list_decimal", "List Number")
+        else:
+            list_style = styles.get("list_dash" if presentation.get("target_level", 0) == 0 else "list_bullet", "List Bullet")
+        add_paragraph(child_id, anchor_block, list_style=list_style, parent=parent)
+        for nested_child in children:
+            if nested_child == anchor_id:
+                continue
+            if nested_child in document["blocks"]:
+                render_block(nested_child, parent=parent)
+            else:
+                walk(nested_child, parent=parent)
+
+    def render_children(node_id: str, *, parent: Any | None = None) -> None:
+        for child_id in document["children"].get(node_id, []):
+            if child_id in document["blocks"]:
+                render_block(child_id, parent=parent)
+            elif child_id in document["containers"]:
+                container = document["containers"][child_id]
+                if container.get("kind") == "list_item":
+                    render_list_item(child_id, parent=parent)
+                else:
+                    render_children(child_id, parent=parent)
+
+    def walk(node_id: str, *, parent: Any | None = None) -> None:
         for child_id in document["children"].get(node_id, []):
             if child_id in document["containers"]:
                 container = document["containers"][child_id]
                 kind = container.get("kind")
                 if kind == "list_item":
-                    presentation = normalized.get("presentation", {}).get("nodes", {}).get(child_id, {})
-                    children = document["children"].get(child_id, [])
-                    anchor_id = presentation.get("marker_anchor")
-                    anchor_block = document["blocks"].get(anchor_id)
-                    if anchor_block is None:
-                        generated = next((item for item in normalized.get("generated_nodes", []) if item.get("node_id") == anchor_id), None)
-                        anchor_block = generated or {"block_type": "paragraph", "role": "body", "inline_content": []}
-                    if presentation.get("marker_kind") == "ordered":
-                        list_style = styles.get("list_letter" if presentation.get("target_level", 0) == 0 else "list_decimal", "List Number")
-                    else:
-                        list_style = styles.get("list_dash" if presentation.get("target_level", 0) == 0 else "list_bullet", "List Bullet")
-                    add_paragraph(child_id, anchor_block, list_style=list_style)
-                    for nested_child in children:
-                        if nested_child == anchor_id:
-                            continue
-                        if nested_child in document["blocks"]:
-                            render_block(nested_child)
-                        else:
-                            walk(nested_child)
+                    render_list_item(child_id, parent=parent)
                 else:
-                    walk(child_id)
+                    render_children(child_id, parent=parent)
                 continue
-            render_block(child_id)
+            render_block(child_id, parent=parent)
 
     walk(document["root_id"])
     output = Path(output_path)

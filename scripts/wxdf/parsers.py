@@ -364,7 +364,7 @@ def _parse_docx(source: Path | str, *, store: SourceStore) -> dict[str, Any]:
     from docx.table import Table
     from docx.text.paragraph import Paragraph
     from docx.oxml.ns import qn
-    from list_detector import analyze_docx_lists
+    from list_detector import analyze_docx_lists, describe_docx_paragraph
     from table_semantics import classify_docx_table
     from .semantics.tables import capture_docx_table_layout
 
@@ -375,6 +375,7 @@ def _parse_docx(source: Path | str, *, store: SourceStore) -> dict[str, Any]:
     numbering = analyze_docx_lists(document, report)
     body = document.element.body
     position = 0
+    nested_list_ordinals: dict[tuple[str, int, int, str | None], int] = {}
 
     def add_unit(parent_id: str, paragraph: Any, node_path: list[str | int], source_position: int, descriptor: dict[str, Any] | None = None) -> None:
         unit_id = _stable_id("u", handle.source_id, "paragraph", *node_path)
@@ -413,36 +414,80 @@ def _parse_docx(source: Path | str, *, store: SourceStore) -> dict[str, Any]:
                 })
         facts["evidence"][unit_id] = evidence
 
+    def _grid_span(cell: Any) -> int:
+        tc_pr = cell._tc.tcPr
+        if tc_pr is None:
+            return 1
+        grid_span = tc_pr.find(qn("w:gridSpan"))
+        try:
+            return max(1, int(grid_span.get(qn("w:val")))) if grid_span is not None else 1
+        except (TypeError, ValueError):
+            return 1
+
+    def add_table(parent_id: str, table: Any, node_path: list[str | int]) -> None:
+        nonlocal position
+        table_position = position
+        table_id = _stable_id("c", handle.source_id, "table", *node_path)
+        table_semantics = classify_docx_table(table)
+        facts["containers"][table_id] = {
+            "kind": "table",
+            "source_ref": _source_ref(handle, "word/document.xml", node_path=node_path),
+            "table_semantics": table_semantics.as_source_record(),
+            "layout": capture_docx_table_layout(table),
+        }
+        facts["children"][table_id] = []
+        facts["children"].setdefault(parent_id, []).append(table_id)
+        for row_index, row in enumerate(table.rows):
+            row_path = [*node_path, row_index]
+            row_id = _stable_id("c", handle.source_id, "row", *row_path)
+            facts["containers"][row_id] = {
+                "kind": "table_row",
+                "source_ref": _source_ref(handle, "word/document.xml", node_path=row_path),
+            }
+            facts["children"][row_id] = []
+            facts["children"][table_id].append(row_id)
+            seen_cells: dict[int, str] = {}
+            for col_index, cell in enumerate(row.cells):
+                cell_key = id(cell._tc)
+                if cell_key in seen_cells:
+                    continue
+                cell_path = [*node_path, row_index, col_index]
+                cell_id = _stable_id("c", handle.source_id, "cell", *cell_path)
+                seen_cells[cell_key] = cell_id
+                facts["containers"][cell_id] = {
+                    "kind": "table_cell",
+                    "row": row_index,
+                    "col": col_index,
+                    "row_span": 1,
+                    "col_span": _grid_span(cell),
+                    "source_ref": _source_ref(handle, "word/document.xml", node_path=cell_path),
+                }
+                facts["children"][cell_id] = []
+                facts["children"][row_id].append(cell_id)
+                for child_index, child in enumerate(cell._tc.iterchildren()):
+                    child_path = [*cell_path, child_index]
+                    if child.tag == qn("w:p"):
+                        paragraph = Paragraph(child, cell)
+                        descriptor = describe_docx_paragraph(document, paragraph)
+                        if descriptor is not None and descriptor.get("status") == "detected":
+                            key = (cell_id, int(descriptor.get("num_id") or 0), int(descriptor.get("ilvl") or 0), descriptor.get("num_fmt"))
+                            ordinal = nested_list_ordinals.get(key, 0) + 1
+                            nested_list_ordinals[key] = ordinal
+                            descriptor = dict(descriptor)
+                            descriptor["start"] = ordinal
+                            descriptor["restart"] = ordinal == 1
+                        add_unit(cell_id, paragraph, child_path, position, descriptor)
+                    elif child.tag == qn("w:tbl"):
+                        add_table(cell_id, Table(child, cell), child_path)
+        facts["evidence"][table_id] = {"source_position": table_position, "table_scope": "cell_local"}
+
     for child_index, child in enumerate(body.iterchildren()):
         if child.tag == qn("w:p"):
             paragraph = Paragraph(child, document)
             add_unit("root", paragraph, ["body", child_index, "w:p"], position, numbering.get(position))
             position += 1
         elif child.tag == qn("w:tbl"):
-            table = Table(child, document)
-            table_id = _stable_id("c", handle.source_id, "table", child_index)
-            table_semantics = classify_docx_table(table)
-            facts["containers"][table_id] = {
-                "kind": "table",
-                "source_ref": _source_ref(handle, "word/document.xml", node_path=["body", child_index, "w:tbl"]),
-                "table_semantics": table_semantics.as_source_record(),
-                "layout": capture_docx_table_layout(table),
-            }
-            facts["children"][table_id] = []
-            facts["children"]["root"].append(table_id)
-            for row_index, row in enumerate(table.rows):
-                row_id = _stable_id("c", handle.source_id, "row", child_index, row_index)
-                facts["containers"][row_id] = {"kind": "table_row", "source_ref": _source_ref(handle, "word/document.xml", node_path=["body", child_index, "w:tbl", row_index])}
-                facts["children"][row_id] = []
-                facts["children"][table_id].append(row_id)
-                for col_index, cell in enumerate(row.cells):
-                    cell_id = _stable_id("c", handle.source_id, "cell", child_index, row_index, col_index)
-                    facts["containers"][cell_id] = {"kind": "table_cell", "row": row_index, "col": col_index, "row_span": 1, "col_span": 1, "source_ref": _source_ref(handle, "word/document.xml", node_path=["body", child_index, "w:tbl", row_index, col_index])}
-                    facts["children"][cell_id] = []
-                    facts["children"][row_id].append(cell_id)
-                    for para_index, paragraph in enumerate(cell.paragraphs):
-                        add_unit(cell_id, paragraph, ["body", child_index, "w:tbl", row_index, col_index, "w:p", para_index], position, None)
-            facts["evidence"][table_id] = {"source_position": position, "table_scope": "cell_local"}
+            add_table("root", Table(child, document), ["body", child_index, "w:tbl"])
             position += 1
 
     facts["extensions"]["docx_numbering_report"] = {"source_lists": report.get("source_lists", {})}

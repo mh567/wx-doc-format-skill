@@ -108,8 +108,11 @@ def _anchor_info(item_id: str, facts: Mapping[str, Any]) -> tuple[bool, str]:
     kind = _node_kind(facts, first)
     if kind in {"table", "image", "list", "quote"}:
         return True, f"first_child_{kind}"
-    if first in facts["units"] and facts["units"][first].get("kind") == "paragraph" and not _unit_text(facts["units"][first]).strip():
-        return True, "empty_first_paragraph"
+    if first in facts["units"] and facts["units"][first].get("kind") == "paragraph":
+        unit = facts["units"][first]
+        has_inline_image = any(item.get("kind") == "image" for item in unit.get("inline_content", []))
+        if not _unit_text(unit).strip() and not has_inline_image:
+            return True, "empty_first_paragraph"
     return False, "paragraph_first"
 
 
@@ -308,7 +311,7 @@ def analyze_lists(facts: Mapping[str, Any], *, context: Mapping[str, Any] | None
                         "list_kind": family,
                         "source_sequence_id": json_sequence_id(sequence_ref, unit_id),
                         "source_start": max(1, int(evidence.get("ordinal") or 1)),
-                        "scope_id": _scope_id(_ancestors(parent_id, parents), facts),
+                        "scope_id": _scope_id([*_ancestors(parent_id, parents), parent_id], facts),
                         "parent_item_id": parent_item_id,
                         "items": [],
                     }

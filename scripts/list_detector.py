@@ -417,6 +417,65 @@ def analyze_docx_lists(
     return result
 
 
+def describe_docx_paragraph(doc, paragraph: Paragraph, *, ordinal: int | None = None, restart: bool = True) -> dict[str, Any] | None:
+    """Return deterministic numbering evidence for a paragraph outside the body.
+
+    ``analyze_docx_lists`` keeps its historical top-level position contract.
+    Nested table cells need the same numbering vocabulary without pretending
+    that their paragraphs occupy top-level document positions.
+    """
+
+    ilvl, num_id, numbering_source = _paragraph_num_info(paragraph)
+    if num_id is None:
+        return None
+    num_to_abstract, abstract_levels, num_level_overrides = _numbering_maps(doc)
+    abstract_id = num_to_abstract.get(num_id)
+    level = dict(abstract_levels.get(abstract_id, {}).get(ilvl or 0, {}))
+    level.update(num_level_overrides.get(num_id, {}).get(ilvl or 0, {}))
+    style_name = _style_name(paragraph)
+    num_fmt = level.get("num_fmt")
+    evidence: list[str] = []
+    if abstract_id is not None and num_fmt in _LIST_FORMATS:
+        evidence.append("valid_numbering_definition")
+    if _is_list_style(style_name):
+        evidence.append("list_style")
+    if looks_like_list_item(paragraph.text.strip()):
+        evidence.append("visible_list_marker")
+    if numbering_source == "direct":
+        evidence.append("direct_num_pr")
+    protected = _is_protected_style(style_name)
+    valid = abstract_id is not None and num_fmt in _LIST_FORMATS
+    if protected or num_fmt == "none" or not valid or not paragraph.text.strip():
+        status = "ignored"
+        confidence = 0.0
+        if protected:
+            evidence.append("protected_role")
+        elif not valid:
+            evidence.append("invalid_numbering_definition")
+    else:
+        status = "detected"
+        confidence = 0.98 if "list_style" in evidence else 0.90
+    list_type_source = source_list_type(num_fmt, level.get("lvl_text"))
+    return {
+        "num_id": num_id,
+        "ilvl": ilvl or 0,
+        "abstract_num_id": abstract_id,
+        "num_fmt": num_fmt,
+        "lvl_text": level.get("lvl_text"),
+        "p_style": level.get("p_style"),
+        "start": ordinal if ordinal is not None else level.get("start", 1),
+        "numbering_source": numbering_source,
+        "layout": paragraph_layout_evidence(paragraph),
+        "restart": restart,
+        "status": status,
+        "confidence": confidence,
+        "evidence": evidence,
+        "semantic_role": None,
+        "source_list_type": list_type_source,
+        "list_type": normalize_wx_list_type(list_type_source, int(ilvl or 0)),
+    }
+
+
 def audit_list_preservation(
     doc,
     normalized_model: dict | None,
