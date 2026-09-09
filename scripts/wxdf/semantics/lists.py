@@ -349,10 +349,6 @@ def analyze_lists(facts: Mapping[str, Any], *, context: Mapping[str, Any] | None
             assign_in_reading_order(child_id)
 
     assign_in_reading_order("root")
-    result["lists"].sort(key=lambda item: item["list_id"])
-    result["items"].sort(key=lambda item: item["item_id"])
-    result["continuations"].sort(key=lambda item: item["node_id"])
-    result["candidates"].sort(key=lambda item: item["candidate_id"])
     result["diagnostics"].sort(key=lambda item: (item.get("code", ""), item.get("node_id", "")))
     if result["diagnostics"]:
         result["status"] = "unresolved"
