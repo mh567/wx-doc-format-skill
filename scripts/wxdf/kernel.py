@@ -625,7 +625,7 @@ class ConversionKernel:
         supported_nodes = tuple(sorted(set(AST_BLOCK_TYPES) | set(AST_CONTAINER_KINDS)))
         common = {
             "contract_version": "2.0",
-            "supported_source_types": ("markdown", "docx", "text"),
+            "supported_source_types": ("markdown", "docx"),
             "supported_node_kinds": supported_nodes,
             "failure_policy": "fail",
         }

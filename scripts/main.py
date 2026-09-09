@@ -1240,7 +1240,7 @@ def _legacy_adapter_argv(args) -> list[str]:
 
 
 def _modular_native_v2_enabled(args) -> bool:
-    """Select the native modular seam for pure-rule sources with list evidence."""
+    """Select the native modular seam from explicit mode and source contracts."""
 
     if args.llm_enhance != "off" or args.resume or args.generate_requests:
         return False
@@ -1248,17 +1248,7 @@ def _modular_native_v2_enabled(args) -> bool:
         return False
     if args.modular_profile == "native-v2":
         return True
-    if args.list_policy != "wx-default-v2":
-        return False
-    if args.input.suffix.lower() == ".docx":
-        return True
-    try:
-        import re
-
-        text = args.input.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return False
-    return any(re.match(r"^[ \t]*(?:[-+*]|\d+[.)])[ \t]+", line) for line in text.splitlines())
+    return False
 
 
 def _run_legacy_full_adapter(args, request: ConversionRequest) -> RunResult:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -14,7 +15,7 @@ if str(SCRIPTS) not in sys.path:
 from test_modular_ast import _ast
 from wxdf.kernel import ConversionKernel, ConversionRequest
 from wxdf.legacy_capability import make_view, translate
-from wxdf.registry import ModuleDescriptor
+from wxdf.registry import ModuleDescriptor, PlanError
 from wxdf.resolver import resolve
 from wxdf.transaction import apply_stage_batch, make_snapshot
 
@@ -135,3 +136,34 @@ def test_module_descriptor_preflight_declares_contract_and_audits() -> None:
 
     assert descriptor.contract_version == "2.0"
     assert descriptor.required_audits == ("saved_output_audit",)
+
+
+def test_native_preflight_rejects_text_source_type() -> None:
+    with pytest.raises(PlanError, match="does not support source type text"):
+        ConversionKernel._native_preflight(_ast(0), "text", "wx-default-v2")
+
+
+def test_explicit_legacy_profile_cannot_be_overridden_by_list_text(tmp_path: Path) -> None:
+    source = tmp_path / "listed.md"
+    source.write_text("1. 列表项\n", encoding="utf-8")
+    output = tmp_path / "listed.docx"
+    report = tmp_path / "report.json"
+    command = [
+        str(SCRIPTS / ".venv" / "bin" / "python3"),
+        str(SCRIPTS / "main.py"),
+        "--input", str(source),
+        "--output", str(output),
+        "--template", str(ROOT / "assets" / "wx_template.docx"),
+        "--pipeline", "modular",
+        "--modular-profile", "legacy-full-v1",
+        "--list-policy", "wx-default-v2",
+        "--llm-enhance", "off",
+        "--report", str(report),
+    ]
+
+    completed = subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
+
+    assert completed.returncode == 0, completed.stderr
+    saved_report = json.loads(report.read_text(encoding="utf-8"))
+    assert saved_report["migration_adapter"] == "legacy-full-v1"
+    assert saved_report["execution_plan"]["profile"] == "wx_full_rules"
