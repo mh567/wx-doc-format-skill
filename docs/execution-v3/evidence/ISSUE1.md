@@ -118,6 +118,31 @@ P1 聚焦回归：
 
 提交：`4da79d0`、`fb7dc21`。当前未推送远程。
 
+## L07 至 L10 特殊承载与局部作用域验收
+
+2026-09-09 增加 `tests/test_issue3_acceptance.py`，覆盖列表首块为表格、子列表或图片，真正空列项、行内图片、DOCX 图片列项、合并单元格、嵌套表格、quote 内列表和列表内 quote。
+
+初始 review 暴露的问题包括 DOCX 原生列表项多余空锚点、保存后编号审计只检查全局存在性、垂直合并缺少 OOXML 证据、嵌套表格顺序反转、嵌套表格 RenderMap 定位重复、DOCX 图片段落被忽略和编号定义缺少校验。
+
+修复提交链：`ded9112`、`fb2b7c7`、`e8e0761`、`9a03ba9`、`a708b71`、`f4ae8d8`。
+
+验收结果：
+
+1. SourceFacts、Source AST、Normalize、RenderPlan、渲染和保存后审计均有专项断言。DOCX 解析器为源引用写入 `parser_version=1.1.0`，事务校验同时比较 `node_path` 和 parser version。
+2. DOCX 原生图片列项允许图片段落参与编号检测，资源路径统一到 DOCX 包内路径，动态 DOCX 夹具验证图片资源、编号样式和输出 `document.xml`。
+3. 空列项继续生成唯一 marker anchor，已有文字或行内图片的段落直接承担编号承载。块图片节点由 AST 合同表达，当前 parser 以 inline image 形式输出。动态 DOCX 图片列项作为等价 parser 入口，覆盖完整 CLI、RenderPlan 和保存后审计。
+4. 合并单元格通过 `gridSpan` 和 `vMerge` 保存后 OOXML 验收。嵌套表格保持源顺序，RenderMap 使用递增的唯一表格定位值。
+5. `check_saved_output()` 逐项核对列表文本、样式、`numId`、`abstractNumId`、`numFmt` 和有效层级，编号定义缺失或格式篡改会阻断发布。
+6. quote 容器、外部列表项和局部标题的父子关系写入 AST 验收，保存后段落顺序保持。
+
+专项测试：`scripts/.venv/bin/python3 -m pytest tests/test_issue3_acceptance.py -q`，`11 passed`。
+
+相关回归：`scripts/.venv/bin/python3 -m pytest tests/test_issue1_acceptance.py tests/test_issue2_acceptance.py tests/test_issue3_acceptance.py tests/test_modular_rendering.py tests/test_list_numbering.py tests/test_list_semantics.py -q`，`68 passed`。
+
+完整回归：`scripts/.venv/bin/python3 -m pytest tests/ -q`，`438 passed`。
+
+双轴 review：Standards 通过。Spec review 在修复编号层级映射回归、补充块图片保存审计并同步本证据后通过，审查过程未修改文件。
+
 ## 真实转换证据
 
 Markdown `input/benchmark_report.md` 通过显式 `--modular-profile native-v2` 转换成功，命令退出码为 `0`。报告路径为 `/tmp/wx-issue1-native-p1-markdown-report.json`，报告显示 `execution_plan.profile=wx_full_rules-native-v2`、八个 native 模块均列入执行计划、事务状态 `committed`、决策数 `21`、模型审计和保存后审计均通过。输出路径为 `/tmp/wx-issue1-native-p1-markdown.docx`，`unzip -t` 退出码为 `0`。
@@ -132,6 +157,6 @@ DOCX 最小列表夹具 `/tmp/wx-issue1-input.docx` 通过 `scripts/main.py --mo
 
 双轴审查固定点为 `4b595c0`，原始实现提交为 `b44de5f`。本轮已补充显式 profile 路由、列表结构单批事务、续段关系、生成锚点、legacy retype 标准语义更新、注册表实际执行绑定、source reference 预条件校验和 failure policy 发布阻断。
 
-L07 至 L16 的逐项双 parser、RenderPlan、`numbering.xml`、段落 `numPr` 和保存后 OOXML 矩阵尚未在本轮补齐，不能据此宣称 Issue #1 全部验收完成。Kylin V10 ARM64 真机、页面视觉和发布流程仍属于外部门禁。远程推送、标签、Release 和公开 Skill 同步均未执行。
+L11 至 L16 的逐项双 parser、页面视觉和外部平台矩阵仍未在本轮补齐，不能据此宣称 Issue #1 全部验收完成。Kylin V10 ARM64 真机和发布流程仍属于外部门禁。远程推送、标签、Release 和公开 Skill 同步均未执行。
 
-下一步：补齐 L01 至 L16 双 parser 验收矩阵及编号 XML 证据，再根据外部平台验收结果评估默认策略切换。
+下一步：补齐 L11 至 L16 验收矩阵及外部平台证据，再根据外部平台验收结果评估默认策略切换。
