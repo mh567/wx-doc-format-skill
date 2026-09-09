@@ -40,6 +40,7 @@ def check_saved_output(path: Path | str, expected: Mapping[str, Any], render_map
     issues: list[dict[str, Any]] = []
     output = Path(path)
     styles_xml = None
+    numbering_xml = None
     try:
         with ZipFile(output) as archive:
             bad = archive.testzip()
@@ -50,6 +51,8 @@ def check_saved_output(path: Path | str, expected: Mapping[str, Any], render_map
                 issues.append({"code": "missing_document_xml"})
             if "word/styles.xml" in names:
                 styles_xml = archive.read("word/styles.xml")
+            if "word/numbering.xml" in names:
+                numbering_xml = archive.read("word/numbering.xml")
     except (OSError, BadZipFile) as exc:
         return {"passed": False, "issues": [{"code": "invalid_docx", "message": str(exc)}]}
 
@@ -93,6 +96,7 @@ def check_saved_output(path: Path | str, expected: Mapping[str, Any], render_map
     expected_numbered_texts = [str(item.get("text") or "") for item in expected_numbered_items if str(item.get("text") or "")]
     expected_numbered_styles = {str(item.get("style") or "") for item in expected_numbered_items if item.get("style")}
     style_names: dict[str, str] = {}
+    style_num_info: dict[str, tuple[int | None, int]] = {}
     if styles_xml is not None:
         styles_root = ElementTree.fromstring(styles_xml)
         for style in styles_root.findall("w:style", ns):
@@ -100,17 +104,89 @@ def check_saved_output(path: Path | str, expected: Mapping[str, Any], render_map
             name = style.find("w:name", ns)
             if style_id and name is not None:
                 style_names[style_id] = name.get(f"{{{namespace}}}val") or ""
+            num_pr = style.find("w:pPr/w:numPr", ns)
+            if style_id and num_pr is not None:
+                num_id = num_pr.find("w:numId", ns)
+                ilvl = num_pr.find("w:ilvl", ns)
+                try:
+                    parsed_num_id = int(num_id.get(f"{{{namespace}}}val")) if num_id is not None else None
+                except (TypeError, ValueError):
+                    parsed_num_id = None
+                try:
+                    parsed_ilvl = int(ilvl.get(f"{{{namespace}}}val")) if ilvl is not None else 0
+                except (TypeError, ValueError):
+                    parsed_ilvl = 0
+                style_num_info[style_id] = (parsed_num_id, parsed_ilvl)
     expected_numbered_style_ids = {style_id for style_id, name in style_names.items() if name in expected_numbered_styles}
+    valid_num_fmts = {"decimal", "decimalZero", "lowerLetter", "upperLetter", "lowerRoman", "upperRoman", "bullet"}
+    numbering_num_to_abstract: dict[int, int] = {}
+    numbering_levels: dict[int, dict[int, str]] = {}
+    numbering_overrides: dict[int, dict[int, str]] = {}
+    if numbering_xml is not None:
+        numbering_root = ElementTree.fromstring(numbering_xml)
+        for abstract in numbering_root.findall("w:abstractNum", ns):
+            try:
+                abstract_id = int(abstract.get(f"{{{namespace}}}abstractNumId"))
+            except (TypeError, ValueError):
+                continue
+            levels: dict[int, str] = {}
+            for level in abstract.findall("w:lvl", ns):
+                try:
+                    ilvl = int(level.get(f"{{{namespace}}}ilvl", "0"))
+                except (TypeError, ValueError):
+                    ilvl = 0
+                num_fmt = level.find("w:numFmt", ns)
+                if num_fmt is not None:
+                    levels[ilvl] = num_fmt.get(f"{{{namespace}}}val") or ""
+            numbering_levels[abstract_id] = levels
+        for num in numbering_root.findall("w:num", ns):
+            try:
+                num_id = int(num.get(f"{{{namespace}}}numId"))
+                abstract = num.find("w:abstractNumId", ns)
+                if abstract is None:
+                    continue
+                numbering_num_to_abstract[num_id] = int(abstract.get(f"{{{namespace}}}val"))
+            except (TypeError, ValueError):
+                continue
+            overrides: dict[int, str] = {}
+            for override in num.findall("w:lvlOverride", ns):
+                try:
+                    ilvl = int(override.get(f"{{{namespace}}}ilvl", "0"))
+                except (TypeError, ValueError):
+                    ilvl = 0
+                override_level = override.find("w:lvl/w:numFmt", ns)
+                if override_level is not None:
+                    overrides[ilvl] = override_level.get(f"{{{namespace}}}val") or ""
+            if overrides:
+                numbering_overrides[num_id] = overrides
     numbered_paragraphs: list[Any] = []
+    invalid_numbering: list[dict[str, Any]] = []
     for paragraph in xml_paragraphs:
         direct = paragraph.find("w:pPr/w:numPr", ns)
         direct_num_id = direct.find("w:numId", ns) if direct is not None else None
+        direct_ilvl = direct.find("w:ilvl", ns) if direct is not None else None
         style = paragraph.find("w:pPr/w:pStyle", ns)
         style_id = style.get(f"{{{namespace}}}val") if style is not None else None
         text = "".join(node.text or "" for node in paragraph.findall(".//w:t", ns))
         direct_numbering = direct_num_id is not None and direct_num_id.get(f"{{{namespace}}}val") not in {None, "0"}
-        if style_id in expected_numbered_style_ids or (direct_numbering and text in expected_numbered_texts):
+        expected_numbering = style_id in expected_numbered_style_ids or (direct_numbering and text in expected_numbered_texts)
+        if expected_numbering:
             numbered_paragraphs.append(paragraph)
+            style_num_id, style_ilvl = style_num_info.get(style_id, (None, 0))
+            try:
+                num_id = int(direct_num_id.get(f"{{{namespace}}}val")) if direct_num_id is not None else style_num_id
+            except (TypeError, ValueError):
+                num_id = None
+            try:
+                ilvl = int(direct_ilvl.get(f"{{{namespace}}}val")) if direct_ilvl is not None else style_ilvl
+            except (TypeError, ValueError):
+                ilvl = style_ilvl
+            abstract_id = numbering_num_to_abstract.get(num_id) if num_id is not None else None
+            num_fmt = numbering_overrides.get(num_id, {}).get(ilvl) if num_id is not None else None
+            if num_fmt is None and abstract_id is not None:
+                num_fmt = numbering_levels.get(abstract_id, {}).get(ilvl)
+            if num_id is None or abstract_id is None or num_fmt not in valid_num_fmts:
+                invalid_numbering.append({"text": text, "num_id": num_id, "ilvl": ilvl, "abstract_num_id": abstract_id, "num_fmt": num_fmt})
     actual_numbered_texts = [
         "".join(node.text or "" for node in paragraph.findall(".//w:t", ns))
         for paragraph in numbered_paragraphs
@@ -126,4 +202,6 @@ def check_saved_output(path: Path | str, expected: Mapping[str, Any], render_map
                 "actual_texts": actual_numbered_texts,
             }
         )
+    if invalid_numbering:
+        issues.append({"code": "list_numbering_definition_invalid", "items": invalid_numbering})
     return {"passed": not issues, "issues": issues, "paragraph_texts": actual_texts, "table_count": table_count}

@@ -256,10 +256,15 @@ def analyze_docx_lists(
     report: dict,
     *,
     excluded_source_positions: set[int] | None = None,
+    numbering_maps: tuple[
+        dict[int, int],
+        dict[int, dict[int, dict[str, Any]]],
+        dict[int, dict[int, dict[str, Any]]],
+    ] | None = None,
 ) -> dict[int, dict[str, Any]]:
     """Return numbering descriptors keyed by stable top-level source position."""
     excluded = excluded_source_positions or set()
-    num_to_abstract, abstract_levels, num_level_overrides = _numbering_maps(doc)
+    num_to_abstract, abstract_levels, num_level_overrides = numbering_maps or _numbering_maps(doc)
     candidates: list[dict[str, Any]] = []
     position = 0
     for child in doc.element.body.iterchildren():
@@ -285,6 +290,7 @@ def analyze_docx_lists(
                         "start": level.get("start", 1),
                         "numbering_source": numbering_source,
                         "layout": paragraph_layout_evidence(paragraph),
+                        "has_drawing": paragraph._p.find(".//" + qn("w:drawing")) is not None,
                     })
             position += 1
         elif child.tag == qn("w:tbl"):
@@ -348,6 +354,8 @@ def analyze_docx_lists(
                 evidence.append("visible_list_marker")
             if candidate.get("numbering_source") == "direct":
                 evidence.append("direct_num_pr")
+            if candidate.get("has_drawing"):
+                evidence.append("image_content")
 
             note_role = source_note_role(style_name, candidate, candidate.get("text"))
             protected = (
@@ -359,7 +367,8 @@ def analyze_docx_lists(
             high = valid and bool({
                 "list_style", "consecutive_numbering_sequence", "visible_list_marker",
             } & set(evidence))
-            if protected or num_fmt == "none" or not valid or not candidate.get("text"):
+            has_content = bool(candidate.get("text") or candidate.get("has_drawing"))
+            if protected or num_fmt == "none" or not valid or not has_content:
                 status = "ignored"
                 confidence = 0.0
                 if protected:
@@ -417,7 +426,18 @@ def analyze_docx_lists(
     return result
 
 
-def describe_docx_paragraph(doc, paragraph: Paragraph, *, ordinal: int | None = None, restart: bool = True) -> dict[str, Any] | None:
+def describe_docx_paragraph(
+    doc,
+    paragraph: Paragraph,
+    *,
+    ordinal: int | None = None,
+    restart: bool = True,
+    numbering_maps: tuple[
+        dict[int, int],
+        dict[int, dict[int, dict[str, Any]]],
+        dict[int, dict[int, dict[str, Any]]],
+    ] | None = None,
+) -> dict[str, Any] | None:
     """Return deterministic numbering evidence for a paragraph outside the body.
 
     ``analyze_docx_lists`` keeps its historical top-level position contract.
@@ -428,7 +448,7 @@ def describe_docx_paragraph(doc, paragraph: Paragraph, *, ordinal: int | None = 
     ilvl, num_id, numbering_source = _paragraph_num_info(paragraph)
     if num_id is None:
         return None
-    num_to_abstract, abstract_levels, num_level_overrides = _numbering_maps(doc)
+    num_to_abstract, abstract_levels, num_level_overrides = numbering_maps or _numbering_maps(doc)
     abstract_id = num_to_abstract.get(num_id)
     level = dict(abstract_levels.get(abstract_id, {}).get(ilvl or 0, {}))
     level.update(num_level_overrides.get(num_id, {}).get(ilvl or 0, {}))
@@ -441,11 +461,14 @@ def describe_docx_paragraph(doc, paragraph: Paragraph, *, ordinal: int | None = 
         evidence.append("list_style")
     if looks_like_list_item(paragraph.text.strip()):
         evidence.append("visible_list_marker")
+    has_drawing = paragraph._p.find(".//" + qn("w:drawing")) is not None
+    if has_drawing:
+        evidence.append("image_content")
     if numbering_source == "direct":
         evidence.append("direct_num_pr")
     protected = _is_protected_style(style_name)
     valid = abstract_id is not None and num_fmt in _LIST_FORMATS
-    if protected or num_fmt == "none" or not valid or not paragraph.text.strip():
+    if protected or num_fmt == "none" or not valid or not (paragraph.text.strip() or has_drawing):
         status = "ignored"
         confidence = 0.0
         if protected:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import re
 from dataclasses import dataclass
@@ -351,9 +352,10 @@ def _docx_inline_content(paragraph: Any, handle: SourceHandle, node_path: list[s
         if resource_id not in resources:
             part = paragraph.part.related_parts.get(relationship_id)
             blob = getattr(part, "blob", b"")
+            media_part = str(getattr(part, "partname", "word/media/unknown")).lstrip("/")
             resources[resource_id] = {
                 "kind": "image",
-                "source_ref": _source_ref(handle, getattr(part, "partname", "word/media/unknown"), node_path=[*node_path, "drawing", relationship_id], parser_version=parser_version),
+                "source_ref": _source_ref(handle, media_part, node_path=[*node_path, "drawing", relationship_id], parser_version=parser_version),
                 "content_sha256": _digest(blob),
                 "dependencies": [],
             }
@@ -366,7 +368,7 @@ def _parse_docx(source: Path | str, *, store: SourceStore) -> dict[str, Any]:
     from docx.table import Table, _Cell
     from docx.text.paragraph import Paragraph
     from docx.oxml.ns import qn
-    from list_detector import analyze_docx_lists, describe_docx_paragraph
+    from list_detector import _numbering_maps, analyze_docx_lists, describe_docx_paragraph
     from table_semantics import classify_docx_table
     from .semantics.tables import capture_docx_table_layout
 
@@ -375,7 +377,11 @@ def _parse_docx(source: Path | str, *, store: SourceStore) -> dict[str, Any]:
     facts = _empty_facts(handle, "docx-source-facts", "docx-ooxml", parser_version="1.1.0")
     parser_version = facts["parser"]["version"]
     report: dict[str, Any] = {}
-    numbering = analyze_docx_lists(document, report)
+    numbering_maps = _numbering_maps(document)
+    if "numbering_maps" in inspect.signature(analyze_docx_lists).parameters:
+        numbering = analyze_docx_lists(document, report, numbering_maps=numbering_maps)
+    else:
+        numbering = analyze_docx_lists(document, report)
     body = document.element.body
     position = 0
     nested_list_ordinals: dict[tuple[str, int, int, str | None], int] = {}
@@ -498,7 +504,7 @@ def _parse_docx(source: Path | str, *, store: SourceStore) -> dict[str, Any]:
                 for child in cell._tc.iterchildren():
                     if child.tag == qn("w:p"):
                         paragraph = Paragraph(child, cell)
-                        descriptor = describe_docx_paragraph(document, paragraph)
+                        descriptor = describe_docx_paragraph(document, paragraph, numbering_maps=numbering_maps)
                         if descriptor is not None and descriptor.get("status") == "detected":
                             key = (cell_id, int(descriptor.get("num_id") or 0), int(descriptor.get("ilvl") or 0), descriptor.get("num_fmt"))
                             ordinal = nested_list_ordinals.get(key, 0) + 1

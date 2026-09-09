@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import io
 from pathlib import Path
 from zipfile import ZipFile
 from xml.etree import ElementTree
@@ -13,6 +14,7 @@ from test_issue2_acceptance import _assert_native_completed, _item_by_text, _par
 from test_modular_normalization import _ast, _profile
 from wxdf.auditing import check_saved_output
 from wxdf.normalization import normalize
+from wxdf.parsers import parse
 from wxdf.rendering import render
 from wxdf.transaction import _source_ref_matches
 from wxdf.validation import validate_ast
@@ -46,12 +48,12 @@ def _build_l09_docx(tmp_path: Path) -> Path:
     vertical.text = "纵向合并"
 
     nested_host = table.cell(1, 0)
-    nested_host.paragraphs[0].text = "外层单元格"
     nested = nested_host.add_table(rows=1, cols=1)
     nested_cell = nested.cell(0, 0)
     nested_cell.paragraphs[0].text = "嵌套表格正文"
     nested_item = nested_cell.add_paragraph("嵌套列表")
     _set_numbering(nested_item, num_id=905, level=0)
+    nested_host.add_paragraph("外层单元格")
 
     table.cell(1, 1).text = "另一单元格"
     table.cell(2, 0).text = "底部一"
@@ -63,6 +65,29 @@ def _build_l09_docx(tmp_path: Path) -> Path:
     output = tmp_path / "l09.docx"
     document.save(output)
     return output
+
+
+def _build_l08_docx(tmp_path: Path) -> Path:
+    document = Document()
+    _append_numbering_definition(document, abstract_id=906, num_id=906, levels=[("decimal", "%1.")])
+    image_only = document.add_paragraph()
+    _set_numbering(image_only, num_id=906, level=0)
+    image_only.add_run().add_picture(io.BytesIO(PNG_1X1))
+    text_image = document.add_paragraph("文字图")
+    _set_numbering(text_image, num_id=906, level=0)
+    text_image.add_run().add_picture(io.BytesIO(PNG_1X1))
+    output = tmp_path / "l08.docx"
+    document.save(output)
+    return output
+
+
+def _rewrite_docx_part(source: Path, target: Path, part_name: str, transform) -> None:
+    with ZipFile(source) as original, ZipFile(target, "w") as rewritten:
+        for info in original.infolist():
+            data = original.read(info.filename)
+            if info.filename == part_name:
+                data = transform(data)
+            rewritten.writestr(info, data)
 
 
 def _assert_numbered_texts(output: Path, texts: set[str]) -> None:
@@ -88,7 +113,7 @@ def _assert_numbered_texts(output: Path, texts: set[str]) -> None:
     assert seen == texts
 
 
-def _assert_numbered_image_paragraph(output: Path) -> None:
+def _assert_numbered_image_paragraph(output: Path, expected_count: int = 1) -> None:
     namespace = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
     ns = {"w": namespace}
     with ZipFile(output) as archive:
@@ -101,14 +126,14 @@ def _assert_numbered_image_paragraph(output: Path) -> None:
         and style.find("w:pPr/w:numPr/w:numId", ns).get(f"{{{namespace}}}val") not in {None, "0"}
     }
     image_paragraphs = [paragraph for paragraph in document.findall(".//w:p", ns) if paragraph.find(".//w:drawing", ns) is not None]
-    assert len(image_paragraphs) == 1
-    paragraph = image_paragraphs[0]
-    style = paragraph.find("w:pPr/w:pStyle", ns)
-    style_id = style.get(f"{{{namespace}}}val") if style is not None else None
-    direct = paragraph.find("w:pPr/w:numPr/w:numId", ns)
-    assert style_id in numbered_style_ids or (
-        direct is not None and direct.get(f"{{{namespace}}}val") not in {None, "0"}
-    )
+    assert len(image_paragraphs) == expected_count
+    for paragraph in image_paragraphs:
+        style = paragraph.find("w:pPr/w:pStyle", ns)
+        style_id = style.get(f"{{{namespace}}}val") if style is not None else None
+        direct = paragraph.find("w:pPr/w:numPr/w:numId", ns)
+        assert style_id in numbered_style_ids or (
+            direct is not None and direct.get(f"{{{namespace}}}val") not in {None, "0"}
+        )
 
 
 def test_l07_first_table_and_sublist_get_one_evidenced_anchor(tmp_path: Path) -> None:
@@ -225,6 +250,69 @@ def test_l08_empty_item_generates_anchor_while_inline_image_keeps_paragraph(tmp_
     assert report["list_semantics_consumption"]["anchor_consumed_count"] == 1
 
 
+def test_l08_docx_image_only_and_inline_image_lists_are_parsed(tmp_path: Path) -> None:
+    source = _build_l08_docx(tmp_path)
+
+    report, source_ast, normalized, output = _run_native(source, tmp_path, "l08-docx")
+
+    _assert_native_completed(report, output)
+    document = source_ast["document"]
+    list_items = [node_id for node_id, node in document["containers"].items() if node.get("kind") == "list_item"]
+    assert len(list_items) == 2
+    assert all(normalized["presentation"]["nodes"][item_id]["generated_anchor"] is False for item_id in list_items)
+    assert len(document["resources"]) == 1
+    assert len(Document(output).inline_shapes) == 2
+    _assert_numbered_image_paragraph(output, expected_count=2)
+    assert report["list_semantics_consumption"]["anchor_consumed_count"] == 0
+
+
+def test_docx_parser_reuses_numbering_maps_for_nested_content(monkeypatch, tmp_path: Path) -> None:
+    source = _build_l09_docx(tmp_path)
+    import list_detector
+
+    real_numbering_maps = list_detector._numbering_maps
+    calls = 0
+
+    def counted_numbering_maps(document):
+        nonlocal calls
+        calls += 1
+        return real_numbering_maps(document)
+
+    monkeypatch.setattr(list_detector, "_numbering_maps", counted_numbering_maps)
+    facts = parse(source)
+
+    assert facts["parser"]["version"] == "1.1.0"
+    assert calls == 1
+
+
+def test_saved_output_audit_rejects_missing_numbering_definition(tmp_path: Path) -> None:
+    image = tmp_path / "pixel.png"
+    image.write_bytes(PNG_1X1)
+    source = _write_markdown(tmp_path, "numbering-definition", ["1. ![内嵌图](pixel.png)", ""])
+    report, _, normalized, output = _run_native(source, tmp_path, "numbering-definition")
+    corrupted = tmp_path / "numbering-definition-corrupt.docx"
+    namespace = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    ns = {"w": namespace}
+
+    def invalidate_numbering(data: bytes) -> bytes:
+        root = ElementTree.fromstring(data)
+        for number in root.findall("w:num", ns):
+            number.set(f"{{{namespace}}}numId", "999999")
+        return ElementTree.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    _rewrite_docx_part(output, corrupted, "word/numbering.xml", invalidate_numbering)
+    resource_id = next(iter(normalized["source_ast"]["document"]["resources"]))
+    rerendered = render(
+        normalized,
+        tmp_path / "numbering-definition-rerendered.docx",
+        template_path=Path(__file__).resolve().parents[1] / "assets" / "wx_template.docx",
+        resources={resource_id: image.read_bytes()},
+    )
+    findings = check_saved_output(corrupted, normalized, rerendered["render_map"])
+    assert findings["passed"] is False
+    assert any(issue["code"] == "list_numbering_definition_invalid" for issue in findings["issues"])
+
+
 def test_l09_merged_and_nested_table_cells_are_unique_and_scope_local(tmp_path: Path) -> None:
     source = _build_l09_docx(tmp_path)
 
@@ -280,6 +368,16 @@ def test_l09_merged_and_nested_table_cells_are_unique_and_scope_local(tmp_path: 
         "嵌套表格正文",
         "嵌套列表",
     ]
+    cell_content = []
+    for child in rendered_outer.cell(1, 0)._tc:
+        local_name = child.tag.rsplit("}", 1)[-1]
+        if local_name == "p":
+            cell_content.append((local_name, "".join(node.text or "" for node in child.iter() if node.tag.rsplit("}", 1)[-1] == "t")))
+        elif local_name == "tbl":
+            cell_content.append((local_name, ""))
+    assert next(index for index, item in enumerate(cell_content) if item[0] == "tbl") < next(
+        index for index, item in enumerate(cell_content) if item == ("p", "外层单元格")
+    )
     assert rendered_outer.cell(0, 2).text == "纵向合并"
     assert rendered_outer.cell(1, 2).text == "纵向合并"
     with ZipFile(output) as archive:
@@ -292,6 +390,9 @@ def test_l09_merged_and_nested_table_cells_are_unique_and_scope_local(tmp_path: 
     for text in ("合并列表一", "合并列表二", "嵌套列表"):
         item_id = next(item for item, item_text in item_ids.items() if item_text == text)
         assert normalized["presentation"]["nodes"][item_id]["generated_anchor"] is False
+    rerendered = render(normalized, tmp_path / "l09-rerendered.docx", template_path=Path(__file__).resolve().parents[1] / "assets" / "wx_template.docx")
+    table_render_map = [item for item in rerendered["render_map"].values() if item.get("kind") == "table"]
+    assert sorted(item["table"] for item in table_render_map) == [1, 2]
 
 
 def test_l10_quote_and_list_scopes_do_not_consume_each_other(tmp_path: Path) -> None:

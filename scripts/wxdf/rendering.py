@@ -114,6 +114,7 @@ def render(
     render_map: dict[str, dict[str, Any]] = {}
     diagnostics: list[dict[str, Any]] = []
     paragraph_counter = 0
+    table_counter = 0
     initial_cell_paragraphs: set[int] = set()
 
     def add_paragraph(
@@ -162,6 +163,9 @@ def render(
         return paragraph
 
     def add_table(node_id: str, block_id: str, *, parent: Any | None = None) -> None:
+        nonlocal table_counter
+        table_counter += 1
+        table_index = table_counter
         block = document["blocks"][block_id]
         row_ids = document["children"].get(block_id, [])
         row_count = len(row_ids)
@@ -186,6 +190,8 @@ def render(
                 table.style = "Table Grid"
             except (KeyError, ValueError):
                 pass
+        if parent is not None:
+            initial_cell_paragraphs.add(id(parent._tc))
         table_body_style = styles.get("table_body")
         if table_body_style and table_body_style in doc.styles:
             normalize_table(
@@ -216,7 +222,7 @@ def render(
                         occupied.add((occupied_row, occupied_col))
                 render_children(cell_id, parent=cell)
                 column_cursor += col_span
-        render_map[node_id] = {"kind": "table", "table": len(doc.tables), "rows": row_count, "cols": column_count}
+        render_map[node_id] = {"kind": "table", "table": table_index, "rows": row_count, "cols": column_count}
 
     def render_block(block_id: str, *, parent: Any | None = None) -> None:
         nonlocal paragraph_counter
