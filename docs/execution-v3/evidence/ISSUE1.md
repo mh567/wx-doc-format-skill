@@ -64,16 +64,17 @@ P1 聚焦回归：
 
 1. 移除 `scripts/wxdf/semantics/lists.py` 中对列表、列表项和候选的节点 ID 排序，保留 SourceFacts 的源阅读顺序。
 2. 验收断言覆盖 SourceFacts 摘要、Source AST 容器关系和列表族、规范化后的源 AST 保真、RenderPlan 顺序和编号、完整 native 模块链、事务提交、模型与保存后审计。
-3. 保存后回读 `numbering.xml`、`styles.xml` 和 `document.xml`，校验 `numId`、`ilvl`、`abstractNumId`、`numFmt`，并执行 ZIP 完整性检查。
-4. 增加不带 pipeline 参数的 legacy 默认入口真实转换检查。
+3. native kernel 对 SourceFacts 生成稳定 digest，在主链前后比对并将结果写入报告。digest 不一致时写入错误诊断，阻止转换完成。
+4. 保存后回读 `numbering.xml`、`styles.xml` 和 `document.xml`，校验 `numId`、`ilvl`、`abstractNumId`、`numFmt`，并执行 ZIP 完整性检查。
+5. 增加同一嵌套列表 Markdown 夹具的不带 pipeline 参数 legacy 默认入口真实转换检查。
 
 验证：
 
 `scripts/.venv/bin/python3 -m pytest tests/test_issue1_acceptance.py -q`，`3 passed`。
 
-`scripts/.venv/bin/python3 -m pytest tests/test_issue1_acceptance.py tests/test_modular_lists.py tests/test_modular_list_consumption.py tests/test_modular_normalization.py tests/test_modular_rendering.py tests/test_modular_kernel.py tests/test_modular_conversion.py tests/test_modular_baseline.py -q`，`41 passed`。
+`scripts/.venv/bin/python3 -m pytest tests/test_issue1_acceptance.py tests/test_modular_lists.py tests/test_modular_list_consumption.py tests/test_modular_normalization.py tests/test_modular_rendering.py tests/test_modular_kernel.py tests/test_modular_conversion.py tests/test_modular_baseline.py tests/test_modular_source_facts.py -q`，`45 passed`。
 
-提交：`96083d3`、`8fad0b3`。当前未推送远程。
+提交：`96083d3`、`8fad0b3`、`ffa0b0a`。当前未推送远程。
 
 ## 真实转换证据
 
