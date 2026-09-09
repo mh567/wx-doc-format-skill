@@ -681,6 +681,8 @@ def validate_checkpoint(checkpoint: Mapping[str, Any]) -> None:
         "modules",
         "requests",
         "responses",
+        "applied_transactions",
+        "transaction_content_digests",
         "budget",
         "round",
         "candidate_baseline_id",
@@ -702,11 +704,35 @@ def validate_checkpoint(checkpoint: Mapping[str, Any]) -> None:
         _fail("invalid_resume_state", "resume_stage", "only waiting_external checkpoints may name a resume stage", contract)
     validate_source_facts(checkpoint["source_facts"])
     _validate_ledger(checkpoint["decision_ledger"], "decision_ledger", contract)
+    if checkpoint["decision_ledger"].get("schema_version") == "2.0":
+        from .decision_ledger import LedgerError, validate_revisions
+
+        try:
+            validate_revisions(checkpoint["source_facts"], checkpoint["decision_ledger"])
+        except LedgerError as exc:
+            _fail("invalid_revision", "decision_ledger", str(exc), contract)
     validate_ast(checkpoint["source_ast"])
     if checkpoint["normalized_ast"] is not None:
         validate_ast(checkpoint["normalized_ast"])
     for field in ("content_overlay", "presentation_override", "modules", "requests", "responses"):
         _list(checkpoint[field], field, contract)
+    applied_transactions = _list(checkpoint["applied_transactions"], "applied_transactions", contract)
+    applied_digests: dict[str, str] = {}
+    for index, transaction in enumerate(applied_transactions):
+        transaction_path = f"applied_transactions[{index}]"
+        transaction = _mapping(transaction, transaction_path, contract)
+        _require_fields(transaction, ("transaction_id", "content_sha256"), transaction_path, contract)
+        _non_empty_string(transaction["transaction_id"], f"{transaction_path}.transaction_id", contract)
+        _sha256(transaction["content_sha256"], f"{transaction_path}.content_sha256", contract)
+        if transaction["transaction_id"] in applied_digests:
+            _fail("transaction_state_mismatch", transaction_path, "transaction ID is repeated", contract)
+        applied_digests[transaction["transaction_id"]] = transaction["content_sha256"]
+    digests = _mapping(checkpoint["transaction_content_digests"], "transaction_content_digests", contract)
+    for transaction_id, digest in digests.items():
+        _non_empty_string(transaction_id, "transaction_content_digests key", contract)
+        _sha256(digest, f"transaction_content_digests.{transaction_id}", contract)
+    if applied_digests != dict(digests):
+        _fail("transaction_state_mismatch", "applied_transactions", "transaction IDs and content digests must match exactly", contract)
     target_map = _mapping(checkpoint["target_map"], "target_map", contract)
     _require_fields(target_map, ("revision", "entries", "view_sha256"), "target_map", contract)
     _non_negative_int(target_map["revision"], "target_map.revision", contract)

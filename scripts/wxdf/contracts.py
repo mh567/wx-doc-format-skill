@@ -186,6 +186,8 @@ class RunCheckpoint(TypedDict, total=False):
     modules: list[dict[str, Any]]
     requests: list[dict[str, Any]]
     responses: list[dict[str, Any]]
+    applied_transactions: list[dict[str, Any]]
+    transaction_content_digests: dict[str, str]
     budget: dict[str, Any]
     round: int
     candidate_baseline_id: str

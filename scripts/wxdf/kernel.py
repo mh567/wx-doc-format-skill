@@ -970,6 +970,7 @@ class ConversionKernel:
 
         from .metrics import MetricsCollector
         from .parsers import digest_source_facts, parse, summarize_source_facts
+        from .decision_ledger import LedgerError, project_ledger, revision_decision
         from .resolver import resolve
         from .semantics.appendices import (
             audit_native_appendix,
@@ -984,6 +985,7 @@ class ConversionKernel:
         from .semantics.structure import collect_structure_candidates
         from .semantics.tables import collect_source_table_semantics, collect_table_candidates
         from .source_store import SourceStore
+        from .transaction import TransactionConflict
 
         metrics = MetricsCollector()
         report: dict[str, Any] = {
@@ -999,6 +1001,7 @@ class ConversionKernel:
         }
         staging_path = request.output_path.with_name(f".{request.output_path.name}.native-v2.staging")
         store = SourceStore()
+        ledger_replay: dict[str, Any] | None = None
         try:
             with metrics.stage("source"):
                 facts = parse(request.input_path, {"source_store": store})
@@ -1034,7 +1037,83 @@ class ConversionKernel:
                 *table_candidates,
                 *caption_candidates,
             ]
-            decision_set = resolve(candidates, {"revision": source_ast["revision"]})
+            supplied_ledger = options.get("decision_ledger")
+            if supplied_ledger is not None:
+                try:
+                    if not isinstance(supplied_ledger, Mapping) or not isinstance(supplied_ledger.get("source_binding"), Mapping):
+                        raise LedgerError(
+                            "native decision ledger must carry a SourceFacts binding",
+                            code="source_binding_missing",
+                        )
+                    baseline_revision = source_ast["revision"]
+                    existing_node_ids = set(source_ast["document"]["blocks"]) | set(source_ast["document"]["containers"])
+                    ledger_view = project_ledger(facts, supplied_ledger, existing_node_ids=existing_node_ids)
+                    blocking_ledger_diagnostics = [
+                        item
+                        for item in ledger_view.get("diagnostics", [])
+                        if item.get("code") in {"revision_precondition_failed", "revision_conflict"}
+                    ]
+                    if blocking_ledger_diagnostics:
+                        report.update({
+                            "status": "failed",
+                            "decision_ledger_replay": {
+                                "enabled": True,
+                                "error_code": "replay_blocked",
+                                "diagnostics": blocking_ledger_diagnostics,
+                            },
+                        })
+                        return RunResult(
+                            status="failed",
+                            exit_code=1,
+                            report=report,
+                            diagnostics=[
+                                {"code": "replay_blocked", "severity": "error", "message": "cannot apply invalidated or conflicted revisions"},
+                                *blocking_ledger_diagnostics,
+                            ],
+                            metrics=metrics.snapshot(),
+                        )
+                except LedgerError as exc:
+                    report.update({
+                        "status": "failed",
+                        "decision_ledger_replay": {"enabled": True, "error_code": exc.code, "message": str(exc)},
+                    })
+                    return RunResult(
+                        status="failed",
+                        exit_code=1,
+                        report=report,
+                        diagnostics=[{"code": exc.code, "severity": "error", "message": str(exc)}],
+                        metrics=metrics.snapshot(),
+                    )
+                for revision in ledger_view.get("active_revisions", []):
+                    ledger_decision = revision_decision(revision, source_ast["revision"])
+                    candidates.append({
+                        "candidate_id": f"ledger-revision-{revision['revision_id']}",
+                        "module_id": "decision_ledger",
+                        "module_version": str(revision.get("resolver_version") or "1.0"),
+                        "target_source_refs": copy.deepcopy(revision.get("target_source_refs") or []),
+                        "target_node_ids": list(revision.get("target_node_ids") or []),
+                        "proposal": {
+                            "operation": ledger_decision["operation"],
+                            "property_scope": list(revision.get("property_scope") or []),
+                            "value": copy.deepcopy(ledger_decision.get("value") or {}),
+                            "invalidates": list(ledger_decision.get("invalidates") or []),
+                        },
+                        "positive_evidence": [{"kind": "ledger_revision", "revision_id": revision["revision_id"]}],
+                        "negative_evidence": [],
+                        "scope": {"stages": list(revision.get("invalidates") or [])},
+                        "constraints": [],
+                        "rationale": "accepted revision restored from the decision ledger",
+                    })
+                decision_set = resolve(candidates, {"revision": source_ast["revision"]}, ledger_view)
+                ledger_replay = {
+                    "enabled": True,
+                    "ledger_revision": supplied_ledger.get("revision"),
+                    "active_revision_count": len(ledger_view.get("active_revisions") or []),
+                    "baseline_ast_revision": baseline_revision,
+                    "decision_count": len(decision_set["decisions"]),
+                }
+            else:
+                decision_set = resolve(candidates, {"revision": source_ast["revision"]})
             native_run = self._execute_native_stage_chain(
                 request,
                 facts,
@@ -1053,6 +1132,7 @@ class ConversionKernel:
                     "status": "failed",
                     "source_ast_revision": source_ast["revision"],
                     "decision_set": decision_set,
+                    "decision_ledger_replay": ledger_replay,
                     "execution_plan": {
                         "profile": "wx_full_rules-native-v2",
                         "modules": self._native_execution_plan_report(execution_plan),
@@ -1132,6 +1212,7 @@ class ConversionKernel:
                     "source_facts_digest_after": source_facts_digest_after,
                     "source_facts_immutable": source_facts_immutable,
                     "decision_set": decision_set,
+                    "decision_ledger_replay": ledger_replay,
                     "model_audit": model_findings,
                     "saved_output_audit": saved_findings,
                     "appendix_semantics": appendix_semantics,
@@ -1244,6 +1325,7 @@ class ConversionKernel:
                     "presentation_overrides": snapshot.presentation_overrides,
                 },
                 "decision_set": decision_set,
+                "decision_ledger_replay": ledger_replay,
                 "execution_plan": {
                     "profile": "wx_full_rules-native-v2",
                     "modules": self._native_execution_plan_report(execution_plan),
@@ -1273,6 +1355,36 @@ class ConversionKernel:
                 report_path.parent.mkdir(parents=True, exist_ok=True)
                 report_path.write_text(json.dumps(result.as_report(), ensure_ascii=False, indent=2), encoding="utf-8")
             return result
+        except TransactionConflict as exc:
+            supplied_ledger = options.get("decision_ledger")
+            if supplied_ledger is not None:
+                revision_ids = [
+                    str(revision.get("revision_id"))
+                    for revision in supplied_ledger.get("revisions", [])
+                    if isinstance(revision, Mapping) and revision.get("status") == "active"
+                ]
+                replay_diagnostic = {
+                    "code": "ledger_transaction_conflict",
+                    "severity": "error",
+                    "message": str(exc),
+                    "revision_ids": revision_ids,
+                }
+                report.update({
+                    "status": "failed",
+                    "decision_ledger_replay": {
+                        **(ledger_replay or {"enabled": True}),
+                        "error_code": replay_diagnostic["code"],
+                        "diagnostics": [replay_diagnostic],
+                    },
+                })
+                return RunResult(status="failed", exit_code=1, report=report, diagnostics=[replay_diagnostic], metrics=metrics.snapshot())
+            return RunResult(
+                status="failed",
+                exit_code=1,
+                report={**report, "status": "failed"},
+                diagnostics=[{"code": "MODULAR_NATIVE_TRANSACTION_CONFLICT", "message": str(exc), "type": type(exc).__name__}],
+                metrics=metrics.snapshot(),
+            )
         except Exception as exc:
             return RunResult(
                 status="failed",

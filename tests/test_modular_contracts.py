@@ -248,6 +248,8 @@ def _valid_checkpoint() -> dict:
         "modules": [{"id": "document-structure", "version": "1.0.0"}],
         "requests": [],
         "responses": [],
+        "applied_transactions": [],
+        "transaction_content_digests": {},
         "budget": {"limit": 3, "consumed": 1, "waiting_seconds": 12.5},
         "round": 0,
         "candidate_baseline_id": "baseline-1",

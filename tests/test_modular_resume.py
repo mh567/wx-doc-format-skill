@@ -16,6 +16,7 @@ from test_modular_contracts import _valid_checkpoint
 from wxdf.run_store import (
     CheckpointError,
     apply_response,
+    complete_pending_response,
     load_checkpoint,
     record_response,
     save_checkpoint,
@@ -52,11 +53,16 @@ def test_checkpoint_status_transitions_and_round_trip_preserve_full_snapshot(tmp
         expected_fingerprints=checkpoint["resource_summary"]["fingerprints"],
         expected_contracts=checkpoint["contracts"],
     )
-    assert restored == waiting
+    expected = copy.deepcopy(waiting)
+    expected["applied_transactions"] = []
+    expected["transaction_content_digests"] = {}
+    assert restored == expected
     assert restored["source_facts"]
     assert restored["decision_ledger"]
     assert restored["source_ast"]
     assert restored["target_map"]
+    assert restored["applied_transactions"] == []
+    assert restored["transaction_content_digests"] == {}
     assert restored["budget"] == checkpoint["budget"]
 
     with pytest.raises(CheckpointError, match="invalid status transition"):
@@ -83,7 +89,13 @@ def test_fingerprint_or_contract_drift_blocks_restore(tmp_path: Path) -> None:
 
 def test_response_persistence_is_idempotent_and_conflicts_on_different_content() -> None:
     checkpoint = _checkpoint()
-    response = {"request_id": "role-0000", "raw_response": {"decision": "keep"}, "input_hash": "sha256:" + "a" * 64}
+    response = {
+        "request_id": "role-0000",
+        "raw_response": {"decision": "keep"},
+        "input_hash": "sha256:" + "a" * 64,
+        "transaction_id": "response-tx",
+        "transaction_content_sha256": "sha256:" + "f" * 64,
+    }
 
     first, state = record_response(checkpoint, response)
     second, repeated = record_response(first, copy.deepcopy(response))
@@ -100,8 +112,16 @@ def test_response_persistence_is_idempotent_and_conflicts_on_different_content()
 def test_response_is_saved_before_apply_and_crash_leaves_pending_response(tmp_path: Path) -> None:
     path = tmp_path / "run.json"
     checkpoint = _checkpoint()
+    checkpoint["applied_transactions"] = [{"transaction_id": "response-tx", "content_sha256": "sha256:" + "f" * 64}]
+    checkpoint["transaction_content_digests"] = {"response-tx": "sha256:" + "f" * 64}
     save_checkpoint(checkpoint, path)
-    response = {"request_id": "role-0000", "raw_response": {"decision": "keep"}, "input_hash": "sha256:" + "a" * 64}
+    response = {
+        "request_id": "role-0000",
+        "raw_response": {"decision": "keep"},
+        "input_hash": "sha256:" + "a" * 64,
+        "transaction_id": "response-tx",
+        "transaction_content_sha256": "sha256:" + "f" * 64,
+    }
     observed: list[dict] = []
 
     def fail_after_persist(saved: dict, _response: dict) -> dict:
@@ -115,14 +135,38 @@ def test_response_is_saved_before_apply_and_crash_leaves_pending_response(tmp_pa
     assert pending["responses"][0]["request_id"] == "role-0000"
     assert pending["responses"][0]["applied"] is False
 
-    def commit(saved: dict, _response: dict) -> dict:
-        saved["status"] = "completed"
-        saved["resume_stage"] = None
-        return saved
-
-    applied = apply_response(pending, response, apply=commit, path=path)
-    assert applied["responses"][0]["applied"] is True
-    assert load_checkpoint(path)["status"] == "completed"
+    with pytest.raises(CheckpointError, match="application is pending") as caught:
+        apply_response(pending, response, apply=lambda saved, _response: saved, path=path)
+    assert caught.value.code == "response_application_pending"
+    with pytest.raises(CheckpointError, match="not bound"):
+        complete_pending_response(pending, "role-0000", transaction_id="other-tx", completed_checkpoint=pending)
+    replacement = copy.deepcopy(pending)
+    replacement["run_id"] = "other-run"
+    with pytest.raises(CheckpointError, match="identity") as identity_error:
+        complete_pending_response(pending, "role-0000", transaction_id="response-tx", completed_checkpoint=replacement)
+    assert identity_error.value.code == "checkpoint_identity_mismatch"
+    replacement = copy.deepcopy(pending)
+    replacement["responses"][0]["raw_response"] = {"decision": "changed"}
+    with pytest.raises(CheckpointError, match="completed response") as response_error:
+        complete_pending_response(pending, "role-0000", transaction_id="response-tx", completed_checkpoint=replacement)
+    assert response_error.value.code == "response_identity_mismatch"
+    applied_without_transaction = copy.deepcopy(pending)
+    applied_without_transaction["responses"][0]["applied"] = True
+    applied_without_transaction["responses"][0]["apply_started"] = False
+    applied_without_transaction["applied_transactions"] = [{"transaction_id": "other-tx", "content_sha256": "sha256:" + "f" * 64}]
+    applied_without_transaction["transaction_content_digests"] = {"other-tx": "sha256:" + "f" * 64}
+    with pytest.raises(CheckpointError, match="not recorded") as applied_error:
+        complete_pending_response(pending, "role-0000", transaction_id="response-tx", completed_checkpoint=applied_without_transaction)
+    assert applied_error.value.code == "transaction_state_missing"
+    completed = complete_pending_response(
+        pending,
+        "role-0000",
+        transaction_id="response-tx",
+        completed_checkpoint=pending,
+        path=path,
+    )
+    assert completed["responses"][0]["applied"] is True
+    assert load_checkpoint(path)["responses"][0]["applied"] is True
 
 
 def test_atomic_checkpoint_write_keeps_previous_commit_on_precommit_failure(tmp_path: Path) -> None:

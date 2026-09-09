@@ -134,6 +134,7 @@ def _decision_from_revision(revision: Mapping[str, Any], expected_revision: int)
             "preconditions": list(revision.get("preconditions") or decision.get("preconditions") or []),
             "evidence": list(revision.get("evidence") or []),
             "invalidates": list(decision.get("invalidates") or []),
+            "transaction_id": revision.get("transaction_id"),
         }
     )
     return decision
@@ -172,7 +173,10 @@ def resolve(
             if len({_canonical(item.get("decision") or {}) for item in ledger_matches}) > 1:
                 unresolved.append({"code": "ledger_conflict", "candidate_ids": [], "revision_ids": sorted(str(item.get("revision_id")) for item in ledger_matches)})
                 continue
-            decisions.append(_decision_from_revision(sorted(ledger_matches, key=lambda item: str(item.get("revision_id")))[0], expected_revision))
+            decision = _decision_from_revision(sorted(ledger_matches, key=lambda item: str(item.get("revision_id")))[0], expected_revision)
+            decision["candidate_ids"] = sorted(str(item.get("candidate_id")) for item in candidates)
+            decision["candidate_id"] = decision["candidate_ids"][0] if decision["candidate_ids"] else None
+            decisions.append(decision)
             continue
 
         by_proposal: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
@@ -198,7 +202,8 @@ def resolve(
     transaction_payload = {"revision": expected_revision, "decisions": decisions, "unresolved": unresolved}
     transaction_id = "decision-set-" + hashlib.sha256(_canonical(transaction_payload).encode("utf-8")).hexdigest()[:20]
     for decision in decisions:
-        decision["transaction_id"] = transaction_id
+        if not decision.get("transaction_id"):
+            decision["transaction_id"] = transaction_id
     return {
         "decision_set_version": "2.0",
         "transaction_id": transaction_id,
