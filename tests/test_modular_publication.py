@@ -27,6 +27,7 @@ ACCEPTED = {
     "semantic_changed": True,
     "presentation_changed": False,
 }
+MISSING = object()
 
 
 def test_publication_writes_manifest_and_commit_marker(tmp_path: Path) -> None:
@@ -69,6 +70,8 @@ def test_publication_failure_does_not_report_completed_and_recovery_is_explicit(
 @pytest.mark.parametrize("reserved_name", [
     "manifest.json", "COMMITTED", "Manifest.JSON", "committed",
     "MANIFEST.JSON/item", "committed/item", "nested/CoMmItTeD",
+    "COMMITTED.", "COMMITTED ", "manifest.json ", "Manifest.JSON. ",
+    "COMMITTED./item", "manifest.json /item", "nested/CoMmItTeD. ",
 ])
 def test_publication_rejects_reserved_bundle_artifact_names(
     tmp_path: Path,
@@ -94,6 +97,12 @@ def test_publication_rejects_reserved_bundle_artifact_names(
     ("item", "ITEM"),
     ("caf\N{LATIN SMALL LETTER E WITH ACUTE}", "cafe\N{COMBINING ACUTE ACCENT}"),
     ("item", "ITEM/child"),
+    ("item", "item."),
+    ("item", "item "),
+    ("item.", "ITEM/child"),
+    ("item", "ITEM. /child"),
+    ("nested/item", "NESTED. /item. "),
+    ("caf\N{LATIN SMALL LETTER E WITH ACUTE}", "CAFE\N{COMBINING ACUTE ACCENT}. "),
     ("/absolute",),
     ("../outside",),
     ("nested/../item",),
@@ -104,6 +113,9 @@ def test_publication_rejects_reserved_bundle_artifact_names(
     ("nested/./item",),
     ("C:/absolute",),
     ("nested\\item",),
+    ("...",),
+    (" . ",),
+    ("nested/ . /item",),
 ])
 def test_bundle_rejects_noncanonical_or_colliding_logical_names_before_mutation(
     tmp_path: Path,
@@ -140,6 +152,40 @@ def test_bundle_preserves_canonical_nested_names(tmp_path: Path) -> None:
     assert recover_publication(destination)["status"] == "completed"
 
 
+@pytest.mark.parametrize("names", [
+    ("COMMITTED.",),
+    ("manifest.json ",),
+    ("nested/COMMITTED. /item",),
+    ("item", "item."),
+    ("item", "item "),
+    ("item", "ITEM. /child"),
+])
+def test_bundle_recovery_rejects_win32_control_and_logical_aliases(
+    tmp_path: Path,
+    names: tuple[str, ...],
+) -> None:
+    artifact = tmp_path / "candidate.bin"
+    artifact.write_bytes(b"candidate")
+    destination = tmp_path / "published"
+    publish_bundle({"payload": artifact}, destination, acceptance=ACCEPTED)
+    manifest_path = destination / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    record = manifest["files"]["payload"]
+    manifest["files"] = {}
+    for name in names:
+        manifest["files"][name] = dict(record, path=name)
+        target = destination / name
+        # Some volumes cannot materialize a file and its aliased parent.
+        # The manifest still contains the conflicting records to reject.
+        if target.parent.is_file():
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"candidate")
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    assert recover_publication(destination)["status"] == "incomplete"
+
+
 def test_publication_recovery_requires_marker_to_match_manifest_run_id(tmp_path: Path) -> None:
     artifact = tmp_path / "candidate.docx"
     artifact.write_bytes(b"candidate")
@@ -156,6 +202,74 @@ def test_publication_recovery_requires_marker_to_match_manifest_run_id(tmp_path:
 
     assert recovered["status"] == "incomplete"
     assert recovered["reason"] == "marker_mismatch"
+
+
+@pytest.mark.parametrize("field,value", [
+    ("schema_version", MISSING),
+    ("schema_version", None),
+    ("schema_version", "99.0"),
+    ("schema_version", 1.0),
+    ("schema_version", {}),
+    ("schema_version", []),
+    ("status", MISSING),
+    ("status", None),
+    ("status", "staging"),
+    ("status", True),
+    ("status", {}),
+    ("acceptance", MISSING),
+    ("acceptance", None),
+    ("acceptance", []),
+    ("acceptance", True),
+    ("acceptance", {}),
+    ("acceptance", {"accepted": False}),
+    ("acceptance", {"accepted": 1}),
+    ("acceptance", {"accepted": "true"}),
+    ("size", MISSING),
+    ("size", None),
+    ("size", -1),
+    ("size", 2),
+    ("size", True),
+    ("size", 1.0),
+    ("size", "1"),
+    ("size", {}),
+    ("size", []),
+])
+def test_bundle_recovery_requires_strict_completion_proof(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    artifact = tmp_path / "candidate.bin"
+    artifact.write_bytes(b"x")
+    destination = tmp_path / "published"
+    publish_bundle({"item": artifact}, destination, run_id="proof-run", acceptance=ACCEPTED)
+    manifest_path = destination / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    record = manifest["files"]["item"] if field == "size" else manifest
+    if value is MISSING:
+        record.pop(field)
+    else:
+        record[field] = value
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    assert recover_publication(destination)["status"] == "incomplete"
+    assert (destination / "item").read_bytes() == b"x"
+
+
+@pytest.mark.parametrize("payload", [b"", b"x"])
+def test_bundle_completion_proof_accepts_exact_nonnegative_integer_sizes(
+    tmp_path: Path,
+    payload: bytes,
+) -> None:
+    artifact = tmp_path / "candidate.bin"
+    artifact.write_bytes(payload)
+    destination = tmp_path / "published"
+    publish_bundle({"item": artifact}, destination, acceptance=ACCEPTED)
+
+    recovered = recover_publication(destination)
+
+    assert recovered["status"] == "completed"
+    assert recovered["manifest"]["files"]["item"]["size"] == len(payload)
 
 
 @pytest.mark.parametrize("tampering", [
@@ -400,6 +514,99 @@ def test_canonical_duplicate_targets_fail_before_recovery_or_replacement(
     assert not list(tmp_path.glob(".*.staging-*"))
 
 
+@pytest.mark.parametrize("failure_boundary", ["replace", "rollback"])
+@pytest.mark.parametrize("with_untrusted_journal", [False, True])
+def test_samefile_targets_fail_before_staging_recovery_or_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_boundary: str,
+    with_untrusted_journal: bool,
+) -> None:
+    from wxdf import publication
+
+    formal = tmp_path / "formal.docx"
+    formal.write_bytes(b"old-formal")
+    alias = tmp_path / "FORMAL.DOCX"
+    # Exercise the actual case alias on insensitive volumes and the same
+    # physical-file boundary through a hard link on sensitive volumes.
+    if not alias.exists():
+        alias.hardlink_to(formal)
+    if str(formal.resolve()) == str(alias.resolve()):
+        alias = tmp_path / "linked.docx"
+        alias.hardlink_to(formal)
+    assert formal.samefile(alias)
+    assert str(formal.resolve()) != str(alias.resolve())
+    poison = tmp_path / (".wxdf-publication-" + "e" * 32 + ".journal")
+    if with_untrusted_journal:
+        poison.write_text("untrusted journal", encoding="utf-8")
+    replace_attempts: list[tuple[Path, Path]] = []
+    real_replace = publication.os.replace
+
+    def fail_replace(source, target):
+        source, target = Path(source), Path(target)
+        replace_attempts.append((source, target))
+        if ".staging-" in source.name and target == alias:
+            raise OSError("injected replace failure")
+        if failure_boundary == "rollback" and ".rollback-" in source.name:
+            raise OSError("injected rollback failure")
+        real_replace(source, target)
+
+    monkeypatch.setattr(publication.os, "replace", fail_replace)
+
+    with pytest.raises(PublicationError, match="targets must be unique"):
+        publish_files_atomically({formal: b"new-first", alias: b"new-alias"})
+
+    assert formal.read_bytes() == alias.read_bytes() == b"old-formal"
+    assert replace_attempts == []
+    assert not list(tmp_path.glob(".*.staging-*"))
+    assert not list(tmp_path.glob(".*.rollback-*"))
+    journals = list(tmp_path.glob(".wxdf-publication-*.journal"))
+    assert journals == ([poison] if with_untrusted_journal else [])
+    if with_untrusted_journal:
+        assert poison.read_text(encoding="utf-8") == "untrusted journal"
+
+
+@pytest.mark.parametrize("layout", ["flat", "missing_parent", "existing_parent_alias"])
+@pytest.mark.parametrize("names", [
+    ("formal.docx", "FORMAL.DOCX"),
+    ("stra\N{LATIN SMALL LETTER SHARP S}e.docx", "strasse.docx"),
+    ("first.docx", "second.docx"),
+])
+def test_missing_generation_targets_follow_actual_filesystem_identity(
+    tmp_path: Path,
+    layout: str,
+    names: tuple[str, str],
+) -> None:
+    probe = tmp_path / names[0]
+    probe.write_bytes(b"identity-probe")
+    alias_probe = tmp_path / names[1]
+    aliases = alias_probe.exists() and probe.samefile(alias_probe)
+    probe.unlink()
+    if layout == "flat":
+        formal, alias = (tmp_path / name for name in names)
+    elif layout == "missing_parent":
+        formal, alias = (tmp_path / name / "item" for name in names)
+    else:
+        parent = tmp_path / names[0]
+        parent.mkdir()
+        formal, alias = (tmp_path / name / "item" for name in names)
+
+    if aliases:
+        with pytest.raises(PublicationError, match="targets must be unique"):
+            publish_files_atomically({str(formal): b"new-first", str(alias): b"new-alias"})
+        assert not formal.exists()
+        assert not alias.exists()
+    else:
+        publish_files_atomically({str(formal): b"new-first", str(alias): b"new-alias"})
+        assert formal.read_bytes() == b"new-first"
+        assert alias.read_bytes() == b"new-alias"
+        assert not formal.samefile(alias)
+    assert not list(tmp_path.rglob(".*.staging-*"))
+    assert not list(tmp_path.rglob(".*.rollback-*"))
+    assert not list(tmp_path.rglob(".wxdf-publication-*.journal"))
+    assert not list(tmp_path.rglob(".wxdf-identity-*"))
+
+
 def test_recovery_rejects_duplicate_journal_targets_before_mutation(tmp_path: Path) -> None:
     formal = tmp_path / "formal.docx"
     formal.write_bytes(b"old-formal")
@@ -427,6 +634,45 @@ def test_recovery_rejects_duplicate_journal_targets_before_mutation(tmp_path: Pa
     assert formal.read_bytes() == b"old-formal"
     assert backup.read_bytes() == b"untrusted-backup"
     assert journal_path.exists()
+
+
+def test_recovery_rejects_samefile_journal_targets_before_mutation(tmp_path: Path) -> None:
+    formal = tmp_path / "formal.docx"
+    formal.write_bytes(b"old-formal")
+    alias = tmp_path / "FORMAL.DOCX"
+    if not alias.exists():
+        alias.hardlink_to(formal)
+    if str(formal.resolve()) == str(alias.resolve()):
+        alias = tmp_path / "linked.docx"
+        alias.hardlink_to(formal)
+    assert formal.samefile(alias)
+    transaction_id = "c" * 32
+    entries = []
+    for target in (formal, alias):
+        backup = tmp_path / f".{target.name}.rollback-{transaction_id}"
+        backup.write_bytes(b"untrusted-backup")
+        entries.append({
+            "target": str(target),
+            "staged": str(tmp_path / f".{target.name}.staging-{transaction_id}"),
+            "backup": str(backup),
+            "had_original": True,
+        })
+    journal_path = tmp_path / f".wxdf-publication-{transaction_id}.journal"
+    journal_bytes = json.dumps({
+        "schema_version": "1.0",
+        "transaction_id": transaction_id,
+        "state": "prepared",
+        "entries": entries,
+        "journal_paths": [str(journal_path)],
+    }).encode("utf-8")
+    journal_path.write_bytes(journal_bytes)
+
+    with pytest.raises(PublicationError, match="targets must be unique"):
+        recover_pending_publications([formal, alias])
+
+    assert formal.read_bytes() == alias.read_bytes() == b"old-formal"
+    assert journal_path.read_bytes() == journal_bytes
+    assert all(Path(entry["backup"]).read_bytes() == b"untrusted-backup" for entry in entries)
 
 
 @pytest.mark.parametrize("symlink_field", ["staged", "backup"])

@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import tempfile
 import unicodedata
 import uuid
 from pathlib import Path
@@ -19,6 +20,7 @@ class PublicationError(RuntimeError):
 
 _JOURNAL_SCHEMA_VERSION = "1.0"
 _JOURNAL_PATTERN = ".wxdf-publication-*.journal"
+_BUNDLE_SCHEMA_VERSION = "1.0"
 _RESERVED_BUNDLE_NAMES = {"manifest.json", "committed"}
 _TRANSACTION_ID_PATTERN = re.compile(r"[0-9a-f]{32}")
 
@@ -35,6 +37,48 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _validate_unique_targets(targets: Iterable[Path]) -> None:
+    paths: set[str] = set()
+    files: set[tuple[int, int]] = set()
+    missing: dict[tuple[int, int], tuple[Path, list[tuple[str, ...]]]] = {}
+    for target in targets:
+        if str(target) in paths:
+            raise PublicationError("publication targets must be unique")
+        paths.add(str(target))
+        try:
+            metadata = target.stat()
+        except FileNotFoundError:
+            parent = target.parent
+            parts = [target.name]
+            while True:
+                try:
+                    metadata = parent.stat()
+                    break
+                except FileNotFoundError:
+                    parts.insert(0, parent.name)
+                    parent = parent.parent
+            identity = (metadata.st_dev, metadata.st_ino)
+            missing.setdefault(identity, (parent, []))[1].append(tuple(parts))
+            continue
+        identity = (metadata.st_dev, metadata.st_ino)
+        if identity in files:
+            raise PublicationError("publication targets must be unique")
+        files.add(identity)
+    for parent, relative_paths in missing.values():
+        if len(relative_paths) < 2:
+            continue
+        # Resolve absent-name aliases using this directory's filesystem rules.
+        # Only empty private probes exist here, before payload staging or recovery.
+        with tempfile.TemporaryDirectory(prefix=".wxdf-identity-", dir=parent) as directory:
+            for parts in relative_paths:
+                probe = Path(directory).joinpath(*parts)
+                probe.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    probe.touch(exist_ok=False)
+                except FileExistsError as exc:
+                    raise PublicationError("publication targets must be unique") from exc
+
+
 def _bundle_artifact_paths(names: Iterable[str]) -> dict[str, Path]:
     paths: dict[str, Path] = {}
     identities: set[tuple[str, ...]] = set()
@@ -44,7 +88,12 @@ def _bundle_artifact_paths(names: Iterable[str]) -> dict[str, Path]:
         parts = name.split("/")
         if any(part in {"", ".", ".."} for part in parts):
             raise PublicationError(f"invalid artifact name: {name}")
-        identity = tuple(unicodedata.normalize("NFC", part).casefold() for part in parts)
+        identity = tuple(
+            unicodedata.normalize("NFC", part).casefold().rstrip(" .")
+            for part in parts
+        )
+        if any(not part for part in identity):
+            raise PublicationError(f"invalid artifact name: {name}")
         if any(part in _RESERVED_BUNDLE_NAMES for part in identity):
             raise PublicationError(f"reserved artifact name: {name}")
         if any(
@@ -145,6 +194,7 @@ def _validate_journal_paths(
             "had_original": raw_entry.get("had_original") is True,
         })
         entry_roots.add(target.parent)
+    _validate_unique_targets(Path(entry["target"]) for entry in entries)
     expected_journal_paths = [
         root / expected_name
         for root in sorted(entry_roots, key=str)
@@ -271,8 +321,7 @@ def _commit_staged_paths(
     crash_at: str | None = None,
 ) -> None:
     targets = [target.resolve() for target in staged]
-    if len(targets) != len(set(targets)):
-        raise PublicationError("publication targets must be unique")
+    _validate_unique_targets(targets)
     entries = [
         {
             "target": str(target.resolve()),
@@ -342,8 +391,7 @@ def publish_files_atomically(
     targets = [Path(value).resolve() for value in payloads]
     if not targets:
         raise PublicationError("publication requires at least one target")
-    if len(targets) != len(set(targets)):
-        raise PublicationError("publication targets must be unique")
+    _validate_unique_targets(targets)
     recover_pending_publications(targets)
     transaction_id = uuid.uuid4().hex
     staged: dict[Path, Path] = {}
@@ -383,7 +431,7 @@ def publish_bundle(
     transaction_id = uuid.uuid4().hex
     staging = destination.parent / f".{destination.name}.staging-{transaction_id}"
     manifest: dict[str, Any] = {
-        "schema_version": "1.0",
+        "schema_version": _BUNDLE_SCHEMA_VERSION,
         "run_id": run_id,
         "status": "staging",
         "acceptance": acceptance_record,
@@ -435,8 +483,14 @@ def recover_publication(destination: Path | str) -> dict[str, Any]:
         marker_run_id = marker.read_text(encoding="utf-8")
     except (OSError, ValueError, RuntimeError):
         return {"status": "incomplete", "destination": str(destination)}
-    if not isinstance(manifest, Mapping):
-        return {"status": "incomplete", "destination": str(destination)}
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("schema_version") != _BUNDLE_SCHEMA_VERSION
+        or manifest.get("status") != "completed"
+        or not isinstance(manifest.get("acceptance"), dict)
+        or manifest["acceptance"].get("accepted") is not True
+    ):
+        return {"status": "incomplete", "destination": str(destination), "reason": "manifest_mismatch"}
     if marker_run_id != manifest.get("run_id"):
         return {
             "status": "incomplete",
@@ -452,10 +506,16 @@ def recover_publication(destination: Path | str) -> dict[str, Any]:
             item = files[name]
             if not isinstance(item, Mapping) or item.get("path") != name:
                 raise PublicationError("artifact path does not match its logical name")
+            size = item.get("size")
+            if type(size) is not int or size < 0:
+                raise PublicationError("invalid artifact size")
             path = root / relative
             if path.resolve() != path or not path.is_file():
                 raise PublicationError("artifact path escapes its bundle location")
-            if _sha256(path) != item.get("sha256"):
+            content = path.read_bytes()
+            if len(content) != size:
+                raise PublicationError("artifact size mismatch")
+            if hashlib.sha256(content).hexdigest() != item.get("sha256"):
                 raise PublicationError("artifact digest mismatch")
     except (PublicationError, OSError, ValueError, RuntimeError):
         return {"status": "incomplete", "destination": str(destination), "reason": "artifact_mismatch"}
