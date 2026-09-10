@@ -761,8 +761,9 @@ def validate_checkpoint(checkpoint: Mapping[str, Any]) -> None:
             expected_presentation = _canonical_digest(normalized["presentation"])
             if normalized["presentation_digest"] != expected_presentation:
                 _fail("digest_mismatch", "normalized_ast.presentation_digest", "normalized presentation digest does not match its snapshot", contract)
-    for field in ("content_overlay", "presentation_override", "modules", "requests", "responses"):
+    for field in ("content_overlay", "presentation_override", "modules", "requests"):
         _list(checkpoint[field], field, contract)
+    responses = _list(checkpoint["responses"], "responses", contract)
     applied_transactions = _list(checkpoint["applied_transactions"], "applied_transactions", contract)
     applied_digests: dict[str, str] = {}
     for index, transaction in enumerate(applied_transactions):
@@ -780,6 +781,55 @@ def validate_checkpoint(checkpoint: Mapping[str, Any]) -> None:
         _sha256(digest, f"transaction_content_digests.{transaction_id}", contract)
     if applied_digests != dict(digests):
         _fail("transaction_state_mismatch", "applied_transactions", "transaction IDs and content digests must match exactly", contract)
+    configuration = checkpoint.get("configuration")
+    native_file_checkpoint = (
+        checkpoint.get("profile") == "wx_full_rules-native-v2"
+        or isinstance(configuration, Mapping)
+        and configuration.get("modular_profile") == "native-v2"
+    )
+    if native_file_checkpoint and status in {"waiting_external", "completed", "completed_with_warnings"}:
+        for index, response in enumerate(responses):
+            response_path = f"responses[{index}]"
+            response = _mapping(response, response_path, contract)
+            applied = response.get("applied")
+            apply_started = response.get("apply_started", False)
+            transaction_id = response.get("transaction_id")
+            transaction_digest = response.get("transaction_content_sha256")
+            if status == "waiting_external":
+                if applied is not False or apply_started is not False:
+                    _fail(
+                        "response_application_state_mismatch",
+                        response_path,
+                        "waiting response must remain unapplied",
+                        contract,
+                    )
+                if transaction_id is not None or transaction_digest is not None:
+                    _fail(
+                        "response_application_state_mismatch",
+                        response_path,
+                        "waiting response cannot carry transaction application metadata",
+                        contract,
+                    )
+                continue
+            if applied is not True or response.get("apply_started") is not False:
+                _fail(
+                    "response_application_state_mismatch",
+                    response_path,
+                    "completed response must be applied and have no application in progress",
+                    contract,
+                )
+            if (
+                not isinstance(transaction_id, str)
+                or not transaction_id
+                or not isinstance(transaction_digest, str)
+                or applied_digests.get(transaction_id) != transaction_digest
+            ):
+                _fail(
+                    "response_application_state_mismatch",
+                    response_path,
+                    "completed response transaction binding does not match checkpoint transactions",
+                    contract,
+                )
     target_map = _mapping(checkpoint["target_map"], "target_map", contract)
     _require_fields(target_map, ("revision", "entries", "view_sha256"), "target_map", contract)
     _non_negative_int(target_map["revision"], "target_map.revision", contract)

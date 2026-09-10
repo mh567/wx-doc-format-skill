@@ -366,6 +366,48 @@ def test_native_resume_rejects_tampered_stored_response_digest_before_replay(
     assert (output.read_bytes() if output.exists() else None) == output_bytes
 
 
+@pytest.mark.parametrize("checkpoint_status", ["waiting", "completed"])
+@pytest.mark.parametrize(
+    "application_field",
+    ["applied", "apply_started", "transaction_id", "transaction_content_sha256"],
+)
+def test_native_resume_rejects_tampered_response_application_state_before_replay(
+    tmp_path: Path,
+    checkpoint_status: str,
+    application_field: str,
+) -> None:
+    mode = "force-ab" if checkpoint_status == "waiting" else "force-a"
+    checkpoint_path, output, _source_ast_path = _generate(tmp_path, mode=mode)
+    request = _read_requests(checkpoint_path)[0]
+    _write_responses(checkpoint_path, [_response(request)])
+    first = _run("--resume", checkpoint_path)
+    assert first.returncode == 0, first.stderr
+    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    assert checkpoint["status"] == ("waiting_external" if checkpoint_status == "waiting" else "completed")
+    response = checkpoint["responses"][0]
+    if application_field == "applied":
+        response["applied"] = not response["applied"]
+    elif application_field == "apply_started":
+        response["apply_started"] = True
+    elif application_field == "transaction_id":
+        response["transaction_id"] = "forged-transaction"
+    else:
+        response["transaction_content_sha256"] = "sha256:" + "9" * 64
+    checkpoint_path.write_text(
+        json.dumps(checkpoint, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    checkpoint_bytes = checkpoint_path.read_bytes()
+    output_bytes = output.read_bytes() if output.exists() else None
+
+    resumed = _run("--resume", checkpoint_path)
+
+    assert resumed.returncode != 0
+    assert "response_application_state_mismatch" in resumed.stderr
+    assert checkpoint_path.read_bytes() == checkpoint_bytes
+    assert (output.read_bytes() if output.exists() else None) == output_bytes
+
+
 def test_native_resume_rejects_unsupported_checkpoint_stage(tmp_path: Path) -> None:
     checkpoint_path, output, _source_ast_path = _generate(tmp_path)
     request = _read_requests(checkpoint_path)[0]
@@ -383,6 +425,35 @@ def test_native_resume_rejects_unsupported_checkpoint_stage(tmp_path: Path) -> N
     assert resumed.returncode != 0
     assert "unsupported_resume_stage" in resumed.stderr
     assert checkpoint_path.read_bytes() == before
+    assert not output.exists()
+
+
+def test_native_resume_rejects_live_candidate_drift_before_recording(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from wxdf import builtin_modules
+
+    checkpoint_path, output, _source_ast_path = _generate(tmp_path)
+    request = _read_requests(checkpoint_path)[0]
+    _write_responses(checkpoint_path, [_response(request)])
+    before = checkpoint_path.read_bytes()
+
+    original_builder = builtin_modules.build_native_candidate_baseline
+
+    def drifted_candidates(*args, **kwargs):
+        return [
+            *original_builder(*args, **kwargs),
+            {"candidate_id": "simulated-live-candidate-drift"},
+        ]
+
+    monkeypatch.setattr(builtin_modules, "build_native_candidate_baseline", drifted_candidates)
+    result = _direct_resume_after_prepare(checkpoint_path, monkeypatch, lambda: None)
+
+    assert result.exit_code != 0
+    assert any(item.get("code") == "candidate_baseline_mismatch" for item in result.diagnostics)
+    assert checkpoint_path.read_bytes() == before
+    assert json.loads(before)["responses"] == []
     assert not output.exists()
 
 

@@ -262,3 +262,46 @@ Before the two final self review cases were added, all modular tests excluding t
 6. `tests/test_modular_file_protocol.py`
 
 The protected test, status file, and `AGENTS.md` remain unchanged. The worktree only `input` and `scripts/.venv` symlinks remain untracked.
+
+## Independent review fix round 3
+
+### Failure first evidence
+
+1. Eight CLI resume cases changed `applied`, `apply_started`, `transaction_id`, or `transaction_content_sha256` in waiting and completed checkpoints. All eight initially resumed successfully, so the focused RED was `8 failed, 35 deselected`.
+2. A live candidate drift test injected an additional deterministic built in candidate during resume. The existing late check returned `candidate_baseline_mismatch` only after recording the external response, so the RED was `1 failed, 43 deselected` with changed checkpoint bytes.
+
+### Fixes
+
+1. Checkpoint validation now identifies native v2 file checkpoints from their profile or effective configuration and validates every response application state against the checkpoint status.
+2. Waiting responses must remain unapplied, cannot have an application in progress, and cannot carry transaction application metadata. Completed responses must be applied, must have `apply_started=false`, and must bind to the exact transaction digest present in both checkpoint transaction collections.
+3. `run_store.py` preserves `response_application_state_mismatch` as a stable checkpoint error. The validation runs during initial load, before the completed shortcut, response map construction, or any checkpoint and output write.
+4. `build_native_candidate_baseline` reconstructs the deterministic scope, structure, protected content, list, appendix, table, and caption candidates from current SourceFacts and Source AST. Resume hashes this live set before reading or recording external responses and compares it to the saved candidate baseline.
+5. The existing run identity check and the later module boundary check remain defense in depth. The new live check establishes semantic candidate identity independently of `run_id`.
+
+### Verification
+
+```text
+Response application state RED: 8 failed, 35 deselected
+Response application state GREEN: 8 passed, 40 deselected
+Live candidate drift RED: 1 failed, 43 deselected
+Live candidate drift GREEN: 1 passed, 43 deselected
+Protocol, resume, and contract integration: 57 passed in 25.75s
+T04 focused and related modules: 99 passed in 43.96s
+Frozen T00 through T04: 7 passed, 10 deselected in 5.96s
+Rendering, table, caption, and conversion regression: 45 passed in 8.69s
+All modular tests excluding the future performance helper: 197 passed in 54.12s
+Full regression excluding the future performance helper: 10 failed, 598 passed in 84.71s
+```
+
+The ten full regression failures remain the frozen T05 through T09 gates listed above. No implemented T00 through T04 behavior or other regression failed.
+
+### Fix round changed files
+
+1. `scripts/wxdf/run_store.py`
+2. `scripts/wxdf/validation.py`
+3. `scripts/wxdf/builtin_modules.py`
+4. `tests/test_modular_file_protocol.py`
+5. `.superpowers/sdd/README/T04-report.md`
+6. `docs/execution-v4/evidence/T04.md`
+
+This fix round created no Git commit. The protected test, status file, and `AGENTS.md` remain unchanged.

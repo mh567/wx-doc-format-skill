@@ -14,7 +14,7 @@ import os
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from .contracts import CHECKPOINT_STATUSES, STAGES
+from .contracts import CHECKPOINT_STATUSES, STAGES, ContractError
 from .validation import validate_checkpoint
 
 
@@ -373,6 +373,19 @@ def prepare_native_resume(
         raise CheckpointError("current SourceFacts do not match the checkpoint", code="fingerprint_mismatch")
     if checkpoint["status"] == "waiting_external":
         _validate_relation_resume_snapshot(checkpoint, current_source_facts)
+        from .builtin_modules import build_native_candidate_baseline
+
+        live_candidates = build_native_candidate_baseline(
+            source_path,
+            current_source_facts,
+            checkpoint["source_ast"],
+        )
+        live_baseline_id = candidate_baseline_digest(checkpoint["source_ast"], live_candidates)
+        if live_baseline_id != checkpoint["candidate_baseline_id"]:
+            raise CheckpointError(
+                "live native candidate baseline does not match the relation checkpoint",
+                code="candidate_baseline_mismatch",
+            )
     on_disk_requests = _read_json_lines(request_path, kind="request")
     if on_disk_requests != checkpoint["requests"]:
         raise CheckpointError("native request file does not match the checkpoint", code="request_identity_conflict")
@@ -581,6 +594,9 @@ def _path(value: Path | str) -> Path:
 def _validate_for_store(checkpoint: Mapping[str, Any]) -> None:
     try:
         validate_checkpoint(checkpoint)
+    except ContractError as exc:
+        code = exc.code if exc.code == "response_application_state_mismatch" else "invalid_checkpoint"
+        raise CheckpointError(f"checkpoint validation failed: {exc}", code=code) from exc
     except Exception as exc:
         raise CheckpointError(f"checkpoint validation failed: {exc}", code="invalid_checkpoint") from exc
 

@@ -715,6 +715,46 @@ def native_semantic_modules() -> tuple[RegisteredModule, ...]:
     )
 
 
+def build_native_candidate_baseline(
+    source_path: Path | str,
+    source_facts: Mapping[str, Any],
+    source_ast: Mapping[str, Any],
+) -> list[Mapping[str, Any]]:
+    """Rebuild the deterministic candidates bound to a native relation checkpoint."""
+
+    region_resolution = resolve_source_regions(source_path, source_facts)
+    list_result = analyze_lists(source_facts)
+    _materialized, list_candidates, _item_map = materialize_list_semantics(
+        source_ast,
+        source_facts,
+        list_result,
+    )
+    appendix_semantics = prepare_native_appendix_semantics(
+        source_facts,
+        source_ast,
+        collect_source_appendix_semantics(source_facts),
+        list_result,
+    )
+    return [
+        *region_resolution["candidates"],
+        *collect_structure_candidates(
+            source_facts,
+            region_resolution["regions"],
+            protect_semantics=True,
+        ),
+        *collect_protected_candidates(source_facts),
+        *list_candidates,
+        *collect_native_appendix_candidates(
+            source_facts,
+            source_ast,
+            appendix_semantics,
+            list_result,
+        ),
+        *collect_table_candidates(source_ast),
+        *collect_caption_candidates(source_ast),
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Native stage chain: source AST construction, CandidateSet aggregation,
 # resolution, transaction, normalization, rendering, auditing, publication.
@@ -1275,6 +1315,7 @@ __all__ = [
     "experimental_native_modules",
     "legacy_full_adapter_module",
     "list_semantics_module",
+    "build_native_candidate_baseline",
     "native_semantic_modules",
     "native_stage_executors",
     "semantic_equivalence_module",
