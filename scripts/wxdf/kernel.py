@@ -530,6 +530,17 @@ class ConversionKernel:
         return "docx" if input_path.suffix.lower() == ".docx" else "markdown"
 
     @staticmethod
+    def _native_checkpoint_modules(execution_plan: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "id": module.module_id,
+                "version": module.version,
+                "contract_version": module.contract_version,
+            }
+            for module in execution_plan.modules
+        ]
+
+    @staticmethod
     def _native_ledger_replay_report(context: Any) -> dict[str, Any] | None:
         """Complete the ledger replay record with the resolved decision count."""
 
@@ -547,18 +558,33 @@ class ConversionKernel:
     def _convert_modular_native_v2(self, request: ConversionRequest) -> RunResult:
         """Execute the registered native Module chain and collect its RunResult."""
 
-        options = request.options or {}
+        options = dict(request.options or {})
+        request = ConversionRequest(
+            input_path=request.input_path,
+            output_path=request.output_path,
+            template_path=request.template_path,
+            pipeline=request.pipeline,
+            list_policy=request.list_policy,
+            options=options,
+        )
         if not request.input_path.is_file():
             return RunResult(status="failed", exit_code=1, diagnostics=[{"code": "INPUT_NOT_FOUND", "message": str(request.input_path)}])
 
         from .builtin_modules import (
             LedgerReplayBlocked,
             ModuleExecutionContext,
+            NativeFileProtocolPause,
             UnresolvedDecisionError,
         )
         from .decision_ledger import LedgerError
         from .metrics import MetricsCollector
         from .registry import build_native_v2_registry
+        from .run_store import (
+            CheckpointError,
+            complete_native_checkpoint,
+            prepare_native_resume,
+            write_native_waiting_checkpoint,
+        )
         from .source_store import SourceStore
         from .transaction import TransactionConflict
 
@@ -575,7 +601,12 @@ class ConversionKernel:
             ],
         }
         enhancement_mode = str(options.get("llm_enhance") or "off")
-        if enhancement_mode != "off" and options.get("enhancement_call") is None:
+        protocol_mode = options.get("protocol_mode")
+        if (
+            enhancement_mode != "off"
+            and options.get("enhancement_call") is None
+            and protocol_mode not in {"generate_requests", "resume"}
+        ):
             diagnostic = {
                 "code": "NATIVE_ENHANCEMENT_ADAPTER_MISSING",
                 "severity": "error",
@@ -601,6 +632,7 @@ class ConversionKernel:
         staging_path = request.output_path.with_name(f".{request.output_path.name}.native-v2.staging")
         store = SourceStore()
         context: Any = None
+        checkpoint: dict[str, Any] | None = None
         try:
             registry = build_native_v2_registry()
             execution_plan = self._native_preflight(
@@ -609,6 +641,40 @@ class ConversionKernel:
                 request.list_policy,
                 registry=registry,
             )
+            if protocol_mode == "resume":
+                contracts = {
+                    "source_facts": "1.0",
+                    "ast": "2.0",
+                    "patch": "2.0",
+                    "checkpoint": "2.0",
+                }
+                checkpoint, ready, response_map = prepare_native_resume(
+                    options["checkpoint_path"],
+                    source_path=request.input_path,
+                    template_path=request.template_path,
+                    contracts=contracts,
+                    modules=self._native_checkpoint_modules(execution_plan),
+                )
+                if not ready:
+                    status = str(checkpoint["status"])
+                    return RunResult(
+                        status=status,
+                        exit_code=0,
+                        report={
+                            "pipeline": "modular",
+                            "profile": "wx_full_rules-native-v2",
+                            "status": status,
+                            "checkpoint": str(options["checkpoint_path"]),
+                        },
+                    )
+                def replay_response(payload: Mapping[str, Any]) -> Mapping[str, Any]:
+                    request_id = str(payload.get("request_id") or "")
+                    if request_id not in response_map:
+                        raise KeyError(f"no recorded response for {request_id}")
+                    return copy.deepcopy(response_map[request_id])
+
+                options["enhancement_call"] = replay_response
+                options["protocol_mode"] = None
             context = ModuleExecutionContext(
                 request=request,
                 services={
@@ -619,7 +685,57 @@ class ConversionKernel:
                 },
             )
             registry.execute(execution_plan, context)
-            return self._native_v2_run_result(request, options, report, execution_plan, context, metrics)
+            result = self._native_v2_run_result(request, options, report, execution_plan, context, metrics)
+            if checkpoint is not None and result.exit_code == 0:
+                committed = context.require("transaction_commit")
+                complete_native_checkpoint(
+                    options["checkpoint_path"],
+                    checkpoint,
+                    status=result.status,
+                    source_ast=committed.snapshot.ast,
+                    normalized=context.require("normalized"),
+                    decision_set=context.require("decision_set"),
+                    overlays=committed.snapshot.overlays,
+                    presentation_overrides=committed.snapshot.presentation_overrides,
+                    transactions=committed.snapshot.transactions,
+                    transaction_id=committed.transaction_id,
+                )
+            return result
+        except NativeFileProtocolPause:
+            checkpoint = write_native_waiting_checkpoint(
+                checkpoint_path=options["checkpoint_path"],
+                requests_path=options["requests_path"],
+                responses_path=options["responses_path"],
+                profile="wx_full_rules-native-v2",
+                list_policy=request.list_policy,
+                configuration=options.get("checkpoint_configuration") or {},
+                source_facts=context.require("source_facts"),
+                source_ast=context.require("source_ast"),
+                candidate_set=context.require("candidate_set"),
+                modules=self._native_checkpoint_modules(execution_plan),
+                requests=list(options.get("enhancement_request_sink") or []),
+                template_path=request.template_path,
+            )
+            return RunResult(
+                status="waiting_external",
+                exit_code=0,
+                report={
+                    "pipeline": "modular",
+                    "profile": checkpoint["profile"],
+                    "status": "waiting_external",
+                    "checkpoint": str(options["checkpoint_path"]),
+                    "request_count": len(checkpoint["requests"]),
+                },
+                artifacts={"checkpoint": str(options["checkpoint_path"])},
+            )
+        except CheckpointError as exc:
+            return RunResult(
+                status="failed",
+                exit_code=1,
+                report={**report, "status": "failed"},
+                diagnostics=[{"code": exc.code, "severity": "error", "message": str(exc)}],
+                metrics=metrics.snapshot(),
+            )
         except LedgerReplayBlocked as exc:
             replay = context.require("ledger_replay") if context is not None else {
                 "enabled": True,

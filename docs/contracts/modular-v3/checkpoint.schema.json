@@ -10,6 +10,18 @@
     "run_id": {"type": "string", "minLength": 1},
     "status": {"enum": ["created", "running", "waiting_external", "completed", "completed_with_warnings", "failed", "cancelled"]},
     "resume_stage": {"type": ["string", "null"]},
+    "profile": {"type": "string", "minLength": 1},
+    "list_policy": {"type": "string", "minLength": 1},
+    "configuration": {"type": "object"},
+    "files": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requests_path", "responses_path"],
+      "properties": {
+        "requests_path": {"type": "string", "minLength": 1},
+        "responses_path": {"type": "string", "minLength": 1}
+      }
+    },
     "source_facts": {"type": "object"},
     "decision_ledger": {"type": "object"},
     "source_ast": {"type": "object"},
@@ -40,6 +52,8 @@
     },
     "budget": {"type": "object", "required": ["limit", "consumed", "waiting_seconds"]},
     "round": {"type": "integer", "minimum": 0},
-    "candidate_baseline_id": {"type": "string", "minLength": 1}
+    "candidate_baseline_id": {"type": "string", "minLength": 1},
+    "semantic_digest": {"type": "string", "minLength": 1},
+    "presentation_digest": {"type": "string", "minLength": 1}
   }
 }

@@ -67,6 +67,11 @@ def test_modular_manifest_matches_contracts_and_open_modes() -> None:
         "entrypoint": "EnhancementExecutor",
         "contract": "T03",
     }
+    assert manifest["open_modes"]["modular_file"] == {
+        "status": "enabled",
+        "entrypoint": "CheckpointStore",
+        "contract": "T04",
+    }
 
 
 def test_release_smoke_accepts_explicit_native_online_adapter_mode() -> None:

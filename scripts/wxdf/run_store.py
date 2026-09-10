@@ -45,6 +45,276 @@ def _digest(value: Any) -> str:
     return "sha256:" + hashlib.sha256(_canonical(value).encode("utf-8")).hexdigest()
 
 
+def content_digest(value: Any) -> str:
+    """Return the canonical JSON digest used by checkpoint identities."""
+
+    return _digest(value)
+
+
+def request_digest(request: Mapping[str, Any]) -> str:
+    """Return the stable content identity of one native file request."""
+
+    if not isinstance(request, Mapping):
+        raise CheckpointError("request must be an object", code="invalid_request")
+    return _digest({key: value for key, value in request.items() if key != "request_sha256"})
+
+
+def file_digest(path: Path | str | None) -> str:
+    """Return a checkpoint digest for one local resource."""
+
+    payload = b"" if path is None else _path(path).read_bytes()
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def checkpoint_target_map(source_ast: Mapping[str, Any]) -> dict[str, Any]:
+    """Build the revision-bound target map stored by native file mode."""
+
+    document = source_ast["document"]
+    entries: dict[str, dict[str, Any]] = {}
+    for node_id, node in {**document["blocks"], **document["containers"]}.items():
+        source_ref = node.get("source_ref") if isinstance(node, Mapping) else None
+        entries[str(node_id)] = {
+            "node_id": str(node_id),
+            "source_refs": [copy.deepcopy(dict(source_ref))] if isinstance(source_ref, Mapping) else [],
+        }
+    return {
+        "revision": int(source_ast["revision"]),
+        "entries": entries,
+        "view_sha256": _digest(entries),
+    }
+
+
+def overlay_entries(values: Mapping[str, Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Serialize keyed transaction overlays without losing node identity."""
+
+    entries: list[dict[str, Any]] = []
+    for node_id in sorted(values):
+        entry = copy.deepcopy(dict(values[node_id]))
+        entry["node_id"] = str(node_id)
+        entries.append(entry)
+    return entries
+
+
+def write_native_waiting_checkpoint(
+    *,
+    checkpoint_path: Path | str,
+    requests_path: Path | str,
+    responses_path: Path | str,
+    profile: str,
+    list_policy: str,
+    configuration: Mapping[str, Any],
+    source_facts: Mapping[str, Any],
+    source_ast: Mapping[str, Any],
+    candidate_set: list[Any],
+    modules: list[dict[str, Any]],
+    requests: list[dict[str, Any]],
+    template_path: Path | str | None,
+) -> dict[str, Any]:
+    """Create and persist one complete native Checkpoint 2.0 waiting state."""
+
+    from .decision_ledger import source_binding
+
+    checkpoint_path = _path(checkpoint_path)
+    requests_path = _path(requests_path)
+    responses_path = _path(responses_path)
+    requests_path.parent.mkdir(parents=True, exist_ok=True)
+    requests = copy.deepcopy(requests)
+    requests_path.write_text(
+        "".join(_canonical(item) + "\n" for item in requests),
+        encoding="utf-8",
+    )
+    responses_path.write_text("", encoding="utf-8")
+
+    source_facts = copy.deepcopy(dict(source_facts))
+    source_ast = copy.deepcopy(dict(source_ast))
+    configuration = copy.deepcopy(dict(configuration))
+    contracts = {
+        "source_facts": "1.0",
+        "ast": "2.0",
+        "patch": "2.0",
+        "checkpoint": "2.0",
+    }
+    source_sha256 = str(source_facts["source"]["content_sha256"])
+    resources = [
+        {"id": str(resource_id), **copy.deepcopy(dict(resource))}
+        for resource_id, resource in sorted(source_facts.get("resources", {}).items())
+        if isinstance(resource, Mapping)
+    ]
+    fingerprints = {
+        "source": source_sha256,
+        "template": file_digest(template_path),
+        "resources": _digest(resources),
+        "configuration": _digest(configuration),
+        "contracts": _digest(contracts),
+        "modules": _digest(modules),
+        "parser": _digest(source_facts.get("parser", {})),
+        "protocol": "2.0",
+    }
+    candidate_baseline_id = _digest({
+        "source_ast": source_ast,
+        "candidates": candidate_set,
+    })
+    checkpoint = {
+        "checkpoint_schema_version": "2.0",
+        "run_id": "native-file-" + candidate_baseline_id[len("sha256:"):len("sha256:") + 20],
+        "status": "waiting_external",
+        "resume_stage": "relation",
+        "profile": profile,
+        "list_policy": list_policy,
+        "configuration": configuration,
+        "files": {
+            "requests_path": str(requests_path.resolve()),
+            "responses_path": str(responses_path.resolve()),
+        },
+        "source_facts": source_facts,
+        "decision_ledger": {
+            "schema_version": "2.0",
+            "revision": 0,
+            "revisions": [],
+            "source_binding": source_binding(source_facts),
+        },
+        "source_ast": source_ast,
+        "normalized_ast": None,
+        "content_overlay": [],
+        "presentation_override": [],
+        "target_map": checkpoint_target_map(source_ast),
+        "resource_summary": {
+            "resources": resources,
+            "source_sha256": source_sha256,
+            "fingerprints": fingerprints,
+        },
+        "contracts": contracts,
+        "modules": copy.deepcopy(modules),
+        "requests": requests,
+        "responses": [],
+        "applied_transactions": [],
+        "transaction_content_digests": {},
+        "budget": {"limit": len(requests), "consumed": 0, "waiting_seconds": 0.0},
+        "round": 0,
+        "candidate_baseline_id": candidate_baseline_id,
+    }
+    save_checkpoint(checkpoint, checkpoint_path)
+    return checkpoint
+
+
+def prepare_native_resume(
+    checkpoint_path: Path | str,
+    *,
+    source_path: Path | str,
+    template_path: Path | str | None,
+    contracts: Mapping[str, str],
+    modules: list[dict[str, Any]],
+) -> tuple[dict[str, Any], bool, dict[str, dict[str, Any]]]:
+    """Validate identities and commit external responses before execution."""
+
+    checkpoint_path = _path(checkpoint_path)
+    checkpoint = load_checkpoint(checkpoint_path)
+    checkpoint = load_checkpoint(
+        checkpoint_path,
+        expected_fingerprints={
+            "source": file_digest(source_path),
+            "template": file_digest(template_path),
+            "configuration": _digest(checkpoint.get("configuration", {})),
+            "contracts": _digest(contracts),
+            "modules": _digest(modules),
+        },
+    )
+    response_path = Path(checkpoint["files"]["responses_path"])
+    responses: list[dict[str, Any]] = []
+    if response_path.is_file():
+        for line_number, line in enumerate(response_path.read_text(encoding="utf-8").splitlines(), 1):
+            if not line.strip():
+                continue
+            try:
+                response = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise CheckpointError(
+                    f"invalid native response JSON at line {line_number}",
+                    code="invalid_response",
+                ) from exc
+            if not isinstance(response, dict):
+                raise CheckpointError(
+                    f"native response at line {line_number} must be an object",
+                    code="invalid_response",
+                )
+            responses.append(response)
+    recorded = checkpoint
+    for response in responses:
+        recorded, _outcome = record_response(recorded, response)
+    if recorded != checkpoint and checkpoint["status"] == "waiting_external":
+        save_checkpoint(recorded, checkpoint_path)
+    response_map = {
+        str(item["request_id"]): {
+            key: copy.deepcopy(value)
+            for key, value in item.items()
+            if key not in {"response_sha256", "applied", "apply_started", "transaction_id", "transaction_content_sha256"}
+        }
+        for item in recorded["responses"]
+    }
+    if checkpoint["status"] in {"completed", "completed_with_warnings"}:
+        return recorded, False, response_map
+    required_ids = {
+        str(item["request_id"])
+        for item in recorded["requests"]
+        if isinstance(item, Mapping) and item.get("request_id")
+    }
+    ready = bool(required_ids) and set(response_map) == required_ids
+    if ready:
+        save_checkpoint(recorded, checkpoint_path)
+    return recorded, ready, response_map
+
+
+def complete_native_checkpoint(
+    checkpoint_path: Path | str,
+    checkpoint: Mapping[str, Any],
+    *,
+    status: str,
+    source_ast: Mapping[str, Any],
+    normalized: Mapping[str, Any],
+    decision_set: Mapping[str, Any],
+    overlays: Mapping[str, Mapping[str, Any]],
+    presentation_overrides: Mapping[str, Mapping[str, Any]],
+    transactions: Mapping[str, str],
+    transaction_id: str,
+) -> dict[str, Any]:
+    """Persist the completed semantic, presentation and transaction snapshot."""
+
+    from .decision_ledger import accept_decisions
+
+    completed = copy.deepcopy(dict(checkpoint))
+    transaction_digests = {
+        str(saved_id): "sha256:" + str(digest).removeprefix("sha256:")
+        for saved_id, digest in transactions.items()
+    }
+    applied_transactions = [
+        {"transaction_id": saved_id, "content_sha256": digest}
+        for saved_id, digest in sorted(transaction_digests.items())
+    ]
+    transaction_digest = transaction_digests.get(transaction_id)
+    for response in completed["responses"]:
+        response["applied"] = True
+        response["apply_started"] = False
+        response["transaction_id"] = transaction_id
+        response["transaction_content_sha256"] = transaction_digest
+    completed.update({
+        "status": status,
+        "resume_stage": None,
+        "source_ast": copy.deepcopy(dict(source_ast)),
+        "normalized_ast": copy.deepcopy(dict(source_ast)),
+        "decision_ledger": accept_decisions(completed["decision_ledger"], decision_set),
+        "content_overlay": overlay_entries(overlays),
+        "presentation_override": overlay_entries(presentation_overrides),
+        "target_map": checkpoint_target_map(source_ast),
+        "applied_transactions": applied_transactions,
+        "transaction_content_digests": transaction_digests,
+        "budget": {**completed["budget"], "consumed": len(completed["responses"])},
+        "semantic_digest": normalized["semantic_digest"],
+        "presentation_digest": normalized["presentation_digest"],
+    })
+    save_checkpoint(completed, checkpoint_path)
+    return completed
+
+
 def _path(value: Path | str) -> Path:
     return value if isinstance(value, Path) else Path(value)
 
@@ -54,6 +324,38 @@ def _validate_for_store(checkpoint: Mapping[str, Any]) -> None:
         validate_checkpoint(checkpoint)
     except Exception as exc:
         raise CheckpointError(f"checkpoint validation failed: {exc}", code="invalid_checkpoint") from exc
+
+
+def _validate_embedded_fingerprints(checkpoint: Mapping[str, Any]) -> None:
+    resource_summary = checkpoint.get("resource_summary")
+    fingerprints = resource_summary.get("fingerprints") if isinstance(resource_summary, Mapping) else None
+    if not isinstance(fingerprints, Mapping):
+        return
+    for fingerprint, field in (
+        ("configuration", "configuration"),
+        ("contracts", "contracts"),
+        ("modules", "modules"),
+    ):
+        if fingerprint in fingerprints and field in checkpoint:
+            if fingerprints[fingerprint] != _digest(checkpoint[field]):
+                raise CheckpointError(
+                    f"checkpoint {field} identity does not match its fingerprint",
+                    code="fingerprint_mismatch",
+                )
+    seen_requests: set[str] = set()
+    for request in checkpoint.get("requests", []):
+        if not isinstance(request, Mapping):
+            continue
+        request_id = request.get("request_id")
+        if not isinstance(request_id, str) or not request_id or request_id in seen_requests:
+            raise CheckpointError("checkpoint request identities are invalid", code="request_identity_conflict")
+        seen_requests.add(request_id)
+        stored_digest = request.get("request_sha256")
+        if stored_digest is not None and stored_digest != request_digest(request):
+            raise CheckpointError(
+                f"request content changed for {request_id}",
+                code="request_identity_conflict",
+            )
 
 
 def _write_json_atomic(checkpoint: Mapping[str, Any], path: Path, *, crash_at: str | None = None) -> None:
@@ -184,6 +486,7 @@ def load_checkpoint(
     checkpoint.setdefault("applied_transactions", [])
     checkpoint.setdefault("transaction_content_digests", {})
     _validate_for_store(checkpoint)
+    _validate_embedded_fingerprints(checkpoint)
     if expected_fingerprints:
         _compare_fingerprints(checkpoint, expected_fingerprints)
     if expected_contracts:
@@ -323,13 +626,33 @@ def record_response(checkpoint: Mapping[str, Any], response: Mapping[str, Any]) 
         raise CheckpointError("response must be an object", code="invalid_response")
     request_id = _response_id(response)
     requests = checkpoint.get("requests", [])
+    matching_requests = [
+        item for item in requests
+        if isinstance(item, Mapping) and item.get("request_id") == request_id
+    ]
     request_ids = {item.get("request_id") for item in requests if isinstance(item, Mapping)}
-    if request_ids and request_id not in request_ids:
+    if request_ids and not matching_requests:
         raise CheckpointError(f"response references unknown request {request_id}", code="stale_response")
+    if len(matching_requests) > 1:
+        raise CheckpointError(f"request identity is repeated for {request_id}", code="request_identity_conflict")
+    if matching_requests:
+        stored_request_digest = matching_requests[0].get("request_sha256")
+        if stored_request_digest is not None and stored_request_digest != request_digest(matching_requests[0]):
+            raise CheckpointError(f"request content changed for {request_id}", code="request_identity_conflict")
     response_digest = _digest(dict(response))
     result = copy.deepcopy(dict(checkpoint))
     responses = result.setdefault("responses", [])
     for existing in responses:
+        if (
+            isinstance(existing, Mapping)
+            and existing.get("response_id") is not None
+            and existing.get("response_id") == response.get("response_id")
+            and existing.get("request_id") != request_id
+        ):
+            raise CheckpointError(
+                f"response identity is reused for {request_id}",
+                code="response_identity_conflict",
+            )
         if not isinstance(existing, Mapping) or existing.get("request_id") != request_id:
             continue
         existing_digest = existing.get("response_sha256") or _digest({key: value for key, value in existing.items() if key not in {"response_sha256", "applied", "apply_started"}})
@@ -469,10 +792,18 @@ def complete_pending_response(
 __all__ = [
     "CheckpointError",
     "apply_response",
+    "checkpoint_target_map",
+    "complete_native_checkpoint",
     "complete_pending_response",
+    "content_digest",
+    "file_digest",
     "load_checkpoint",
+    "overlay_entries",
+    "prepare_native_resume",
     "record_response",
+    "request_digest",
     "save_checkpoint",
     "transition_status",
     "validate_status_transition",
+    "write_native_waiting_checkpoint",
 ]

@@ -151,6 +151,26 @@ def build_native_request(
     )
 
 
+def serialize_native_request(request: EnhancementRequest | Mapping[str, Any]) -> dict[str, Any]:
+    """Return the complete JSON request identity used by file adapters."""
+
+    request = _coerce_request(request)
+    payload = {
+        "request_id": request.request_id,
+        "capability": request.capability,
+        "phase": request.phase,
+        "items": [_thaw(item) for item in request.items],
+        "budget": request.budget,
+        "timeout_seconds": request.timeout_seconds,
+        "view_sha256": request.view_sha256,
+        "model_revision": request.model_revision,
+        "source_refs": [_thaw(item) for item in request.source_refs],
+        "contract_versions": dict(request.contract_versions),
+    }
+    payload["request_sha256"] = _digest(payload)
+    return payload
+
+
 def _coerce_request(request: EnhancementRequest | Mapping[str, Any]) -> EnhancementRequest:
     if isinstance(request, EnhancementRequest):
         return request
@@ -511,4 +531,5 @@ __all__ = [
     "EnhancementResult",
     "CAPABILITY_REGISTRY",
     "build_native_request",
+    "serialize_native_request",
 ]

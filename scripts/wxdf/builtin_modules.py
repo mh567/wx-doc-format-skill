@@ -46,6 +46,13 @@ class UnresolvedDecisionError(RuntimeError):
         )
 
 
+class NativeFileProtocolPause(RuntimeError):
+    """Stop the native chain after request capture and before resolution."""
+
+    def __init__(self) -> None:
+        super().__init__("native file protocol is waiting for external responses")
+
+
 @dataclass
 class ModuleExecutionContext:
     """Per-conversion capability bus shared by executable modules.
@@ -786,6 +793,8 @@ def _native_candidate_set(context: ModuleExecutionContext) -> list[Mapping[str, 
         "enhancement_candidate_count": len(enhancement_candidates),
         "enhancement_status": enhancement_result["status"],
     }
+    if options.get("protocol_mode") == "generate_requests":
+        raise NativeFileProtocolPause()
     return candidates
 
 
@@ -797,7 +806,7 @@ def _native_enhancement_candidates(
 
     from llm_enhancer import CAPABILITY_REGISTRY, normalize_mode, should_enhance
 
-    from .enhancement import EnhancementExecutor, build_native_request
+    from .enhancement import EnhancementExecutor, build_native_request, serialize_native_request
 
     mode = str(options.get("llm_enhance") or "off")
     if mode == "off":
@@ -821,6 +830,7 @@ def _native_enhancement_candidates(
     timeout = options.get("enhancement_timeout_seconds", 30.0)
     timeout = float(timeout) if isinstance(timeout, (int, float)) and not isinstance(timeout, bool) else 30.0
     adapter = options.get("enhancement_call")
+    request_sink = options.get("enhancement_request_sink")
     executor = EnhancementExecutor()
     candidates: list[Mapping[str, Any]] = []
     records: list[dict[str, Any]] = []
@@ -835,7 +845,12 @@ def _native_enhancement_candidates(
             timeout_seconds=timeout,
             request_id=f"native-{source_ast['revision']}-{capability}",
         )
-        result = executor.execute(request, call=adapter)
+        if isinstance(request_sink, list):
+            request_sink.append(serialize_native_request(request))
+        if options.get("protocol_mode") == "generate_requests":
+            result = executor.execute(request, responses=[])
+        else:
+            result = executor.execute(request, call=adapter)
         consumed += result.consumed
         for candidate in result.candidates:
             item = json.loads(json.dumps(candidate, ensure_ascii=False))
@@ -1180,6 +1195,7 @@ def native_stage_executors() -> dict[str, Callable[[ModuleExecutionContext], Any
 
 __all__ = [
     "LedgerReplayBlocked",
+    "NativeFileProtocolPause",
     "ModuleExecutionContext",
     "UnresolvedDecisionError",
     "appendix_semantics_module",

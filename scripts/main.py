@@ -1287,15 +1287,36 @@ def _legacy_adapter_argv(args) -> list[str]:
 def _modular_native_v2_enabled(args) -> bool:
     """Select the native modular seam from explicit mode and source contracts."""
 
-    if args.resume or args.generate_requests:
-        return False
-    if args.llm_enhance != "off" and not args.llm_command:
+    if args.llm_enhance != "off" and not args.llm_command and not (args.resume or args.generate_requests):
         return False
     if args.input is None:
         return False
     if args.modular_profile == "native-v2":
         return True
     return False
+
+
+def _native_checkpoint_configuration(args, *, output_path: Path) -> dict:
+    """Freeze the effective native CLI configuration used across resume."""
+
+    return {
+        "input": str(args.input),
+        "output": str(output_path),
+        "template": str(args.template) if args.template else None,
+        "report": str(args.report) if args.report else None,
+        "report_md": str(args.report_md) if args.report_md else None,
+        "ast": str(args.ast) if args.ast else None,
+        "source_ast": str(args.source_ast) if args.source_ast else None,
+        "fail_on_risk": bool(args.fail_on_risk),
+        "llm_enhance": args.llm_enhance,
+        "llm_hint": args.llm_hint,
+        "strict_normalize": args.strict_normalize,
+        "table_row_height_cm": args.table_row_height_cm,
+        "table_row_height_rule": args.table_row_height_rule,
+        "pipeline": args.pipeline,
+        "modular_profile": args.modular_profile,
+        "list_policy": args.list_policy,
+    }
 
 
 def _run_legacy_full_adapter(args, request: ConversionRequest) -> RunResult:
@@ -1501,24 +1522,46 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
     args.llm_enhance = normalize_mode(args.llm_enhance)
 
     # ── Handle --resume: load run.json and restore original CLI args ──
+    native_checkpoint = False
     if args.resume:
-        run_info = read_run_info(args.resume)
-        run_args = run_info.get("args", {})
+        try:
+            run_info = read_run_info(args.resume)
+        except ValueError:
+            raw_run_info = json.loads(args.resume.read_text(encoding="utf-8"))
+            if raw_run_info.get("checkpoint_schema_version") != "2.0":
+                raise
+            native_checkpoint = True
+            run_info = raw_run_info
+        run_args = run_info.get("configuration" if native_checkpoint else "args", {})
         # Only fill in input/output/template from run.json if the user
         # didn't provide them on the CLI (allows override).
-        if not args.input and "input" in run_args:
+        if native_checkpoint and run_args.get("input"):
             args.input = Path(run_args["input"])
-        if not args.output and "output" in run_args:
+        elif not args.input and "input" in run_args:
+            args.input = Path(run_args["input"])
+        if native_checkpoint and run_args.get("output"):
             args.output = Path(run_args["output"])
-        if not args.template and run_args.get("template"):
+        elif not args.output and "output" in run_args:
+            args.output = Path(run_args["output"])
+        if native_checkpoint and run_args.get("template"):
             args.template = Path(run_args["template"])
-        if not args.report and run_args.get("report"):
+        elif not args.template and run_args.get("template"):
+            args.template = Path(run_args["template"])
+        if native_checkpoint and run_args.get("report"):
             args.report = Path(run_args["report"])
-        if not args.report_md and run_args.get("report_md"):
+        elif not args.report and run_args.get("report"):
+            args.report = Path(run_args["report"])
+        if native_checkpoint and run_args.get("report_md"):
             args.report_md = Path(run_args["report_md"])
-        if not args.ast and run_args.get("ast"):
+        elif not args.report_md and run_args.get("report_md"):
+            args.report_md = Path(run_args["report_md"])
+        if native_checkpoint and run_args.get("ast"):
             args.ast = Path(run_args["ast"])
-        if not args.source_ast and run_args.get("source_ast"):
+        elif not args.ast and run_args.get("ast"):
+            args.ast = Path(run_args["ast"])
+        if native_checkpoint and run_args.get("source_ast"):
+            args.source_ast = Path(run_args["source_ast"])
+        elif not args.source_ast and run_args.get("source_ast"):
             args.source_ast = Path(run_args["source_ast"])
         if "fail_on_risk" in run_args:
             args.fail_on_risk = bool(run_args["fail_on_risk"])
@@ -1534,6 +1577,8 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
             args.table_row_height_rule = run_args["table_row_height_rule"]
         if "pipeline" in run_args:
             args.pipeline = run_args["pipeline"]
+        if "modular_profile" in run_args:
+            args.modular_profile = run_args["modular_profile"]
         if "list_policy" in run_args:
             args.list_policy = run_args["list_policy"]
 
@@ -1545,7 +1590,7 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
         raise SystemExit("--resume: run.json does not contain 'input', provide --input on CLI")
     if args.resume and not args.output:
         raise SystemExit("--resume: run.json does not contain 'output', provide --output on CLI")
-    if args.resume:
+    if args.resume and not native_checkpoint:
         try:
             verify_source_snapshot(args.input, str(run_info.get("source_sha256") or ""))
         except ProtocolError as exc:
@@ -1573,6 +1618,30 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
             if local_command is not None:
                 def enhancement_call(payload, *, _local_command=local_command):
                     return _local_command(json.dumps(payload, ensure_ascii=False))
+        kernel_options = {
+            "llm_enhance": args.llm_enhance,
+            "protocol_mode": modular_protocol_mode,
+            "source_ast_path": args.source_ast,
+            "normalized_ast_path": args.ast,
+            "report_path": args.report,
+            "release": _os.environ.get("WX_DOC_FORMAT_RELEASE") == "1",
+            "profile": "native_v2" if native_v2 else None,
+            "enhancement_call": enhancement_call,
+        }
+        if native_v2 and args.generate_requests is not None:
+            request_dir = args.generate_requests.resolve()
+            kernel_options.update({
+                "checkpoint_path": request_dir / "run.json",
+                "requests_path": request_dir / "llm_requests.jsonl",
+                "responses_path": request_dir / "llm_responses.jsonl",
+                "enhancement_request_sink": [],
+                "checkpoint_configuration": _native_checkpoint_configuration(
+                    args,
+                    output_path=modular_output_path,
+                ),
+            })
+        elif native_v2 and native_checkpoint:
+            kernel_options["checkpoint_path"] = args.resume.resolve()
         result = ConversionKernel(
             modular_runner=None if native_v2 else lambda request: _run_legacy_full_adapter(args, request),
         ).convert(
@@ -1582,16 +1651,7 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
                 template_path=args.template,
                 pipeline=args.pipeline,
                 list_policy=args.list_policy,
-                options={
-                    "llm_enhance": args.llm_enhance,
-                    "protocol_mode": modular_protocol_mode,
-                    "source_ast_path": args.source_ast,
-                    "normalized_ast_path": args.ast,
-                    "report_path": args.report,
-                    "release": _os.environ.get("WX_DOC_FORMAT_RELEASE") == "1",
-                    "profile": "native_v2" if native_v2 else None,
-                    "enhancement_call": enhancement_call,
-                },
+                options=kernel_options,
             )
         )
         if args.report is not None:

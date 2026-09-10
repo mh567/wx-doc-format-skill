@@ -36,7 +36,7 @@ MODULAR_CONTRACT_VERSIONS = {
 MODULAR_OPEN_MODES = {
     "modular_pure": {"status": "enabled", "entrypoint": "ConversionKernel.convert", "contract": "T09"},
     "modular_online": {"status": "enabled", "entrypoint": "EnhancementExecutor", "contract": "T03"},
-    "modular_file": {"status": "closed", "entrypoint": "CheckpointStore", "reason": "modular CLI resume integration is pending"},
+    "modular_file": {"status": "enabled", "entrypoint": "CheckpointStore", "contract": "T04"},
     "modular_review": {"status": "closed", "entrypoint": "ReviewEvaluator", "reason": "modular post-audit rerender integration is pending"},
     "legacy_online": {"status": "enabled", "entrypoint": "legacy CLI", "contract": "legacy"},
     "legacy_file": {"status": "enabled", "entrypoint": "legacy CLI", "contract": "1.0"},

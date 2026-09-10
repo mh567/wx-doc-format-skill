@@ -85,7 +85,11 @@ def test_mode_manifest_matches_current_preflight_surface() -> None:
     assert manifest["modular_pure"]["status"] == "enabled"
     assert manifest["modular_online"]["status"] == "enabled"
     assert manifest["modular_online"]["contract"] == "T03"
-    assert manifest["modular_file"]["status"] == "closed"
+    assert manifest["modular_file"] == {
+        "status": "enabled",
+        "entrypoint": "CheckpointStore",
+        "contract": "T04",
+    }
     assert manifest["modular_review"]["status"] == "closed"
     assert all(item["status"] in {"enabled", "closed"} for item in manifest.values())
 
