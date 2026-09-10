@@ -58,6 +58,33 @@ def _digest(value: Any) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _canonical_decision_content(decision: Mapping[str, Any]) -> dict[str, Any]:
+    nested = decision.get("decision")
+    operation = nested.get("operation") if isinstance(nested, Mapping) else decision.get("operation")
+    value = nested.get("value") if isinstance(nested, Mapping) else decision.get("value")
+    invalidates = nested.get("invalidates") if isinstance(nested, Mapping) else decision.get("invalidates")
+    return {
+        "target_source_refs": copy.deepcopy(list(decision.get("target_source_refs") or [])),
+        "target_node_ids": copy.deepcopy(list(decision.get("target_node_ids") or [])),
+        "property_scope": copy.deepcopy(list(decision.get("property_scope") or [])),
+        "operation": operation,
+        "value": copy.deepcopy(value),
+        "invalidates": copy.deepcopy(list(invalidates or [])),
+        "preconditions": copy.deepcopy(list(decision.get("preconditions") or [])),
+        "evidence": copy.deepcopy(list(decision.get("evidence") or [])),
+        "supersedes": copy.deepcopy(list(decision.get("supersedes") or [])),
+    }
+
+
+def transaction_content_digest(decisions: Sequence[Mapping[str, Any]]) -> str:
+    """Return the shared transaction proof used by snapshots and ledgers."""
+
+    return "sha256:" + _digest([
+        _canonical_decision_content(decision)
+        for decision in decisions
+    ])
+
+
 def _transaction_id(decisions: Sequence[Mapping[str, Any]]) -> str:
     explicit = [str(decision.get("transaction_id")) for decision in decisions if decision.get("transaction_id")]
     if explicit and len(set(explicit)) == 1:
@@ -384,18 +411,45 @@ def apply_stage_batch(
         raise TransactionConflict(
             f"revision conflict: expected {expected_revision}, current {snapshot.ast.get('revision')}"
         )
-    transaction_id = _transaction_id(decisions)
-    decision_digest = _digest(list(decisions))
-    previous_digest = snapshot.transactions.get(transaction_id)
-    if previous_digest is not None:
-        if previous_digest != decision_digest:
+    fallback_transaction_id = _transaction_id(decisions)
+    transaction_groups: dict[str, list[Mapping[str, Any]]] = {}
+    for decision in decisions:
+        transaction_id = str(decision.get("transaction_id") or fallback_transaction_id)
+        transaction_groups.setdefault(transaction_id, []).append(decision)
+    if not transaction_groups:
+        transaction_groups[fallback_transaction_id] = []
+    fresh_groups: dict[str, list[Mapping[str, Any]]] = {}
+    group_digests: dict[str, str] = {}
+    for transaction_id, group in transaction_groups.items():
+        decision_digest = transaction_content_digest(group)
+        group_digests[transaction_id] = decision_digest
+        previous_digest = snapshot.transactions.get(transaction_id)
+        if previous_digest is None:
+            fresh_groups[transaction_id] = group
+            continue
+        if group and all(decision.get("revision_id") for decision in group):
+            continue
+        normalized_previous = "sha256:" + str(previous_digest).removeprefix("sha256:")
+        if normalized_previous != decision_digest:
             raise TransactionConflict(f"transaction {transaction_id} has a different content digest")
+    if not fresh_groups:
         return CommitResult(
             status="already_committed",
             snapshot=snapshot,
             metrics={"full_model_copy_count": 0, "full_graph_validation_count": 0, "index_rebuild_count": 0},
-            transaction_id=transaction_id,
+            transaction_id=next(iter(transaction_groups)),
         )
+    transaction_id = (
+        next(iter(fresh_groups))
+        if len(fresh_groups) == 1
+        else fallback_transaction_id
+    )
+    fresh_transaction_ids = set(fresh_groups)
+    fresh_decisions = [
+        decision
+        for decision in decisions
+        if str(decision.get("transaction_id") or fallback_transaction_id) in fresh_transaction_ids
+    ]
 
     isolated = StageSnapshot(
         ast=copy.deepcopy(snapshot.ast),
@@ -405,7 +459,7 @@ def apply_stage_batch(
     )
     metrics = {"full_model_copy_count": 1, "full_graph_validation_count": 0, "index_rebuild_count": 0}
     try:
-        for decision in _order_stage_decisions(isolated, decisions):
+        for decision in _order_stage_decisions(isolated, fresh_decisions):
             decision_revision = decision.get("expected_revision", expected_revision)
             if decision_revision != expected_revision:
                 raise TransactionConflict(f"decision revision conflict: expected {expected_revision}, got {decision_revision}")
@@ -426,7 +480,8 @@ def apply_stage_batch(
         overlays=isolated.overlays,
         presentation_overrides=isolated.presentation_overrides,
     )
-    committed.transactions[transaction_id] = decision_digest
+    for fresh_transaction_id in fresh_groups:
+        committed.transactions[fresh_transaction_id] = group_digests[fresh_transaction_id]
     return CommitResult(status="committed", snapshot=committed, metrics=metrics, transaction_id=transaction_id)
 
 

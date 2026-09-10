@@ -17,8 +17,14 @@ from wxdf.review import MODE_MANIFEST, accept_candidate, evaluate_candidate, mod
 from wxdf.transaction import make_snapshot
 
 
-def _bundle(*, level: int = 1, presentation: str = "presentation-1", text: str = "段落0") -> dict:
-    ast = _ast(1)
+def _bundle(
+    *,
+    level: int = 1,
+    presentation: str = "presentation-1",
+    text: str = "段落0",
+    paragraph_count: int = 1,
+) -> dict:
+    ast = _ast(paragraph_count)
     ast["document"]["blocks"]["p0"]["inline_content"][0]["text"] = text
     ast["document"]["blocks"]["p0"]["role"] = "heading"
     ast["document"]["blocks"]["p0"]["level"] = level
@@ -75,6 +81,44 @@ def test_content_change_and_protection_regression_are_rejected() -> None:
     after = [{"audit_id": "invariant:document", "severity": "critical", "repairable": False, "category": "deterministic_format", "evidence": {"type": "output_structure"}}]
 
     decision = evaluate_candidate(baseline, candidate, _findings(before, after), decisions=[{"target_node_ids": ["p0"]}])
+
+    assert decision.status == "rejected"
+    assert decision.reason == "content_changed"
+
+
+@pytest.mark.parametrize(
+    "surface",
+    ["children", "containers", "associations", "resources", "overlay"],
+)
+def test_content_preservation_digest_rejects_non_block_content_mutations(surface: str) -> None:
+    baseline = _bundle(level=1, paragraph_count=2)
+    candidate = _bundle(level=2, paragraph_count=2)
+    document = candidate["source_ast"]["document"]
+    if surface == "children":
+        document["children"] = list(reversed(document["children"]))
+    elif surface == "containers":
+        document["containers"]["root"]["kind"] = "mutated-container"
+    elif surface == "associations":
+        document.setdefault("associations", []).append(
+            {"kind": "caption_for", "source_id": "p0", "target_id": "p1"}
+        )
+    elif surface == "resources":
+        document.setdefault("resources", {})["r0"] = {
+            "kind": "image",
+            "sha256": "sha256:" + "1" * 64,
+        }
+    else:
+        candidate["normalized_ast"]["overlay"] = {"p0": {"marker": "changed"}}
+
+    decision = evaluate_candidate(
+        baseline,
+        candidate,
+        _findings(
+            [{"audit_id": "heading:p0", "severity": "high", "repairable": True, "block_id": "p0"}],
+            [],
+        ),
+        decisions=[{"target_node_ids": ["p0"]}],
+    )
 
     assert decision.status == "rejected"
     assert decision.reason == "content_changed"
@@ -222,6 +266,36 @@ def test_audit_findings_preserve_risk_and_repairability_across_audit_sources() -
     assert findings[0]["repairable"] is True
     assert findings[1]["severity"] == "critical"
     assert findings[1]["repairable"] is False
+
+
+def test_production_heading_level_jump_is_repairable_and_unknown_code_is_not() -> None:
+    bundle = _bundle(level=1, paragraph_count=2)
+    ast = bundle["source_ast"]
+    ast["document"]["blocks"]["p1"]["role"] = "heading"
+    ast["document"]["blocks"]["p1"]["level"] = 3
+    bundle["normalized_ast"].update({
+        "source_ast": ast,
+        "source_revision": ast["revision"],
+        "presentation": {"nodes": {}},
+        "generated_nodes": [],
+        "diagnostics": [],
+    })
+
+    model_audit = auditing.check_model(bundle["normalized_ast"])
+    findings = auditing.collect_audit_findings({
+        "model": model_audit,
+        "saved_output": {
+            "passed": False,
+            "issues": [{"code": "unknown_saved_issue", "node_id": "p0"}],
+        },
+    })
+
+    heading = next(item for item in findings if item["evidence"]["code"] == "heading_level_jump")
+    unknown = next(item for item in findings if item["evidence"]["code"] == "unknown_saved_issue")
+    assert heading["block_id"] == "p1"
+    assert heading["repairable"] is True
+    assert heading["evidence"]["expected_level"] == 2
+    assert unknown["repairable"] is False
 
 
 def test_candidate_revision_keeps_baseline_snapshot_independent_for_rollback() -> None:

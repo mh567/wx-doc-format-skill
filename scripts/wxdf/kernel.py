@@ -666,22 +666,49 @@ class ConversionKernel:
                     status = str(checkpoint["status"])
                     return RunResult(
                         status=status,
-                        exit_code=0,
+                        exit_code=1 if status in {"failed", "cancelled"} else 0,
                         report={
                             "pipeline": "modular",
                             "profile": "wx_full_rules-native-v2",
                             "status": status,
                             "checkpoint": str(options["checkpoint_path"]),
+                            **(
+                                {"review_outcome": copy.deepcopy(checkpoint["review_outcome"])}
+                                if isinstance(checkpoint.get("review_outcome"), Mapping)
+                                else {}
+                            ),
                         },
                     )
                 options.update(resume_options)
                 options["enhancement_request_sink"] = []
                 options["available_response_ids"] = list(response_map)
-                options["file_protocol_source_ast"] = copy.deepcopy(checkpoint["source_ast"])
+                stored_requests = {
+                    str(item["request_id"]): item
+                    for item in checkpoint["requests"]
+                }
                 def replay_response(payload: Mapping[str, Any]) -> Mapping[str, Any]:
                     request_id = str(payload.get("request_id") or "")
                     if request_id not in response_map:
                         raise KeyError(f"no recorded response for {request_id}")
+                    stored_request = stored_requests.get(request_id)
+                    request_identity = {
+                        "capability": payload.get("capability"),
+                        "model_revision": payload.get("model_revision"),
+                        "view_sha256": payload.get("view_sha256"),
+                        "items": json.loads(json.dumps(payload.get("items"), ensure_ascii=False)),
+                    }
+                    if stored_request is None or request_identity != {
+                        key: stored_request.get(key)
+                        for key in request_identity
+                    }:
+                        raise KeyError(f"runtime request identity changed for {request_id}")
+                    stored_packet = stored_request.get("review_packet")
+                    live_packet = json.loads(json.dumps(
+                        payload.get("context", {}).get("review_packet"),
+                        ensure_ascii=False,
+                    ))
+                    if stored_packet is not None and live_packet != stored_packet:
+                        raise KeyError(f"runtime ReviewPacket identity changed for {request_id}")
                     return copy.deepcopy(response_map[request_id])
 
                 options["enhancement_call"] = replay_response
@@ -696,8 +723,12 @@ class ConversionKernel:
             )
             registry.execute(execution_plan, context)
             result = self._native_v2_run_result(request, options, report, execution_plan, context, metrics)
-            if checkpoint is not None and result.exit_code == 0:
-                review_result = context.require("review_result")
+            review_result = context.require("review_result") if context is not None else {}
+            terminal_review_rollback = (
+                isinstance(review_result, Mapping)
+                and review_result.get("status") == "rolled_back"
+            )
+            if checkpoint is not None and (result.exit_code == 0 or terminal_review_rollback):
                 committed = review_result["transaction_commit"]
                 enhancement = context.require("enhancement_result")
                 relation_commit = context.require("transaction_commit")
@@ -749,6 +780,15 @@ class ConversionKernel:
                     transaction_id=committed.transaction_id,
                     applied_request_ids=applied_request_ids,
                     request_transaction_ids=request_transaction_ids,
+                    review_outcome=(
+                        {
+                            "status": "rolled_back",
+                            "acceptance": copy.deepcopy(review_result.get("acceptance") or {}),
+                            "audit_exception": copy.deepcopy(review_result.get("audit_exception")),
+                        }
+                        if terminal_review_rollback
+                        else None
+                    ),
                 )
             return result
         except NativeFileProtocolPause:
@@ -1140,6 +1180,7 @@ class ConversionKernel:
             },
         })
         artifacts = {"docx": str(request.output_path)}
+        publication_payloads: dict[Path, bytes] = {}
         for option_key, artifact_key, payload in (
             ("source_ast_path", "source_ast", snapshot.ast),
             ("normalized_ast_path", "normalized_ast", normalized),
@@ -1147,16 +1188,42 @@ class ConversionKernel:
             path = options.get(option_key)
             if path is not None and not options.get("release"):
                 path = Path(path)
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+                publication_payloads[path] = json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    indent=2,
+                ).encode("utf-8")
                 artifacts[artifact_key] = str(path)
         report["artifacts"] = artifacts
         result = RunResult(status=status, exit_code=0, report=report, artifacts=artifacts, diagnostics=diagnostics, metrics=metrics.snapshot())
         report_path = options.get("report_path")
         if report_path is not None:
             report_path = Path(report_path)
-            report_path.parent.mkdir(parents=True, exist_ok=True)
-            report_path.write_text(json.dumps(result.as_report(), ensure_ascii=False, indent=2), encoding="utf-8")
+            publication_payloads[report_path] = json.dumps(
+                result.as_report(),
+                ensure_ascii=False,
+                indent=2,
+            ).encode("utf-8")
+        try:
+            from .publication import PublicationError, publish_files_atomically
+
+            publication_payloads[request.output_path] = Path(published).read_bytes()
+            publish_files_atomically(publication_payloads)
+        except (OSError, PublicationError) as exc:
+            diagnostic = {
+                "code": "PUBLICATION_FAILED",
+                "severity": "error",
+                "message": str(exc),
+            }
+            failed_report = {**report, "status": "failed"}
+            return RunResult(
+                status="failed",
+                exit_code=1,
+                report=failed_report,
+                artifacts={},
+                diagnostics=[*diagnostics, diagnostic],
+                metrics=metrics.snapshot(),
+            )
         return result
 
 

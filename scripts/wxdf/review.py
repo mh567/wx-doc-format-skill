@@ -51,25 +51,91 @@ def _normalized(bundle: Mapping[str, Any]) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
 
-def _content_digest(bundle: Mapping[str, Any]) -> str:
+def _content_surface(bundle: Mapping[str, Any]) -> dict[str, Any]:
     normalized = _normalized(bundle)
     source_ast = normalized.get("source_ast") or bundle.get("source_ast") or {}
     document = source_ast.get("document", {}) if isinstance(source_ast, Mapping) else {}
-    records: list[dict[str, Any]] = []
-    for node_id, block in sorted((document.get("blocks") or {}).items()):
-        if not isinstance(block, Mapping):
-            continue
-        records.append({
-            "id": node_id,
-            "block_type": block.get("block_type"),
-            "inline_content": block.get("inline_content"),
-            "resource_id": block.get("resource_id"),
-            "alt_text": block.get("alt_text"),
-            "rows": block.get("rows"),
-            "source_ref": block.get("source_ref"),
-        })
-    payload = json.dumps(records, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    semantic_fields = {
+        "role",
+        "level",
+        "semantic_role",
+        "semantic_source_operation",
+        "semantic_adapter",
+        "semantic_paragraph_id",
+        "semantic_list_parent_id",
+        "appendix_id",
+        "appendix_role",
+        "appendix_relative_level",
+        "semantic_scope_id",
+        "source_heading_level",
+        "page_break_before",
+        "source_number_preserved",
+    }
+    blocks = {
+        str(node_id): {
+            key: copy.deepcopy(value)
+            for key, value in block.items()
+            if key not in semantic_fields
+        }
+        for node_id, block in (document.get("blocks") or {}).items()
+        if isinstance(block, Mapping)
+    }
+    return {
+        "root_id": document.get("root_id"),
+        "children": copy.deepcopy(document.get("children") or {}),
+        "containers": copy.deepcopy(document.get("containers") or {}),
+        "associations": copy.deepcopy(document.get("associations") or []),
+        "resources": copy.deepcopy(document.get("resources") or {}),
+        "blocks": blocks,
+        "overlay": copy.deepcopy(normalized.get("overlay") or {}),
+    }
+
+
+def _content_digest(bundle: Mapping[str, Any]) -> str:
+    payload = json.dumps(
+        _content_surface(bundle),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _authorized_hierarchy_repair(
+    baseline_bundle: Mapping[str, Any],
+    candidate_bundle: Mapping[str, Any],
+    decisions: Iterable[Mapping[str, Any]] | None,
+) -> bool:
+    baseline = _content_surface(baseline_bundle)
+    candidate = _content_surface(candidate_bundle)
+    baseline_children = baseline.pop("children")
+    candidate_children = candidate.pop("children")
+    if baseline != candidate or baseline_children == candidate_children:
+        return False
+    move_targets = {
+        str(target)
+        for decision in decisions or ()
+        if decision.get("operation") == "move_node"
+        for target in decision.get("target_node_ids") or []
+    }
+    if not move_targets:
+        return False
+
+    def positions(children: Mapping[str, Any]) -> dict[str, tuple[str, int]]:
+        return {
+            str(child_id): (str(parent_id), index)
+            for parent_id, child_ids in children.items()
+            for index, child_id in enumerate(child_ids)
+        }
+
+    before_positions = positions(baseline_children)
+    after_positions = positions(candidate_children)
+    changed = {
+        node_id
+        for node_id in set(before_positions) | set(after_positions)
+        if before_positions.get(node_id) != after_positions.get(node_id)
+    }
+    return bool(changed) and changed.issubset(move_targets)
 
 
 def _finding_score(findings: Iterable[Mapping[str, Any]]) -> tuple[int, int, int, int, int]:
@@ -202,7 +268,10 @@ def evaluate_candidate(
     if isinstance(baseline_round, int) and isinstance(candidate_round, int) and candidate_round > baseline_round + 1:
         return AcceptanceDecision("rejected", "review_round_exceeded", False, semantic_changed, presentation_changed, details)
 
-    if _content_digest(baseline_bundle) != _content_digest(candidate_bundle):
+    if (
+        _content_digest(baseline_bundle) != _content_digest(candidate_bundle)
+        and not _authorized_hierarchy_repair(baseline_bundle, candidate_bundle, decisions)
+    ):
         return AcceptanceDecision("rejected", "content_changed", False, semantic_changed, presentation_changed, details)
 
     before, after = _findings_pair(baseline_bundle, candidate_bundle, findings)

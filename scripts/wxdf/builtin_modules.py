@@ -1333,19 +1333,7 @@ def _native_reviewer(context: ModuleExecutionContext) -> dict[str, Any]:
     )
     request_sink = options.get("enhancement_request_sink")
     if isinstance(request_sink, list):
-        file_ast = options.get("file_protocol_source_ast")
-        file_request = (
-            build_native_request(
-                "document_review",
-                file_ast,
-                budget=min(1, remaining),
-                timeout_seconds=float(options.get("enhancement_timeout_seconds", 30.0)),
-                request_id=enhancement_request.request_id,
-            )
-            if isinstance(file_ast, Mapping)
-            else enhancement_request
-        )
-        serialized = serialize_native_request(file_request)
+        serialized = serialize_native_request(enhancement_request)
         serialized["review_packet"] = _json_copy(packet)
         serialized["request_sha256"] = request_digest(serialized)
         request_sink.append(serialized)
@@ -1406,11 +1394,30 @@ def _native_reviewer(context: ModuleExecutionContext) -> dict[str, Any]:
             candidate_artifact=candidate_path,
         )
 
-    revision = stage_candidate_revision(
-        baseline_commit.snapshot,
-        decision_set["decisions"],
-        expected_revision=baseline_commit.snapshot.ast["revision"],
-    )
+    try:
+        revision = stage_candidate_revision(
+            baseline_commit.snapshot,
+            decision_set["decisions"],
+            expected_revision=baseline_commit.snapshot.ast["revision"],
+        )
+    except Exception as exc:
+        audit_exception = {"type": type(exc).__name__, "message": str(exc)}
+        acceptance = AcceptanceDecision(
+            "rejected",
+            "candidate_transaction_failed",
+            False,
+            False,
+            False,
+            {"audit_exception": audit_exception},
+        )
+        return finish(
+            status="rolled_back",
+            acceptance=acceptance,
+            enhancement=enhancement_record,
+            decision_set=decision_set,
+            audit_exception=audit_exception,
+            candidate_artifact=candidate_path,
+        )
     candidate_commit = revision.candidate
     candidate_bundle: dict[str, Any] = {
         "source_ast": candidate_commit.snapshot.ast,
@@ -1539,15 +1546,12 @@ def _native_publisher(context: ModuleExecutionContext) -> bool:
         for item in context.require("list_semantics_result").get("diagnostics", [])
         if item.get("severity") in {"error", "warning"}
     ]
-    output_path = context.request.output_path
     if audits_passed and not fatal_diagnostics:
         selected_artifact = Path(review_result["selected_artifact"])
         if not selected_artifact.is_file():
             context.provide("published_output", None)
             return False
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        selected_artifact.replace(output_path)
-        context.provide("published_output", str(output_path))
+        context.provide("published_output", str(selected_artifact))
         return True
     context.provide("published_output", None)
     return False

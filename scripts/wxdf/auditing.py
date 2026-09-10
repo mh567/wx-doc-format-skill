@@ -15,6 +15,11 @@ from .render_plan import build_render_plan
 from .validation import validate_ast
 
 
+_REPAIRABLE_AUDIT_CODES = frozenset({
+    ("model", "heading_level_jump"),
+})
+
+
 def collect_audit_findings(
     audits: Mapping[str, Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -31,7 +36,13 @@ def collect_audit_findings(
             severity = issue.get("severity")
             if severity not in {"critical", "high", "medium", "low"}:
                 severity = "critical" if audit_name == "saved_output" else "high"
-            repairable = bool(issue.get("repairable") is True and block_id)
+            repairable = bool(
+                block_id
+                and (
+                    issue.get("repairable") is True
+                    or (audit_name, code) in _REPAIRABLE_AUDIT_CODES
+                )
+            )
             identity = str(block_id) if block_id else str(index)
             finding: dict[str, Any] = {
                 "audit_id": str(issue.get("audit_id") or f"{audit_name}:{code}:{identity}"),
@@ -75,6 +86,30 @@ def check_model(normalized: Mapping[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         issues.append({"code": "ast_invalid", "message": str(exc)})
     plan = build_render_plan(normalized)
+    blocks = normalized.get("source_ast", {}).get("document", {}).get("blocks", {})
+    previous_heading_level = 0
+    for operation in plan["operations"]:
+        node_id = str(operation.get("node_id") or "")
+        block = blocks.get(node_id) if isinstance(blocks, Mapping) else None
+        if not isinstance(block, Mapping) or block.get("block_type") != "paragraph":
+            continue
+        if block.get("role") != "heading":
+            continue
+        if block.get("appendix_id") or block.get("appendix_role"):
+            continue
+        level = block.get("level")
+        if not isinstance(level, int):
+            continue
+        expected_level = min(6, previous_heading_level + 1)
+        if level > expected_level:
+            issues.append({
+                "code": "heading_level_jump",
+                "node_id": node_id,
+                "severity": "high",
+                "expected_level": expected_level,
+                "actual_level": level,
+            })
+        previous_heading_level = level
     presentation = normalized.get("presentation", {}).get("nodes", {})
     for node_id, node in presentation.items():
         if not node.get("marker_anchor"):

@@ -8,7 +8,7 @@ import json
 from typing import Any, Mapping, Sequence
 
 from .contracts import AST_BLOCK_TYPES, AST_CONTAINER_KINDS, AST_ROLES, LIST_KINDS, PATCH_OPERATIONS, TABLE_TYPES
-from .transaction import StageSnapshot, apply_stage_batch, make_snapshot
+from .transaction import StageSnapshot, apply_stage_batch, make_snapshot, transaction_content_digest
 from .validation import validate_ast
 
 
@@ -636,12 +636,7 @@ def _revision_content(revision: Mapping[str, Any]) -> str:
 
 
 def _transaction_digest(revisions: Sequence[Mapping[str, Any]]) -> str:
-    payload = json.dumps(
-        [_revision_content(revision) for revision in revisions],
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
-    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return transaction_content_digest(revisions)
 
 
 def accept_decisions(ledger: Mapping[str, Any], decisions: Sequence[Mapping[str, Any]] | Mapping[str, Any]) -> dict[str, Any]:

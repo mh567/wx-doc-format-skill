@@ -27,10 +27,13 @@ if str(SCRIPTS) not in sys.path:
 from wxdf.run_store import (
     CheckpointError,
     append_native_waiting_requests,
+    prepare_native_resume,
     record_response,
     request_digest,
 )
+from wxdf.enhancement import build_native_request, serialize_native_request
 from wxdf.validation import validate_checkpoint
+from wxdf.source_store import SourceStore
 
 
 def _environment() -> dict[str, str]:
@@ -359,6 +362,90 @@ def test_native_resume_is_idempotent_and_changed_content_conflicts(tmp_path: Pat
     assert conflicted.returncode != 0
     assert checkpoint_path.read_bytes() == baseline_bytes
     assert output.read_bytes() == baseline_output
+
+
+def test_later_request_append_recovers_request_file_after_injected_process_crash(
+    tmp_path: Path,
+) -> None:
+    checkpoint_path, _output, _source_ast_path = _generate(tmp_path)
+    checkpoint_bytes = checkpoint_path.read_bytes()
+    checkpoint = json.loads(checkpoint_bytes)
+    original_requests = _read_requests(checkpoint_path)
+    extra_request = serialize_native_request(build_native_request(
+        "document_review",
+        checkpoint["source_ast"],
+        request_id="native-crash-review",
+    ))
+    journal_path = checkpoint_path.with_name(
+        checkpoint_path.name + ".request-append.journal"
+    )
+
+    with pytest.raises(SystemExit, match="injected request append crash"):
+        append_native_waiting_requests(
+            checkpoint_path,
+            checkpoint,
+            [extra_request],
+            crash_at="after_request_replace",
+        )
+
+    assert journal_path.is_file()
+    assert len(_read_requests(checkpoint_path)) == len(original_requests) + 1
+
+    recovered_checkpoint, ready, _responses, _options = prepare_native_resume(
+        checkpoint_path,
+        source_path=SOURCE,
+        template_path=TEMPLATE,
+        contracts=checkpoint["contracts"],
+        modules=checkpoint["modules"],
+        configuration=checkpoint["configuration"],
+        source_store=SourceStore(),
+    )
+
+    assert ready is False
+    assert recovered_checkpoint["status"] == "waiting_external"
+    assert checkpoint_path.read_bytes() == checkpoint_bytes
+    assert _read_requests(checkpoint_path) == original_requests
+    assert not journal_path.exists()
+
+
+def test_later_request_append_detects_change_immediately_before_replace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from wxdf import run_store
+
+    checkpoint_path, _output, _source_ast_path = _generate(tmp_path)
+    checkpoint_bytes = checkpoint_path.read_bytes()
+    checkpoint = json.loads(checkpoint_bytes)
+    request_path = Path(checkpoint["files"]["requests_path"])
+    extra_request = serialize_native_request(build_native_request(
+        "document_review",
+        checkpoint["source_ast"],
+        request_id="native-racing-review",
+    ))
+    journal_path = checkpoint_path.with_name(
+        checkpoint_path.name + ".request-append.journal"
+    )
+    real_replace_bytes = run_store._replace_bytes
+
+    def replace_and_race(path: Path, payload: bytes, suffix: str) -> None:
+        real_replace_bytes(path, payload, suffix)
+        if path == journal_path:
+            request_path.write_bytes(b"external-concurrent-change\n")
+
+    monkeypatch.setattr(run_store, "_replace_bytes", replace_and_race)
+
+    with pytest.raises(CheckpointError) as caught:
+        append_native_waiting_requests(
+            checkpoint_path,
+            checkpoint,
+            [extra_request],
+        )
+
+    assert caught.value.code == "request_identity_conflict"
+    assert request_path.read_bytes() == b"external-concurrent-change\n"
+    assert checkpoint_path.read_bytes() == checkpoint_bytes
+    assert not journal_path.exists()
 
 
 @pytest.mark.parametrize("checkpoint_status", ["waiting", "completed"])

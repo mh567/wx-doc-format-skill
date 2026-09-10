@@ -7,6 +7,7 @@ pending response instead of silently losing external work.
 
 from __future__ import annotations
 
+import base64
 import copy
 import hashlib
 import json
@@ -329,10 +330,73 @@ def write_native_waiting_checkpoint(
     return checkpoint
 
 
+def _request_append_journal_path(checkpoint_path: Path) -> Path:
+    return checkpoint_path.with_name(checkpoint_path.name + ".request-append.journal")
+
+
+def _bytes_digest(payload: bytes) -> str:
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def _replace_bytes(path: Path, payload: bytes, suffix: str) -> None:
+    temporary = path.with_name(path.name + suffix)
+    temporary.write_bytes(payload)
+    os.replace(temporary, path)
+
+
+def _recover_native_request_append(checkpoint_path: Path) -> None:
+    journal_path = _request_append_journal_path(checkpoint_path)
+    if not journal_path.is_file():
+        return
+    try:
+        journal = json.loads(journal_path.read_text(encoding="utf-8"))
+        checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        if journal.get("schema_version") != "1.0":
+            raise ValueError("unsupported journal version")
+        request_path = Path(journal["requests_path"])
+        checkpoint_request_path = Path(checkpoint["files"]["requests_path"])
+        if request_path.resolve() != checkpoint_request_path.resolve():
+            raise ValueError("journal request path does not match checkpoint")
+        previous = base64.b64decode(journal["previous_base64"], validate=True)
+        replacement = base64.b64decode(journal["replacement_base64"], validate=True)
+        previous_digest = _bytes_digest(previous)
+        replacement_digest = _bytes_digest(replacement)
+        if (
+            previous_digest != journal.get("previous_sha256")
+            or replacement_digest != journal.get("replacement_sha256")
+        ):
+            raise ValueError("journal content digest changed")
+        checkpoint_digest = (
+            checkpoint.get("resource_summary", {})
+            .get("fingerprints", {})
+            .get("requests")
+        )
+        current = request_path.read_bytes()
+        if checkpoint_digest == replacement_digest:
+            if current != replacement:
+                raise ValueError("committed request append does not match its file")
+        elif checkpoint_digest == previous_digest:
+            if current == replacement:
+                _replace_bytes(request_path, previous, ".append-recovery.tmp")
+            elif current != previous:
+                raise ValueError("request file changed during append recovery")
+        else:
+            raise ValueError("checkpoint request digest does not match append journal")
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise CheckpointError(
+            f"cannot recover native request append: {exc}",
+            code="request_append_recovery_failed",
+        ) from exc
+    request_path.with_name(request_path.name + ".append.tmp").unlink(missing_ok=True)
+    journal_path.unlink(missing_ok=True)
+
+
 def append_native_waiting_requests(
     checkpoint_path: Path | str,
     checkpoint: Mapping[str, Any],
     requests: list[dict[str, Any]],
+    *,
+    crash_at: str | None = None,
 ) -> dict[str, Any]:
     """Append later-stage requests while preserving the waiting checkpoint."""
 
@@ -379,20 +443,43 @@ def append_native_waiting_requests(
     if updated["requests"] == checkpoint.get("requests"):
         return updated
 
-    payload = "".join(_canonical(item) + "\n" for item in updated["requests"])
+    payload = "".join(_canonical(item) + "\n" for item in updated["requests"]).encode("utf-8")
     temporary = request_path.with_name(request_path.name + ".append.tmp")
-    temporary.write_text(payload, encoding="utf-8")
-    os.replace(temporary, request_path)
-    updated["resource_summary"]["fingerprints"]["requests"] = file_digest(request_path)
-    updated["budget"]["limit"] = len(updated["requests"])
-    updated["round"] = int(updated.get("round") or 0) + 1
+    journal_path = _request_append_journal_path(checkpoint_path)
+    temporary.write_bytes(payload)
+    journal = {
+        "schema_version": "1.0",
+        "requests_path": str(request_path),
+        "previous_sha256": _bytes_digest(previous),
+        "replacement_sha256": _bytes_digest(payload),
+        "previous_base64": base64.b64encode(previous).decode("ascii"),
+        "replacement_base64": base64.b64encode(payload).decode("ascii"),
+    }
+    _replace_bytes(
+        journal_path,
+        (_canonical(journal) + "\n").encode("utf-8"),
+        ".tmp",
+    )
     try:
+        if request_path.read_bytes() != previous:
+            journal_path.unlink(missing_ok=True)
+            raise CheckpointError(
+                "native request file changed immediately before later-stage append",
+                code="request_identity_conflict",
+            )
+        os.replace(temporary, request_path)
+        if crash_at == "after_request_replace":
+            raise SystemExit("injected request append crash")
+        updated["resource_summary"]["fingerprints"]["requests"] = _bytes_digest(payload)
+        updated["budget"]["limit"] = len(updated["requests"])
+        updated["round"] = int(updated.get("round") or 0) + 1
         save_checkpoint(updated, checkpoint_path)
     except Exception:
-        rollback = request_path.with_name(request_path.name + ".rollback.tmp")
-        rollback.write_bytes(previous)
-        os.replace(rollback, request_path)
+        if request_path.read_bytes() == payload:
+            _replace_bytes(request_path, previous, ".rollback.tmp")
+        journal_path.unlink(missing_ok=True)
         raise
+    journal_path.unlink(missing_ok=True)
     return updated
 
 
@@ -409,6 +496,7 @@ def prepare_native_resume(
     """Validate identities and commit external responses before execution."""
 
     checkpoint_path = _path(checkpoint_path)
+    _recover_native_request_append(checkpoint_path)
     checkpoint = load_checkpoint(checkpoint_path)
     if (
         checkpoint["status"] == "waiting_external"
@@ -476,10 +564,29 @@ def prepare_native_resume(
             items = request.get("items")
             if not isinstance(items, list) or len(items) != 1 or not isinstance(items[0], Mapping):
                 raise CheckpointError("native request has an invalid source view", code="invalid_request")
-            if items[0].get("source_ast") != checkpoint["source_ast"]:
+            request_ast = items[0].get("source_ast")
+            if not isinstance(request_ast, Mapping):
+                raise CheckpointError("native request has an invalid source AST", code="invalid_request")
+            request_revision = request_ast.get("revision")
+            if (
+                items[0].get("revision") != request_revision
+                or request.get("model_revision") != request_revision
+                or request.get("view_sha256") != _digest(request_ast)
+            ):
+                raise CheckpointError("native request view identity is inconsistent", code="request_identity_conflict")
+            is_review = request.get("capability") == "document_review"
+            if (
+                checkpoint["status"] == "waiting_external"
+                and not is_review
+                and request_ast != checkpoint["source_ast"]
+            ):
                 raise CheckpointError("native request Source AST does not match the checkpoint", code="request_identity_conflict")
-            if request.get("view_sha256") != _digest(checkpoint["source_ast"]):
-                raise CheckpointError("native request view digest does not match the checkpoint", code="request_identity_conflict")
+            packet = request.get("review_packet")
+            if is_review and (
+                not isinstance(packet, Mapping)
+                or packet.get("baseline_revision") != request_revision
+            ):
+                raise CheckpointError("native review request baseline is inconsistent", code="request_identity_conflict")
     response_path = Path(checkpoint["files"]["responses_path"])
     responses = _read_json_lines(response_path, kind="response") if response_path.is_file() else []
     recorded = checkpoint
@@ -515,7 +622,11 @@ def prepare_native_resume(
             template_path,
             template_bytes=template_bytes,
         )
-    if checkpoint["status"] in {"completed", "completed_with_warnings"}:
+    if checkpoint["status"] in {"completed", "completed_with_warnings"} or (
+        checkpoint["status"] == "failed"
+        and isinstance(checkpoint.get("review_outcome"), Mapping)
+        and checkpoint["review_outcome"].get("status") == "rolled_back"
+    ):
         return recorded, False, response_map, resume_options
     required_ids = {
         str(item["request_id"])
@@ -621,6 +732,7 @@ def complete_native_checkpoint(
     transaction_id: str,
     applied_request_ids: set[str],
     request_transaction_ids: Mapping[str, str] | None = None,
+    review_outcome: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Persist the completed semantic, presentation and transaction snapshot."""
 
@@ -695,6 +807,8 @@ def complete_native_checkpoint(
         "semantic_digest": normalized["semantic_digest"],
         "presentation_digest": normalized["presentation_digest"],
     })
+    if review_outcome is not None:
+        completed["review_outcome"] = copy.deepcopy(dict(review_outcome))
     save_checkpoint(completed, checkpoint_path)
     return completed
 
@@ -715,6 +829,79 @@ def _validate_for_store(checkpoint: Mapping[str, Any]) -> None:
         raise CheckpointError(f"checkpoint validation failed: {exc}", code=code) from exc
     except Exception as exc:
         raise CheckpointError(f"checkpoint validation failed: {exc}", code="invalid_checkpoint") from exc
+    terminal_rollback = (
+        checkpoint.get("status") == "failed"
+        and isinstance(checkpoint.get("review_outcome"), Mapping)
+        and checkpoint["review_outcome"].get("status") == "rolled_back"
+    )
+    if checkpoint.get("status") in {"completed", "completed_with_warnings"} or terminal_rollback:
+        ledger_digests: dict[str, str] = {}
+        for revision in checkpoint.get("decision_ledger", {}).get("revisions", []):
+            transaction_id = str(revision.get("transaction_id") or "")
+            digest = revision.get("transaction_content_sha256")
+            if not transaction_id or not isinstance(digest, str):
+                raise CheckpointError(
+                    "completed ledger revision has no transaction proof",
+                    code="transaction_state_missing",
+                )
+            prior = ledger_digests.setdefault(transaction_id, digest)
+            if prior != digest:
+                raise CheckpointError(
+                    f"completed ledger has conflicting content for {transaction_id}",
+                    code="transaction_state_mismatch",
+                )
+        transaction_digests = {
+            str(transaction_id): str(digest)
+            for transaction_id, digest in checkpoint.get("transaction_content_digests", {}).items()
+        }
+        applied_digests = {
+            str(item.get("transaction_id")): str(item.get("content_sha256"))
+            for item in checkpoint.get("applied_transactions", [])
+            if isinstance(item, Mapping)
+        }
+        if ledger_digests != transaction_digests or applied_digests != transaction_digests:
+            raise CheckpointError(
+                "completed transaction proofs do not match the decision ledger",
+                code="transaction_state_mismatch",
+            )
+    if terminal_rollback:
+        bindings = checkpoint.get("response_transaction_bindings") or {}
+        bound_ids: set[str] = set()
+        for response in checkpoint.get("responses", []):
+            request_id = str(response.get("request_id") or "")
+            if response.get("applied") is True:
+                transaction_id = str(response.get("transaction_id") or "")
+                digest = response.get("transaction_content_sha256")
+                expected_binding = _response_transaction_binding(
+                    response,
+                    transaction_id,
+                    str(digest or ""),
+                )
+                if (
+                    applied_digests.get(transaction_id) != digest
+                    or bindings.get(request_id) != expected_binding
+                ):
+                    raise CheckpointError(
+                        f"rolled-back response proof changed for {request_id}",
+                        code="response_transaction_binding_mismatch",
+                    )
+                bound_ids.add(request_id)
+            elif (
+                response.get("applied") is not False
+                or response.get("apply_started", False) is not False
+                or response.get("transaction_id") is not None
+                or response.get("transaction_content_sha256") is not None
+                or request_id in bindings
+            ):
+                raise CheckpointError(
+                    f"rejected response application state changed for {request_id}",
+                    code="response_application_state_mismatch",
+                )
+        if set(bindings) != bound_ids:
+            raise CheckpointError(
+                "rolled-back response bindings do not match applied responses",
+                code="response_transaction_binding_mismatch",
+            )
 
 
 def _validate_embedded_fingerprints(checkpoint: Mapping[str, Any]) -> None:
@@ -875,7 +1062,7 @@ def _snapshot_transaction_state(transactions: Mapping[str, str]) -> tuple[list[d
 
 def _checkpoint_transactions(checkpoint: Mapping[str, Any]) -> dict[str, str]:
     return {
-        str(item["transaction_id"]): str(item["content_sha256"])[len("sha256:"):]
+        str(item["transaction_id"]): str(item["content_sha256"])
         for item in checkpoint.get("applied_transactions", [])
         if isinstance(item, Mapping) and item.get("transaction_id") and item.get("content_sha256")
     }

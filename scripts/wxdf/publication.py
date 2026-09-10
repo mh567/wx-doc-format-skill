@@ -27,6 +27,55 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def publish_files_atomically(payloads: Mapping[Path | str, bytes]) -> None:
+    """Replace a set of formal files as one rollback protected commit."""
+
+    targets = [Path(value) for value in payloads]
+    if len(targets) != len(set(targets)):
+        raise PublicationError("publication targets must be unique")
+    commit_id = uuid.uuid4().hex
+    staged: dict[Path, Path] = {}
+    backups: dict[Path, Path] = {}
+    installed: set[Path] = set()
+    try:
+        for target, payload in ((Path(path), value) for path, value in payloads.items()):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target.with_name(f".{target.name}.staging-{commit_id}")
+            temporary.write_bytes(payload)
+            staged[target] = temporary
+        for target in targets:
+            if target.exists():
+                backup = target.with_name(f".{target.name}.rollback-{commit_id}")
+                os.replace(target, backup)
+                backups[target] = backup
+            os.replace(staged[target], target)
+            installed.add(target)
+    except Exception as exc:
+        rollback_errors: list[str] = []
+        for target in reversed(targets):
+            try:
+                if target in installed and target.exists():
+                    target.unlink()
+                backup = backups.get(target)
+                if backup is not None and backup.exists():
+                    os.replace(backup, target)
+            except Exception as rollback_exc:
+                rollback_errors.append(f"{target}: {rollback_exc}")
+        detail = f"; rollback failed for {', '.join(rollback_errors)}" if rollback_errors else ""
+        raise PublicationError(f"atomic publication failed: {exc}{detail}") from exc
+    finally:
+        for temporary in staged.values():
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+    for backup in backups.values():
+        try:
+            backup.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def publish_bundle(
     artifacts: Mapping[str, Path | str],
     destination: Path | str,
@@ -42,8 +91,10 @@ def publish_bundle(
     missing = [name for name in required if name not in artifacts or not Path(artifacts[name]).is_file()]
     if missing:
         raise PublicationError(f"missing artifact: {missing[0]}")
-    staging = destination / ".staging" / run_id
-    staging.mkdir(parents=True, exist_ok=True)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    commit_id = uuid.uuid4().hex
+    staging = destination.parent / f".{destination.name}.staging-{commit_id}"
+    backup = destination.parent / f".{destination.name}.rollback-{commit_id}"
     manifest: dict[str, Any] = {
         "schema_version": "1.0",
         "run_id": run_id,
@@ -51,23 +102,44 @@ def publish_bundle(
         "acceptance": acceptance_record,
         "files": {},
     }
-    for name in required:
-        source = Path(artifacts[name])
-        target = staging / name
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, target)
-        manifest["files"][name] = {"path": name, "size": target.stat().st_size, "sha256": _sha256(target)}
-    manifest_path = staging / "manifest.json"
-    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-    manifest["status"] = "completed"
-    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-    destination.mkdir(parents=True, exist_ok=True)
-    for name in required:
-        target = destination / name
-        target.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(staging / name, target)
-    os.replace(manifest_path, destination / "manifest.json")
-    (destination / "COMMITTED").write_text(run_id, encoding="utf-8")
+    try:
+        staging.mkdir(parents=True, exist_ok=False)
+        for name in required:
+            relative = Path(name)
+            if relative.is_absolute() or ".." in relative.parts:
+                raise PublicationError(f"invalid artifact name: {name}")
+            source = Path(artifacts[name])
+            target = staging / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+            manifest["files"][name] = {
+                "path": name,
+                "size": target.stat().st_size,
+                "sha256": _sha256(target),
+            }
+        manifest["status"] = "completed"
+        (staging / "manifest.json").write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        (staging / "COMMITTED").write_text(run_id, encoding="utf-8")
+        if destination.exists():
+            os.replace(destination, backup)
+        try:
+            os.replace(staging, destination)
+        except Exception:
+            if backup.exists():
+                os.replace(backup, destination)
+            raise
+    except Exception as exc:
+        if isinstance(exc, PublicationError):
+            raise
+        raise PublicationError(f"publication failed: {exc}") from exc
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+    if backup.exists():
+        shutil.rmtree(backup, ignore_errors=True)
     return {"status": "completed", "run_id": run_id, "destination": str(destination), "manifest": manifest}
 
 
