@@ -188,6 +188,41 @@ def test_native_review_repairs_real_heading_audit_without_audit_monkeypatch(
     assert zipfile.is_zipfile(tmp_path / "formal.docx")
 
 
+@pytest.mark.parametrize("invalid_value", ["missing_role", "missing_level", "extra_field"])
+def test_native_heading_review_rejects_incomplete_value_before_candidate_artifacts(
+    tmp_path: Path,
+    invalid_value: str,
+) -> None:
+    source = tmp_path / "source.md"
+    source.write_text("# Heading\n\n### Jump\n\nBody.\n", encoding="utf-8")
+    formal = tmp_path / "formal.docx"
+    formal.write_bytes(b"old-formal")
+
+    def adapter(payload):
+        patch = _review_patch(payload, role="heading")
+        target = payload["context"]["review_packet"]["targets"][0]
+        value = {"role": "heading", "level": target["evidence"]["expected_level"]}
+        if invalid_value == "extra_field":
+            value["semantic_role"] = "appendix_title"
+        else:
+            value.pop(invalid_value.removeprefix("missing_"))
+        patch["candidates"][0]["proposal"] = {
+            "operation": "update_role",
+            "property_scope": ["role", "level"],
+            "value": value,
+        }
+        return patch
+
+    result = ConversionKernel().convert(_request(tmp_path, source, adapter))
+
+    review = result.report["native_review"]
+    assert result.status == "failed"
+    assert review["status"] == "rolled_back"
+    assert review["acceptance"]["reason"] == "review_scope_violation"
+    assert not Path(review["candidate_artifact"]).exists()
+    assert formal.read_bytes() == b"old-formal"
+
+
 def test_native_publication_failure_preserves_formal_and_all_existing_auxiliary_artifacts(
     tmp_path: Path,
 ) -> None:

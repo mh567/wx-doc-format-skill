@@ -250,6 +250,7 @@ def test_review_packet_contains_only_stable_repairable_targets() -> None:
         "role": ["heading"],
         "level": [2],
     }
+    assert packet["targets"][0]["required_value_fields"] == ["role", "level"]
 
 
 @pytest.mark.parametrize(
@@ -299,8 +300,12 @@ def test_review_packet_rejects_candidate_decisions_outside_explicit_authority(de
     [
         {"role": "note", "level": 2},
         {"role": "heading", "level": 1},
+        {"role": "heading"},
+        {"level": 2},
+        {},
+        {"role": "heading", "level": 2, "semantic_role": "appendix_title"},
     ],
-    ids=["role", "level"],
+    ids=["role", "level", "missing_level", "missing_role", "empty", "extra_field"],
 )
 def test_heading_review_authority_rejects_values_outside_finding(value: dict) -> None:
     baseline = _bundle(level=1)

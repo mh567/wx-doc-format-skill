@@ -66,7 +66,10 @@ def test_publication_failure_does_not_report_completed_and_recovery_is_explicit(
     assert recover_publication(destination)["status"] == "incomplete"
 
 
-@pytest.mark.parametrize("reserved_name", ["manifest.json", "COMMITTED"])
+@pytest.mark.parametrize("reserved_name", [
+    "manifest.json", "COMMITTED", "Manifest.JSON", "committed",
+    "MANIFEST.JSON/item", "committed/item", "nested/CoMmItTeD",
+])
 def test_publication_rejects_reserved_bundle_artifact_names(
     tmp_path: Path,
     reserved_name: str,
@@ -86,6 +89,57 @@ def test_publication_rejects_reserved_bundle_artifact_names(
     assert not destination.exists()
 
 
+@pytest.mark.parametrize("names", [
+    ("item", "./item"),
+    ("item", "ITEM"),
+    ("caf\N{LATIN SMALL LETTER E WITH ACUTE}", "cafe\N{COMBINING ACUTE ACCENT}"),
+    ("item", "ITEM/child"),
+    ("/absolute",),
+    ("../outside",),
+    ("nested/../item",),
+    ("",),
+    ("item//child",),
+    ("item/",),
+    (".",),
+    ("nested/./item",),
+    ("C:/absolute",),
+    ("nested\\item",),
+])
+def test_bundle_rejects_noncanonical_or_colliding_logical_names_before_mutation(
+    tmp_path: Path,
+    names: tuple[str, ...],
+) -> None:
+    artifact = tmp_path / "candidate.bin"
+    artifact.write_bytes(b"candidate")
+    destination = tmp_path / "published"
+    destination.mkdir()
+    original = destination / "original"
+    original.write_bytes(b"old-bundle")
+
+    with pytest.raises(PublicationError, match="artifact name"):
+        publish_bundle({name: artifact for name in names}, destination, acceptance=ACCEPTED)
+
+    assert original.read_bytes() == b"old-bundle"
+    assert sorted(path.name for path in destination.iterdir()) == ["original"]
+    assert not list(tmp_path.glob(".published.staging-*"))
+    assert not list(tmp_path.glob(".wxdf-publication-*.journal"))
+
+
+def test_bundle_preserves_canonical_nested_names(tmp_path: Path) -> None:
+    artifact = tmp_path / "candidate.bin"
+    artifact.write_bytes(b"candidate")
+    destination = tmp_path / "published"
+
+    published = publish_bundle(
+        {"nested/item": artifact, "nested/other": artifact},
+        destination,
+        acceptance=ACCEPTED,
+    )
+
+    assert set(published["manifest"]["files"]) == {"nested/item", "nested/other"}
+    assert recover_publication(destination)["status"] == "completed"
+
+
 def test_publication_recovery_requires_marker_to_match_manifest_run_id(tmp_path: Path) -> None:
     artifact = tmp_path / "candidate.docx"
     artifact.write_bytes(b"candidate")
@@ -102,6 +156,87 @@ def test_publication_recovery_requires_marker_to_match_manifest_run_id(tmp_path:
 
     assert recovered["status"] == "incomplete"
     assert recovered["reason"] == "marker_mismatch"
+
+
+@pytest.mark.parametrize("tampering", [
+    "absolute", "traversal", "different_name", "dot_alias",
+    "symlink_file", "symlink_parent", "symlink_inside",
+    "logical_alias", "logical_case_collision", "logical_reserved",
+    "manifest_symlink", "marker_symlink", "files_list", "entry_list",
+])
+def test_bundle_recovery_rejects_untrusted_manifest_paths_without_reading_outside(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tampering: str,
+) -> None:
+    artifact = tmp_path / "candidate.bin"
+    artifact.write_bytes(b"candidate")
+    destination = tmp_path / "published"
+    publish_bundle({"nested/item": artifact}, destination, run_id="bound-run", acceptance=ACCEPTED)
+    manifest_path = destination / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    record = manifest["files"]["nested/item"]
+    if tampering == "absolute":
+        record["path"] = str(artifact)
+    elif tampering == "traversal":
+        record["path"] = "../candidate.bin"
+    elif tampering == "different_name":
+        (destination / "different").write_bytes(b"candidate")
+        record["path"] = "different"
+    elif tampering == "dot_alias":
+        record["path"] = "nested/./item"
+    elif tampering in {"symlink_file", "symlink_inside"}:
+        item_path = destination / "nested" / "item"
+        item_path.unlink()
+        if tampering == "symlink_inside":
+            artifact = destination / "different"
+            artifact.write_bytes(b"candidate")
+        item_path.symlink_to(artifact)
+    elif tampering == "symlink_parent":
+        (destination / "nested" / "item").unlink()
+        (destination / "nested").rmdir()
+        external = tmp_path / "external"
+        external.mkdir()
+        (external / "item").write_bytes(b"candidate")
+        (destination / "nested").symlink_to(external, target_is_directory=True)
+    elif tampering == "logical_alias":
+        manifest["files"]["./nested/item"] = dict(record, path="./nested/item")
+    elif tampering == "logical_case_collision":
+        manifest["files"]["NESTED/ITEM"] = dict(record, path="NESTED/ITEM")
+    elif tampering == "logical_reserved":
+        manifest["files"] = {"COMMITTED/child": record}
+    elif tampering == "files_list":
+        manifest["files"] = []
+    elif tampering == "entry_list":
+        manifest["files"]["nested/item"] = []
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    if tampering in {"manifest_symlink", "marker_symlink"}:
+        controlled = manifest_path if tampering == "manifest_symlink" else destination / "COMMITTED"
+        external = tmp_path / "external-control"
+        external.write_bytes(controlled.read_bytes())
+        controlled.unlink()
+        controlled.symlink_to(external)
+    real_read_bytes = Path.read_bytes
+    real_read_text = Path.read_text
+    outside_reads: list[Path] = []
+
+    def tracked_read_bytes(path):
+        if not path.resolve().is_relative_to(destination):
+            outside_reads.append(path)
+        return real_read_bytes(path)
+
+    def tracked_read_text(path, *args, **kwargs):
+        if not path.resolve().is_relative_to(destination):
+            outside_reads.append(path)
+        return real_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_bytes", tracked_read_bytes)
+    monkeypatch.setattr(Path, "read_text", tracked_read_text)
+
+    recovered = recover_publication(destination)
+
+    assert recovered["status"] == "incomplete"
+    assert outside_reads == []
 
 
 @pytest.mark.parametrize("acceptance", [None, {}, {"accepted": False, "status": "rejected"}])
@@ -210,6 +345,127 @@ def test_formal_file_commit_recovers_old_generation_after_process_interrupt(
     assert formal.read_bytes() == b"old-formal"
     assert report.read_bytes() == b"old-report"
     assert not list(tmp_path.glob(".wxdf-publication-*.journal"))
+
+
+@pytest.mark.parametrize("alias_kind", ["relative", "dotdot", "symlink", "symlink_parent"])
+@pytest.mark.parametrize("failure_boundary", ["replace", "rollback"])
+@pytest.mark.parametrize("with_untrusted_journal", [False, True])
+def test_canonical_duplicate_targets_fail_before_recovery_or_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    alias_kind: str,
+    failure_boundary: str,
+    with_untrusted_journal: bool,
+) -> None:
+    from wxdf import publication
+
+    monkeypatch.chdir(tmp_path)
+    formal = tmp_path / "formal.docx"
+    formal.write_bytes(b"old-formal")
+    if alias_kind == "relative":
+        alias = Path("formal.docx")
+    elif alias_kind == "dotdot":
+        (tmp_path / "nested").mkdir()
+        alias = tmp_path / "nested" / ".." / "formal.docx"
+    elif alias_kind == "symlink":
+        alias = tmp_path / "alias.docx"
+        alias.symlink_to(formal)
+    else:
+        directory_alias = tmp_path / "alias-dir"
+        directory_alias.symlink_to(tmp_path, target_is_directory=True)
+        alias = directory_alias / "formal.docx"
+    poison = tmp_path / (".wxdf-publication-" + "e" * 32 + ".journal")
+    if with_untrusted_journal:
+        poison.write_text("untrusted journal", encoding="utf-8")
+    replace_attempts: list[tuple[Path, Path]] = []
+    real_replace = publication.os.replace
+
+    def fail_replace(source, target):
+        replace_attempts.append((Path(source), Path(target)))
+        if failure_boundary == "replace" or ".rollback-" in Path(source).name:
+            raise OSError(f"injected {failure_boundary} failure")
+        real_replace(source, target)
+
+    monkeypatch.setattr(publication.os, "replace", fail_replace)
+
+    with pytest.raises(PublicationError, match="targets must be unique"):
+        publish_files_atomically({formal: b"new-first", alias: b"new-alias"})
+
+    assert formal.read_bytes() == b"old-formal"
+    if with_untrusted_journal:
+        assert poison.read_text(encoding="utf-8") == "untrusted journal"
+    else:
+        assert not list(tmp_path.glob(".wxdf-publication-*.journal"))
+    assert replace_attempts == []
+    assert not list(tmp_path.glob(".*.staging-*"))
+
+
+def test_recovery_rejects_duplicate_journal_targets_before_mutation(tmp_path: Path) -> None:
+    formal = tmp_path / "formal.docx"
+    formal.write_bytes(b"old-formal")
+    transaction_id = "f" * 32
+    backup = tmp_path / f".{formal.name}.rollback-{transaction_id}"
+    backup.write_bytes(b"untrusted-backup")
+    journal_path = tmp_path / f".wxdf-publication-{transaction_id}.journal"
+    entry = {
+        "target": str(formal),
+        "staged": str(tmp_path / f".{formal.name}.staging-{transaction_id}"),
+        "backup": str(backup),
+        "had_original": True,
+    }
+    journal_path.write_text(json.dumps({
+        "schema_version": "1.0",
+        "transaction_id": transaction_id,
+        "state": "prepared",
+        "entries": [entry, entry],
+        "journal_paths": [str(journal_path)],
+    }), encoding="utf-8")
+
+    with pytest.raises(PublicationError, match="targets must be unique"):
+        recover_pending_publications(formal)
+
+    assert formal.read_bytes() == b"old-formal"
+    assert backup.read_bytes() == b"untrusted-backup"
+    assert journal_path.exists()
+
+
+@pytest.mark.parametrize("symlink_field", ["staged", "backup"])
+def test_recovery_rejects_generation_payload_symlinks_outside_trusted_root(
+    tmp_path: Path,
+    symlink_field: str,
+) -> None:
+    trusted = tmp_path / "trusted"
+    trusted.mkdir()
+    formal = trusted / "formal.docx"
+    formal.write_bytes(b"old-formal")
+    outside = tmp_path / "outside"
+    outside.write_bytes(b"outside-data")
+    transaction_id = "a" * 32
+    staged = trusted / f".{formal.name}.staging-{transaction_id}"
+    backup = trusted / f".{formal.name}.rollback-{transaction_id}"
+    paths = {"staged": staged, "backup": backup}
+    paths[symlink_field].symlink_to(outside)
+    journal_path = trusted / f".wxdf-publication-{transaction_id}.journal"
+    journal_path.write_text(json.dumps({
+        "schema_version": "1.0",
+        "transaction_id": transaction_id,
+        "state": "prepared",
+        "entries": [{
+            "target": str(formal),
+            "staged": str(staged),
+            "backup": str(backup),
+            "had_original": True,
+        }],
+        "journal_paths": [str(journal_path)],
+    }), encoding="utf-8")
+
+    with pytest.raises(PublicationError, match="trusted publication root"):
+        recover_pending_publications(formal)
+
+    assert formal.read_bytes() == b"old-formal"
+    assert not formal.is_symlink()
+    assert outside.read_bytes() == b"outside-data"
+    assert paths[symlink_field].is_symlink()
 
 
 def test_cross_directory_recovery_observes_committed_generation_marker(

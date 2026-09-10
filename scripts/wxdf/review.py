@@ -26,6 +26,7 @@ _REPAIR_AUTHORITIES: dict[str, dict[str, Any]] = {
     "heading_level_jump": {
         "allowed_operations": ("update_role",),
         "property_scope": ("role", "level"),
+        "required_value_fields": ("role", "level"),
         "allowed_values": {
             "role": ("heading",),
             "level": "expected_level",
@@ -297,6 +298,7 @@ def build_review_packet(
                 "allowed_operations": list(authority["allowed_operations"]),
                 "property_scope": list(authority["property_scope"]),
                 "allowed_values": allowed_values,
+                "required_value_fields": list(authority.get("required_value_fields", ())),
                 "current": {
                     key: copy.deepcopy(node[key])
                     for key in (
@@ -372,6 +374,12 @@ def validate_review_decisions(
             allowed_values = authority.get("allowed_values")
             value = decision.get("value")
             if not isinstance(allowed_values, Mapping) or not isinstance(value, Mapping):
+                return {
+                    "code": "review_scope_violation",
+                    "kind": "value",
+                    "decision_index": index,
+                }
+            if not set(authority.get("required_value_fields") or []).issubset(value):
                 return {
                     "code": "review_scope_violation",
                     "kind": "value",

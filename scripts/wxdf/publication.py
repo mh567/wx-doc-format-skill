@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import unicodedata
 import uuid
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -18,7 +19,7 @@ class PublicationError(RuntimeError):
 
 _JOURNAL_SCHEMA_VERSION = "1.0"
 _JOURNAL_PATTERN = ".wxdf-publication-*.journal"
-_RESERVED_BUNDLE_NAMES = {"manifest.json", "COMMITTED"}
+_RESERVED_BUNDLE_NAMES = {"manifest.json", "committed"}
 _TRANSACTION_ID_PATTERN = re.compile(r"[0-9a-f]{32}")
 
 
@@ -32,6 +33,28 @@ def validate_acceptance(acceptance: Mapping[str, Any] | None) -> dict[str, Any]:
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _bundle_artifact_paths(names: Iterable[str]) -> dict[str, Path]:
+    paths: dict[str, Path] = {}
+    identities: set[tuple[str, ...]] = set()
+    for name in names:
+        if not isinstance(name, str) or any(character in name for character in ("\\", ":", "\0")):
+            raise PublicationError(f"invalid artifact name: {name}")
+        parts = name.split("/")
+        if any(part in {"", ".", ".."} for part in parts):
+            raise PublicationError(f"invalid artifact name: {name}")
+        identity = tuple(unicodedata.normalize("NFC", part).casefold() for part in parts)
+        if any(part in _RESERVED_BUNDLE_NAMES for part in identity):
+            raise PublicationError(f"reserved artifact name: {name}")
+        if any(
+            identity[:len(existing)] == existing or existing[:len(identity)] == identity
+            for existing in identities
+        ):
+            raise PublicationError(f"colliding artifact name: {name}")
+        identities.add(identity)
+        paths[name] = Path(*parts)
+    return paths
 
 
 def _remove_path(path: Path) -> None:
@@ -95,6 +118,7 @@ def _validate_journal_paths(
         raise ValueError("publication journal has no entries")
     entries: list[dict[str, Any]] = []
     entry_roots: set[Path] = set()
+    entry_targets: set[Path] = set()
     for raw_entry in raw_entries:
         if not isinstance(raw_entry, Mapping):
             raise ValueError("publication journal entry is invalid")
@@ -103,12 +127,17 @@ def _validate_journal_paths(
             raise ValueError(
                 "publication target is not a trusted publication target or is outside a trusted publication root"
             )
+        if target in entry_targets:
+            raise ValueError("publication targets must be unique")
+        entry_targets.add(target)
         expected_staged = target.with_name(f".{target.name}.staging-{transaction_id}")
         expected_backup = target.with_name(f".{target.name}.rollback-{transaction_id}")
         if Path(str(raw_entry.get("staged") or "")) != expected_staged:
             raise ValueError("publication staged path does not match its transaction")
         if Path(str(raw_entry.get("backup") or "")) != expected_backup:
             raise ValueError("publication backup path does not match its transaction")
+        if any(path.resolve() != path for path in (expected_staged, expected_backup)):
+            raise ValueError("publication payload is outside its trusted publication root")
         entries.append({
             "target": str(target),
             "staged": str(expected_staged),
@@ -138,7 +167,6 @@ def _validate_journal_paths(
 
 
 def _recover_journal(journal_path: Path, trusted_targets: set[Path]) -> str:
-    trusted_roots = {target.parent for target in trusted_targets}
     try:
         journal = _validate_journal_paths(
             json.loads(journal_path.read_text(encoding="utf-8")),
@@ -222,7 +250,7 @@ def recover_pending_publications(
     for journal_path in journal_paths:
         if journal_path.exists():
             statuses.append(_recover_journal(journal_path, trusted_targets))
-    for target in targets:
+    for target in trusted_targets:
         prefix = f".{target.name}.staging-"
         for candidate in target.parent.glob(prefix + "*"):
             transaction_id = candidate.name.removeprefix(prefix)
@@ -242,7 +270,9 @@ def _commit_staged_paths(
     *,
     crash_at: str | None = None,
 ) -> None:
-    targets = list(staged)
+    targets = [target.resolve() for target in staged]
+    if len(targets) != len(set(targets)):
+        raise PublicationError("publication targets must be unique")
     entries = [
         {
             "target": str(target.resolve()),
@@ -252,7 +282,7 @@ def _commit_staged_paths(
             ),
             "had_original": target.exists(),
         }
-        for target in targets
+        for target in staged
     ]
     journal_paths = _journal_paths(targets, transaction_id)
     journal: dict[str, Any] = {
@@ -262,6 +292,10 @@ def _commit_staged_paths(
         "entries": entries,
         "journal_paths": [str(path) for path in journal_paths],
     }
+    try:
+        journal = _validate_journal_paths(journal, journal_paths[0], set(targets))
+    except ValueError as exc:
+        raise PublicationError(f"invalid publication generation: {exc}") from exc
     try:
         _write_journal_copies(journal)
     except Exception as exc:
@@ -305,7 +339,7 @@ def publish_files_atomically(
 ) -> None:
     """Replace formal files through one crash recoverable generation commit."""
 
-    targets = [Path(value) for value in payloads]
+    targets = [Path(value).resolve() for value in payloads]
     if not targets:
         raise PublicationError("publication requires at least one target")
     if len(targets) != len(set(targets)):
@@ -314,7 +348,7 @@ def publish_files_atomically(
     transaction_id = uuid.uuid4().hex
     staged: dict[Path, Path] = {}
     try:
-        for target, payload in ((Path(path), value) for path, value in payloads.items()):
+        for target, payload in zip(targets, payloads.values()):
             target.parent.mkdir(parents=True, exist_ok=True)
             temporary = target.with_name(f".{target.name}.staging-{transaction_id}")
             temporary.write_bytes(payload)
@@ -336,17 +370,15 @@ def publish_bundle(
     acceptance: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     acceptance_record = validate_acceptance(acceptance)
-    destination = Path(destination)
-    recover_pending_publications(destination)
+    destination = Path(destination).resolve()
     run_id = run_id or uuid.uuid4().hex
     required = required or tuple(artifacts)
+    _bundle_artifact_paths(artifacts)
+    artifact_paths = _bundle_artifact_paths(required)
     missing = [name for name in required if name not in artifacts or not Path(artifacts[name]).is_file()]
     if missing:
         raise PublicationError(f"missing artifact: {missing[0]}")
-    for name in required:
-        relative = Path(name)
-        if relative.as_posix() in _RESERVED_BUNDLE_NAMES:
-            raise PublicationError(f"reserved artifact name: {name}")
+    recover_pending_publications(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
     transaction_id = uuid.uuid4().hex
     staging = destination.parent / f".{destination.name}.staging-{transaction_id}"
@@ -360,11 +392,8 @@ def publish_bundle(
     try:
         staging.mkdir(parents=True, exist_ok=False)
         for name in required:
-            relative = Path(name)
-            if relative.is_absolute() or ".." in relative.parts:
-                raise PublicationError(f"invalid artifact name: {name}")
             source = Path(artifacts[name])
-            target = staging / relative
+            target = staging / artifact_paths[name]
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)
             manifest["files"][name] = {
@@ -393,14 +422,20 @@ def recover_publication(destination: Path | str) -> dict[str, Any]:
     pending = recover_pending_publications(destination)
     if destination.is_file():
         return {"status": pending["status"], "destination": str(destination)}
-    marker = destination / "COMMITTED"
-    manifest_path = destination / "manifest.json"
-    if not marker.exists() or not manifest_path.exists():
-        return {"status": "incomplete", "destination": str(destination)}
     try:
+        root = destination.resolve()
+        marker = root / "COMMITTED"
+        manifest_path = root / "manifest.json"
+        if any(
+            path.resolve() != path or not path.is_file()
+            for path in (marker, manifest_path)
+        ):
+            return {"status": "incomplete", "destination": str(destination)}
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         marker_run_id = marker.read_text(encoding="utf-8")
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError, RuntimeError):
+        return {"status": "incomplete", "destination": str(destination)}
+    if not isinstance(manifest, Mapping):
         return {"status": "incomplete", "destination": str(destination)}
     if marker_run_id != manifest.get("run_id"):
         return {
@@ -408,8 +443,20 @@ def recover_publication(destination: Path | str) -> dict[str, Any]:
             "destination": str(destination),
             "reason": "marker_mismatch",
         }
-    for item in manifest.get("files", {}).values():
-        path = destination / item["path"]
-        if not path.is_file() or _sha256(path) != item.get("sha256"):
-            return {"status": "incomplete", "destination": str(destination), "reason": "artifact_mismatch"}
+    try:
+        files = manifest.get("files")
+        if not isinstance(files, Mapping):
+            raise PublicationError("invalid artifact manifest")
+        artifact_paths = _bundle_artifact_paths(files)
+        for name, relative in artifact_paths.items():
+            item = files[name]
+            if not isinstance(item, Mapping) or item.get("path") != name:
+                raise PublicationError("artifact path does not match its logical name")
+            path = root / relative
+            if path.resolve() != path or not path.is_file():
+                raise PublicationError("artifact path escapes its bundle location")
+            if _sha256(path) != item.get("sha256"):
+                raise PublicationError("artifact digest mismatch")
+    except (PublicationError, OSError, ValueError, RuntimeError):
+        return {"status": "incomplete", "destination": str(destination), "reason": "artifact_mismatch"}
     return {"status": "completed", "destination": str(destination), "manifest": manifest}
