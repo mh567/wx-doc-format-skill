@@ -80,6 +80,20 @@ def response_digest(response: Mapping[str, Any]) -> str:
     })
 
 
+def _response_transaction_binding(
+    response: Mapping[str, Any],
+    transaction_id: str,
+    transaction_content_sha256: str,
+) -> dict[str, str]:
+    binding = {
+        "request_id": str(response["request_id"]),
+        "response_sha256": str(response["response_sha256"]),
+        "transaction_id": str(transaction_id),
+        "transaction_content_sha256": str(transaction_content_sha256),
+    }
+    return {**binding, "binding_sha256": _digest(binding)}
+
+
 def file_digest(path: Path | str | None) -> str:
     """Return a checkpoint digest for one local resource."""
 
@@ -304,6 +318,7 @@ def write_native_waiting_checkpoint(
         "modules": copy.deepcopy(modules),
         "requests": requests,
         "responses": [],
+        "response_transaction_bindings": {},
         "applied_transactions": [],
         "transaction_content_digests": {},
         "budget": {"limit": len(requests), "consumed": 0, "waiting_seconds": 0.0},
@@ -553,12 +568,18 @@ def complete_native_checkpoint(
         for saved_id, digest in sorted(transaction_digests.items())
     ]
     transaction_digest = transaction_digests.get(transaction_id)
+    response_transaction_bindings: dict[str, dict[str, str]] = {}
     for response in completed["responses"]:
         if response.get("request_id") in applied_request_ids:
             response["applied"] = True
             response["apply_started"] = False
             response["transaction_id"] = transaction_id
             response["transaction_content_sha256"] = transaction_digest
+            response_transaction_bindings[str(response["request_id"])] = _response_transaction_binding(
+                response,
+                transaction_id,
+                str(transaction_digest),
+            )
     fresh_decisions = [
         decision
         for decision in decision_set.get("decisions", [])
@@ -577,6 +598,7 @@ def complete_native_checkpoint(
         "content_overlay": overlay_entries(overlays),
         "presentation_override": overlay_entries(presentation_overrides),
         "target_map": checkpoint_target_map(source_ast),
+        "response_transaction_bindings": response_transaction_bindings,
         "applied_transactions": applied_transactions,
         "transaction_content_digests": transaction_digests,
         "budget": {**completed["budget"], "consumed": len(completed["responses"])},
@@ -595,7 +617,11 @@ def _validate_for_store(checkpoint: Mapping[str, Any]) -> None:
     try:
         validate_checkpoint(checkpoint)
     except ContractError as exc:
-        code = exc.code if exc.code == "response_application_state_mismatch" else "invalid_checkpoint"
+        stable_codes = {
+            "response_application_state_mismatch",
+            "response_transaction_binding_mismatch",
+        }
+        code = exc.code if exc.code in stable_codes else "invalid_checkpoint"
         raise CheckpointError(f"checkpoint validation failed: {exc}", code=code) from exc
     except Exception as exc:
         raise CheckpointError(f"checkpoint validation failed: {exc}", code="invalid_checkpoint") from exc

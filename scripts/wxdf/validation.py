@@ -788,6 +788,19 @@ def validate_checkpoint(checkpoint: Mapping[str, Any]) -> None:
         and configuration.get("modular_profile") == "native-v2"
     )
     if native_file_checkpoint and status in {"waiting_external", "completed", "completed_with_warnings"}:
+        bindings = _mapping(
+            checkpoint.get("response_transaction_bindings"),
+            "response_transaction_bindings",
+            contract,
+        )
+        if status == "waiting_external" and bindings:
+            _fail(
+                "response_transaction_binding_mismatch",
+                "response_transaction_bindings",
+                "waiting checkpoint cannot carry response transaction bindings",
+                contract,
+            )
+        bound_request_ids: list[str] = []
         for index, response in enumerate(responses):
             response_path = f"responses[{index}]"
             response = _mapping(response, response_path, contract)
@@ -830,6 +843,47 @@ def validate_checkpoint(checkpoint: Mapping[str, Any]) -> None:
                     "completed response transaction binding does not match checkpoint transactions",
                     contract,
                 )
+            request_id = response.get("request_id")
+            if not isinstance(request_id, str) or not request_id:
+                _fail(
+                    "response_transaction_binding_mismatch",
+                    response_path,
+                    "completed response requires a request identity",
+                    contract,
+                )
+            bound_request_ids.append(request_id)
+            binding_path = f"response_transaction_bindings.{request_id}"
+            binding = _mapping(bindings.get(request_id), binding_path, contract)
+            binding_content = {
+                "request_id": request_id,
+                "response_sha256": response.get("response_sha256"),
+                "transaction_id": transaction_id,
+                "transaction_content_sha256": transaction_digest,
+            }
+            if any(binding.get(field) != value for field, value in binding_content.items()):
+                _fail(
+                    "response_transaction_binding_mismatch",
+                    binding_path,
+                    "saved response transaction proof does not match the response",
+                    contract,
+                )
+            if binding.get("binding_sha256") != _canonical_digest(binding_content):
+                _fail(
+                    "response_transaction_binding_mismatch",
+                    binding_path,
+                    "saved response transaction proof digest is invalid",
+                    contract,
+                )
+        if status != "waiting_external" and (
+            len(bound_request_ids) != len(set(bound_request_ids))
+            or set(bindings) != set(bound_request_ids)
+        ):
+            _fail(
+                "response_transaction_binding_mismatch",
+                "response_transaction_bindings",
+                "completed response transaction proofs do not match response identities",
+                contract,
+            )
     target_map = _mapping(checkpoint["target_map"], "target_map", contract)
     _require_fields(target_map, ("revision", "entries", "view_sha256"), "target_map", contract)
     _non_negative_int(target_map["revision"], "target_map.revision", contract)

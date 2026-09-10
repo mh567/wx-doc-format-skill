@@ -305,3 +305,33 @@ The ten full regression failures remain the frozen T05 through T09 gates listed 
 6. `docs/execution-v4/evidence/T04.md`
 
 This fix round created no Git commit. The protected test, status file, and `AGENTS.md` remain unchanged.
+
+## Independent review fix round 4
+
+### Failure first evidence
+
+1. A completed native checkpoint was given two valid transactions. The stored response application metadata was changed to the other valid transaction ID and matching content digest. Existing global membership checks accepted the rebound response, producing `1 failed, 44 deselected`.
+2. A structural test required live baseline reconstruction and the runtime candidate chain to invoke one shared ordered collector. The collector did not yet exist, producing `1 failed, 45 deselected`.
+
+### Fixes
+
+1. Native v2 waiting checkpoints now initialize `response_transaction_bindings` as an empty mapping. Completion writes one independently stored proof for every applied response. Each proof binds request identity, canonical response digest, consuming transaction identity, and transaction content digest under its own canonical digest.
+2. Native v2 checkpoint validation requires waiting bindings to remain empty. Completed validation requires exactly one proof per response and cross checks every proof field and proof digest against the response. This validation runs before the completed shortcut, so changing a response to another globally valid transaction is rejected with `response_transaction_binding_mismatch` without changing checkpoint or output bytes.
+3. The schema describes the proof object while keeping the field optional for established generic Checkpoint 2.0 callers. Native v2 runtime validation remains strict.
+4. `collect_native_candidates` is now the only ordered assembly point for source region, document structure, protected content, list, appendix, table, and caption candidates. Live baseline rebuilding and the runtime candidate chain both call this function with named groups.
+
+### Verification
+
+```text
+Transaction rebinding RED: 1 failed, 44 deselected
+Shared candidate collector RED: 1 failed, 45 deselected
+Round 4 focused cases GREEN: 2 passed, 44 deselected in 1.33s
+Protocol, resume, and contract integration: 59 passed in 36.64s
+T04 focused and related modules: 101 passed in 46.11s
+Frozen T00 through T04: 7 passed, 10 deselected in 5.44s
+Rendering, table, caption, and conversion regression: 45 passed in 7.80s
+All modular tests excluding the future performance helper: 199 passed in 58.36s
+Full regression excluding the future performance helper: 10 failed, 600 passed in 87.45s
+```
+
+The ten full regression failures remain the frozen T05 through T09 gates. No implemented T00 through T04 behavior or other regression failed. This fix round created no Git commit.

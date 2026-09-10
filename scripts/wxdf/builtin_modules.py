@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 import json
 from pathlib import Path
-from typing import Any, Callable, Iterator, Mapping
+from typing import Any, Callable, Iterable, Iterator, Mapping
 
 from .parsers import digest_source_facts, parse, summarize_source_facts
 from .registry import ModuleDescriptor, PlanError, RegisteredModule
@@ -715,6 +715,29 @@ def native_semantic_modules() -> tuple[RegisteredModule, ...]:
     )
 
 
+def collect_native_candidates(
+    *,
+    source_region_candidates: Iterable[Mapping[str, Any]],
+    document_structure_candidates: Iterable[Mapping[str, Any]],
+    protected_content_candidates: Iterable[Mapping[str, Any]],
+    list_semantics_candidates: Iterable[Mapping[str, Any]],
+    appendix_semantics_candidates: Iterable[Mapping[str, Any]],
+    table_semantics_candidates: Iterable[Mapping[str, Any]],
+    caption_semantics_candidates: Iterable[Mapping[str, Any]],
+) -> list[Mapping[str, Any]]:
+    """Collect rule candidates in the single native module order."""
+
+    return [
+        *source_region_candidates,
+        *document_structure_candidates,
+        *protected_content_candidates,
+        *list_semantics_candidates,
+        *appendix_semantics_candidates,
+        *table_semantics_candidates,
+        *caption_semantics_candidates,
+    ]
+
+
 def build_native_candidate_baseline(
     source_path: Path | str,
     source_facts: Mapping[str, Any],
@@ -735,24 +758,24 @@ def build_native_candidate_baseline(
         collect_source_appendix_semantics(source_facts),
         list_result,
     )
-    return [
-        *region_resolution["candidates"],
-        *collect_structure_candidates(
+    return collect_native_candidates(
+        source_region_candidates=region_resolution["candidates"],
+        document_structure_candidates=collect_structure_candidates(
             source_facts,
             region_resolution["regions"],
             protect_semantics=True,
         ),
-        *collect_protected_candidates(source_facts),
-        *list_candidates,
-        *collect_native_appendix_candidates(
+        protected_content_candidates=collect_protected_candidates(source_facts),
+        list_semantics_candidates=list_candidates,
+        appendix_semantics_candidates=collect_native_appendix_candidates(
             source_facts,
             source_ast,
             appendix_semantics,
             list_result,
         ),
-        *collect_table_candidates(source_ast),
-        *collect_caption_candidates(source_ast),
-    ]
+        table_semantics_candidates=collect_table_candidates(source_ast),
+        caption_semantics_candidates=collect_caption_candidates(source_ast),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -780,15 +803,15 @@ def _native_source_ast(context: ModuleExecutionContext) -> dict[str, Any]:
 
 
 def _native_candidate_set(context: ModuleExecutionContext) -> list[Mapping[str, Any]]:
-    candidates: list[Mapping[str, Any]] = [
-        *context.require("source_region_candidates"),
-        *context.require("document_structure_candidates"),
-        *context.require("protected_content_candidates"),
-        *context.require("list_semantics_candidates"),
-        *context.require("appendix_semantics_candidates"),
-        *context.require("table_semantics_candidates"),
-        *context.require("caption_semantics_candidates"),
-    ]
+    candidates = collect_native_candidates(
+        source_region_candidates=context.require("source_region_candidates"),
+        document_structure_candidates=context.require("document_structure_candidates"),
+        protected_content_candidates=context.require("protected_content_candidates"),
+        list_semantics_candidates=context.require("list_semantics_candidates"),
+        appendix_semantics_candidates=context.require("appendix_semantics_candidates"),
+        table_semantics_candidates=context.require("table_semantics_candidates"),
+        caption_semantics_candidates=context.require("caption_semantics_candidates"),
+    )
     baseline_candidates = list(candidates)
     options = context.request.options or {}
     supplied_ledger = options.get("decision_ledger")
@@ -1311,6 +1334,7 @@ __all__ = [
     "UnresolvedDecisionError",
     "appendix_semantics_module",
     "caption_semantics_module",
+    "collect_native_candidates",
     "document_structure_module",
     "experimental_native_modules",
     "legacy_full_adapter_module",

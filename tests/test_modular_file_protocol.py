@@ -408,6 +408,172 @@ def test_native_resume_rejects_tampered_response_application_state_before_replay
     assert (output.read_bytes() if output.exists() else None) == output_bytes
 
 
+def test_native_resume_rejects_response_rebinding_to_another_valid_transaction(
+    tmp_path: Path,
+) -> None:
+    from wxdf.decision_ledger import _replay_snapshot, accept_decisions
+    from wxdf.transaction import apply_stage_batch, make_snapshot
+
+    checkpoint_path, output, _source_ast_path = _generate(tmp_path)
+    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    target_id = next(iter(checkpoint["source_ast"]["document"]["blocks"]))
+    preloaded_decision = {
+        "decision_id": "preloaded-binding-proof",
+        "transaction_id": "preloaded-binding-transaction",
+        "operation": "update_overlay",
+        "target_node_ids": [target_id],
+        "target_source_refs": [],
+        "expected_revision": checkpoint["source_ast"]["revision"],
+        "property_scope": ["overlay"],
+        "value": {"preloaded_binding_proof": True},
+        "preconditions": [{
+            "kind": "source_sha256",
+            "value": checkpoint["source_facts"]["source"]["content_sha256"],
+        }],
+        "evidence": [{"kind": "user_override"}],
+        "invalidates": [],
+    }
+    committed = apply_stage_batch(
+        make_snapshot(checkpoint["source_ast"]),
+        [preloaded_decision],
+        expected_revision=checkpoint["source_ast"]["revision"],
+    )
+    ledger = accept_decisions(
+        checkpoint["decision_ledger"],
+        {"transaction_id": committed.transaction_id, "decisions": [preloaded_decision]},
+    )
+    replayed = _replay_snapshot(
+        checkpoint["source_facts"],
+        ledger,
+        make_snapshot(checkpoint["source_ast"]),
+    )
+    preloaded_digest = ledger["revisions"][0]["transaction_content_sha256"]
+    checkpoint["source_ast"] = replayed.ast
+    checkpoint["decision_ledger"] = ledger
+    checkpoint["content_overlay"] = [
+        {"node_id": node_id, **value}
+        for node_id, value in sorted(replayed.overlays.items())
+    ]
+    checkpoint["applied_transactions"] = [{
+        "transaction_id": committed.transaction_id,
+        "content_sha256": preloaded_digest,
+    }]
+    checkpoint["transaction_content_digests"] = {
+        committed.transaction_id: preloaded_digest,
+    }
+    checkpoint_path.write_text(
+        json.dumps(checkpoint, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    request = _read_requests(checkpoint_path)[0]
+    _write_responses(checkpoint_path, [_response(request)])
+    resumed = _run("--resume", checkpoint_path)
+    assert resumed.returncode == 0, resumed.stderr
+
+    completed = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    assert len(completed["transaction_content_digests"]) >= 2
+    response = completed["responses"][0]
+    assert response["transaction_id"] != committed.transaction_id
+    response["transaction_id"] = committed.transaction_id
+    response["transaction_content_sha256"] = completed["transaction_content_digests"][committed.transaction_id]
+    checkpoint_path.write_text(
+        json.dumps(completed, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    checkpoint_bytes = checkpoint_path.read_bytes()
+    output_bytes = output.read_bytes()
+
+    rebound = _run("--resume", checkpoint_path)
+
+    assert rebound.returncode != 0
+    assert "response_transaction_binding_mismatch" in rebound.stderr
+    assert checkpoint_path.read_bytes() == checkpoint_bytes
+    assert output.read_bytes() == output_bytes
+
+
+def test_live_baseline_and_native_chain_share_candidate_collector(monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
+    from wxdf import builtin_modules
+
+    candidate_groups = {
+        "source_region_candidates": [{"candidate_id": "region"}],
+        "document_structure_candidates": [{"candidate_id": "structure"}],
+        "protected_content_candidates": [{"candidate_id": "protected"}],
+        "list_semantics_candidates": [{"candidate_id": "list"}],
+        "appendix_semantics_candidates": [{"candidate_id": "appendix"}],
+        "table_semantics_candidates": [{"candidate_id": "table"}],
+        "caption_semantics_candidates": [{"candidate_id": "caption"}],
+    }
+    collected: list[dict[str, list[dict[str, str]]]] = []
+
+    def collect(**groups):
+        collected.append(groups)
+        return [{"candidate_id": "shared-order"}]
+
+    monkeypatch.setattr(builtin_modules, "collect_native_candidates", collect)
+    monkeypatch.setattr(
+        builtin_modules,
+        "resolve_source_regions",
+        lambda source_path, source_facts: {
+            "regions": [],
+            "candidates": candidate_groups["source_region_candidates"],
+        },
+    )
+    monkeypatch.setattr(builtin_modules, "analyze_lists", lambda source_facts: {})
+    monkeypatch.setattr(
+        builtin_modules,
+        "materialize_list_semantics",
+        lambda source_ast, source_facts, result: (
+            {},
+            candidate_groups["list_semantics_candidates"],
+            {},
+        ),
+    )
+    monkeypatch.setattr(builtin_modules, "collect_source_appendix_semantics", lambda source_facts: {})
+    monkeypatch.setattr(
+        builtin_modules,
+        "prepare_native_appendix_semantics",
+        lambda source_facts, source_ast, semantics, list_result: {},
+    )
+    monkeypatch.setattr(
+        builtin_modules,
+        "collect_structure_candidates",
+        lambda source_facts, regions, protect_semantics: candidate_groups["document_structure_candidates"],
+    )
+    monkeypatch.setattr(
+        builtin_modules,
+        "collect_protected_candidates",
+        lambda source_facts: candidate_groups["protected_content_candidates"],
+    )
+    monkeypatch.setattr(
+        builtin_modules,
+        "collect_native_appendix_candidates",
+        lambda source_facts, source_ast, semantics, list_result: candidate_groups["appendix_semantics_candidates"],
+    )
+    monkeypatch.setattr(
+        builtin_modules,
+        "collect_table_candidates",
+        lambda source_ast: candidate_groups["table_semantics_candidates"],
+    )
+    monkeypatch.setattr(
+        builtin_modules,
+        "collect_caption_candidates",
+        lambda source_ast: candidate_groups["caption_semantics_candidates"],
+    )
+
+    rebuilt = builtin_modules.build_native_candidate_baseline("source.docx", {}, {})
+    context = builtin_modules.ModuleExecutionContext(
+        request=SimpleNamespace(options={"llm_enhance": "off"}),
+        artifacts={**candidate_groups, "source_ast": {}},
+    )
+    runtime = builtin_modules._native_candidate_set(context)
+
+    assert rebuilt == [{"candidate_id": "shared-order"}]
+    assert runtime == [{"candidate_id": "shared-order"}]
+    assert collected == [candidate_groups, candidate_groups]
+
+
 def test_native_resume_rejects_unsupported_checkpoint_stage(tmp_path: Path) -> None:
     checkpoint_path, output, _source_ast_path = _generate(tmp_path)
     request = _read_requests(checkpoint_path)[0]

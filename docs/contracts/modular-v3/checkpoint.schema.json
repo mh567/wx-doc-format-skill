@@ -61,6 +61,21 @@
     "modules": {"type": "array"},
     "requests": {"type": "array"},
     "responses": {"type": "array"},
+    "response_transaction_bindings": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["request_id", "response_sha256", "transaction_id", "transaction_content_sha256", "binding_sha256"],
+        "properties": {
+          "request_id": {"type": "string", "minLength": 1},
+          "response_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+          "transaction_id": {"type": "string", "minLength": 1},
+          "transaction_content_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+          "binding_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+        }
+      }
+    },
     "applied_transactions": {
       "type": "array",
       "items": {
