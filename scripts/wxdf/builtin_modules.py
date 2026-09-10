@@ -749,6 +749,7 @@ def _native_candidate_set(context: ModuleExecutionContext) -> list[Mapping[str, 
         *context.require("table_semantics_candidates"),
         *context.require("caption_semantics_candidates"),
     ]
+    baseline_candidates = list(candidates)
     options = context.request.options or {}
     supplied_ledger = options.get("decision_ledger")
     ledger_view: dict[str, Any] | None = None
@@ -778,32 +779,43 @@ def _native_candidate_set(context: ModuleExecutionContext) -> list[Mapping[str, 
                 "diagnostics": blocking,
             })
             raise LedgerReplayBlocked(blocking)
-        for revision in ledger_view.get("active_revisions", []):
-            ledger_decision = revision_decision(revision, source_ast["revision"])
-            candidates.append({
-                "candidate_id": f"ledger-revision-{revision['revision_id']}",
-                "module_id": "decision_ledger",
-                "module_version": str(revision.get("resolver_version") or "1.0"),
-                "target_source_refs": _copy_refs(revision.get("target_source_refs")),
-                "target_node_ids": list(revision.get("target_node_ids") or []),
-                "proposal": {
-                    "operation": ledger_decision["operation"],
-                    "property_scope": list(revision.get("property_scope") or []),
-                    "value": dict(ledger_decision.get("value") or {}),
-                    "invalidates": list(ledger_decision.get("invalidates") or []),
-                },
-                "positive_evidence": [{"kind": "ledger_revision", "revision_id": revision["revision_id"]}],
-                "negative_evidence": [],
-                "scope": {"stages": list(revision.get("invalidates") or [])},
-                "constraints": [],
-                "rationale": "accepted revision restored from the decision ledger",
-            })
+        if options.get("checkpoint_resume_stage") != "relation":
+            for revision in ledger_view.get("active_revisions", []):
+                ledger_decision = revision_decision(revision, source_ast["revision"])
+                candidates.append({
+                    "candidate_id": f"ledger-revision-{revision['revision_id']}",
+                    "module_id": "decision_ledger",
+                    "module_version": str(revision.get("resolver_version") or "1.0"),
+                    "target_source_refs": _copy_refs(revision.get("target_source_refs")),
+                    "target_node_ids": list(revision.get("target_node_ids") or []),
+                    "proposal": {
+                        "operation": ledger_decision["operation"],
+                        "property_scope": list(revision.get("property_scope") or []),
+                        "value": dict(ledger_decision.get("value") or {}),
+                        "invalidates": list(ledger_decision.get("invalidates") or []),
+                    },
+                    "positive_evidence": [{"kind": "ledger_revision", "revision_id": revision["revision_id"]}],
+                    "negative_evidence": [],
+                    "scope": {"stages": list(revision.get("invalidates") or [])},
+                    "constraints": [],
+                    "rationale": "accepted revision restored from the decision ledger",
+                })
         ledger_replay = {
             "enabled": True,
             "ledger_revision": supplied_ledger.get("revision"),
             "active_revision_count": len(ledger_view.get("active_revisions") or []),
             "baseline_ast_revision": source_ast["revision"],
         }
+    expected_baseline = options.get("restored_candidate_baseline_id")
+    if expected_baseline is not None:
+        from .run_store import CheckpointError, candidate_baseline_digest
+
+        actual_baseline = candidate_baseline_digest(context.require("source_ast"), baseline_candidates)
+        if actual_baseline != expected_baseline:
+            raise CheckpointError(
+                f"relation checkpoint candidate baseline changed: expected {expected_baseline}, got {actual_baseline}",
+                code="candidate_baseline_mismatch",
+            )
     enhancement_candidates, enhancement_result = _native_enhancement_candidates(
         context.require("source_ast"),
         options,
@@ -1002,17 +1014,24 @@ def _native_normalizer(context: ModuleExecutionContext) -> Mapping[str, Any]:
     decision_set = context.require("decision_set")
     facts = context.require("source_facts")
     request = context.request
+    options = request.options or {}
     store = context.services.get("store")
     with context.stage("normalize"):
-        template = load_template_bundle(request.template_path) if request.template_path else {
-            "resolved_styles": {
-                "list_letter": "List Number",
-                "list_decimal": "List Number 2",
-                "list_dash": "List Bullet",
-                "list_bullet": "List Bullet 2",
-            },
-            "numbering_ids": {},
-        }
+        restored_template = options.get("restored_template_bundle")
+        if restored_template is not None:
+            template = restored_template
+        elif request.template_path:
+            template = load_template_bundle(request.template_path)
+        else:
+            template = {
+                "resolved_styles": {
+                    "list_letter": "List Number",
+                    "list_decimal": "List Number 2",
+                    "list_dash": "List Bullet",
+                    "list_bullet": "List Bullet 2",
+                },
+                "numbering_ids": {},
+            }
         normalized = normalize(
             committed.snapshot.ast,
             template,
@@ -1024,21 +1043,29 @@ def _native_normalizer(context: ModuleExecutionContext) -> Mapping[str, Any]:
                 "decision_set_version": decision_set["decision_set_version"],
             },
         )
+    restored_resources = options.get("restored_resource_bytes")
     resources: dict[str, Any] = {}
-    for resource_id, resource in facts.get("resources", {}).items():
-        source_ref = resource.get("source_ref") if isinstance(resource, Mapping) else None
-        if not isinstance(source_ref, Mapping):
-            continue
-        try:
-            payload = store.resolve(dict(source_ref))
-            if isinstance(payload, bytes):
-                resources[resource_id] = payload
-        except Exception:
-            part = source_ref.get("part")
-            if isinstance(part, str):
-                candidate_path = request.input_path.parent / part
-                if candidate_path.is_file():
-                    resources[resource_id] = candidate_path
+    if isinstance(restored_resources, Mapping):
+        resources = {
+            str(resource_id): bytes(payload)
+            for resource_id, payload in restored_resources.items()
+            if isinstance(payload, (bytes, bytearray))
+        }
+    else:
+        for resource_id, resource in facts.get("resources", {}).items():
+            source_ref = resource.get("source_ref") if isinstance(resource, Mapping) else None
+            if not isinstance(source_ref, Mapping):
+                continue
+            try:
+                payload = store.resolve(dict(source_ref))
+                if isinstance(payload, bytes):
+                    resources[resource_id] = payload
+            except Exception:
+                part = source_ref.get("part")
+                if isinstance(part, str):
+                    candidate_path = request.input_path.parent / part
+                    if candidate_path.is_file():
+                        resources[resource_id] = candidate_path
     context.provide("template_bundle", template)
     context.provide("normalized", normalized)
     context.provide("resources", resources)

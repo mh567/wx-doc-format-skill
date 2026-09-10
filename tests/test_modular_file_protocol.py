@@ -24,9 +24,7 @@ TEMPLATE = ROOT / "assets" / "wx_template.docx"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from wxdf.decision_ledger import source_binding
-from wxdf.enhancement import build_native_request, serialize_native_request
-from wxdf.run_store import CheckpointError, file_digest, record_response, request_digest
+from wxdf.run_store import CheckpointError, record_response, request_digest
 from wxdf.validation import validate_checkpoint
 
 
@@ -163,20 +161,42 @@ def _write_responses(checkpoint_path: Path, responses: list[dict]) -> None:
     )
 
 
-def _replace_requests(checkpoint_path: Path, requests: list[dict]) -> None:
+def _direct_resume_after_prepare(
+    checkpoint_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    after_prepare,
+):
+    from wxdf import run_store
+    from wxdf.kernel import ConversionKernel, ConversionRequest
+
+    original = run_store.prepare_native_resume
+
+    def prepare_then_change(*args, **kwargs):
+        prepared = original(*args, **kwargs)
+        after_prepare()
+        return prepared
+
+    monkeypatch.setattr(run_store, "prepare_native_resume", prepare_then_change)
     checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
-    request_path = Path(checkpoint["files"]["requests_path"])
-    request_path.write_text(
-        "".join(json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n" for item in requests),
-        encoding="utf-8",
-    )
-    checkpoint["requests"] = copy.deepcopy(requests)
-    fingerprints = checkpoint["resource_summary"].get("fingerprints", {})
-    if "requests" in fingerprints:
-        fingerprints["requests"] = file_digest(request_path)
-    checkpoint_path.write_text(
-        json.dumps(checkpoint, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
-        encoding="utf-8",
+    configuration = checkpoint["configuration"]
+    return ConversionKernel().convert(
+        ConversionRequest(
+            input_path=Path(configuration["input"]),
+            output_path=Path(configuration["output"]),
+            template_path=Path(configuration["template"]) if configuration["template"] else None,
+            pipeline="modular",
+            list_policy=configuration["list_policy"],
+            options={
+                "llm_enhance": configuration["llm_enhance"],
+                "protocol_mode": "resume",
+                "checkpoint_path": checkpoint_path,
+                "checkpoint_configuration": configuration,
+                "source_ast_path": Path(configuration["source_ast"]) if configuration["source_ast"] else None,
+                "normalized_ast_path": Path(configuration["ast"]) if configuration["ast"] else None,
+                "report_path": Path(configuration["report"]) if configuration["report"] else None,
+                "profile": "native_v2",
+            },
+        )
     )
 
 
@@ -316,6 +336,148 @@ def test_native_resume_is_idempotent_and_changed_content_conflicts(tmp_path: Pat
     assert output.read_bytes() == baseline_output
 
 
+@pytest.mark.parametrize("checkpoint_status", ["waiting", "completed"])
+def test_native_resume_rejects_tampered_stored_response_digest_before_replay(
+    tmp_path: Path,
+    checkpoint_status: str,
+) -> None:
+    mode = "force-ab" if checkpoint_status == "waiting" else "force-a"
+    checkpoint_path, output, _source_ast_path = _generate(tmp_path, mode=mode)
+    request = _read_requests(checkpoint_path)[0]
+    response = _response(request)
+    _write_responses(checkpoint_path, [response])
+    first = _run("--resume", checkpoint_path)
+    assert first.returncode == 0, first.stderr
+    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    assert checkpoint["status"] == ("waiting_external" if checkpoint_status == "waiting" else "completed")
+    checkpoint["responses"][0]["candidates"][0]["proposal"]["value"]["semantic_role"] = "tampered-stored-candidate"
+    checkpoint_path.write_text(
+        json.dumps(checkpoint, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    checkpoint_bytes = checkpoint_path.read_bytes()
+    output_bytes = output.read_bytes() if output.exists() else None
+
+    resumed = _run("--resume", checkpoint_path)
+
+    assert resumed.returncode != 0
+    assert "response_identity_mismatch" in resumed.stderr
+    assert checkpoint_path.read_bytes() == checkpoint_bytes
+    assert (output.read_bytes() if output.exists() else None) == output_bytes
+
+
+def test_native_resume_rejects_unsupported_checkpoint_stage(tmp_path: Path) -> None:
+    checkpoint_path, output, _source_ast_path = _generate(tmp_path)
+    request = _read_requests(checkpoint_path)[0]
+    _write_responses(checkpoint_path, [_response(request)])
+    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    checkpoint["resume_stage"] = "render"
+    checkpoint_path.write_text(
+        json.dumps(checkpoint, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    before = checkpoint_path.read_bytes()
+
+    resumed = _run("--resume", checkpoint_path)
+
+    assert resumed.returncode != 0
+    assert "unsupported_resume_stage" in resumed.stderr
+    assert checkpoint_path.read_bytes() == before
+    assert not output.exists()
+
+
+@pytest.mark.parametrize(
+    "component",
+    [
+        "source_ast",
+        "decision_ledger",
+        "transaction_conflict",
+        "content_overlay",
+        "presentation_override",
+        "transactions",
+        "candidate_baseline",
+    ],
+)
+def test_native_resume_rejects_inconsistent_relation_snapshot(
+    tmp_path: Path,
+    component: str,
+) -> None:
+    from wxdf.decision_ledger import accept_decisions
+
+    checkpoint_path, output, _source_ast_path = _generate(tmp_path)
+    request = _read_requests(checkpoint_path)[0]
+    _write_responses(checkpoint_path, [_response(request)])
+    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    target_id = next(iter(checkpoint["source_ast"]["document"]["blocks"]))
+    if component == "source_ast":
+        checkpoint["source_ast"]["document"]["blocks"][target_id]["semantic_role"] = "untracked-change"
+    elif component == "decision_ledger":
+        checkpoint["decision_ledger"] = accept_decisions(
+            checkpoint["decision_ledger"],
+            [{
+                "decision_id": "unapplied-ledger-decision",
+                "operation": "update_overlay",
+                "target_node_ids": [target_id],
+                "target_source_refs": [],
+                "expected_revision": checkpoint["source_ast"]["revision"],
+                "property_scope": ["overlay"],
+                "value": {"ledger_value": "missing-from-snapshot"},
+                "preconditions": [{
+                    "kind": "source_sha256",
+                    "value": checkpoint["source_facts"]["source"]["content_sha256"],
+                }],
+                "evidence": [{"kind": "test"}],
+                "invalidates": [],
+            }],
+        )
+    elif component == "transaction_conflict":
+        checkpoint["decision_ledger"] = accept_decisions(
+            checkpoint["decision_ledger"],
+            [{
+                "decision_id": "malformed-overlay-decision",
+                "operation": "update_overlay",
+                "target_node_ids": [target_id],
+                "target_source_refs": [],
+                "expected_revision": checkpoint["source_ast"]["revision"],
+                "property_scope": ["overlay"],
+                "value": "invalid-overlay-value",
+                "preconditions": [{
+                    "kind": "source_sha256",
+                    "value": checkpoint["source_facts"]["source"]["content_sha256"],
+                }],
+                "evidence": [{"kind": "test"}],
+                "invalidates": [],
+            }],
+        )
+    elif component == "content_overlay":
+        checkpoint["content_overlay"] = [{"node_id": target_id, "untracked": "overlay"}]
+    elif component == "presentation_override":
+        checkpoint["presentation_override"] = [{"node_id": target_id, "untracked": "presentation"}]
+    elif component == "transactions":
+        checkpoint["applied_transactions"] = [{
+            "transaction_id": "untracked-transaction",
+            "content_sha256": "sha256:" + "7" * 64,
+        }]
+        checkpoint["transaction_content_digests"] = {
+            "untracked-transaction": "sha256:" + "7" * 64,
+        }
+    else:
+        checkpoint["candidate_baseline_id"] = "sha256:" + "8" * 64
+    checkpoint_path.write_text(
+        json.dumps(checkpoint, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    before = checkpoint_path.read_bytes()
+
+    resumed = _run("--resume", checkpoint_path)
+
+    assert resumed.returncode != 0
+    expected_code = "candidate_baseline_mismatch" if component == "candidate_baseline" else "resume_snapshot_mismatch"
+    assert expected_code in resumed.stderr
+    assert checkpoint_path.read_bytes() == before
+    assert not output.exists()
+
+
 @pytest.mark.parametrize("invalid_kind", ["stale_view", "invalid_patch", "stale_target"])
 def test_native_resume_blocks_invalid_responses_before_transaction_or_publish(
     tmp_path: Path,
@@ -348,78 +510,90 @@ def test_native_resume_blocks_invalid_responses_before_transaction_or_publish(
 
 
 def test_native_resume_restores_saved_ast_ledger_overlays_and_transactions(tmp_path: Path) -> None:
+    from wxdf.decision_ledger import _replay_snapshot, accept_decisions
+    from wxdf.transaction import apply_stage_batch, make_snapshot
+
     checkpoint_path, output, _source_ast_path = _generate(tmp_path)
     checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
     target_id = next(iter(checkpoint["source_ast"]["document"]["blocks"]))
-    checkpoint["source_ast"]["document"]["blocks"][target_id]["semantic_role"] = "checkpoint-restored"
-    restored_request = serialize_native_request(
-        build_native_request(
-            checkpoint["requests"][0]["capability"],
-            checkpoint["source_ast"],
-            budget=checkpoint["requests"][0]["budget"],
-            timeout_seconds=checkpoint["requests"][0]["timeout_seconds"],
-            request_id=checkpoint["requests"][0]["request_id"],
-        )
-    )
-    checkpoint["content_overlay"] = [{"node_id": target_id, "restored_overlay": "kept"}]
-    checkpoint["presentation_override"] = [{"node_id": target_id, "restored_presentation": "kept"}]
-    checkpoint["applied_transactions"] = [
-        {"transaction_id": "preloaded-transaction", "content_sha256": "sha256:" + "7" * 64}
+    source_digest = checkpoint["source_facts"]["source"]["content_sha256"]
+    decisions = [
+        {
+            "decision_id": "preloaded-overlay",
+            "transaction_id": "preloaded-transaction",
+            "operation": "update_overlay",
+            "target_node_ids": [target_id],
+            "target_source_refs": [],
+            "expected_revision": checkpoint["source_ast"]["revision"],
+            "property_scope": ["overlay"],
+            "value": {"restored_overlay": "kept"},
+            "preconditions": [{"kind": "source_sha256", "value": source_digest}],
+            "evidence": [{"kind": "user_override"}],
+            "invalidates": [],
+        },
+        {
+            "decision_id": "preloaded-presentation",
+            "transaction_id": "preloaded-transaction",
+            "operation": "set_presentation_override",
+            "target_node_ids": [target_id],
+            "target_source_refs": [],
+            "expected_revision": checkpoint["source_ast"]["revision"],
+            "property_scope": ["presentation"],
+            "value": {"restored_presentation": "kept"},
+            "preconditions": [{"kind": "source_sha256", "value": source_digest}],
+            "evidence": [{"kind": "user_override"}],
+            "invalidates": [],
+        },
     ]
+    committed = apply_stage_batch(
+        make_snapshot(checkpoint["source_ast"]),
+        decisions,
+        expected_revision=checkpoint["source_ast"]["revision"],
+    )
+    ledger = accept_decisions(
+        checkpoint["decision_ledger"],
+        {"transaction_id": committed.transaction_id, "decisions": decisions},
+    )
+    replayed = _replay_snapshot(
+        checkpoint["source_facts"],
+        ledger,
+        make_snapshot(checkpoint["source_ast"]),
+    )
+    transaction_digest = ledger["revisions"][0]["transaction_content_sha256"]
+    checkpoint["source_ast"] = replayed.ast
+    checkpoint["content_overlay"] = [
+        {"node_id": node_id, **value}
+        for node_id, value in sorted(replayed.overlays.items())
+    ]
+    checkpoint["presentation_override"] = [
+        {"node_id": node_id, **value}
+        for node_id, value in sorted(replayed.presentation_overrides.items())
+    ]
+    checkpoint["decision_ledger"] = ledger
+    checkpoint["applied_transactions"] = [{
+        "transaction_id": committed.transaction_id,
+        "content_sha256": transaction_digest,
+    }]
     checkpoint["transaction_content_digests"] = {
-        "preloaded-transaction": "sha256:" + "7" * 64
-    }
-    checkpoint["decision_ledger"] = {
-        "schema_version": "2.0",
-        "revision": 1,
-        "revisions": [
-            {
-                "revision_id": "preloaded-revision",
-                "parent_revision": 0,
-                "transaction_id": "preloaded-ledger-transaction",
-                "target_source_refs": [],
-                "target_node_ids": [target_id],
-                "property_scope": ["semantics"],
-                "decision": {
-                    "operation": "update_node_semantics",
-                    "value": {"semantic_role": "checkpoint-restored"},
-                },
-                "preconditions": [
-                    {
-                        "kind": "source_sha256",
-                        "value": checkpoint["source_facts"]["source"]["content_sha256"],
-                    }
-                ],
-                "evidence": [{"kind": "user_override"}],
-                "origin": {"kind": "review"},
-                "resolver_version": "1.0",
-                "status": "active",
-                "supersedes": [],
-            }
-        ],
-        "source_binding": source_binding(checkpoint["source_facts"]),
+        committed.transaction_id: transaction_digest,
     }
     checkpoint_path.write_text(
         json.dumps(checkpoint, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
         encoding="utf-8",
     )
-    _replace_requests(checkpoint_path, [restored_request])
-    _write_responses(checkpoint_path, [_response(restored_request)])
+    request = _read_requests(checkpoint_path)[0]
+    _write_responses(checkpoint_path, [_response(request)])
 
     resumed = _run("--resume", checkpoint_path)
 
     assert resumed.returncode == 0, resumed.stderr
     assert output.is_file()
     completed = json.loads(checkpoint_path.read_text(encoding="utf-8"))
-    assert completed["source_ast"]["document"]["blocks"][target_id]["semantic_role"] == "checkpoint-restored"
-    assert any(
-        revision["revision_id"] == "preloaded-revision"
-        for revision in completed["decision_ledger"]["revisions"]
-    )
+    assert all(revision["status"] == "active" for revision in completed["decision_ledger"]["revisions"][:2])
     assert completed["normalized_ast"]["source_ast"] == completed["source_ast"]
     assert completed["normalized_ast"]["overlay"][target_id]["restored_overlay"] == "kept"
     assert completed["normalized_ast"]["presentation_override"][target_id]["restored_presentation"] == "kept"
-    assert completed["transaction_content_digests"]["preloaded-transaction"] == "sha256:" + "7" * 64
+    assert completed["transaction_content_digests"][committed.transaction_id] == transaction_digest
 
 
 @pytest.mark.parametrize(
@@ -512,6 +686,131 @@ def test_native_resume_rejects_external_resource_drift_before_recording(tmp_path
     assert checkpoint_path.read_bytes() == before
     assert json.loads(before)["responses"] == []
     assert not output.exists()
+
+
+def test_native_resume_rejects_resource_disappearance_between_parse_and_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from wxdf import builtin_modules, parsers
+
+    source = tmp_path / "vanishing-resource.md"
+    resource = tmp_path / "vanishing-pixel.png"
+    resource.write_bytes(base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL9xQAAAABJRU5ErkJggg=="
+    ))
+    source.write_text("# Vanishing resource\n\n![pixel](vanishing-pixel.png)\n", encoding="utf-8")
+    request_dir = tmp_path / "vanishing-resource-requests"
+    output = tmp_path / "vanishing-resource-output.docx"
+    generated = _run(
+        "--input", source,
+        "--output", output,
+        "--template", TEMPLATE,
+        "--pipeline", "modular",
+        "--modular-profile", "native-v2",
+        "--list-policy", "wx-default-v2",
+        "--llm-enhance", "force-a",
+        "--generate-requests", request_dir,
+    )
+    assert generated.returncode == 0, generated.stderr
+    checkpoint_path = request_dir / "run.json"
+    request = _read_requests(checkpoint_path)[0]
+    _write_responses(checkpoint_path, [_response(request)])
+    before = checkpoint_path.read_bytes()
+    original_parse = parsers.parse
+
+    def parse_then_remove(*args, **kwargs):
+        facts = original_parse(*args, **kwargs)
+        resource.unlink()
+        monkeypatch.setattr(parsers, "parse", original_parse)
+        monkeypatch.setattr(builtin_modules, "parse", original_parse)
+        return facts
+
+    monkeypatch.setattr(parsers, "parse", parse_then_remove)
+    monkeypatch.setattr(builtin_modules, "parse", parse_then_remove)
+    result = _direct_resume_after_prepare(checkpoint_path, monkeypatch, lambda: None)
+
+    assert result.exit_code != 0
+    assert checkpoint_path.read_bytes() == before
+    assert json.loads(before)["responses"] == []
+    assert not output.exists()
+
+
+def test_native_resume_renders_verified_resource_bytes_after_source_path_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "bound-resource.md"
+    resource = tmp_path / "bound-pixel.png"
+    original_resource = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL9xQAAAABJRU5ErkJggg=="
+    )
+    resource.write_bytes(original_resource)
+    source.write_text("# Bound resource\n\n![pixel](bound-pixel.png)\n", encoding="utf-8")
+    request_dir = tmp_path / "bound-resource-requests"
+    output = tmp_path / "bound-resource-output.docx"
+    generated = _run(
+        "--input", source,
+        "--output", output,
+        "--template", TEMPLATE,
+        "--pipeline", "modular",
+        "--modular-profile", "native-v2",
+        "--list-policy", "wx-default-v2",
+        "--llm-enhance", "force-a",
+        "--generate-requests", request_dir,
+    )
+    assert generated.returncode == 0, generated.stderr
+    checkpoint_path = request_dir / "run.json"
+    request = _read_requests(checkpoint_path)[0]
+    _write_responses(checkpoint_path, [_response(request)])
+
+    result = _direct_resume_after_prepare(
+        checkpoint_path,
+        monkeypatch,
+        lambda: resource.write_bytes(b"changed-after-validation"),
+    )
+
+    assert result.exit_code == 0, result.diagnostics
+    assert output.is_file()
+    with ZipFile(output) as archive:
+        media = [archive.read(name) for name in archive.namelist() if name.startswith("word/media/")]
+    assert original_resource in media
+
+
+def test_native_resume_renders_verified_template_bytes_after_template_path_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "template-source.md"
+    source.write_bytes(SOURCE.read_bytes())
+    template = tmp_path / "bound-template.docx"
+    template.write_bytes(TEMPLATE.read_bytes())
+    request_dir = tmp_path / "bound-template-requests"
+    output = tmp_path / "bound-template-output.docx"
+    generated = _run(
+        "--input", source,
+        "--output", output,
+        "--template", template,
+        "--pipeline", "modular",
+        "--modular-profile", "native-v2",
+        "--list-policy", "wx-default-v2",
+        "--llm-enhance", "force-a",
+        "--generate-requests", request_dir,
+    )
+    assert generated.returncode == 0, generated.stderr
+    checkpoint_path = request_dir / "run.json"
+    request = _read_requests(checkpoint_path)[0]
+    _write_responses(checkpoint_path, [_response(request)])
+
+    result = _direct_resume_after_prepare(
+        checkpoint_path,
+        monkeypatch,
+        lambda: template.write_bytes(b"changed-after-validation"),
+    )
+
+    assert result.exit_code == 0, result.diagnostics
+    assert output.is_file()
+    assert result.report["saved_output_audit"]["passed"] is True
 
 
 def test_multi_stage_resume_matches_single_process_native_execution(tmp_path: Path) -> None:

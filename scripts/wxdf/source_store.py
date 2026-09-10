@@ -100,6 +100,19 @@ class SourceStore:
         except KeyError as exc:
             raise SourceStoreError(f"source part is unavailable: {part}") from exc
 
+    def bind_part(self, part: str, payload: bytes) -> None:
+        """Retain one verified resource snapshot without permitting replacement."""
+
+        if not self.is_open:
+            raise SourceStoreError("source is not open")
+        if not isinstance(part, str) or not part:
+            raise SourceStoreError("source part is required")
+        value = bytes(payload)
+        existing = self._parts.get(part)
+        if existing is not None and existing != value:
+            raise SourceStoreError(f"source part is already bound: {part}")
+        self._parts[part] = value
+
     def close(self) -> None:
         self._handle = None
         self._opened_path = None

@@ -5,8 +5,10 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass
 import hashlib
+import io
 from pathlib import Path
 import re
+import tempfile
 from types import MappingProxyType
 from typing import Any, Mapping, Sequence
 
@@ -69,16 +71,26 @@ class TemplateBundle:
 
     schema_version: str
     path: Path
+    template_bytes: bytes
     template_sha256: str
     profile: Mapping[str, Any]
     presentation_contract: Mapping[str, Any]
     toc_fragment_xml: tuple[bytes, ...]
 
 
-def load_template_bundle(template: Path | str) -> TemplateBundle:
+def load_template_bundle(
+    template: Path | str,
+    *,
+    template_bytes: bytes | None = None,
+) -> TemplateBundle:
     template_path = Path(template)
-    profile = load_template_profile(template_path)
-    document = Document(str(template_path))
+    raw = template_path.read_bytes() if template_bytes is None else bytes(template_bytes)
+    with tempfile.NamedTemporaryFile(suffix=".docx") as snapshot:
+        snapshot.write(raw)
+        snapshot.flush()
+        profile = load_template_profile(snapshot.name)
+    profile["path"] = str(template_path)
+    document = Document(io.BytesIO(raw))
     toc_fragment = tuple(
         etree.tostring(element, encoding="utf-8")
         for element in extract_template_toc_fragment(document)
@@ -87,7 +99,7 @@ def load_template_bundle(template: Path | str) -> TemplateBundle:
     contract = {
         "source": {
             "path": str(template_path),
-            "sha256": hashlib.sha256(template_path.read_bytes()).hexdigest(),
+            "sha256": hashlib.sha256(raw).hexdigest(),
         },
         "styles": {
             "resolved_roles": dict(resolved),
@@ -115,6 +127,7 @@ def load_template_bundle(template: Path | str) -> TemplateBundle:
     return TemplateBundle(
         schema_version="1.0",
         path=template_path,
+        template_bytes=raw,
         template_sha256=contract["source"]["sha256"],
         profile=_freeze(profile),
         presentation_contract=_freeze(contract),

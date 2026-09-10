@@ -213,3 +213,52 @@ The ten full suite failures remain the frozen T05 through T09 gates listed earli
 9. `tests/test_modular_file_protocol.py`
 
 The worktree only `input` and `scripts/.venv` symlinks remain untracked. The intentionally absent future `tests/test_modular_performance.py` helper remains the only test collection exclusion.
+
+## Independent review fix round 2
+
+### Status
+
+The embedded response identity, relation resume gate, state consistency, candidate baseline, and verified byte binding findings are closed. This fix round created no Git commit.
+
+### Failure first evidence
+
+1. Waiting and completed checkpoint response tampering, an unsupported resume stage, and six inconsistent relation state components initially produced `9 failed, 22 deselected`.
+2. Resource and template replacement after resume preparation initially produced `2 failed, 31 deselected` because rendering reopened the original paths.
+3. The first template snapshot fix exposed nondeterministic candidate ordering after a JSON round trip. Canonical candidate ordering made the candidate baseline process stable.
+4. A malformed ledger transaction escaped the checkpoint error boundary and produced `1 failed, 33 deselected` with `MODULAR_NATIVE_TRANSACTION_CONFLICT`.
+5. An external resource removed after parsing and before byte binding allowed response recording before render failure. The focused RED was `1 failed, 34 deselected`.
+
+### Fixes
+
+1. Every stored response is rehashed from its canonical response content during checkpoint load. Only `response_sha256`, `applied`, `apply_started`, `transaction_id`, and `transaction_content_sha256` are excluded. A mismatch returns `response_identity_mismatch` before response map construction or completed replay.
+2. Waiting checkpoints can resume only at `relation`. Other stages return `unsupported_resume_stage`. Relation recovery rebuilds Source AST from current SourceFacts, replays the decision ledger, and compares the saved AST, content overlay, presentation override, applied transactions, and transaction digests before execution.
+3. Candidate baselines use canonical candidate ordering. The checkpoint run identity is checked before response recording, and the live semantic candidate set is checked before enhancement consumption.
+4. Transaction replay errors are normalized to `resume_snapshot_mismatch`. A valid nonempty state is created with the actual transaction and ledger APIs and resumes successfully; each independently inconsistent component is rejected.
+5. Resume captures external resource bytes and template bytes once. `SourceStore.bind_part` retains verified resources, `TemplateBundle` retains the template snapshot, and normalization plus rendering consume those exact bytes. Path based callers remain compatible.
+6. A resource that disappears after parsing but before binding now returns `fingerprint_mismatch` before response recording. Resources already classified as unresolved remain compatible and later fail the existing render contract if required.
+
+### Final focused verification
+
+```text
+PYTHONPATH="$(pwd)/tests" scripts/.venv/bin/python3 -m pytest -q tests/test_modular_file_protocol.py tests/test_modular_resume.py tests/test_modular_contracts.py tests/test_modular_capability.py tests/test_modular_kernel.py tests/test_modular_review.py tests/test_modular_distribution.py
+90 passed in 24.37s
+
+PYTHONPATH="$(pwd)/tests" scripts/.venv/bin/python3 -m pytest tests/test_native_skill_cutover.py -q -k 't00 or t01 or t02 or t03 or t04'
+7 passed, 10 deselected in 3.16s
+
+PYTHONPATH="$(pwd)/tests" scripts/.venv/bin/python3 -m pytest tests/test_modular_rendering.py tests/test_modular_table_consumption.py tests/test_table_formatting.py tests/test_table_semantics.py tests/test_caption_placement.py tests/test_modular_caption_consumption.py tests/test_modular_conversion.py -q
+45 passed in 4.61s
+```
+
+Before the two final self review cases were added, all modular tests excluding the future performance helper passed `186 passed in 30.38s`. The full regression at that point was `10 failed, 587 passed in 55.23s`; all ten failures were the frozen T05 through T09 gates already listed above. The main Codex owns the final broad rerun requested after this fix round.
+
+### Fix round changed files
+
+1. `scripts/wxdf/run_store.py`
+2. `scripts/wxdf/builtin_modules.py`
+3. `scripts/wxdf/source_store.py`
+4. `scripts/wxdf/template.py`
+5. `scripts/wxdf/rendering.py`
+6. `tests/test_modular_file_protocol.py`
+
+The protected test, status file, and `AGENTS.md` remain unchanged. The worktree only `input` and `scripts/.venv` symlinks remain untracked.

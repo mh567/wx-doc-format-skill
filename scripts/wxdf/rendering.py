@@ -233,7 +233,11 @@ def render(
     document = ast["document"]
     styles = _profile_styles(normalized)
     selected_template = template_bundle.path if template_bundle is not None else template_path
-    doc = Document(str(selected_template)) if selected_template else Document()
+    doc = (
+        Document(io.BytesIO(template_bundle.template_bytes))
+        if template_bundle is not None
+        else Document(str(selected_template)) if selected_template else Document()
+    )
     body = doc._element.body
     for child in list(body):
         if child.tag != qn("w:sectPr"):

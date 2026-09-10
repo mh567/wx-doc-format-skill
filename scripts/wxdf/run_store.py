@@ -59,6 +59,27 @@ def request_digest(request: Mapping[str, Any]) -> str:
     return _digest({key: value for key, value in request.items() if key != "request_sha256"})
 
 
+_RESPONSE_APPLICATION_FIELDS = frozenset({
+    "response_sha256",
+    "applied",
+    "apply_started",
+    "transaction_id",
+    "transaction_content_sha256",
+})
+
+
+def response_digest(response: Mapping[str, Any]) -> str:
+    """Return response content identity without mutable apply metadata."""
+
+    if not isinstance(response, Mapping):
+        raise CheckpointError("response must be an object", code="invalid_response")
+    return _digest({
+        key: value
+        for key, value in response.items()
+        if key not in _RESPONSE_APPLICATION_FIELDS
+    })
+
+
 def file_digest(path: Path | str | None) -> str:
     """Return a checkpoint digest for one local resource."""
 
@@ -82,6 +103,15 @@ def checkpoint_target_map(source_ast: Mapping[str, Any]) -> dict[str, Any]:
         "entries": entries,
         "view_sha256": _digest(entries),
     }
+
+
+def candidate_baseline_digest(source_ast: Mapping[str, Any], candidates: list[Any]) -> str:
+    """Bind a deterministic pre enhancement candidate set to its Source AST."""
+
+    return _digest({
+        "source_ast": source_ast,
+        "candidates": sorted(candidates, key=_canonical),
+    })
 
 
 def overlay_entries(values: Mapping[str, Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -126,6 +156,66 @@ def _read_json_lines(path: Path, *, kind: str) -> list[dict[str, Any]]:
             )
         values.append(value)
     return values
+
+
+def _verified_resource_bytes(
+    source_path: Path | str,
+    source_facts: Mapping[str, Any],
+    source_store: Any,
+) -> dict[str, bytes]:
+    """Bind resource bytes whose content identity was captured by SourceFacts."""
+
+    from .source_store import SourceStoreError
+
+    verified: dict[str, bytes] = {}
+    source_root = _path(source_path).parent
+    unresolved_parts = {
+        str(diagnostic.get("message"))
+        for diagnostic in source_facts.get("diagnostics", [])
+        if isinstance(diagnostic, Mapping)
+        and diagnostic.get("code") == "external_resource_unresolved"
+    }
+    for resource_id, resource in source_facts.get("resources", {}).items():
+        if not isinstance(resource, Mapping):
+            continue
+        source_ref = resource.get("source_ref")
+        if not isinstance(source_ref, Mapping):
+            continue
+        part = source_ref.get("part")
+        if not isinstance(part, str) or not part:
+            continue
+        try:
+            value = source_store.resolve(dict(source_ref))
+        except SourceStoreError:
+            candidate = Path(part)
+            if not candidate.is_absolute():
+                candidate = source_root / candidate
+            try:
+                value = candidate.read_bytes()
+            except OSError as exc:
+                if part in unresolved_parts:
+                    continue
+                raise CheckpointError(
+                    f"resource became unavailable while binding {resource_id}",
+                    code="fingerprint_mismatch",
+                ) from exc
+            actual_digest = "sha256:" + hashlib.sha256(value).hexdigest()
+            if actual_digest != resource.get("content_sha256"):
+                raise CheckpointError(
+                    f"resource changed while binding {resource_id}",
+                    code="fingerprint_mismatch",
+                )
+            source_store.bind_part(part, value)
+        if not isinstance(value, bytes):
+            continue
+        actual_digest = "sha256:" + hashlib.sha256(value).hexdigest()
+        if actual_digest != resource.get("content_sha256"):
+            raise CheckpointError(
+                f"resource snapshot does not match SourceFacts for {resource_id}",
+                code="fingerprint_mismatch",
+            )
+        verified[str(resource_id)] = value
+    return verified
 
 
 def write_native_waiting_checkpoint(
@@ -180,10 +270,7 @@ def write_native_waiting_checkpoint(
         "protocol": "2.0",
         "requests": file_digest(requests_path),
     }
-    candidate_baseline_id = _digest({
-        "source_ast": source_ast,
-        "candidates": candidate_set,
-    })
+    candidate_baseline_id = candidate_baseline_digest(source_ast, candidate_set)
     checkpoint = {
         "checkpoint_schema_version": "2.0",
         "run_id": "native-file-" + candidate_baseline_id[len("sha256:"):len("sha256:") + 20],
@@ -241,15 +328,39 @@ def prepare_native_resume(
 
     checkpoint_path = _path(checkpoint_path)
     checkpoint = load_checkpoint(checkpoint_path)
+    if (
+        checkpoint["status"] == "waiting_external"
+        and checkpoint.get("resume_stage") != "relation"
+    ):
+        raise CheckpointError(
+            f"unsupported native resume stage {checkpoint.get('resume_stage')!r}",
+            code="unsupported_resume_stage",
+        )
+    baseline_id = str(checkpoint.get("candidate_baseline_id") or "")
+    expected_run_id = "native-file-" + baseline_id.removeprefix("sha256:")[:20]
+    if checkpoint["status"] == "waiting_external" and checkpoint.get("run_id") != expected_run_id:
+        raise CheckpointError(
+            "relation checkpoint candidate baseline identity changed",
+            code="candidate_baseline_mismatch",
+        )
     request_path = Path(checkpoint["files"]["requests_path"])
     from .parsers import parse
 
     current_source_facts = parse(source_path, {"source_store": source_store})
+    verified_resources = _verified_resource_bytes(source_path, current_source_facts, source_store)
+    try:
+        template_bytes = b"" if template_path is None else _path(template_path).read_bytes()
+    except OSError as exc:
+        raise CheckpointError(
+            f"cannot read native template file: {template_path}",
+            code="checkpoint_read_failed",
+        ) from exc
+    template_digest = "sha256:" + hashlib.sha256(template_bytes).hexdigest()
     checkpoint = load_checkpoint(
         checkpoint_path,
         expected_fingerprints={
             "source": current_source_facts["source"]["content_sha256"],
-            "template": file_digest(template_path),
+            "template": template_digest,
             "configuration": _digest(configuration),
             "contracts": _digest(contracts),
             "modules": _digest(modules),
@@ -260,6 +371,8 @@ def prepare_native_resume(
     )
     if _digest(current_source_facts) != _digest(checkpoint["source_facts"]):
         raise CheckpointError("current SourceFacts do not match the checkpoint", code="fingerprint_mismatch")
+    if checkpoint["status"] == "waiting_external":
+        _validate_relation_resume_snapshot(checkpoint, current_source_facts)
     on_disk_requests = _read_json_lines(request_path, kind="request")
     if on_disk_requests != checkpoint["requests"]:
         raise CheckpointError("native request file does not match the checkpoint", code="request_identity_conflict")
@@ -292,12 +405,21 @@ def prepare_native_resume(
         "restored_source_ast": copy.deepcopy(recorded["source_ast"]),
         "decision_ledger": copy.deepcopy(recorded["decision_ledger"]),
         "checkpoint_resume_stage": recorded["resume_stage"],
+        "restored_candidate_baseline_id": recorded["candidate_baseline_id"],
+        "restored_resource_bytes": verified_resources,
         "restored_transaction_snapshot": {
             "transactions": _checkpoint_transactions(recorded),
             "overlays": _entries_to_overlay(recorded.get("content_overlay")),
             "presentation_overrides": _entries_to_overlay(recorded.get("presentation_override")),
         },
     }
+    if template_path is not None:
+        from .template import load_template_bundle
+
+        resume_options["restored_template_bundle"] = load_template_bundle(
+            template_path,
+            template_bytes=template_bytes,
+        )
     if checkpoint["status"] in {"completed", "completed_with_warnings"}:
         return recorded, False, response_map, resume_options
     required_ids = {
@@ -309,6 +431,85 @@ def prepare_native_resume(
     if ready:
         save_checkpoint(recorded, checkpoint_path)
     return recorded, ready, response_map, resume_options
+
+
+def _validate_relation_resume_snapshot(
+    checkpoint: Mapping[str, Any],
+    source_facts: Mapping[str, Any],
+) -> None:
+    """Cross check one relation checkpoint against deterministic ledger replay."""
+
+    from .decision_ledger import LedgerError, _replay_snapshot, project_ledger
+    from .semantics.source_ast import build_source_ast
+    from .transaction import TransactionConflict, make_snapshot
+
+    try:
+        base_ast = build_source_ast(source_facts)
+        base_node_ids = set(base_ast["document"]["blocks"]) | set(base_ast["document"]["containers"])
+        ledger_view = project_ledger(
+            source_facts,
+            checkpoint["decision_ledger"],
+            existing_node_ids=base_node_ids,
+        )
+        blocking = {
+            "revision_precondition_failed",
+            "revision_conflict",
+        }
+        if any(item.get("code") in blocking for item in ledger_view.get("diagnostics", [])):
+            raise LedgerError("relation checkpoint ledger cannot be replayed", code="replay_blocked")
+        replayed = _replay_snapshot(source_facts, checkpoint["decision_ledger"], make_snapshot(base_ast))
+    except (LedgerError, TransactionConflict, KeyError, TypeError, ValueError) as exc:
+        raise CheckpointError(
+            f"relation checkpoint replay failed: {exc}",
+            code="resume_snapshot_mismatch",
+        ) from exc
+
+    expected_state = {
+        "source_ast": replayed.ast,
+        "content_overlay": overlay_entries(replayed.overlays),
+        "presentation_override": overlay_entries(replayed.presentation_overrides),
+    }
+    actual_state = {
+        "source_ast": checkpoint.get("source_ast"),
+        "content_overlay": checkpoint.get("content_overlay"),
+        "presentation_override": checkpoint.get("presentation_override"),
+    }
+    if actual_state != expected_state:
+        raise CheckpointError(
+            "relation checkpoint semantic snapshot does not match ledger replay",
+            code="resume_snapshot_mismatch",
+        )
+
+    expected_transactions: dict[str, str] = {}
+    for revision in ledger_view.get("revisions", []):
+        transaction_id = revision.get("transaction_id")
+        transaction_digest = revision.get("transaction_content_sha256")
+        if not isinstance(transaction_id, str) or not isinstance(transaction_digest, str):
+            raise CheckpointError(
+                "relation checkpoint ledger has no transaction proof",
+                code="resume_snapshot_mismatch",
+            )
+        previous = expected_transactions.get(transaction_id)
+        if previous is not None and previous != transaction_digest:
+            raise CheckpointError(
+                "relation checkpoint ledger transaction digests conflict",
+                code="resume_snapshot_mismatch",
+            )
+        expected_transactions[transaction_id] = transaction_digest
+    stored_transactions = {
+        str(transaction_id): str(digest)
+        for transaction_id, digest in checkpoint.get("transaction_content_digests", {}).items()
+    }
+    stored_applied = {
+        str(item.get("transaction_id")): str(item.get("content_sha256"))
+        for item in checkpoint.get("applied_transactions", [])
+        if isinstance(item, Mapping)
+    }
+    if stored_transactions != expected_transactions or stored_applied != expected_transactions:
+        raise CheckpointError(
+            "relation checkpoint transaction snapshot does not match its ledger",
+            code="resume_snapshot_mismatch",
+        )
 
 
 def complete_native_checkpoint(
@@ -426,6 +627,16 @@ def _validate_embedded_fingerprints(checkpoint: Mapping[str, Any]) -> None:
             raise CheckpointError(
                 f"request content changed for {request_id}",
                 code="request_identity_conflict",
+            )
+    for response in checkpoint.get("responses", []):
+        if not isinstance(response, Mapping):
+            continue
+        request_id = response.get("request_id")
+        stored_digest = response.get("response_sha256")
+        if stored_digest is None or stored_digest != response_digest(response):
+            raise CheckpointError(
+                f"stored response content changed for {request_id}",
+                code="response_identity_mismatch",
             )
 
 
@@ -693,6 +904,7 @@ def record_response(checkpoint: Mapping[str, Any], response: Mapping[str, Any]) 
     """Record one response exactly once and return ``(checkpoint, outcome)``."""
 
     _validate_for_store(checkpoint)
+    _validate_embedded_fingerprints(checkpoint)
     if not isinstance(response, Mapping):
         raise CheckpointError("response must be an object", code="invalid_response")
     request_id = _response_id(response)
@@ -710,7 +922,7 @@ def record_response(checkpoint: Mapping[str, Any], response: Mapping[str, Any]) 
         stored_request_digest = matching_requests[0].get("request_sha256")
         if stored_request_digest is not None and stored_request_digest != request_digest(matching_requests[0]):
             raise CheckpointError(f"request content changed for {request_id}", code="request_identity_conflict")
-    response_digest = _digest(dict(response))
+    incoming_digest = response_digest(response)
     result = copy.deepcopy(dict(checkpoint))
     responses = result.setdefault("responses", [])
     for existing in responses:
@@ -726,12 +938,12 @@ def record_response(checkpoint: Mapping[str, Any], response: Mapping[str, Any]) 
             )
         if not isinstance(existing, Mapping) or existing.get("request_id") != request_id:
             continue
-        existing_digest = existing.get("response_sha256") or _digest({key: value for key, value in existing.items() if key not in {"response_sha256", "applied", "apply_started"}})
-        if existing_digest != response_digest:
+        existing_digest = existing.get("response_sha256") or response_digest(existing)
+        if existing_digest != incoming_digest:
             raise CheckpointError(f"response conflict for {request_id}", code="response_conflict")
         return result, "already_recorded"
     record = copy.deepcopy(dict(response))
-    record["response_sha256"] = response_digest
+    record["response_sha256"] = incoming_digest
     record["applied"] = False
     responses.append(record)
     return result, "recorded"
@@ -808,16 +1020,14 @@ def complete_pending_response(
             )
     pending_response = pending_matches[0]
     response = matches[0]
-    pending_response_digest = pending_response.get("response_sha256") or _digest(
-        {key: value for key, value in pending_response.items() if key not in {"response_sha256", "applied", "apply_started"}}
-    )
+    pending_response_digest = pending_response.get("response_sha256") or response_digest(pending_response)
     if response.get("response_sha256") != pending_response_digest:
         raise CheckpointError(
             f"completed response does not match pending response {request_id}",
             code="response_identity_mismatch",
         )
-    pending_payload = {key: value for key, value in pending_response.items() if key not in {"response_sha256", "applied", "apply_started"}}
-    completed_payload = {key: value for key, value in response.items() if key not in {"response_sha256", "applied", "apply_started"}}
+    pending_payload = {key: value for key, value in pending_response.items() if key not in _RESPONSE_APPLICATION_FIELDS}
+    completed_payload = {key: value for key, value in response.items() if key not in _RESPONSE_APPLICATION_FIELDS}
     if pending_payload != completed_payload:
         raise CheckpointError(
             f"completed response payload does not match pending response {request_id}",
