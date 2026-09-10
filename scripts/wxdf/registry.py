@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Iterable, Mapping
 
 from .contracts import AST_BLOCK_TYPES, AST_CONTAINER_KINDS, SOURCE_TYPES, STAGES
@@ -72,6 +72,7 @@ class RegisteredModule:
 
     descriptor: ModuleDescriptor
     execute: Callable[[Any], Any]
+    fallback: Callable[[Any], Any] | None = None
 
 
 class ModuleRegistry:
@@ -106,21 +107,171 @@ class ModuleRegistry:
         return plan
 
     def execute(self, plan: ExecutionPlan, context: Any) -> list[Any]:
+        """Dispatch the frozen plan and enforce every runtime capability contract.
+
+        When the context is a capability bus, each Module execution is observed
+        through ``require`` and ``provide`` and checked against its descriptor.
+        Failures follow the descriptor ``failure_policy`` deterministically.
+        """
+
+        observes = hasattr(context, "begin_module") and hasattr(context, "end_module")
         results: list[Any] = []
-        for descriptor in plan.modules:
+        for position, descriptor in enumerate(plan.modules):
             module = self._modules.get(descriptor.module_id)
             if module is None:
                 raise PlanError(f"module {descriptor.module_id} is not registered")
-            results.append(module.execute(context))
+            if observes:
+                context.begin_module(descriptor, position)
+            try:
+                result = module.execute(context)
+            except Exception as exc:
+                result = self._recover(module, descriptor, context, observes, exc)
+                if result is _RERAISED:
+                    raise
+                results.append(result)
+                continue
+            if observes:
+                observation = context.end_module("completed")
+                self._enforce(descriptor, observation)
+            results.append(result)
         return results
+
+    def _recover(
+        self,
+        module: RegisteredModule,
+        descriptor: ModuleDescriptor,
+        context: Any,
+        observes: bool,
+        exc: Exception,
+    ) -> Any:
+        """Apply the descriptor failure policy to a raised Module error."""
+
+        policy = descriptor.failure_policy
+        if policy == "fallback" and module.fallback is not None:
+            if observes:
+                context.reset_observation()
+            try:
+                result = module.fallback(context)
+            except Exception as fallback_exc:
+                if observes:
+                    context.end_module("failed", fallback_exc)
+                raise fallback_exc
+            if observes:
+                self._enforce(descriptor, context.end_module("completed"))
+            return result
+        if observes:
+            context.end_module("failed" if policy in {"fail", "fallback"} else "warned" if policy == "warn" else "skipped", exc)
+        if policy in {"warn", "skip"}:
+            return None
+        return _RERAISED
+
+    @staticmethod
+    def _enforce(descriptor: ModuleDescriptor, observation: Mapping[str, Any]) -> None:
+        """Reject a completed Module whose observed capabilities break its contract."""
+
+        consumed = list(observation.get("consumed") or ())
+        produced = list(observation.get("produced") or ())
+        undeclared_reads = [name for name in consumed if name not in descriptor.requires]
+        if undeclared_reads:
+            raise PlanError(
+                f"module {descriptor.module_id} read undeclared capability {undeclared_reads[0]}"
+            )
+        undeclared_writes = [name for name in produced if name not in descriptor.provides]
+        if undeclared_writes:
+            raise PlanError(
+                f"module {descriptor.module_id} provided undeclared capability {undeclared_writes[0]}"
+            )
+        missing = [name for name in descriptor.provides if name not in produced]
+        if missing:
+            raise PlanError(
+                f"module {descriptor.module_id} did not produce {missing[0]}"
+            )
+
+
+class _Reraised:
+    """Sentinel telling ``execute`` to propagate the original Module error."""
+
+
+_RERAISED = _Reraised()
+
+
+# Capabilities the native conversion chain exchanges between Modules.
+NATIVE_CHAIN_CAPABILITIES = (
+    "source_facts",
+    "source_facts_summary",
+    "source_facts_digest",
+    "source_regions",
+    "source_region_candidates",
+    "source_region",
+    "document_structure_candidates",
+    "document_structure",
+    "protected_content_candidates",
+    "protected_content",
+    "source_ast",
+    "list_semantics_result",
+    "list_semantics_candidates",
+    "list_item_map",
+    "list_semantics",
+    "table_semantics_result",
+    "table_semantics_candidates",
+    "table_semantics",
+    "caption_semantics_result",
+    "caption_semantics_candidates",
+    "caption_semantics",
+    "appendix_semantics_result",
+    "appendix_semantics_candidates",
+    "appendix_semantics",
+    "candidate_set",
+    "ledger_view",
+    "ledger_replay",
+    "decision_set",
+    "transaction_commit",
+    "source_ast_revision",
+    "source_ast_hierarchy",
+    "normalized",
+    "template_bundle",
+    "resources",
+    "render_plan",
+    "render_result",
+    "model_audit",
+    "saved_output_audit",
+    "appendix_audit",
+    "source_facts_integrity",
+    "published_output",
+)
 
 
 def build_native_v2_registry(
     bindings: Mapping[str, Callable[[Any], Any]] | None = None,
+    *,
+    semantic_modules: Iterable[RegisteredModule] | None = None,
 ) -> ModuleRegistry:
-    """Return the registered contract for the direct native-v2 stage chain."""
+    """Return the registered contract for the direct native-v2 conversion chain.
+
+    The factory has a single shape: the semantic Modules that own parsing,
+    regions, structure, protected content, lists, tables, captions and
+    appendices run first, then the native stage chain that builds the source
+    AST, aggregates the CandidateSet, resolves, commits the transaction,
+    normalizes, renders, audits and publishes.
+
+    ``semantic_modules`` replaces the registered semantic set for contract
+    tests.  A missing or empty value falls back to the registered default set,
+    so the default call always returns the complete native chain.
+
+    ``bindings`` replaces the in-process execution of any registered Module by
+    its identifier.  Modules without a binding keep their registered
+    implementation.
+    """
+
+    from . import builtin_modules as native_implementation
 
     bindings = dict(bindings or {})
+    semantic = (
+        tuple(semantic_modules)
+        if semantic_modules
+        else native_implementation.native_semantic_modules()
+    )
+    stage_executors = native_implementation.native_stage_executors()
     supported_nodes = tuple(sorted(set(AST_BLOCK_TYPES) | set(AST_CONTAINER_KINDS)))
     common = {
         "contract_version": "2.0",
@@ -129,63 +280,77 @@ def build_native_v2_registry(
         "failure_policy": "fail",
     }
 
-    def binding_for(module_id: str) -> Callable[[Any], Any]:
-        binding = bindings.get(module_id)
-        if binding is not None:
-            return binding
+    def bound(module: RegisteredModule) -> RegisteredModule:
+        binding = bindings.get(module.descriptor.module_id)
+        if binding is None:
+            return module
+        return replace(module, execute=binding)
 
-        def missing_binding(_context: Any) -> None:
-            raise PlanError(f"native module {module_id} has no runtime binding")
-
-        return missing_binding
-
-    return ModuleRegistry([
+    return ModuleRegistry(bound(module) for module in [
+        *semantic,
         RegisteredModule(
-            ModuleDescriptor("native-source-parser", "2.0", ("source",), (), ("source_facts",), **common),
-            binding_for("native-source-parser"),
+            ModuleDescriptor("native-source-parser", "2.0", ("source",), ("source_facts",), ("source_ast",), **common),
+            stage_executors["native-source-parser"],
         ),
         RegisteredModule(
-            ModuleDescriptor("native-candidate-set", "2.0", ("scope", "role", "relation"), ("source_facts",), ("candidate_set",), **common),
-            binding_for("native-candidate-set"),
+            ModuleDescriptor(
+                "native-candidate-set",
+                "2.0",
+                ("relation",),
+                (
+                    "source_facts",
+                    "source_ast",
+                    "source_region_candidates",
+                    "document_structure_candidates",
+                    "protected_content_candidates",
+                    "list_semantics_candidates",
+                    "appendix_semantics_candidates",
+                    "table_semantics_candidates",
+                    "caption_semantics_candidates",
+                ),
+                ("candidate_set", "ledger_view", "ledger_replay"),
+                **common,
+            ),
+            stage_executors["native-candidate-set"],
         ),
         RegisteredModule(
-            ModuleDescriptor("native-resolver", "2.0", ("relation",), ("candidate_set",), ("decision_set",), **common),
-            binding_for("native-resolver"),
+            ModuleDescriptor("native-resolver", "2.0", ("relation",), ("candidate_set", "source_ast", "ledger_view"), ("decision_set",), **common),
+            stage_executors["native-resolver"],
         ),
         RegisteredModule(
-            ModuleDescriptor("native-transaction", "2.0", ("relation",), ("decision_set",), ("source_ast_revision",), **common),
-            binding_for("native-transaction"),
+            ModuleDescriptor("native-transaction", "2.0", ("relation",), ("source_ast", "decision_set"), ("transaction_commit", "source_ast_revision", "source_ast_hierarchy"), **common),
+            stage_executors["native-transaction"],
         ),
         RegisteredModule(
-            ModuleDescriptor("native-normalizer", "2.0", ("normalize",), ("source_ast_revision",), ("normalized",), **common),
-            binding_for("native-normalizer"),
+            ModuleDescriptor("native-normalizer", "2.0", ("normalize",), ("source_facts", "transaction_commit", "decision_set"), ("normalized", "template_bundle", "resources"), **common),
+            stage_executors["native-normalizer"],
         ),
         RegisteredModule(
-            ModuleDescriptor("native-renderer", "2.0", ("render",), ("normalized",), ("render_plan",), **common),
-            binding_for("native-renderer"),
+            ModuleDescriptor("native-renderer", "2.0", ("render",), ("normalized", "template_bundle", "resources"), ("render_plan", "render_result"), **common),
+            stage_executors["native-renderer"],
         ),
         RegisteredModule(
             ModuleDescriptor(
                 "native-auditor",
                 "2.0",
                 ("audit",),
-                ("render_plan",),
-                ("model_audit", "saved_output_audit"),
+                ("source_facts", "source_facts_digest", "normalized", "render_result", "appendix_semantics"),
+                ("model_audit", "saved_output_audit", "appendix_audit", "source_facts_integrity"),
                 required_audits=("model_audit", "saved_output_audit"),
                 **common,
             ),
-            binding_for("native-auditor"),
+            stage_executors["native-auditor"],
         ),
         RegisteredModule(
             ModuleDescriptor(
                 "native-publisher",
                 "2.0",
                 ("publish",),
-                ("saved_output_audit",),
+                ("model_audit", "saved_output_audit", "appendix_audit", "list_semantics_result"),
                 ("published_output",),
                 **common,
             ),
-            binding_for("native-publisher"),
+            stage_executors["native-publisher"],
         ),
     ])
 

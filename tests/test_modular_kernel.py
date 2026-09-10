@@ -88,35 +88,28 @@ def test_executable_registry_rejects_missing_required_capability_and_runs_plan()
 
 
 def test_native_registry_executes_bound_stage_implementations() -> None:
+    config = {
+        "pipeline": "modular",
+        "list_policy": "wx-default-v2",
+        "source_type": "markdown",
+        "node_kinds": ["document"],
+        "available_audits": ["model_audit", "saved_output_audit"],
+    }
     calls: list[str] = []
+    registered = [module.module_id for module in build_native_v2_registry().build(config).modules]
     bindings = {
         module_id: (lambda _context, module_id=module_id: calls.append(module_id) or module_id)
-        for module_id in (
-            "native-source-parser",
-            "native-candidate-set",
-            "native-resolver",
-            "native-transaction",
-            "native-normalizer",
-            "native-renderer",
-            "native-auditor",
-            "native-publisher",
-        )
+        for module_id in registered
     }
     registry = build_native_v2_registry(bindings)
-    plan = registry.build(
-        {
-            "pipeline": "modular",
-            "list_policy": "wx-default-v2",
-            "source_type": "markdown",
-            "node_kinds": ["document"],
-            "available_audits": ["model_audit", "saved_output_audit"],
-        },
-    )
+    plan = registry.build(config)
 
     results = registry.execute(plan, {})
 
     assert results == calls
     assert calls == [module.module_id for module in plan.modules]
+    assert calls[0] == "source-facts-parser"
+    assert len(calls) == 16
 
 
 def test_kernel_rejects_modular_conversion_without_complete_capability_adapter(tmp_path: Path) -> None:

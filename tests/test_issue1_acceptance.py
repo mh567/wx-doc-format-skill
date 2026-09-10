@@ -276,10 +276,19 @@ def test_l01_nested_ordered_unordered_ordered_runs_full_native_acceptance(tmp_pa
         "Publisher",
     ]
     assert report["execution_plan"]["profile"] == "wx_full_rules-native-v2"
-    assert [
+    executed_modules = [
         module["module_id"] for module in report["execution_plan"]["modules"]
-    ] == [
+    ]
+    assert executed_modules == [
+        "source-facts-parser",
         "native-source-parser",
+        "source-region",
+        "document-structure",
+        "protected-content",
+        "list-semantics",
+        "table-semantics",
+        "caption-semantics",
+        "appendix-semantics",
         "native-candidate-set",
         "native-resolver",
         "native-transaction",
@@ -288,6 +297,10 @@ def test_l01_nested_ordered_unordered_ordered_runs_full_native_acceptance(tmp_pa
         "native-auditor",
         "native-publisher",
     ]
+    assert executed_modules == list(report["native_module_evidence"])
+    assert [
+        record["order"] for record in report["native_module_evidence"].values()
+    ] == list(range(len(executed_modules)))
     assert report["native_transaction"]["status"] == "committed"
     assert report["model_audit"]["passed"] is True
     assert report["saved_output_audit"]["passed"] is True

@@ -106,74 +106,15 @@ class ConversionKernel:
 
     @staticmethod
     def _facts_to_ast(facts: Mapping[str, Any]) -> dict[str, Any]:
-        """Convert public SourceFacts to the first Source AST revision."""
+        """Compatibility seam for the generic SourceFacts to AST construction.
 
-        units: dict[str, dict[str, Any]] = {}
-        for unit_id, unit in facts["units"].items():
-            kind = unit.get("kind")
-            source_ref = copy.deepcopy(unit["source_ref"])
-            if kind == "paragraph":
-                block: dict[str, Any] = {
-                    "block_type": "paragraph",
-                    "role": unit.get("role") or "body",
-                    "inline_content": copy.deepcopy(unit.get("inline_content", [])),
-                    "source_ref": source_ref,
-                }
-                if block["role"] == "heading":
-                    block["level"] = int(unit.get("level") or 1)
-                units[unit_id] = block
-            elif kind in {"code_block", "opaque", "separator"}:
-                units[unit_id] = {
-                    "block_type": "opaque",
-                    "diagnostic_ids": list(unit.get("diagnostic_ids") or [f"source_{kind}"]),
-                    "raw_text": str(unit.get("raw_text") or ""),
-                    "source_ref": source_ref,
-                }
-            else:
-                units[unit_id] = {
-                    "block_type": "opaque",
-                    "diagnostic_ids": [f"unsupported_source_unit:{kind}"],
-                    "source_ref": source_ref,
-                }
+        The construction itself lives in ``wxdf.semantics.source_ast`` so that
+        the native chain owns it as a registered Module.
+        """
 
-        blocks = dict(units)
-        containers: dict[str, dict[str, Any]] = {}
-        for container_id, container in facts["containers"].items():
-            kind = container.get("kind")
-            if kind == "table":
-                table = {"block_type": "table", "table_type": "data"}
-                table_semantics = container.get("table_semantics")
-                if isinstance(table_semantics, Mapping):
-                    table["table_type"] = str(table_semantics.get("table_type") or "data")
-                    if "header_rows" in table_semantics:
-                        table["header_rows"] = int(table_semantics.get("header_rows") or 0)
-                if isinstance(container.get("layout"), Mapping):
-                    table["layout"] = copy.deepcopy(dict(container["layout"]))
-                if "source_ref" in container:
-                    table["source_ref"] = copy.deepcopy(container["source_ref"])
-                else:
-                    table["generated_by"] = "source_facts_adapter"
-                    table["generation_basis"] = [container_id]
-                blocks[container_id] = table
-                continue
-            containers[container_id] = copy.deepcopy(dict(container))
-        containers.setdefault("root", {"kind": "document"})
-        ast = {
-            "schema_version": "2.0",
-            "revision": 1,
-            "document": {
-                "root_id": "root",
-                "blocks": blocks,
-                "containers": containers,
-                "children": copy.deepcopy(facts["children"]),
-                "associations": [],
-                "resources": copy.deepcopy(facts["resources"]),
-            },
-        }
-        from .validation import validate_ast
+        from .semantics.source_ast import build_source_ast
 
-        validate_ast(ast)
-        return ast
+        return build_source_ast(facts)
 
     def _convert_modular(self, request: ConversionRequest) -> RunResult:
         options = request.options or {}
@@ -489,241 +430,35 @@ class ConversionKernel:
         facts: Mapping[str, Any],
         list_result: Mapping[str, Any],
     ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, str]]:
-        """Build list structure operations without changing the source revision."""
+        """Compatibility seam for native list AST materialization.
 
-        ast = copy.deepcopy(dict(source_ast))
-        document = ast["document"]
-        blocks = document["blocks"]
-        containers = document["containers"]
-        children = document["children"]
-        nodes = {**blocks, **containers}
-        original_parents = {
-            child_id: parent_id
-            for parent_id, child_ids in children.items()
-            for child_id in child_ids
-        }
-        original_positions = {
-            (parent_id, child_id): index
-            for parent_id, child_ids in children.items()
-            for index, child_id in enumerate(child_ids)
-        }
-        list_specs = {str(item["list_id"]): item for item in list_result.get("lists", [])}
-        item_records: dict[str, list[Mapping[str, Any]]] = {}
-        for relation in list_result.get("items", []):
-            item_records.setdefault(str(relation["list_id"]), []).append(relation)
+        The materialization itself lives in ``wxdf.semantics.source_ast`` so
+        that the list semantics Module owns it.
+        """
 
-        item_map: dict[str, str] = {}
-        for relation in list_result.get("items", []):
-            source_item_id = str(relation["item_id"])
-            source_node = containers.get(source_item_id)
-            if isinstance(source_node, Mapping) and source_node.get("kind") == "list_item":
-                item_map[source_item_id] = source_item_id
-                continue
-            item_id = f"native-list-item-{source_item_id}"
-            while item_id in nodes or item_id in item_map.values():
-                item_id = f"{item_id}-copy"
-            item_map[source_item_id] = item_id
+        from .semantics.source_ast import materialize_list_semantics
 
-        def source_node(source_id: str) -> Mapping[str, Any]:
-            return facts.get("units", {}).get(source_id) or facts.get("containers", {}).get(source_id) or {}
-
-        def source_ref(source_id: str) -> dict[str, Any] | None:
-            value = source_node(source_id).get("source_ref")
-            return copy.deepcopy(dict(value)) if isinstance(value, Mapping) else None
-
-        def parent_for_list(list_id: str, spec: Mapping[str, Any], records: list[Mapping[str, Any]]) -> tuple[str, int]:
-            parent_item_id = spec.get("parent_item_id")
-            if parent_item_id is not None:
-                parent_id = item_map.get(str(parent_item_id), str(parent_item_id))
-                return parent_id, len(children.get(parent_id, []))
-            first_source_id = str(records[0]["item_id"]) if records else ""
-            parent_id = original_parents.get(first_source_id, document["root_id"])
-            if parent_id in item_map:
-                parent_id = item_map[parent_id]
-            return parent_id, original_positions.get((parent_id, first_source_id), len(children.get(parent_id, [])))
-
-        candidates: list[dict[str, Any]] = []
-        for list_id, spec in list_specs.items():
-            records = item_records.get(list_id, [])
-            if list_id not in containers:
-                parent_id, index = parent_for_list(list_id, spec, records)
-                first_source_id = str(records[0]["item_id"]) if records else ""
-                list_node: dict[str, Any] = {
-                    "kind": "list",
-                    "list_kind": str(spec.get("list_kind") or "ordered"),
-                    "source_start": max(1, int(spec.get("source_start") or 1)),
-                    "source_sequence_id": str(spec.get("source_sequence_id") or list_id),
-                }
-                if isinstance(spec.get("group_boundary"), Mapping):
-                    list_node["group_boundary"] = copy.deepcopy(dict(spec["group_boundary"]))
-                ref = source_ref(first_source_id)
-                if ref is not None:
-                    list_node["source_ref"] = ref
-                candidates.append({
-                    "candidate_id": f"list-structure-{list_id}",
-                    "module_id": "list_semantics",
-                    "module_version": "1.0",
-                    "target_source_refs": [ref] if ref is not None else [],
-                    "target_node_ids": [list_id],
-                    "proposal": {
-                        "operation": "create_node",
-                        "property_scope": ["children"],
-                        "value": {"node_id": list_id, "parent_id": parent_id, "index": index, "node": list_node},
-                    },
-                    "positive_evidence": [{"kind": "structural", "source": "source_facts_list_structure"}],
-                    "negative_evidence": [],
-                    "scope": {"stages": ["relation"]},
-                    "constraints": [],
-                    "rationale": "list container derived from immutable source facts",
-                })
-
-            for index, relation in enumerate(records):
-                source_item_id = str(relation["item_id"])
-                item_id = item_map[source_item_id]
-                existing_item = item_id in containers and containers[item_id].get("kind") == "list_item"
-                if not existing_item:
-                    unit = source_node(source_item_id)
-                    evidence = facts.get("evidence", {}).get(source_item_id, {})
-                    item_node: dict[str, Any] = {
-                        "kind": "list_item",
-                        "source_marker": relation.get("source_marker") or evidence.get("marker_text"),
-                        "source_ordinal": relation.get("source_ordinal") or evidence.get("ordinal"),
-                        "source_sequence_id": relation.get("source_sequence_id") or source_item_id,
-                    }
-                    if isinstance(unit.get("source_ref"), Mapping):
-                        item_node["source_ref"] = copy.deepcopy(dict(unit["source_ref"]))
-                    candidates.append({
-                        "candidate_id": f"list-item-structure-{source_item_id}",
-                        "module_id": "list_semantics",
-                        "module_version": "1.0",
-                        "target_source_refs": [source_ref(source_item_id)] if source_ref(source_item_id) else [],
-                        "target_node_ids": [item_id],
-                        "proposal": {
-                            "operation": "create_node",
-                            "property_scope": ["children"],
-                            "value": {"node_id": item_id, "parent_id": list_id, "index": index, "node": item_node},
-                        },
-                        "positive_evidence": [{"kind": "structural", "source": "source_facts_list_item"}],
-                        "negative_evidence": [],
-                        "scope": {"stages": ["relation"]},
-                        "constraints": [],
-                        "rationale": "list item owner derived from immutable source facts",
-                    })
-
-        for candidate in list_result.get("candidates", []):
-            mapped = copy.deepcopy(dict(candidate))
-            target_ids = [str(node_id) for node_id in candidate.get("target_node_ids", [])]
-            if len(target_ids) != 1:
-                candidates.append(mapped)
-                continue
-            source_item_id = target_ids[0]
-            item_id = item_map.get(source_item_id, source_item_id)
-            proposal = dict(mapped.get("proposal") or {})
-            value = dict(proposal.get("value") or {})
-            list_id = str(value.get("list_id") or value.get("new_parent_id") or "")
-            existing_item = item_id in containers and containers[item_id].get("kind") == "list_item"
-            value["new_parent_id"] = list_id if existing_item else item_id
-            value["list_id"] = list_id
-            if value.get("parent_item_id") is not None:
-                value["parent_item_id"] = item_map.get(str(value["parent_item_id"]), str(value["parent_item_id"]))
-            value["index"] = next(
-                (index for index, relation in enumerate(item_records.get(list_id, [])) if str(relation.get("item_id")) == source_item_id),
-                0,
-            ) if existing_item else 0
-            proposal["value"] = value
-            mapped["proposal"] = proposal
-            mapped["target_node_ids"] = [source_item_id]
-            candidates.append(mapped)
-
-        existing_associations = {
-            (str(association.get("kind")), str(association.get("source_id")), str(association.get("target_id")))
-            for association in document.get("associations", [])
-            if isinstance(association, Mapping)
-        }
-        continuation_tails: dict[str, str] = {}
-        for continuation in list_result.get("continuations", []):
-            source_item_id = str(continuation.get("owner_item_id"))
-            source_id = continuation_tails.get(source_item_id, item_map.get(source_item_id, source_item_id))
-            target_id = str(continuation.get("node_id"))
-            association = {
-                "kind": "sequence_continuation",
-                "source_id": source_id,
-                "target_id": target_id,
-            }
-            if (association["kind"], source_id, target_id) in existing_associations:
-                continue
-            target_ref = source_ref(target_id)
-            candidates.append({
-                "candidate_id": f"list-continuation-{source_id}-{target_id}",
-                "module_id": "list_semantics",
-                "module_version": "1.0",
-                "target_source_refs": [target_ref] if target_ref is not None else [],
-                "target_node_ids": [target_id],
-                "proposal": {
-                    "operation": "update_association",
-                    "property_scope": ["association"],
-                    "value": {"association": association},
-                },
-                "positive_evidence": [{"kind": "structural", "source": "source_facts_list_continuation"}],
-                "negative_evidence": [],
-                "scope": {"stages": ["relation"], "scope_id": continuation.get("scope_id")},
-                "constraints": [{"kind": "preserve_list_owner", "owner_item_id": source_id}],
-                "rationale": "continuation association derived from list item ownership",
-            })
-            continuation_tails[source_item_id] = target_id
-
-        for relation in list_result.get("items", []):
-            if not relation.get("generated_anchor_required"):
-                continue
-            source_item_id = str(relation.get("item_id"))
-            item_id = item_map.get(source_item_id, source_item_id)
-            anchor_id = f"generated-anchor-{item_id}"
-            if anchor_id in nodes:
-                continue
-            anchor_reason = str(relation.get("anchor_reason") or "list_item_anchor")
-            anchor_node = {
-                "block_type": "paragraph",
-                "role": "body",
-                "inline_content": [],
-                "generated_by": "list_semantics.marker_anchor",
-                "generation_basis": [source_item_id, anchor_reason],
-            }
-            anchor_ref = source_ref(source_item_id)
-            candidates.append({
-                "candidate_id": f"list-anchor-{item_id}",
-                "module_id": "list_semantics",
-                "module_version": "1.0",
-                "target_source_refs": [anchor_ref] if anchor_ref is not None else [],
-                "target_node_ids": [anchor_id],
-                "proposal": {
-                    "operation": "create_node",
-                    "property_scope": ["children"],
-                    "value": {"node_id": anchor_id, "parent_id": item_id, "index": 0, "node": anchor_node},
-                },
-                "positive_evidence": [{"kind": "structural", "source": "source_facts_list_anchor"}],
-                "negative_evidence": [],
-                "scope": {"stages": ["relation"], "scope_id": relation.get("scope_id")},
-                "constraints": [{"kind": "single_marker_anchor", "reason": anchor_reason}],
-                "rationale": "generated marker anchor required by list semantics",
-            })
-
-        from .validation import validate_ast
-
-        validate_ast(ast)
-        return ast, candidates, item_map
+        return materialize_list_semantics(source_ast, facts, list_result)
 
     @staticmethod
-    def _native_preflight(source_ast: Mapping[str, Any], source_type: str, list_policy: str, *, registry: Any = None) -> Any:
-        """Validate the native module contract before candidate execution."""
+    def _native_preflight(source_ast: Mapping[str, Any] | None, source_type: str, list_policy: str, *, registry: Any = None) -> Any:
+        """Validate the native module contract before module execution.
+
+        ``source_ast`` is optional.  Without it the request omits the node kind
+        contract because the chain builds that revision inside a registered
+        Module.
+        """
 
         from .registry import build_native_v2_registry
 
-        node_kinds = {
-            str(node.get("block_type") or node.get("kind"))
-            for collection in (source_ast["document"]["blocks"], source_ast["document"]["containers"])
-            for node in collection.values()
-            if node.get("block_type") or node.get("kind")
-        }
+        node_kinds: list[str] = []
+        if source_ast is not None:
+            node_kinds = sorted({
+                str(node.get("block_type") or node.get("kind"))
+                for collection in (source_ast["document"]["blocks"], source_ast["document"]["containers"])
+                for node in collection.values()
+                if node.get("block_type") or node.get("kind")
+            })
         registry = registry or build_native_v2_registry()
         return registry.build(
             {
@@ -744,6 +479,8 @@ class ConversionKernel:
 
     @staticmethod
     def _native_execution_plan_report(execution_plan: Any) -> list[dict[str, Any]]:
+        """Report every Module of the executed native plan in execution order."""
+
         return [
             {
                 "module_id": module.module_id,
@@ -786,204 +523,42 @@ class ConversionKernel:
             return "consumed"
         return "consumed_mismatch"
 
-    def _execute_native_stage_chain(
-        self,
-        request: ConversionRequest,
-        facts: Mapping[str, Any],
-        source_ast: Mapping[str, Any],
-        candidates: list[Mapping[str, Any]],
-        decision_set: Mapping[str, Any],
-        list_result: Mapping[str, Any],
-        appendix_semantics: Mapping[str, Any] | None,
-        store: Any,
-        metrics: Any,
-        staging_path: Path,
-    ) -> dict[str, Any]:
-        """Execute the native stage implementations through the registered chain."""
+    @staticmethod
+    def _native_source_type(input_path: Path) -> str:
+        """Return the source type the native chain preflights against."""
 
-        from .auditing import check_model, check_saved_output
-        from .normalization import normalize
-        from .registry import build_native_v2_registry
-        from .rendering import render
-        from .semantics.appendices import audit_native_appendix
-        from .template import load_template_bundle
-        from .transaction import apply_stage_batch, make_snapshot
+        return "docx" if input_path.suffix.lower() == ".docx" else "markdown"
 
-        context: dict[str, Any] = {
-            "facts": facts,
-            "source_ast": source_ast,
-            "candidates": candidates,
-            "decision_set": decision_set,
-            "list_result": list_result,
-            "appendix_semantics": appendix_semantics,
-            "request": request,
-            "metrics": metrics,
-            "store": store,
-            "staging_path": staging_path,
-        }
+    @staticmethod
+    def _native_ledger_replay_report(context: Any) -> dict[str, Any] | None:
+        """Complete the ledger replay record with the resolved decision count."""
 
-        def source_parser(runtime: dict[str, Any]) -> dict[str, Any]:
-            runtime["artifacts"] = {"source_facts": runtime["facts"]}
-            return runtime["facts"]
-
-        def candidate_set(runtime: dict[str, Any]) -> list[Mapping[str, Any]]:
-            runtime["artifacts"]["candidate_set"] = runtime["candidates"]
-            return runtime["candidates"]
-
-        def resolver(runtime: dict[str, Any]) -> Mapping[str, Any]:
-            runtime["artifacts"]["decision_set"] = runtime["decision_set"]
-            return runtime["decision_set"]
-
-        def transaction(runtime: dict[str, Any]) -> Any:
-            with metrics.stage("transaction"):
-                committed = apply_stage_batch(
-                    make_snapshot(runtime["source_ast"]),
-                    runtime["decision_set"]["decisions"],
-                    expected_revision=runtime["source_ast"]["revision"],
-                )
-            runtime["committed"] = committed
-            runtime["artifacts"]["source_ast_revision"] = committed.snapshot.ast["revision"]
-            return committed
-
-        def normalizer(runtime: dict[str, Any]) -> Mapping[str, Any]:
-            committed = runtime["committed"]
-            with metrics.stage("normalize"):
-                template = load_template_bundle(request.template_path) if request.template_path else {
-                    "resolved_styles": {
-                        "list_letter": "List Number",
-                        "list_decimal": "List Number 2",
-                        "list_dash": "List Bullet",
-                        "list_bullet": "List Bullet 2",
-                    },
-                    "numbering_ids": {},
-                }
-                normalized = normalize(
-                    committed.snapshot.ast,
-                    template,
-                    strategy=request.list_policy,
-                    overlay=committed.snapshot.overlays,
-                    presentation_override=committed.snapshot.presentation_overrides,
-                    context={"transaction_id": committed.transaction_id, "decision_set_version": decision_set["decision_set_version"]},
-                )
-            resources: dict[str, Any] = {}
-            for resource_id, resource in facts.get("resources", {}).items():
-                source_ref = resource.get("source_ref") if isinstance(resource, Mapping) else None
-                if not isinstance(source_ref, Mapping):
-                    continue
-                try:
-                    payload = store.resolve(dict(source_ref))
-                    if isinstance(payload, bytes):
-                        resources[resource_id] = payload
-                except Exception:
-                    part = source_ref.get("part")
-                    if isinstance(part, str):
-                        candidate_path = request.input_path.parent / part
-                        if candidate_path.is_file():
-                            resources[resource_id] = candidate_path
-            runtime["template"] = template
-            runtime["normalized"] = normalized
-            runtime["resources"] = resources
-            runtime["artifacts"]["normalized"] = normalized
-            return normalized
-
-        def renderer(runtime: dict[str, Any]) -> Mapping[str, Any]:
-            with metrics.stage("render"):
-                if hasattr(runtime["template"], "path"):
-                    result = render(runtime["normalized"], staging_path, template_bundle=runtime["template"], resources=runtime["resources"])
-                else:
-                    result = render(runtime["normalized"], staging_path, resources=runtime["resources"])
-                metrics.record_render()
-            runtime["render_result"] = result
-            runtime["artifacts"]["render_plan"] = result["render_plan"]
-            return result
-
-        def auditor(runtime: dict[str, Any]) -> dict[str, Any]:
-            with metrics.stage("audit"):
-                model_findings = check_model(runtime["normalized"])
-                saved_findings = check_saved_output(staging_path, runtime["normalized"], runtime["render_result"]["render_map"])
-                appendix_findings = (
-                    audit_native_appendix(runtime["normalized"]["source_ast"], runtime["appendix_semantics"])
-                    if runtime.get("appendix_semantics") is not None
-                    else {"passed": True, "issues": []}
-                )
-            runtime["model_findings"] = model_findings
-            runtime["saved_findings"] = saved_findings
-            runtime["appendix_findings"] = appendix_findings
-            runtime["artifacts"]["model_audit"] = model_findings
-            runtime["artifacts"]["saved_output_audit"] = saved_findings
-            runtime["artifacts"]["appendix_audit"] = appendix_findings
-            return {"model": model_findings, "saved": saved_findings, "appendix": appendix_findings}
-
-        def publisher(runtime: dict[str, Any]) -> bool:
-            audits_passed = (
-                runtime["model_findings"].get("passed") is True
-                and runtime["saved_findings"].get("passed") is True
-                and runtime["appendix_findings"].get("passed") is True
-            )
-            fatal_diagnostics = [
-                item for item in runtime["list_result"].get("diagnostics", [])
-                if item.get("severity") in {"error", "warning"}
-            ]
-            if not audits_passed or fatal_diagnostics:
-                return False
-            staging_path.replace(request.output_path)
-            runtime["artifacts"]["published_output"] = str(request.output_path)
-            return True
-
-        bindings = {
-            "native-source-parser": source_parser,
-            "native-candidate-set": candidate_set,
-            "native-resolver": resolver,
-            "native-transaction": transaction,
-            "native-normalizer": normalizer,
-            "native-renderer": renderer,
-            "native-auditor": auditor,
-            "native-publisher": publisher,
-        }
-        registry = build_native_v2_registry(bindings)
-        execution_plan = self._native_preflight(
-            source_ast,
-            facts["source"]["source_type"],
-            request.list_policy,
-            registry=registry,
-        )
-        if self._native_should_block_publish(execution_plan, decision_set):
-            return {"status": "blocked", "execution_plan": execution_plan}
-        registry.execute(execution_plan, context)
-        return {
-            "status": "published" if context["artifacts"].get("published_output") else "failed",
-            "execution_plan": execution_plan,
-            "committed": context["committed"],
-            "normalized": context["normalized"],
-            "render_result": context["render_result"],
-            "model_findings": context["model_findings"],
-            "saved_findings": context["saved_findings"],
-            "appendix_findings": context["appendix_findings"],
-        }
+        if context is None:
+            return None
+        replay = context.artifacts.get("ledger_replay")
+        if replay is None:
+            return None
+        record = dict(replay)
+        decision_set = context.artifacts.get("decision_set")
+        if decision_set is not None:
+            record["decision_count"] = len(decision_set.get("decisions") or [])
+        return record
 
     def _convert_modular_native_v2(self, request: ConversionRequest) -> RunResult:
-        """Run the modular source, decision, transaction and render chain."""
+        """Execute the registered native Module chain and collect its RunResult."""
 
         options = request.options or {}
         if not request.input_path.is_file():
             return RunResult(status="failed", exit_code=1, diagnostics=[{"code": "INPUT_NOT_FOUND", "message": str(request.input_path)}])
 
-        from .metrics import MetricsCollector
-        from .parsers import digest_source_facts, parse, summarize_source_facts
-        from .decision_ledger import LedgerError, project_ledger, revision_decision
-        from .resolver import resolve
-        from .semantics.appendices import (
-            audit_native_appendix,
-            collect_native_appendix_candidates,
-            collect_source_appendix_semantics,
-            prepare_native_appendix_semantics,
+        from .builtin_modules import (
+            LedgerReplayBlocked,
+            ModuleExecutionContext,
+            UnresolvedDecisionError,
         )
-        from .semantics.captions import collect_caption_candidates
-        from .semantics.lists import analyze_lists
-        from .semantics.protected import collect_protected_candidates
-        from .semantics.regions import resolve_source_regions
-        from .semantics.structure import collect_structure_candidates
-        from .semantics.tables import collect_source_table_semantics, collect_table_candidates
+        from .decision_ledger import LedgerError
+        from .metrics import MetricsCollector
+        from .registry import build_native_v2_registry
         from .source_store import SourceStore
         from .transaction import TransactionConflict
 
@@ -1001,360 +576,74 @@ class ConversionKernel:
         }
         staging_path = request.output_path.with_name(f".{request.output_path.name}.native-v2.staging")
         store = SourceStore()
-        ledger_replay: dict[str, Any] | None = None
+        context: Any = None
         try:
-            with metrics.stage("source"):
-                facts = parse(request.input_path, {"source_store": store})
-                metrics.record_source_opened()
-                source_summary = summarize_source_facts(facts)
-                source_facts_digest = digest_source_facts(facts)
-            with metrics.stage("scope"):
-                regions = resolve_source_regions(request.input_path, facts)
-            with metrics.stage("role"):
-                structure_candidates = collect_structure_candidates(
-                    facts,
-                    regions["regions"],
-                    protect_semantics=True,
-                )
-                protected_candidates = collect_protected_candidates(facts)
-            with metrics.stage("relation"):
-                list_result = analyze_lists(facts)
-                source_ast = self._facts_to_ast(facts)
-                source_ast, list_candidates, item_map = self._materialize_list_semantics(source_ast, facts, list_result)
-                appendix_semantics = collect_source_appendix_semantics(facts)
-                appendix_semantics = prepare_native_appendix_semantics(facts, source_ast, appendix_semantics, list_result)
-                appendix_candidates = collect_native_appendix_candidates(facts, source_ast, appendix_semantics, list_result)
-                table_source = collect_source_table_semantics(facts)
-                table_candidates = collect_table_candidates(source_ast)
-                caption_candidates = collect_caption_candidates(source_ast)
-
-            candidates = [
-                *regions.get("candidates", []),
-                *structure_candidates,
-                *protected_candidates,
-                *list_candidates,
-                *appendix_candidates,
-                *table_candidates,
-                *caption_candidates,
-            ]
-            supplied_ledger = options.get("decision_ledger")
-            if supplied_ledger is not None:
-                try:
-                    if not isinstance(supplied_ledger, Mapping) or not isinstance(supplied_ledger.get("source_binding"), Mapping):
-                        raise LedgerError(
-                            "native decision ledger must carry a SourceFacts binding",
-                            code="source_binding_missing",
-                        )
-                    baseline_revision = source_ast["revision"]
-                    existing_node_ids = set(source_ast["document"]["blocks"]) | set(source_ast["document"]["containers"])
-                    ledger_view = project_ledger(facts, supplied_ledger, existing_node_ids=existing_node_ids)
-                    blocking_ledger_diagnostics = [
-                        item
-                        for item in ledger_view.get("diagnostics", [])
-                        if item.get("code") in {"revision_precondition_failed", "revision_conflict"}
-                    ]
-                    if blocking_ledger_diagnostics:
-                        report.update({
-                            "status": "failed",
-                            "decision_ledger_replay": {
-                                "enabled": True,
-                                "error_code": "replay_blocked",
-                                "diagnostics": blocking_ledger_diagnostics,
-                            },
-                        })
-                        return RunResult(
-                            status="failed",
-                            exit_code=1,
-                            report=report,
-                            diagnostics=[
-                                {"code": "replay_blocked", "severity": "error", "message": "cannot apply invalidated or conflicted revisions"},
-                                *blocking_ledger_diagnostics,
-                            ],
-                            metrics=metrics.snapshot(),
-                        )
-                except LedgerError as exc:
-                    report.update({
-                        "status": "failed",
-                        "decision_ledger_replay": {"enabled": True, "error_code": exc.code, "message": str(exc)},
-                    })
-                    return RunResult(
-                        status="failed",
-                        exit_code=1,
-                        report=report,
-                        diagnostics=[{"code": exc.code, "severity": "error", "message": str(exc)}],
-                        metrics=metrics.snapshot(),
-                    )
-                for revision in ledger_view.get("active_revisions", []):
-                    ledger_decision = revision_decision(revision, source_ast["revision"])
-                    candidates.append({
-                        "candidate_id": f"ledger-revision-{revision['revision_id']}",
-                        "module_id": "decision_ledger",
-                        "module_version": str(revision.get("resolver_version") or "1.0"),
-                        "target_source_refs": copy.deepcopy(revision.get("target_source_refs") or []),
-                        "target_node_ids": list(revision.get("target_node_ids") or []),
-                        "proposal": {
-                            "operation": ledger_decision["operation"],
-                            "property_scope": list(revision.get("property_scope") or []),
-                            "value": copy.deepcopy(ledger_decision.get("value") or {}),
-                            "invalidates": list(ledger_decision.get("invalidates") or []),
-                        },
-                        "positive_evidence": [{"kind": "ledger_revision", "revision_id": revision["revision_id"]}],
-                        "negative_evidence": [],
-                        "scope": {"stages": list(revision.get("invalidates") or [])},
-                        "constraints": [],
-                        "rationale": "accepted revision restored from the decision ledger",
-                    })
-                decision_set = resolve(candidates, {"revision": source_ast["revision"]}, ledger_view)
-                ledger_replay = {
-                    "enabled": True,
-                    "ledger_revision": supplied_ledger.get("revision"),
-                    "active_revision_count": len(ledger_view.get("active_revisions") or []),
-                    "baseline_ast_revision": baseline_revision,
-                    "decision_count": len(decision_set["decisions"]),
-                }
-            else:
-                decision_set = resolve(candidates, {"revision": source_ast["revision"]})
-            native_run = self._execute_native_stage_chain(
-                request,
-                facts,
-                source_ast,
-                candidates,
-                decision_set,
-                list_result,
-                appendix_semantics,
-                store,
-                metrics,
-                staging_path,
+            registry = build_native_v2_registry()
+            execution_plan = self._native_preflight(
+                None,
+                self._native_source_type(request.input_path),
+                request.list_policy,
+                registry=registry,
             )
-            execution_plan = native_run["execution_plan"]
-            if native_run["status"] == "blocked":
-                report.update({
-                    "status": "failed",
-                    "source_ast_revision": source_ast["revision"],
-                    "decision_set": decision_set,
-                    "decision_ledger_replay": ledger_replay,
-                    "execution_plan": {
-                        "profile": "wx_full_rules-native-v2",
-                        "modules": self._native_execution_plan_report(execution_plan),
-                    },
-                })
-                return RunResult(
-                    status="failed",
-                    exit_code=1,
-                    report=report,
-                    diagnostics=list(decision_set.get("unresolved") or []),
-                    metrics=metrics.snapshot(),
-                )
-            committed = native_run["committed"]
-            source_facts_digest_after = digest_source_facts(facts)
-            source_facts_immutable = source_facts_digest == source_facts_digest_after
-            snapshot = committed.snapshot
-            normalized = native_run["normalized"]
-            render_result = native_run["render_result"]
-            model_findings = native_run["model_findings"]
-            saved_findings = native_run["saved_findings"]
-            appendix_audit = native_run["appendix_findings"]
-            appendix_range_candidate_ids = {
-                str(candidate.get("candidate_id"))
-                for candidate in appendix_candidates
-                if str(candidate.get("candidate_id", "")).startswith("appendix-range-")
-            }
-            appendix_heading_candidate_ids = {
-                str(candidate.get("candidate_id"))
-                for candidate in appendix_candidates
-                if str(candidate.get("candidate_id", "")).startswith("appendix-heading-")
-            }
-            appendix_decision_ids = {
-                str(candidate_id)
-                for decision in decision_set.get("decisions", [])
-                for candidate_id in decision.get("candidate_ids", [])
-            }
-            appendix_consumption = {
-                "candidate_count": len(appendix_candidates),
-                "range_candidate_count": len(appendix_range_candidate_ids),
-                "range_consumed_count": len(appendix_range_candidate_ids & appendix_decision_ids),
-                "heading_candidate_count": len(appendix_heading_candidate_ids),
-                "heading_consumed_count": len(appendix_heading_candidate_ids & appendix_decision_ids),
-                "unmatched_count": len(appendix_range_candidate_ids | appendix_heading_candidate_ids) - len((appendix_range_candidate_ids | appendix_heading_candidate_ids) & appendix_decision_ids),
-                "ambiguous_count": len(decision_set.get("unresolved") or []),
-            }
-
-            diagnostics = list(list_result.get("diagnostics") or [])
-            if not source_facts_immutable:
-                diagnostics.append({
-                    "code": "SOURCE_FACTS_MUTATED",
-                    "severity": "error",
-                    "message": "SourceFacts changed during native pipeline execution",
-                })
-            diagnostics.extend(decision_set.get("unresolved") or [])
-            diagnostics.extend(model_findings.get("issues") or [])
-            diagnostics.extend(saved_findings.get("issues") or [])
-            diagnostics.extend(appendix_audit.get("issues") or [])
-            audits_passed = (
-                model_findings.get("passed") is True
-                and saved_findings.get("passed") is True
-                and appendix_audit.get("passed") is True
+            context = ModuleExecutionContext(
+                request=request,
+                services={
+                    "metrics": metrics,
+                    "store": store,
+                    "staging_path": staging_path,
+                    "execution_plan": execution_plan,
+                },
             )
-            blocking_diagnostics = [
-                item
-                for item in diagnostics
-                if item in (decision_set.get("unresolved") or [])
-                or item in (model_findings.get("issues") or [])
-                or item in (saved_findings.get("issues") or [])
-                or item in (appendix_audit.get("issues") or [])
-                or item.get("severity") in {"error", "warning"}
-            ]
-            if native_run["status"] != "published" or not audits_passed or blocking_diagnostics:
-                report.update({
-                    "status": "failed",
-                    "source_ast_revision": snapshot.ast["revision"],
-                    "source_facts_digest": source_facts_digest,
-                    "source_facts_digest_after": source_facts_digest_after,
-                    "source_facts_immutable": source_facts_immutable,
-                    "decision_set": decision_set,
-                    "decision_ledger_replay": ledger_replay,
-                    "model_audit": model_findings,
-                    "saved_output_audit": saved_findings,
-                    "appendix_semantics": appendix_semantics,
-                    "appendix_semantics_consumption": appendix_consumption,
-                    "appendix_preservation_audit": appendix_audit,
-                    "execution_plan": {
-                        "profile": "wx_full_rules-native-v2",
-                        "modules": self._native_execution_plan_report(execution_plan),
-                    },
-                })
-                return RunResult(
-                    status="failed",
-                    exit_code=1,
-                    report=report,
-                    diagnostics=diagnostics,
-                    metrics=metrics.snapshot(),
-                )
-            capability_status = {
-                "source_region": self._native_capability_status("source_regions", candidates, decision_set, committed, audits_passed),
-                "document_structure": self._native_capability_status("source_structure", candidates, decision_set, committed, audits_passed),
-                "protected_content": self._native_capability_status("protected_content", candidates, decision_set, committed, audits_passed),
-                "list_semantics": self._native_capability_status("list_semantics", candidates, decision_set, committed, audits_passed),
-                "table_semantics": self._native_capability_status("table_semantics", candidates, decision_set, committed, audits_passed),
-                "caption_semantics": self._native_capability_status("caption_semantics", candidates, decision_set, committed, audits_passed),
-                "appendix_semantics": self._native_capability_status("appendix_semantics", candidates, decision_set, committed, audits_passed),
+            registry.execute(execution_plan, context)
+            return self._native_v2_run_result(request, options, report, execution_plan, context, metrics)
+        except LedgerReplayBlocked as exc:
+            replay = context.require("ledger_replay") if context is not None else {
+                "enabled": True,
+                "error_code": "replay_blocked",
+                "diagnostics": exc.diagnostics,
             }
-            capability_status["source_parser"] = "consumed" if audits_passed else "consumed_mismatch"
-            item_candidate_ids = {
-                str(candidate.get("candidate_id"))
-                for candidate in list_candidates
-                if str(candidate.get("candidate_id", "")).startswith("list-relation-")
-            }
-            continuation_candidate_ids = {
-                str(candidate.get("candidate_id"))
-                for candidate in list_candidates
-                if ((candidate.get("proposal") or {}).get("value") or {}).get("association", {}).get("kind") == "sequence_continuation"
-            }
-            anchor_candidate_ids = {
-                str(candidate.get("candidate_id"))
-                for candidate in list_candidates
-                if str(candidate.get("candidate_id", "")).startswith("list-anchor-")
-            }
-            item_consumed_count = sum(
-                1
-                for decision in decision_set.get("decisions", [])
-                if item_candidate_ids.intersection(str(item) for item in decision.get("candidate_ids", []))
+            report.update({"status": "failed", "decision_ledger_replay": replay})
+            return RunResult(
+                status="failed",
+                exit_code=1,
+                report=report,
+                diagnostics=[
+                    {"code": "replay_blocked", "severity": "error", "message": "cannot apply invalidated or conflicted revisions"},
+                    *exc.diagnostics,
+                ],
+                metrics=metrics.snapshot(),
             )
-            continuation_consumed_count = sum(
-                1
-                for decision in decision_set.get("decisions", [])
-                if continuation_candidate_ids.intersection(str(item) for item in decision.get("candidate_ids", []))
-            )
-            anchor_consumed_count = sum(
-                1
-                for decision in decision_set.get("decisions", [])
-                if anchor_candidate_ids.intersection(str(item) for item in decision.get("candidate_ids", []))
-            )
-            status = "completed" if not diagnostics else "completed_with_warnings"
+        except LedgerError as exc:
             report.update({
-                "status": status,
-                "source_facts_summary": source_summary,
-                "source_facts_digest": source_facts_digest,
-                "source_facts_digest_after": source_facts_digest_after,
-                "source_facts_immutable": source_facts_immutable,
-                "source_ast_revision": snapshot.ast["revision"],
-                "semantic_digest": normalized["semantic_digest"],
-                "presentation_digest": normalized["presentation_digest"],
-                "source_ast_hierarchy": {
-                    "list_count": sum(node.get("kind") == "list" for node in snapshot.ast["document"]["containers"].values()),
-                    "item_count": sum(node.get("kind") == "list_item" for node in snapshot.ast["document"]["containers"].values()),
-                    "nested_list_count": sum(
-                        1
-                        for parent_id, node in snapshot.ast["document"]["containers"].items()
-                        if node.get("kind") == "list_item"
-                        and any(snapshot.ast["document"]["containers"].get(child, {}).get("kind") == "list" for child in snapshot.ast["document"]["children"].get(parent_id, []))
-                    ),
-                },
-                "list_semantics": {
-                    "list_count": len(list_result["lists"]),
-                    "item_count": len(list_result["items"]),
-                    "continuation_count": len(list_result["continuations"]),
-                    "diagnostics": list(list_result["diagnostics"]),
-                    "downgrades": list(list_result.get("downgrades") or []),
-                    "groups": list(list_result["lists"]),
-                },
-                "list_semantics_consumption": {
-                    "candidate_count": len(list_candidates),
-                    "item_candidate_count": len(list_result["items"]),
-                    "item_consumed_count": item_consumed_count,
-                    "continuation_candidate_count": len(list_result["continuations"]),
-                    "continuation_consumed_count": continuation_consumed_count,
-                    "anchor_candidate_count": len(anchor_candidate_ids),
-                    "anchor_consumed_count": anchor_consumed_count,
-                    "unmatched_count": 0,
-                    "ambiguous_count": len(decision_set.get("unresolved") or []),
-                },
-                "table_semantics": {"candidate_count": len(table_candidates), "source_count": len(table_source)},
-                "appendix_semantics": appendix_semantics,
-                "appendix_semantics_consumption": appendix_consumption,
-                "appendix_preservation_audit": appendix_audit,
-                "native_transaction": {
-                    "status": committed.status,
-                    "transaction_id": committed.transaction_id,
-                    "decision_count": len(decision_set["decisions"]),
-                    "unresolved_count": len(decision_set.get("unresolved") or []),
-                    "expected_revision": decision_set["expected_revision"],
-                    "committed_revision": snapshot.ast["revision"],
-                    "metrics": committed.metrics,
-                    "overlays": snapshot.overlays,
-                    "presentation_overrides": snapshot.presentation_overrides,
-                },
+                "status": "failed",
+                "decision_ledger_replay": {"enabled": True, "error_code": exc.code, "message": str(exc)},
+            })
+            return RunResult(
+                status="failed",
+                exit_code=1,
+                report=report,
+                diagnostics=[{"code": exc.code, "severity": "error", "message": str(exc)}],
+                metrics=metrics.snapshot(),
+            )
+        except UnresolvedDecisionError as exc:
+            decision_set = context.require("decision_set") if context is not None else {"unresolved": exc.unresolved}
+            report.update({
+                "status": "failed",
+                "source_ast_revision": context.require("source_ast")["revision"] if context is not None else 1,
                 "decision_set": decision_set,
-                "decision_ledger_replay": ledger_replay,
+                "decision_ledger_replay": self._native_ledger_replay_report(context),
                 "execution_plan": {
                     "profile": "wx_full_rules-native-v2",
                     "modules": self._native_execution_plan_report(execution_plan),
                 },
-                "model_audit": model_findings,
-                "saved_output_audit": saved_findings,
-                "capability_migration": {
-                    **capability_status,
-                },
             })
-            artifacts = {"docx": str(request.output_path)}
-            for option_key, artifact_key, payload in (
-                ("source_ast_path", "source_ast", snapshot.ast),
-                ("normalized_ast_path", "normalized_ast", normalized),
-            ):
-                path = options.get(option_key)
-                if path is not None and not options.get("release"):
-                    path = Path(path)
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-                    artifacts[artifact_key] = str(path)
-            report["artifacts"] = artifacts
-            result = RunResult(status=status, exit_code=0, report=report, artifacts=artifacts, diagnostics=diagnostics, metrics=metrics.snapshot())
-            report_path = options.get("report_path")
-            if report_path is not None:
-                report_path = Path(report_path)
-                report_path.parent.mkdir(parents=True, exist_ok=True)
-                report_path.write_text(json.dumps(result.as_report(), ensure_ascii=False, indent=2), encoding="utf-8")
-            return result
+            return RunResult(
+                status="failed",
+                exit_code=1,
+                report=report,
+                diagnostics=list(decision_set.get("unresolved") or []),
+                metrics=metrics.snapshot(),
+            )
         except TransactionConflict as exc:
             supplied_ledger = options.get("decision_ledger")
             if supplied_ledger is not None:
@@ -1372,7 +661,7 @@ class ConversionKernel:
                 report.update({
                     "status": "failed",
                     "decision_ledger_replay": {
-                        **(ledger_replay or {"enabled": True}),
+                        **(self._native_ledger_replay_report(context) or {"enabled": True}),
                         "error_code": replay_diagnostic["code"],
                         "diagnostics": [replay_diagnostic],
                     },
@@ -1398,6 +687,231 @@ class ConversionKernel:
                 staging_path.unlink()
             store.close()
 
+    def _native_v2_run_result(
+        self,
+        request: ConversionRequest,
+        options: dict[str, Any],
+        report: dict[str, Any],
+        execution_plan: Any,
+        context: Any,
+        metrics: Any,
+    ) -> RunResult:
+        """Translate the committed native artifacts into the RunResult contract."""
+
+        candidates = list(context.require("candidate_set"))
+        decision_set = context.require("decision_set")
+        list_candidates = list(context.require("list_semantics_candidates"))
+        appendix_candidates = list(context.require("appendix_semantics_candidates"))
+        appendix_semantics = context.require("appendix_semantics")
+        list_result = context.require("list_semantics_result")
+        committed = context.require("transaction_commit")
+        snapshot = committed.snapshot
+        normalized = context.require("normalized")
+        model_findings = context.require("model_audit")
+        saved_findings = context.require("saved_output_audit")
+        appendix_audit = context.require("appendix_audit")
+        published = context.require("published_output")
+        integrity = context.require("source_facts_integrity")
+        source_facts_digest = context.require("source_facts_digest")
+        source_facts_digest_after = str(integrity["digest_after"])
+        source_facts_immutable = bool(integrity["immutable"])
+        ledger_replay = self._native_ledger_replay_report(context)
+
+        appendix_range_candidate_ids = {
+            str(candidate.get("candidate_id"))
+            for candidate in appendix_candidates
+            if str(candidate.get("candidate_id", "")).startswith("appendix-range-")
+        }
+        appendix_heading_candidate_ids = {
+            str(candidate.get("candidate_id"))
+            for candidate in appendix_candidates
+            if str(candidate.get("candidate_id", "")).startswith("appendix-heading-")
+        }
+        appendix_decision_ids = {
+            str(candidate_id)
+            for decision in decision_set.get("decisions", [])
+            for candidate_id in decision.get("candidate_ids", [])
+        }
+        appendix_consumption = {
+            "candidate_count": len(appendix_candidates),
+            "range_candidate_count": len(appendix_range_candidate_ids),
+            "range_consumed_count": len(appendix_range_candidate_ids & appendix_decision_ids),
+            "heading_candidate_count": len(appendix_heading_candidate_ids),
+            "heading_consumed_count": len(appendix_heading_candidate_ids & appendix_decision_ids),
+            "unmatched_count": len(appendix_range_candidate_ids | appendix_heading_candidate_ids) - len((appendix_range_candidate_ids | appendix_heading_candidate_ids) & appendix_decision_ids),
+            "ambiguous_count": len(decision_set.get("unresolved") or []),
+        }
+
+        diagnostics = list(list_result.get("diagnostics") or [])
+        if not source_facts_immutable:
+            diagnostics.append({
+                "code": "SOURCE_FACTS_MUTATED",
+                "severity": "error",
+                "message": "SourceFacts changed during native pipeline execution",
+            })
+        diagnostics.extend(decision_set.get("unresolved") or [])
+        diagnostics.extend(model_findings.get("issues") or [])
+        diagnostics.extend(saved_findings.get("issues") or [])
+        diagnostics.extend(appendix_audit.get("issues") or [])
+        audits_passed = (
+            model_findings.get("passed") is True
+            and saved_findings.get("passed") is True
+            and appendix_audit.get("passed") is True
+        )
+        blocking_diagnostics = [
+            item
+            for item in diagnostics
+            if item in (decision_set.get("unresolved") or [])
+            or item in (model_findings.get("issues") or [])
+            or item in (saved_findings.get("issues") or [])
+            or item in (appendix_audit.get("issues") or [])
+            or item.get("severity") in {"error", "warning"}
+        ]
+        if published is None or not audits_passed or blocking_diagnostics:
+            report.update({
+                "status": "failed",
+                "source_ast_revision": snapshot.ast["revision"],
+                "source_facts_digest": source_facts_digest,
+                "source_facts_digest_after": source_facts_digest_after,
+                "source_facts_immutable": source_facts_immutable,
+                "decision_set": decision_set,
+                "decision_ledger_replay": ledger_replay,
+                "model_audit": model_findings,
+                "saved_output_audit": saved_findings,
+                "appendix_semantics": appendix_semantics,
+                "appendix_semantics_consumption": appendix_consumption,
+                "appendix_preservation_audit": appendix_audit,
+                "execution_plan": {
+                    "profile": "wx_full_rules-native-v2",
+                    "modules": self._native_execution_plan_report(execution_plan),
+                },
+            })
+            return RunResult(
+                status="failed",
+                exit_code=1,
+                report=report,
+                diagnostics=diagnostics,
+                metrics=metrics.snapshot(),
+            )
+        capability_status = {
+            "source_region": self._native_capability_status("source_regions", candidates, decision_set, committed, audits_passed),
+            "document_structure": self._native_capability_status("source_structure", candidates, decision_set, committed, audits_passed),
+            "protected_content": self._native_capability_status("protected_content", candidates, decision_set, committed, audits_passed),
+            "list_semantics": self._native_capability_status("list_semantics", candidates, decision_set, committed, audits_passed),
+            "table_semantics": self._native_capability_status("table_semantics", candidates, decision_set, committed, audits_passed),
+            "caption_semantics": self._native_capability_status("caption_semantics", candidates, decision_set, committed, audits_passed),
+            "appendix_semantics": self._native_capability_status("appendix_semantics", candidates, decision_set, committed, audits_passed),
+        }
+        capability_status["source_parser"] = "consumed" if audits_passed else "consumed_mismatch"
+        item_candidate_ids = {
+            str(candidate.get("candidate_id"))
+            for candidate in list_candidates
+            if str(candidate.get("candidate_id", "")).startswith("list-relation-")
+        }
+        continuation_candidate_ids = {
+            str(candidate.get("candidate_id"))
+            for candidate in list_candidates
+            if ((candidate.get("proposal") or {}).get("value") or {}).get("association", {}).get("kind") == "sequence_continuation"
+        }
+        anchor_candidate_ids = {
+            str(candidate.get("candidate_id"))
+            for candidate in list_candidates
+            if str(candidate.get("candidate_id", "")).startswith("list-anchor-")
+        }
+        item_consumed_count = sum(
+            1
+            for decision in decision_set.get("decisions", [])
+            if item_candidate_ids.intersection(str(item) for item in decision.get("candidate_ids", []))
+        )
+        continuation_consumed_count = sum(
+            1
+            for decision in decision_set.get("decisions", [])
+            if continuation_candidate_ids.intersection(str(item) for item in decision.get("candidate_ids", []))
+        )
+        anchor_consumed_count = sum(
+            1
+            for decision in decision_set.get("decisions", [])
+            if anchor_candidate_ids.intersection(str(item) for item in decision.get("candidate_ids", []))
+        )
+        status = "completed" if not diagnostics else "completed_with_warnings"
+        report.update({
+            "status": status,
+            "source_facts_summary": context.require("source_facts_summary"),
+            "source_facts_digest": source_facts_digest,
+            "source_facts_digest_after": source_facts_digest_after,
+            "source_facts_immutable": source_facts_immutable,
+            "source_ast_revision": snapshot.ast["revision"],
+            "semantic_digest": normalized["semantic_digest"],
+            "presentation_digest": normalized["presentation_digest"],
+            "source_ast_hierarchy": context.require("source_ast_hierarchy"),
+            "list_semantics": {
+                "list_count": len(list_result["lists"]),
+                "item_count": len(list_result["items"]),
+                "continuation_count": len(list_result["continuations"]),
+                "diagnostics": list(list_result["diagnostics"]),
+                "downgrades": list(list_result.get("downgrades") or []),
+                "groups": list(list_result["lists"]),
+            },
+            "list_semantics_consumption": {
+                "candidate_count": len(list_candidates),
+                "item_candidate_count": len(list_result["items"]),
+                "item_consumed_count": item_consumed_count,
+                "continuation_candidate_count": len(list_result["continuations"]),
+                "continuation_consumed_count": continuation_consumed_count,
+                "anchor_candidate_count": len(anchor_candidate_ids),
+                "anchor_consumed_count": anchor_consumed_count,
+                "unmatched_count": 0,
+                "ambiguous_count": len(decision_set.get("unresolved") or []),
+            },
+            "table_semantics": dict(context.require("table_semantics")),
+            "appendix_semantics": appendix_semantics,
+            "appendix_semantics_consumption": appendix_consumption,
+            "appendix_preservation_audit": appendix_audit,
+            "native_transaction": {
+                "status": committed.status,
+                "transaction_id": committed.transaction_id,
+                "decision_count": len(decision_set["decisions"]),
+                "unresolved_count": len(decision_set.get("unresolved") or []),
+                "expected_revision": decision_set["expected_revision"],
+                "committed_revision": snapshot.ast["revision"],
+                "metrics": committed.metrics,
+                "overlays": snapshot.overlays,
+                "presentation_overrides": snapshot.presentation_overrides,
+            },
+            "decision_set": decision_set,
+            "decision_ledger_replay": ledger_replay,
+            "execution_plan": {
+                "profile": "wx_full_rules-native-v2",
+                "modules": self._native_execution_plan_report(execution_plan),
+            },
+            "native_module_evidence": copy.deepcopy(context.evidence),
+            "model_audit": model_findings,
+            "saved_output_audit": saved_findings,
+            "capability_migration": {
+                **capability_status,
+            },
+        })
+        artifacts = {"docx": str(request.output_path)}
+        for option_key, artifact_key, payload in (
+            ("source_ast_path", "source_ast", snapshot.ast),
+            ("normalized_ast_path", "normalized_ast", normalized),
+        ):
+            path = options.get(option_key)
+            if path is not None and not options.get("release"):
+                path = Path(path)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+                artifacts[artifact_key] = str(path)
+        report["artifacts"] = artifacts
+        result = RunResult(status=status, exit_code=0, report=report, artifacts=artifacts, diagnostics=diagnostics, metrics=metrics.snapshot())
+        report_path = options.get("report_path")
+        if report_path is not None:
+            report_path = Path(report_path)
+            report_path.parent.mkdir(parents=True, exist_ok=True)
+            report_path.write_text(json.dumps(result.as_report(), ensure_ascii=False, indent=2), encoding="utf-8")
+        return result
+
+
     def _convert_modular_native_experimental(self, request: ConversionRequest) -> RunResult:
         """Retain the incomplete native path for staged module replacement tests."""
 
@@ -1405,14 +919,9 @@ class ConversionKernel:
         if not request.input_path.is_file():
             return RunResult(status="failed", exit_code=1, diagnostics=[{"code": "INPUT_NOT_FOUND", "message": str(request.input_path)}])
 
-        from .auditing import check_model, check_saved_output
+        from .builtin_modules import ModuleExecutionContext, experimental_native_modules
         from .metrics import MetricsCollector
-        from .normalization import normalize
-        from .parsers import parse, summarize_source_facts
-        from .rendering import render
-        from .semantics.lists import analyze_lists
-        from .source_store import SourceStore
-        from template_profile import load_template_profile
+        from .registry import ModuleRegistry
 
         metrics = MetricsCollector()
         report: dict[str, Any] = {
@@ -1422,32 +931,28 @@ class ConversionKernel:
             "contract_versions": {"source_facts": "1.0", "ast": "2.0", "normalized": "1.0"},
         }
         try:
-            with metrics.stage("source"):
-                store = SourceStore()
-                facts = parse(request.input_path, {"source_store": store})
-                metrics.record_source_opened()
-                source_summary = summarize_source_facts(facts)
-            with metrics.stage("scope"):
-                list_result = analyze_lists(facts)
-            with metrics.stage("role"):
-                source_ast = self._facts_to_ast(facts)
-            with metrics.stage("normalize"):
-                profile = load_template_profile(request.template_path) if request.template_path else {"resolved_styles": {}, "numbering_ids": {}}
-                normalized = normalize(source_ast, profile, strategy=request.list_policy)
-            with metrics.stage("render"):
-                render_result = render(normalized, request.output_path, template_path=request.template_path)
-                metrics.record_render()
-            with metrics.stage("audit"):
-                model_findings = check_model(normalized)
-                saved_findings = check_saved_output(request.output_path, normalized, render_result["render_map"])
+            registry = ModuleRegistry(experimental_native_modules())
+            plan = registry.build({"pipeline": "modular", "list_policy": request.list_policy})
+            context = ModuleExecutionContext(request=request, services={"metrics": metrics})
+            registry.execute(plan, context)
+
+            source_ast = context.require("source_ast")
+            normalized = context.require("normalized")
+            list_result = context.require("list_semantics_result")
+            model_findings = context.require("model_audit")
+            saved_findings = context.require("saved_output_audit")
 
             report.update({
                 "status": "completed" if not list_result["diagnostics"] else "completed_with_warnings",
-                "source_facts_summary": source_summary,
+                "source_facts_summary": context.require("source_facts_summary"),
                 "source_ast_revision": source_ast["revision"],
                 "semantic_digest": normalized["semantic_digest"],
                 "presentation_digest": normalized["presentation_digest"],
-                "list_semantics": {"list_count": len(list_result["lists"]), "item_count": len(list_result["items"]), "diagnostics": list_result["diagnostics"]},
+                "list_semantics": {
+                    "list_count": len(list_result["lists"]),
+                    "item_count": len(list_result["items"]),
+                    "diagnostics": list(list_result["diagnostics"]),
+                },
                 "model_audit": model_findings,
                 "saved_output_audit": saved_findings,
             })

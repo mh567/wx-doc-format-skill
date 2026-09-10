@@ -13,6 +13,7 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 from test_modular_ast import _ast
+from wxdf.builtin_modules import native_semantic_modules
 from wxdf.kernel import ConversionKernel, ConversionRequest
 from wxdf.legacy_capability import make_view, translate
 from wxdf.parsers import parse
@@ -288,7 +289,15 @@ def test_native_v2_preflight_builds_plan_from_registered_modules() -> None:
     plan = ConversionKernel._native_preflight(_ast(0), "markdown", "wx-default-v2")
 
     assert [module.module_id for module in plan.modules] == [
+        "source-facts-parser",
         "native-source-parser",
+        "source-region",
+        "document-structure",
+        "protected-content",
+        "list-semantics",
+        "table-semantics",
+        "caption-semantics",
+        "appendix-semantics",
         "native-candidate-set",
         "native-resolver",
         "native-transaction",
@@ -300,6 +309,27 @@ def test_native_v2_preflight_builds_plan_from_registered_modules() -> None:
     assert [module.module_id for module in registry.build({"pipeline": "modular", "list_policy": "wx-default-v2", "source_type": "markdown", "node_kinds": ["document"], "available_audits": ["model_audit", "saved_output_audit"]}).modules] == [module.module_id for module in plan.modules]
     assert all(module.failure_policy == "fail" for module in plan.modules)
     assert plan.modules[-1].required_audits == ()
+
+
+def test_native_v2_default_factory_has_a_single_full_chain_shape() -> None:
+    """The default factory call returns the complete native chain once."""
+
+    config = {
+        "pipeline": "modular",
+        "list_policy": "wx-default-v2",
+        "source_type": "markdown",
+        "available_audits": ("model_audit", "saved_output_audit"),
+    }
+    default_plan = [module.module_id for module in build_native_v2_registry().build(config).modules]
+    injected_plan = [
+        module.module_id
+        for module in build_native_v2_registry(semantic_modules=native_semantic_modules()).build(config).modules
+    ]
+
+    assert default_plan == injected_plan
+    assert "native-candidate-set" in default_plan
+    assert "source-facts-parser" in default_plan
+    assert len(default_plan) == 16
 
 
 def test_native_fail_policy_blocks_unresolved_decisions_before_publish() -> None:
