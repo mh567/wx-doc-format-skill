@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 
@@ -202,6 +203,63 @@ def test_publication_recovery_requires_marker_to_match_manifest_run_id(tmp_path:
 
     assert recovered["status"] == "incomplete"
     assert recovered["reason"] == "marker_mismatch"
+
+
+@pytest.mark.parametrize("run_id", ["", " ", "\t\n", "\u3000", None, 1, True, {}, [], MISSING])
+def test_bundle_recovery_requires_nonempty_run_identity(
+    tmp_path: Path,
+    run_id: object,
+) -> None:
+    artifact = tmp_path / "candidate.bin"
+    artifact.write_bytes(b"candidate")
+    destination = tmp_path / "published"
+    publish_bundle({"item": artifact}, destination, run_id="valid-run", acceptance=ACCEPTED)
+    manifest_path = destination / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if run_id is MISSING:
+        manifest.pop("run_id")
+    else:
+        manifest["run_id"] = run_id
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    marker_text = run_id if isinstance(run_id, str) else ""
+    (destination / "COMMITTED").write_text(marker_text, encoding="utf-8")
+
+    assert recover_publication(destination)["status"] == "incomplete"
+    assert (destination / "item").read_bytes() == b"candidate"
+
+
+@pytest.mark.parametrize("run_id", [
+    "a14aa28e-64d9-4413-a8dd-bf7937516ea9",
+    "a14aa28e64d94413a8ddbf7937516ea9",
+])
+def test_bundle_recovery_accepts_bound_uuid_run_identity(tmp_path: Path, run_id: str) -> None:
+    artifact = tmp_path / "candidate.bin"
+    artifact.write_bytes(b"candidate")
+    destination = tmp_path / "published"
+    publish_bundle({"item": artifact}, destination, run_id=run_id, acceptance=ACCEPTED)
+
+    recovered = recover_publication(destination)
+
+    assert recovered["status"] == "completed"
+    assert recovered["manifest"]["run_id"] == run_id
+    assert (destination / "COMMITTED").read_text(encoding="utf-8") == run_id
+
+
+@pytest.mark.parametrize("run_id", [None, "", " ", "\t\n", "\u3000"])
+def test_bundle_publication_generates_uuid_for_blank_run_identity(
+    tmp_path: Path,
+    run_id: str | None,
+) -> None:
+    artifact = tmp_path / "candidate.bin"
+    artifact.write_bytes(b"candidate")
+    destination = tmp_path / "published"
+
+    published = publish_bundle({"item": artifact}, destination, run_id=run_id, acceptance=ACCEPTED)
+
+    assert UUID(published["run_id"]).version == 4
+    assert published["manifest"]["run_id"] == published["run_id"]
+    assert (destination / "COMMITTED").read_text(encoding="utf-8") == published["run_id"]
+    assert recover_publication(destination)["status"] == "completed"
 
 
 @pytest.mark.parametrize("field,value", [

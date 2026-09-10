@@ -420,6 +420,8 @@ def publish_bundle(
     acceptance_record = validate_acceptance(acceptance)
     destination = Path(destination).resolve()
     run_id = run_id or uuid.uuid4().hex
+    if isinstance(run_id, str) and not run_id.strip():
+        run_id = uuid.uuid4().hex
     required = required or tuple(artifacts)
     _bundle_artifact_paths(artifacts)
     artifact_paths = _bundle_artifact_paths(required)
@@ -487,6 +489,8 @@ def recover_publication(destination: Path | str) -> dict[str, Any]:
         not isinstance(manifest, dict)
         or manifest.get("schema_version") != _BUNDLE_SCHEMA_VERSION
         or manifest.get("status") != "completed"
+        or not isinstance(manifest.get("run_id"), str)
+        or not manifest["run_id"].strip()
         or not isinstance(manifest.get("acceptance"), dict)
         or manifest["acceptance"].get("accepted") is not True
     ):
