@@ -53,6 +53,9 @@ def collect_audit_findings(
             }
             if block_id:
                 finding["block_id"] = str(block_id)
+            for field in ("allowed_operations", "property_scope"):
+                if isinstance(issue.get(field), list):
+                    finding[field] = list(issue[field])
             findings.append(finding)
     return findings
 

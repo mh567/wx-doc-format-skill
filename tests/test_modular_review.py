@@ -13,7 +13,13 @@ if str(SCRIPTS) not in sys.path:
 
 from test_modular_ast import _ast
 from wxdf import auditing, review, transaction
-from wxdf.review import MODE_MANIFEST, accept_candidate, evaluate_candidate, mode_manifest
+from wxdf.review import (
+    MODE_MANIFEST,
+    accept_candidate,
+    build_review_packet,
+    evaluate_candidate,
+    mode_manifest,
+)
 from wxdf.transaction import make_snapshot
 
 
@@ -219,7 +225,7 @@ def test_review_packet_contains_only_stable_repairable_targets() -> None:
             "repairable": True,
             "block_id": "p0",
             "category": "model",
-            "evidence": {"code": "heading_hierarchy"},
+            "evidence": {"code": "heading_level_jump", "expected_level": 2},
         },
         {
             "audit_id": "saved:paragraph-order",
@@ -238,6 +244,113 @@ def test_review_packet_contains_only_stable_repairable_targets() -> None:
     assert packet["repairable_count"] == 1
     assert packet["targets"][0]["block_id"] == "p0"
     assert packet["targets"][0]["source_ref"]["source_id"] == "p0"
+    assert packet["targets"][0]["allowed_operations"] == ["update_role"]
+    assert packet["targets"][0]["property_scope"] == ["role", "level"]
+
+
+@pytest.mark.parametrize(
+    "decision",
+    [
+        {
+            "operation": "update_role",
+            "target_node_ids": ["p1"],
+            "property_scope": ["role"],
+            "value": {"role": "note"},
+        },
+        {
+            "operation": "update_association",
+            "target_node_ids": ["p0"],
+            "property_scope": ["association"],
+            "value": {"association": {"kind": "caption_target", "source_id": "p0", "target_id": "p1"}},
+        },
+        {
+            "operation": "update_role",
+            "target_node_ids": ["p0"],
+            "property_scope": ["role", "semantic_role"],
+            "value": {"role": "heading", "semantic_role": "appendix_title"},
+        },
+    ],
+    ids=["target", "operation", "property_scope"],
+)
+def test_review_packet_rejects_candidate_decisions_outside_explicit_authority(decision: dict) -> None:
+    baseline = _bundle(level=1, paragraph_count=2)
+    finding = {
+        "audit_id": "model:heading_level_jump:p0",
+        "severity": "high",
+        "repairable": True,
+        "block_id": "p0",
+        "category": "model",
+        "evidence": {"code": "heading_level_jump", "expected_level": 2},
+    }
+    packet = build_review_packet(baseline, [finding])
+
+    violation = review.validate_review_decisions(packet, [decision])
+
+    assert violation is not None
+    assert violation["code"] == "review_scope_violation"
+
+
+def test_candidate_rejects_out_of_scope_ast_semantic_mutation_after_authorized_decision() -> None:
+    baseline = _bundle(level=1, paragraph_count=2)
+    candidate = copy.deepcopy(baseline)
+    candidate["source_ast"]["document"]["blocks"]["p0"]["level"] = 2
+    candidate["source_ast"]["document"]["blocks"]["p1"]["role"] = "note"
+    candidate["normalized_ast"]["semantic_digest"] = "semantic-authorized-plus-hidden"
+    finding = {
+        "audit_id": "model:heading_level_jump:p0",
+        "severity": "high",
+        "repairable": True,
+        "block_id": "p0",
+        "category": "model",
+        "evidence": {"code": "heading_level_jump", "expected_level": 2},
+    }
+    packet = build_review_packet(baseline, [finding])
+    decisions = [{
+        "operation": "update_role",
+        "target_node_ids": ["p0"],
+        "property_scope": ["role", "level"],
+        "value": {"role": "heading", "level": 2},
+    }]
+
+    decision = evaluate_candidate(
+        baseline,
+        candidate,
+        _findings([finding], []),
+        decisions=decisions,
+        review_packet=packet,
+    )
+
+    assert decision.status == "rejected"
+    assert decision.reason == "review_scope_violation"
+    assert decision.details["review_scope_violation"]["code"] == "out_of_scope_semantic_change"
+
+
+def test_valid_move_node_allows_passive_sibling_index_shifts() -> None:
+    baseline = _bundle(level=1, paragraph_count=3)
+    candidate = copy.deepcopy(baseline)
+    candidate["source_ast"]["document"]["children"]["root"] = ["p1", "p2", "p0"]
+    candidate["normalized_ast"]["semantic_digest"] = "semantic-moved-p0"
+    finding = {
+        "audit_id": "model:parent:p0",
+        "severity": "high",
+        "repairable": True,
+        "block_id": "p0",
+    }
+
+    decision = evaluate_candidate(
+        baseline,
+        candidate,
+        _findings([finding], []),
+        decisions=[{
+            "operation": "move_node",
+            "target_node_ids": ["p0"],
+            "property_scope": ["parent"],
+            "value": {"new_parent_id": "root", "index": 2},
+        }],
+    )
+
+    assert decision.status == "accepted"
+    assert decision.reason == "target_audit_improved"
 
 
 def test_audit_findings_preserve_risk_and_repairability_across_audit_sources() -> None:

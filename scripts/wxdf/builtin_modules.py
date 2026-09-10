@@ -1216,7 +1216,12 @@ def _native_reviewer(context: ModuleExecutionContext) -> dict[str, Any]:
     from .normalization import normalize
     from .rendering import render
     from .resolver import resolve
-    from .review import AcceptanceDecision, accept_candidate, build_review_packet
+    from .review import (
+        AcceptanceDecision,
+        accept_candidate,
+        build_review_packet,
+        validate_review_decisions,
+    )
     from .run_store import request_digest
     from .transaction import stage_candidate_revision
 
@@ -1394,6 +1399,24 @@ def _native_reviewer(context: ModuleExecutionContext) -> dict[str, Any]:
             candidate_artifact=candidate_path,
         )
 
+    scope_violation = validate_review_decisions(packet, decision_set["decisions"])
+    if scope_violation is not None:
+        acceptance = AcceptanceDecision(
+            "rejected",
+            "review_scope_violation",
+            False,
+            False,
+            False,
+            {"review_scope_violation": scope_violation},
+        )
+        return finish(
+            status="rolled_back",
+            acceptance=acceptance,
+            enhancement=enhancement_record,
+            decision_set=decision_set,
+            candidate_artifact=candidate_path,
+        )
+
     try:
         revision = stage_candidate_revision(
             baseline_commit.snapshot,
@@ -1478,6 +1501,7 @@ def _native_reviewer(context: ModuleExecutionContext) -> dict[str, Any]:
                 "candidate": candidate_audits["findings"],
             },
             decisions=decision_set["decisions"],
+            review_packet=packet,
         )
     except Exception as exc:
         audit_exception = {"type": type(exc).__name__, "message": str(exc)}
@@ -1490,6 +1514,7 @@ def _native_reviewer(context: ModuleExecutionContext) -> dict[str, Any]:
                 "candidate": candidate_bundle.get("findings") or [],
             },
             decisions=decision_set["decisions"],
+            review_packet=packet,
         )
         if candidate_path.is_file():
             candidate_path.unlink()

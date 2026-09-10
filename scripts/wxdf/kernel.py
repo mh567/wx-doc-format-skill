@@ -567,6 +567,20 @@ class ConversionKernel:
             list_policy=request.list_policy,
             options=options,
         )
+        from .publication import PublicationError, recover_pending_publications
+
+        try:
+            recover_pending_publications(request.output_path)
+        except PublicationError as exc:
+            return RunResult(
+                status="failed",
+                exit_code=1,
+                diagnostics=[{
+                    "code": "PUBLICATION_RECOVERY_FAILED",
+                    "severity": "error",
+                    "message": str(exc),
+                }],
+            )
         if not request.input_path.is_file():
             return RunResult(status="failed", exit_code=1, diagnostics=[{"code": "INPUT_NOT_FOUND", "message": str(request.input_path)}])
 

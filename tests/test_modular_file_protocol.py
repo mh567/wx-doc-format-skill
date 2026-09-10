@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import base64
+import fcntl
 import hashlib
 import json
 import os
@@ -169,6 +170,42 @@ def _write_responses(checkpoint_path: Path, responses: list[dict]) -> None:
     )
 
 
+def _complete_force_a_checkpoint(tmp_path: Path) -> tuple[Path, Path]:
+    checkpoint_path, output, _source_ast_path = _generate(tmp_path)
+    requests = _read_requests(checkpoint_path)
+    _write_responses(checkpoint_path, [_response(request) for request in requests])
+    resumed = _run("--resume", checkpoint_path)
+    assert resumed.returncode == 0, resumed.stderr
+    return checkpoint_path, output
+
+
+def _legacy_ledger_transaction_digest(revisions: list[dict]) -> str:
+    revision_contents = []
+    for revision in revisions:
+        revision_contents.append(json.dumps(
+            {
+                "target_source_refs": revision.get("target_source_refs") or [],
+                "target_node_ids": revision.get("target_node_ids") or [],
+                "property_scope": revision.get("property_scope") or [],
+                "decision": revision.get("decision") or {},
+                "preconditions": revision.get("preconditions") or [],
+                "evidence": revision.get("evidence") or [],
+                "origin": revision.get("origin") or {},
+                "resolver_version": revision.get("resolver_version"),
+                "supersedes": revision.get("supersedes") or [],
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        ))
+    payload = json.dumps(revision_contents, ensure_ascii=False, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _binding_digest(binding: dict) -> str:
+    payload = json.dumps(binding, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def _direct_resume_after_prepare(
     checkpoint_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -216,6 +253,7 @@ def test_native_generate_writes_complete_waiting_checkpoint_and_requests(tmp_pat
 
     assert validate_checkpoint(checkpoint) is None
     assert checkpoint["checkpoint_schema_version"] == "2.0"
+    assert checkpoint["transaction_digest_version"] == "2.0"
     assert checkpoint["status"] == "waiting_external"
     assert checkpoint["resume_stage"] == "relation"
     assert checkpoint["profile"] == "wx_full_rules-native-v2"
@@ -408,6 +446,61 @@ def test_later_request_append_recovers_request_file_after_injected_process_crash
     assert not journal_path.exists()
 
 
+def test_later_request_append_recovers_checkpoint_commit_before_append_journal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from wxdf import publication
+
+    checkpoint_path, _output, _source_ast_path = _generate(tmp_path)
+    checkpoint_bytes = checkpoint_path.read_bytes()
+    checkpoint = json.loads(checkpoint_bytes)
+    original_requests = _read_requests(checkpoint_path)
+    extra_request = serialize_native_request(build_native_request(
+        "document_review",
+        checkpoint["source_ast"],
+        request_id="native-checkpoint-crash-review",
+    ))
+    append_journal = checkpoint_path.with_name(
+        checkpoint_path.name + ".request-append.journal"
+    )
+    real_replace = publication.os.replace
+    interrupted = False
+
+    def interrupt_after_checkpoint_install(source: Path | str, target: Path | str) -> None:
+        nonlocal interrupted
+        real_replace(source, target)
+        if (
+            not interrupted
+            and Path(target) == checkpoint_path
+            and ".staging-" in Path(source).name
+        ):
+            interrupted = True
+            raise SystemExit("injected append checkpoint interruption")
+
+    monkeypatch.setattr(publication.os, "replace", interrupt_after_checkpoint_install)
+    with pytest.raises(SystemExit, match="append checkpoint interruption"):
+        append_native_waiting_requests(checkpoint_path, checkpoint, [extra_request])
+    monkeypatch.setattr(publication.os, "replace", real_replace)
+
+    recovered_checkpoint, ready, _responses, _options = prepare_native_resume(
+        checkpoint_path,
+        source_path=SOURCE,
+        template_path=TEMPLATE,
+        contracts=checkpoint["contracts"],
+        modules=checkpoint["modules"],
+        configuration=checkpoint["configuration"],
+        source_store=SourceStore(),
+    )
+
+    assert ready is False
+    assert recovered_checkpoint["status"] == "waiting_external"
+    assert checkpoint_path.read_bytes() == checkpoint_bytes
+    assert _read_requests(checkpoint_path) == original_requests
+    assert not append_journal.exists()
+    assert not list(checkpoint_path.parent.glob(".wxdf-publication-*.journal"))
+
+
 def test_later_request_append_detects_change_immediately_before_replace(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -446,6 +539,44 @@ def test_later_request_append_detects_change_immediately_before_replace(
     assert request_path.read_bytes() == b"external-concurrent-change\n"
     assert checkpoint_path.read_bytes() == checkpoint_bytes
     assert not journal_path.exists()
+
+
+def test_later_request_append_holds_exclusive_lock_through_final_replace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from wxdf import run_store
+
+    checkpoint_path, _output, _source_ast_path = _generate(tmp_path)
+    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    request_path = Path(checkpoint["files"]["requests_path"])
+    extra_request = serialize_native_request(build_native_request(
+        "document_review",
+        checkpoint["source_ast"],
+        request_id="native-locked-review",
+    ))
+    lock_path = request_path.with_name(request_path.name + ".append.lock")
+    observed: list[str] = []
+    real_replace = run_store.os.replace
+
+    def inspect_lock_before_replace(source: Path | str, target: Path | str) -> None:
+        if Path(source).name.endswith(".append.tmp") and Path(target) == request_path:
+            with lock_path.open("a+b") as contender:
+                try:
+                    fcntl.flock(contender.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    observed.append("blocked")
+                else:
+                    observed.append("acquired")
+                    fcntl.flock(contender.fileno(), fcntl.LOCK_UN)
+        real_replace(source, target)
+
+    monkeypatch.setattr(run_store.os, "replace", inspect_lock_before_replace)
+
+    updated = append_native_waiting_requests(checkpoint_path, checkpoint, [extra_request])
+
+    assert observed == ["blocked"]
+    assert updated["requests"][-1]["request_id"] == "native-locked-review"
 
 
 @pytest.mark.parametrize("checkpoint_status", ["waiting", "completed"])
@@ -1230,3 +1361,109 @@ def test_multi_stage_resume_matches_single_process_native_execution(tmp_path: Pa
     assert _docx_structure_summary(file_output) == _docx_structure_summary(online_output)
     assert _docx_content_digest(file_output) == _docx_content_digest(online_output)
     assert file_output.is_file() and online_output.is_file()
+
+
+def test_terminal_resume_recomputes_transaction_digest_from_ledger_revision_content(
+    tmp_path: Path,
+) -> None:
+    checkpoint_path, output = _complete_force_a_checkpoint(tmp_path)
+    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    checkpoint["decision_ledger"]["revisions"][0]["evidence"].append(
+        {"kind": "tampered-after-commit"}
+    )
+    checkpoint_path.write_text(
+        json.dumps(checkpoint, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    before_checkpoint = checkpoint_path.read_bytes()
+    before_output = output.read_bytes()
+
+    resumed = _run("--resume", checkpoint_path)
+
+    assert resumed.returncode != 0
+    assert "transaction_state_mismatch" in resumed.stderr
+    assert checkpoint_path.read_bytes() == before_checkpoint
+    assert output.read_bytes() == before_output
+
+
+def test_terminal_resume_migrates_valid_legacy_t04_transaction_proofs(
+    tmp_path: Path,
+) -> None:
+    checkpoint_path, output = _complete_force_a_checkpoint(tmp_path)
+    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    checkpoint.pop("transaction_digest_version", None)
+    revisions_by_transaction: dict[str, list[dict]] = {}
+    for revision in checkpoint["decision_ledger"]["revisions"]:
+        revisions_by_transaction.setdefault(revision["transaction_id"], []).append(revision)
+    legacy_stage_digests = {
+        transaction_id: "sha256:" + hashlib.sha256(
+            ("legacy-stage:" + transaction_id).encode("utf-8")
+        ).hexdigest()
+        for transaction_id in revisions_by_transaction
+    }
+    for transaction_id, revisions in revisions_by_transaction.items():
+        legacy_ledger_digest = _legacy_ledger_transaction_digest(revisions)
+        for revision in revisions:
+            revision["transaction_content_sha256"] = legacy_ledger_digest
+    checkpoint["transaction_content_digests"] = copy.deepcopy(legacy_stage_digests)
+    checkpoint["applied_transactions"] = [
+        {"transaction_id": transaction_id, "content_sha256": digest}
+        for transaction_id, digest in sorted(legacy_stage_digests.items())
+    ]
+    bindings = {}
+    for response in checkpoint["responses"]:
+        transaction_id = response["transaction_id"]
+        digest = legacy_stage_digests[transaction_id]
+        response["transaction_content_sha256"] = digest
+        binding = {
+            "request_id": response["request_id"],
+            "response_sha256": response["response_sha256"],
+            "transaction_id": transaction_id,
+            "transaction_content_sha256": digest,
+        }
+        bindings[response["request_id"]] = {
+            **binding,
+            "binding_sha256": _binding_digest(binding),
+        }
+    checkpoint["response_transaction_bindings"] = bindings
+    checkpoint_path.write_text(
+        json.dumps(checkpoint, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    legacy_bytes = checkpoint_path.read_bytes()
+    before_output = output.read_bytes()
+
+    resumed = _run("--resume", checkpoint_path)
+
+    assert resumed.returncode == 0, resumed.stderr
+    migrated = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    assert migrated["transaction_digest_version"] == "2.0"
+    assert checkpoint_path.read_bytes() != legacy_bytes
+    assert output.read_bytes() == before_output
+    assert migrated["transaction_content_digests"] != legacy_stage_digests
+    assert {
+        item["transaction_id"]: item["content_sha256"]
+        for item in migrated["applied_transactions"]
+    } == migrated["transaction_content_digests"]
+    assert {
+        binding["transaction_id"]: binding["transaction_content_sha256"]
+        for binding in migrated["response_transaction_bindings"].values()
+    } == migrated["transaction_content_digests"]
+
+
+def test_native_resume_rejects_unknown_transaction_digest_version(tmp_path: Path) -> None:
+    checkpoint_path, output, _source_ast_path = _generate(tmp_path)
+    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    checkpoint["transaction_digest_version"] = "9.0"
+    checkpoint_path.write_text(
+        json.dumps(checkpoint, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    before = checkpoint_path.read_bytes()
+
+    resumed = _run("--resume", checkpoint_path)
+
+    assert resumed.returncode != 0
+    assert "invalid_checkpoint" in resumed.stderr
+    assert checkpoint_path.read_bytes() == before
+    assert not output.exists()

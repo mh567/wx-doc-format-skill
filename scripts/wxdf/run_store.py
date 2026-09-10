@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import copy
+import fcntl
 import hashlib
 import json
 import os
@@ -288,6 +289,7 @@ def write_native_waiting_checkpoint(
     candidate_baseline_id = candidate_baseline_digest(source_ast, candidate_set)
     checkpoint = {
         "checkpoint_schema_version": "2.0",
+        "transaction_digest_version": "2.0",
         "run_id": "native-file-" + candidate_baseline_id[len("sha256:"):len("sha256:") + 20],
         "status": "waiting_external",
         "resume_stage": "relation",
@@ -398,6 +400,38 @@ def append_native_waiting_requests(
     *,
     crash_at: str | None = None,
 ) -> dict[str, Any]:
+    """Serialize cooperative append writers through checkpoint commit."""
+
+    checkpoint_path = _path(checkpoint_path)
+    try:
+        request_path = Path(checkpoint["files"]["requests_path"])
+    except (KeyError, TypeError) as exc:
+        raise CheckpointError(
+            "native checkpoint has no request path",
+            code="invalid_checkpoint",
+        ) from exc
+    lock_path = request_path.with_name(request_path.name + ".append.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+b") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            return _append_native_waiting_requests_locked(
+                checkpoint_path,
+                checkpoint,
+                requests,
+                crash_at=crash_at,
+            )
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _append_native_waiting_requests_locked(
+    checkpoint_path: Path | str,
+    checkpoint: Mapping[str, Any],
+    requests: list[dict[str, Any]],
+    *,
+    crash_at: str | None = None,
+) -> dict[str, Any]:
     """Append later-stage requests while preserving the waiting checkpoint."""
 
     checkpoint_path = _path(checkpoint_path)
@@ -496,6 +530,7 @@ def prepare_native_resume(
     """Validate identities and commit external responses before execution."""
 
     checkpoint_path = _path(checkpoint_path)
+    load_checkpoint(checkpoint_path)
     _recover_native_request_append(checkpoint_path)
     checkpoint = load_checkpoint(checkpoint_path)
     if (
@@ -793,6 +828,7 @@ def complete_native_checkpoint(
         )
     completed.update({
         "status": status,
+        "transaction_digest_version": "2.0",
         "resume_stage": None,
         "source_ast": copy.deepcopy(dict(source_ast)),
         "normalized_ast": copy.deepcopy(dict(normalized)),
@@ -817,6 +853,119 @@ def _path(value: Path | str) -> Path:
     return value if isinstance(value, Path) else Path(value)
 
 
+def _stored_transaction_digests(checkpoint: Mapping[str, Any]) -> tuple[dict[str, str], dict[str, str]]:
+    transaction_digests = {
+        str(transaction_id): str(digest)
+        for transaction_id, digest in checkpoint.get("transaction_content_digests", {}).items()
+    }
+    applied_digests = {
+        str(item.get("transaction_id")): str(item.get("content_sha256"))
+        for item in checkpoint.get("applied_transactions", [])
+        if isinstance(item, Mapping)
+    }
+    return transaction_digests, applied_digests
+
+
+def _migrate_transaction_digest_version(checkpoint: dict[str, Any]) -> bool:
+    """Upgrade a valid unversioned T04 proof chain to canonical digest v2."""
+
+    if checkpoint.get("transaction_digest_version") is not None:
+        return False
+    from .decision_ledger import LedgerError, ledger_transaction_digests
+
+    ledger = checkpoint.get("decision_ledger", {})
+    transaction_digests, applied_digests = _stored_transaction_digests(checkpoint)
+    if transaction_digests != applied_digests:
+        raise CheckpointError(
+            "legacy checkpoint transaction maps disagree",
+            code="transaction_state_mismatch",
+        )
+    canonical_digests: dict[str, str] = {}
+    try:
+        canonical_digests = ledger_transaction_digests(
+            ledger,
+            version="2.0",
+            verify_stored=False,
+        )
+        current_digests = ledger_transaction_digests(ledger, version="2.0")
+    except LedgerError:
+        current_digests = {}
+    if current_digests == transaction_digests:
+        checkpoint["transaction_digest_version"] = "2.0"
+        return True
+    if (
+        current_digests
+        and not transaction_digests
+        and checkpoint.get("status") not in {"completed", "completed_with_warnings", "failed"}
+        and not any(
+            isinstance(response, Mapping) and response.get("applied") is True
+            for response in checkpoint.get("responses", [])
+        )
+    ):
+        checkpoint["transaction_digest_version"] = "2.0"
+        return True
+    try:
+        legacy_digests = ledger_transaction_digests(ledger, version="1.0")
+    except LedgerError as exc:
+        raise CheckpointError(
+            f"legacy checkpoint ledger proof changed: {exc}",
+            code="transaction_state_mismatch",
+        ) from exc
+    if set(legacy_digests) != set(transaction_digests):
+        if checkpoint.get("status") not in {"completed", "completed_with_warnings", "failed"}:
+            checkpoint["transaction_digest_version"] = "1.0"
+            return True
+        raise CheckpointError(
+            "legacy checkpoint transaction IDs disagree",
+            code="transaction_state_mismatch",
+        )
+    bindings = checkpoint.get("response_transaction_bindings") or {}
+    for response in checkpoint.get("responses", []):
+        if not isinstance(response, Mapping) or response.get("applied") is not True:
+            continue
+        request_id = str(response.get("request_id") or "")
+        transaction_id = str(response.get("transaction_id") or "")
+        stored_digest = transaction_digests.get(transaction_id)
+        if response.get("transaction_content_sha256") != stored_digest:
+            raise CheckpointError(
+                f"legacy response proof changed for {request_id}",
+                code="transaction_state_mismatch",
+            )
+        expected_binding = _response_transaction_binding(
+            response,
+            transaction_id,
+            str(stored_digest or ""),
+        )
+        if bindings.get(request_id) != expected_binding:
+            raise CheckpointError(
+                f"legacy response binding changed for {request_id}",
+                code="response_transaction_binding_mismatch",
+            )
+    for revision in ledger.get("revisions", []):
+        if isinstance(revision, dict):
+            revision["transaction_content_sha256"] = canonical_digests[str(revision["transaction_id"])]
+    checkpoint["transaction_content_digests"] = copy.deepcopy(canonical_digests)
+    checkpoint["applied_transactions"] = [
+        {"transaction_id": transaction_id, "content_sha256": digest}
+        for transaction_id, digest in sorted(canonical_digests.items())
+    ]
+    migrated_bindings: dict[str, dict[str, str]] = {}
+    for response in checkpoint.get("responses", []):
+        if not isinstance(response, dict) or response.get("applied") is not True:
+            continue
+        transaction_id = str(response["transaction_id"])
+        digest = canonical_digests[transaction_id]
+        response["transaction_content_sha256"] = digest
+        migrated_bindings[str(response["request_id"])] = _response_transaction_binding(
+            response,
+            transaction_id,
+            digest,
+        )
+    checkpoint["response_transaction_bindings"] = migrated_bindings
+    checkpoint["transaction_digest_version"] = "2.0"
+    return True
+
+
 def _validate_for_store(checkpoint: Mapping[str, Any]) -> None:
     try:
         validate_checkpoint(checkpoint)
@@ -835,30 +984,24 @@ def _validate_for_store(checkpoint: Mapping[str, Any]) -> None:
         and checkpoint["review_outcome"].get("status") == "rolled_back"
     )
     if checkpoint.get("status") in {"completed", "completed_with_warnings"} or terminal_rollback:
-        ledger_digests: dict[str, str] = {}
-        for revision in checkpoint.get("decision_ledger", {}).get("revisions", []):
-            transaction_id = str(revision.get("transaction_id") or "")
-            digest = revision.get("transaction_content_sha256")
-            if not transaction_id or not isinstance(digest, str):
-                raise CheckpointError(
-                    "completed ledger revision has no transaction proof",
-                    code="transaction_state_missing",
-                )
-            prior = ledger_digests.setdefault(transaction_id, digest)
-            if prior != digest:
-                raise CheckpointError(
-                    f"completed ledger has conflicting content for {transaction_id}",
-                    code="transaction_state_mismatch",
-                )
-        transaction_digests = {
-            str(transaction_id): str(digest)
-            for transaction_id, digest in checkpoint.get("transaction_content_digests", {}).items()
-        }
-        applied_digests = {
-            str(item.get("transaction_id")): str(item.get("content_sha256"))
-            for item in checkpoint.get("applied_transactions", [])
-            if isinstance(item, Mapping)
-        }
+        if checkpoint.get("transaction_digest_version") != "2.0":
+            raise CheckpointError(
+                "completed checkpoint has no supported transaction digest version",
+                code="transaction_state_mismatch",
+            )
+        try:
+            from .decision_ledger import ledger_transaction_digests
+
+            ledger_digests = ledger_transaction_digests(
+                checkpoint.get("decision_ledger", {}),
+                version="2.0",
+            )
+        except Exception as exc:
+            raise CheckpointError(
+                f"completed ledger transaction content changed: {exc}",
+                code="transaction_state_mismatch",
+            ) from exc
+        transaction_digests, applied_digests = _stored_transaction_digests(checkpoint)
         if ledger_digests != transaction_digests or applied_digests != transaction_digests:
             raise CheckpointError(
                 "completed transaction proofs do not match the decision ledger",
@@ -960,15 +1103,14 @@ def _validate_embedded_fingerprints(checkpoint: Mapping[str, Any]) -> None:
 
 
 def _write_json_atomic(checkpoint: Mapping[str, Any], path: Path, *, crash_at: str | None = None) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + ".tmp")
-    payload = _canonical(checkpoint) + "\n"
-    temporary.write_text(payload, encoding="utf-8")
-    if crash_at == "before_commit":
-        raise CheckpointError("injected failure before commit", code="injected_failure")
-    os.replace(temporary, path)
-    if crash_at == "after_commit":
-        raise CheckpointError("injected failure after commit", code="injected_failure")
+    from .publication import PublicationError, publish_files_atomically
+
+    payload = (_canonical(checkpoint) + "\n").encode("utf-8")
+    try:
+        publish_files_atomically({path: payload}, crash_at=crash_at)
+    except PublicationError as exc:
+        code = "injected_failure" if crash_at is not None else "checkpoint_write_failed"
+        raise CheckpointError(str(exc), code=code) from exc
 
 
 def save_checkpoint(
@@ -992,6 +1134,7 @@ def save_checkpoint(
     payload = copy.deepcopy(dict(checkpoint))
     payload.setdefault("applied_transactions", [])
     payload.setdefault("transaction_content_digests", {})
+    _migrate_transaction_digest_version(payload)
     ledger = payload.get("decision_ledger")
     source_facts = payload.get("source_facts")
     if (
@@ -1078,6 +1221,15 @@ def load_checkpoint(
     """Load, validate and optionally bind a checkpoint to current inputs."""
 
     source = _path(path)
+    from .publication import PublicationError, recover_pending_publications
+
+    try:
+        recover_pending_publications(source)
+    except PublicationError as exc:
+        raise CheckpointError(
+            f"cannot recover checkpoint publication: {exc}",
+            code="checkpoint_recovery_failed",
+        ) from exc
     try:
         checkpoint = json.loads(source.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -1086,6 +1238,7 @@ def load_checkpoint(
         raise CheckpointError("checkpoint root must be an object", code="invalid_checkpoint")
     checkpoint.setdefault("applied_transactions", [])
     checkpoint.setdefault("transaction_content_digests", {})
+    migrated_transaction_digests = _migrate_transaction_digest_version(checkpoint)
     _validate_for_store(checkpoint)
     _validate_embedded_fingerprints(checkpoint)
     if expected_fingerprints:
@@ -1185,6 +1338,8 @@ def load_checkpoint(
             raise
         except Exception as exc:
             raise CheckpointError(f"source AST recovery failed: {exc}", code="source_ast_rebuild_failed") from exc
+    if migrated_transaction_digests:
+        _write_json_atomic(checkpoint, source)
     return checkpoint
 
 

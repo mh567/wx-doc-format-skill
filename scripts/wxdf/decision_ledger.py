@@ -639,6 +639,55 @@ def _transaction_digest(revisions: Sequence[Mapping[str, Any]]) -> str:
     return transaction_content_digest(revisions)
 
 
+def _legacy_transaction_digest(revisions: Sequence[Mapping[str, Any]]) -> str:
+    payload = json.dumps(
+        [_revision_content(revision) for revision in revisions],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def ledger_transaction_digests(
+    ledger: Mapping[str, Any],
+    *,
+    version: str = "2.0",
+    verify_stored: bool = True,
+) -> dict[str, str]:
+    """Recompute transaction proofs from immutable ledger revision content."""
+
+    groups: dict[str, list[Mapping[str, Any]]] = {}
+    for revision in ledger.get("revisions", []):
+        if not isinstance(revision, Mapping):
+            raise LedgerError("ledger revision is not an object", code="invalid_revision")
+        transaction_id = str(revision.get("transaction_id") or "")
+        if not transaction_id:
+            raise LedgerError("ledger revision has no transaction ID", code="invalid_transaction_id")
+        groups.setdefault(transaction_id, []).append(revision)
+    if version == "2.0":
+        digest_function = _transaction_digest
+    elif version == "1.0":
+        digest_function = _legacy_transaction_digest
+    else:
+        raise LedgerError(
+            f"unsupported transaction digest version {version}",
+            code="unsupported_transaction_digest_version",
+        )
+    result = {
+        transaction_id: digest_function(revisions)
+        for transaction_id, revisions in groups.items()
+    }
+    if verify_stored:
+        for transaction_id, revisions in groups.items():
+            expected = result[transaction_id]
+            if any(revision.get("transaction_content_sha256") != expected for revision in revisions):
+                raise LedgerError(
+                    f"ledger transaction digest changed for {transaction_id}",
+                    code="transaction_state_mismatch",
+                )
+    return result
+
+
 def accept_decisions(ledger: Mapping[str, Any], decisions: Sequence[Mapping[str, Any]] | Mapping[str, Any]) -> dict[str, Any]:
     """Append a complete accepted DecisionSet to a copied ledger."""
 

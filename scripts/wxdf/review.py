@@ -22,6 +22,31 @@ MODE_MANIFEST: dict[str, dict[str, Any]] = {
 }
 
 
+_REPAIR_AUTHORITIES: dict[str, dict[str, tuple[str, ...]]] = {
+    "heading_level_jump": {
+        "allowed_operations": ("update_role",),
+        "property_scope": ("role", "level"),
+    },
+}
+
+_PROPERTY_AST_FIELDS: dict[str, tuple[str, ...]] = {
+    "role": ("role",),
+    "level": ("level",),
+    "semantic_role": ("semantic_role",),
+    "source_operation": ("semantic_source_operation",),
+    "adapter_id": ("semantic_adapter",),
+    "paragraph_id": ("semantic_paragraph_id",),
+    "list_parent_id": ("semantic_list_parent_id",),
+    "appendix_id": ("appendix_id",),
+    "appendix_role": ("appendix_role",),
+    "appendix_relative_level": ("appendix_relative_level",),
+    "semantic_scope_id": ("semantic_scope_id",),
+    "source_heading_level": ("source_heading_level",),
+    "page_break_before": ("page_break_before",),
+    "source_number_preserved": ("source_number_preserved",),
+}
+
+
 @dataclass(frozen=True)
 class AcceptanceDecision:
     status: str
@@ -121,6 +146,9 @@ def _authorized_hierarchy_repair(
     if not move_targets:
         return False
 
+    if not isinstance(baseline_children, Mapping) or not isinstance(candidate_children, Mapping):
+        return False
+
     def positions(children: Mapping[str, Any]) -> dict[str, tuple[str, int]]:
         return {
             str(child_id): (str(parent_id), index)
@@ -130,12 +158,32 @@ def _authorized_hierarchy_repair(
 
     before_positions = positions(baseline_children)
     after_positions = positions(candidate_children)
-    changed = {
-        node_id
-        for node_id in set(before_positions) | set(after_positions)
-        if before_positions.get(node_id) != after_positions.get(node_id)
-    }
-    return bool(changed) and changed.issubset(move_targets)
+    if not move_targets.issubset(before_positions) or not move_targets.issubset(after_positions):
+        return False
+    passive_nodes = (set(before_positions) | set(after_positions)) - move_targets
+    if any(
+        before_positions.get(node_id, (None,))[0]
+        != after_positions.get(node_id, (None,))[0]
+        for node_id in passive_nodes
+    ):
+        return False
+    for parent_id in set(baseline_children) | set(candidate_children):
+        before_passive = [
+            str(node_id)
+            for node_id in baseline_children.get(parent_id, [])
+            if str(node_id) not in move_targets
+        ]
+        after_passive = [
+            str(node_id)
+            for node_id in candidate_children.get(parent_id, [])
+            if str(node_id) not in move_targets
+        ]
+        if before_passive != after_passive:
+            return False
+    return any(
+        before_positions[target_id] != after_positions[target_id]
+        for target_id in move_targets
+    )
 
 
 def _finding_score(findings: Iterable[Mapping[str, Any]]) -> tuple[int, int, int, int, int]:
@@ -194,13 +242,36 @@ def build_review_packet(
     for finding in finding_list:
         node_id = str(finding.get("block_id") or "")
         node = nodes.get(node_id)
-        if finding.get("repairable") is not True or not isinstance(node, Mapping):
+        evidence = finding.get("evidence") if isinstance(finding.get("evidence"), Mapping) else {}
+        authority = _REPAIR_AUTHORITIES.get(str(evidence.get("code") or ""))
+        if authority is None:
+            raw_operations = finding.get("allowed_operations")
+            raw_scope = finding.get("property_scope")
+            if (
+                isinstance(raw_operations, list)
+                and raw_operations
+                and all(isinstance(value, str) and value for value in raw_operations)
+                and isinstance(raw_scope, list)
+                and raw_scope
+                and all(isinstance(value, str) and value for value in raw_scope)
+            ):
+                authority = {
+                    "allowed_operations": tuple(raw_operations),
+                    "property_scope": tuple(raw_scope),
+                }
+        if (
+            finding.get("repairable") is not True
+            or not isinstance(node, Mapping)
+            or authority is None
+        ):
             continue
         targets.append(
             {
                 **finding,
                 "block_id": node_id,
                 "source_ref": copy.deepcopy(dict(node.get("source_ref") or {})),
+                "allowed_operations": list(authority["allowed_operations"]),
+                "property_scope": list(authority["property_scope"]),
                 "current": {
                     key: copy.deepcopy(node[key])
                     for key in (
@@ -229,6 +300,99 @@ def build_review_packet(
     }
 
 
+def validate_review_decisions(
+    review_packet: Mapping[str, Any],
+    decisions: Iterable[Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    """Return a structured violation when a review decision exceeds its packet."""
+
+    authorities = {
+        str(target.get("block_id")): target
+        for target in review_packet.get("targets", [])
+        if isinstance(target, Mapping) and target.get("block_id")
+    }
+    for index, decision in enumerate(decisions):
+        targets = [str(value) for value in decision.get("target_node_ids") or []]
+        operation = str(decision.get("operation") or "")
+        scope = {str(value) for value in decision.get("property_scope") or []}
+        if not targets or any(target not in authorities for target in targets):
+            return {
+                "code": "review_scope_violation",
+                "kind": "target",
+                "decision_index": index,
+                "target_node_ids": targets,
+            }
+        for target_id in targets:
+            authority = authorities[target_id]
+            allowed_operations = {
+                str(value) for value in authority.get("allowed_operations") or []
+            }
+            allowed_scope = {
+                str(value) for value in authority.get("property_scope") or []
+            }
+            if operation not in allowed_operations:
+                return {
+                    "code": "review_scope_violation",
+                    "kind": "operation",
+                    "decision_index": index,
+                    "operation": operation,
+                }
+            if not scope or not scope.issubset(allowed_scope):
+                return {
+                    "code": "review_scope_violation",
+                    "kind": "property_scope",
+                    "decision_index": index,
+                    "property_scope": sorted(scope),
+                }
+        value = decision.get("value")
+        if operation == "update_role" and isinstance(value, Mapping):
+            if not set(value).issubset(scope):
+                return {
+                    "code": "review_scope_violation",
+                    "kind": "value_scope",
+                    "decision_index": index,
+                    "value_fields": sorted(value),
+                }
+    return None
+
+
+def _out_of_scope_semantic_change(
+    baseline_bundle: Mapping[str, Any],
+    candidate_bundle: Mapping[str, Any],
+    decisions: Iterable[Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    baseline_normalized = _normalized(baseline_bundle)
+    candidate_normalized = _normalized(candidate_bundle)
+    baseline_ast = baseline_normalized.get("source_ast") or baseline_bundle.get("source_ast") or {}
+    candidate_ast = candidate_normalized.get("source_ast") or candidate_bundle.get("source_ast") or {}
+    baseline_document = copy.deepcopy(dict(baseline_ast.get("document") or {}))
+    candidate_document = copy.deepcopy(dict(candidate_ast.get("document") or {}))
+    for decision in decisions:
+        operation = str(decision.get("operation") or "")
+        if operation == "move_node":
+            baseline_document.pop("children", None)
+            candidate_document.pop("children", None)
+            continue
+        fields = {
+            ast_field
+            for property_name in decision.get("property_scope") or []
+            for ast_field in _PROPERTY_AST_FIELDS.get(str(property_name), ())
+        }
+        for collection_name in ("blocks", "containers"):
+            before_nodes = baseline_document.get(collection_name) or {}
+            after_nodes = candidate_document.get(collection_name) or {}
+            for target_id in decision.get("target_node_ids") or []:
+                before_node = before_nodes.get(str(target_id))
+                after_node = after_nodes.get(str(target_id))
+                if isinstance(before_node, dict) and isinstance(after_node, dict):
+                    for field_name in fields:
+                        before_node.pop(field_name, None)
+                        after_node.pop(field_name, None)
+    if baseline_document != candidate_document:
+        return {"code": "out_of_scope_semantic_change"}
+    return None
+
+
 def _high_risk_finding_ids(findings: Iterable[Mapping[str, Any]]) -> set[str]:
     return {
         str(finding.get("audit_id") or "")
@@ -243,6 +407,7 @@ def evaluate_candidate(
     findings: Any = None,
     *,
     decisions: Iterable[Mapping[str, Any]] | None = None,
+    review_packet: Mapping[str, Any] | None = None,
 ) -> AcceptanceDecision:
     """Evaluate semantic and presentation changes with protection gates."""
 
@@ -260,6 +425,25 @@ def evaluate_candidate(
     if audit_exception:
         details["audit_exception"] = copy.deepcopy(audit_exception)
         return AcceptanceDecision("rejected", "audit_exception", False, semantic_changed, presentation_changed, details)
+    decision_list = list(decisions or [])
+    if review_packet is not None:
+        violation = validate_review_decisions(review_packet, decision_list)
+        if violation is None:
+            violation = _out_of_scope_semantic_change(
+                baseline_bundle,
+                candidate_bundle,
+                decision_list,
+            )
+        if violation is not None:
+            details["review_scope_violation"] = violation
+            return AcceptanceDecision(
+                "rejected",
+                "review_scope_violation",
+                False,
+                semantic_changed,
+                presentation_changed,
+                details,
+            )
     if not semantic_changed and not presentation_changed:
         return AcceptanceDecision("no_effect", "no_effect", False, False, False, details)
 
@@ -270,7 +454,7 @@ def evaluate_candidate(
 
     if (
         _content_digest(baseline_bundle) != _content_digest(candidate_bundle)
-        and not _authorized_hierarchy_repair(baseline_bundle, candidate_bundle, decisions)
+        and not _authorized_hierarchy_repair(baseline_bundle, candidate_bundle, decision_list)
     ):
         return AcceptanceDecision("rejected", "content_changed", False, semantic_changed, presentation_changed, details)
 
@@ -286,7 +470,7 @@ def evaluate_candidate(
     if after_score[:3] > before_score[:3]:
         return AcceptanceDecision("rejected", "protection_audit_regressed", False, semantic_changed, presentation_changed, details)
 
-    target_ids = _decision_targets(decisions)
+    target_ids = _decision_targets(decision_list)
     before_target_ids = {str(item.get("audit_id")) for item in before if str(item.get("block_id") or "") in target_ids}
     after_target_ids = {str(item.get("audit_id")) for item in after if str(item.get("block_id") or "") in target_ids}
     details["unresolved_target_findings"] = sorted(before_target_ids & after_target_ids)
@@ -303,11 +487,18 @@ def accept_candidate(
     findings: Any = None,
     *,
     decisions: Iterable[Mapping[str, Any]] | None = None,
+    review_packet: Mapping[str, Any] | None = None,
 ) -> tuple[AcceptanceDecision, dict[str, Any]]:
     """Return the accepted candidate bundle or an unchanged baseline copy."""
 
     decision_list = list(decisions or [])
-    decision = evaluate_candidate(baseline_bundle, candidate_bundle, findings, decisions=decision_list)
+    decision = evaluate_candidate(
+        baseline_bundle,
+        candidate_bundle,
+        findings,
+        decisions=decision_list,
+        review_packet=review_packet,
+    )
     if not decision.accepted:
         return decision, copy.deepcopy(dict(baseline_bundle))
     accepted = copy.deepcopy(dict(candidate_bundle))
@@ -326,4 +517,5 @@ __all__ = [
     "build_review_packet",
     "evaluate_candidate",
     "mode_manifest",
+    "validate_review_decisions",
 ]

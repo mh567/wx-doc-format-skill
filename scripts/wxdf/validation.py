@@ -699,6 +699,14 @@ def validate_checkpoint(checkpoint: Mapping[str, Any]) -> None:
             _fail("missing_checkpoint_field", field, "checkpoint field is required even when empty", contract)
     if checkpoint["checkpoint_schema_version"] != CHECKPOINT_SCHEMA_VERSION:
         _fail("unsupported_version", "checkpoint_schema_version", "unsupported checkpoint version", contract)
+    digest_version = checkpoint.get("transaction_digest_version")
+    if digest_version is not None and digest_version not in {"1.0", "2.0"}:
+        _fail(
+            "unsupported_version",
+            "transaction_digest_version",
+            "unsupported transaction digest version",
+            contract,
+        )
     _non_empty_string(checkpoint["run_id"], "run_id", contract)
     status = checkpoint["status"]
     if status not in CHECKPOINT_STATUSES:

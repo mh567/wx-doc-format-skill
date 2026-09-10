@@ -56,6 +56,7 @@ def test_checkpoint_status_transitions_and_round_trip_preserve_full_snapshot(tmp
     expected = copy.deepcopy(waiting)
     expected["applied_transactions"] = []
     expected["transaction_content_digests"] = {}
+    expected["transaction_digest_version"] = "2.0"
     assert restored == expected
     assert restored["source_facts"]
     assert restored["decision_ledger"]
@@ -183,3 +184,41 @@ def test_atomic_checkpoint_write_keeps_previous_commit_on_precommit_failure(tmp_
     with pytest.raises(CheckpointError, match="after commit"):
         save_checkpoint(changed, path, crash_at="after_commit")
     assert load_checkpoint(path)["round"] == 1
+
+
+def test_checkpoint_load_recovers_previous_generation_after_process_interrupt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from wxdf import publication, run_store
+
+    path = tmp_path / "run.json"
+    checkpoint = _checkpoint()
+    save_checkpoint(checkpoint, path)
+    changed = copy.deepcopy(checkpoint)
+    changed["round"] = 1
+    real_replace = publication.os.replace
+    interrupted = False
+
+    def interrupt_after_checkpoint_install(source: Path | str, target: Path | str) -> None:
+        nonlocal interrupted
+        real_replace(source, target)
+        if (
+            not interrupted
+            and Path(target) == path
+            and ".staging-" in Path(source).name
+        ):
+            interrupted = True
+            raise SystemExit("injected checkpoint interruption")
+
+    monkeypatch.setattr(publication.os, "replace", interrupt_after_checkpoint_install)
+    monkeypatch.setattr(run_store.os, "replace", interrupt_after_checkpoint_install)
+    with pytest.raises(SystemExit, match="checkpoint interruption"):
+        save_checkpoint(changed, path)
+    monkeypatch.setattr(publication.os, "replace", real_replace)
+    monkeypatch.setattr(run_store.os, "replace", real_replace)
+
+    restored = load_checkpoint(path)
+
+    assert restored["round"] == 0
+    assert not list(tmp_path.glob(".wxdf-publication-*.journal"))

@@ -102,6 +102,8 @@ def _reviewable_model_audit(real_check, *, always_fail: bool = False, raise_on_n
                     "node_id": target_id,
                     "severity": "high",
                     "repairable": True,
+                    "allowed_operations": ["update_role"],
+                    "property_scope": ["role"],
                 }
             )
         return result
@@ -238,6 +240,50 @@ def test_native_publication_failure_preserves_formal_and_all_existing_auxiliary_
     assert not normalized_path.exists()
 
 
+def test_native_entry_recovers_interrupted_formal_generation_before_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from wxdf import publication
+
+    formal = tmp_path / "formal.docx"
+    report = tmp_path / "report.json"
+    formal.write_bytes(b"old-formal")
+    report.write_bytes(b"old-report")
+    real_replace = publication.os.replace
+    interrupted = False
+
+    def interrupt_after_formal_install(source: Path | str, target: Path | str) -> None:
+        nonlocal interrupted
+        real_replace(source, target)
+        if (
+            not interrupted
+            and Path(target) == formal
+            and ".staging-" in Path(source).name
+        ):
+            interrupted = True
+            raise SystemExit("injected native formal interruption")
+
+    monkeypatch.setattr(publication.os, "replace", interrupt_after_formal_install)
+    with pytest.raises(SystemExit, match="native formal interruption"):
+        publication.publish_files_atomically({formal: b"new-formal", report: b"new-report"})
+    monkeypatch.setattr(publication.os, "replace", real_replace)
+
+    result = ConversionKernel().convert(ConversionRequest(
+        input_path=tmp_path / "missing.md",
+        output_path=formal,
+        template_path=TEMPLATE,
+        pipeline="modular",
+        list_policy="wx-default-v2",
+        options={"profile": "native_v2", "llm_enhance": "off"},
+    ))
+
+    assert result.status == "failed"
+    assert formal.read_bytes() == b"old-formal"
+    assert report.read_bytes() == b"old-report"
+    assert not list(tmp_path.glob(".wxdf-publication-*.journal"))
+
+
 def test_rejected_native_review_preserves_existing_formal_output(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -319,6 +365,42 @@ def test_candidate_transaction_exception_returns_explicit_rollback_with_baseline
     assert review["acceptance"]["reason"] == "candidate_transaction_failed"
     assert review["audit_exception"]["type"] == "TransactionConflict"
     assert result.report["model_audit"]["issues"]
+    assert formal.read_bytes() == b"existing-formal-output"
+
+
+def test_native_review_rejects_candidate_target_outside_review_packet(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.md"
+    source.write_text("# 标题\n\n正文。\n", encoding="utf-8")
+    formal = tmp_path / "formal.docx"
+    formal.write_bytes(b"existing-formal-output")
+    real_check = auditing.check_model
+    monkeypatch.setattr(auditing, "check_model", _reviewable_model_audit(real_check))
+
+    def adapter(payload):
+        patch = _review_patch(payload)
+        ast = payload["items"][0]["source_ast"]
+        authorized_id = payload["context"]["review_packet"]["targets"][0]["block_id"]
+        other_id, other_node = next(
+            (node_id, node)
+            for node_id, node in ast["document"]["blocks"].items()
+            if node_id != authorized_id and node.get("block_type") == "paragraph"
+        )
+        patch["candidates"][0]["target_node_ids"] = [other_id]
+        patch["candidates"][0]["target_source_refs"] = [
+            copy.deepcopy(other_node["source_ref"])
+        ]
+        return patch
+
+    result = ConversionKernel().convert(_request(tmp_path, source, adapter))
+
+    review = result.report["native_review"]
+    assert result.status == "failed"
+    assert review["status"] == "rolled_back"
+    assert review["acceptance"]["reason"] == "review_scope_violation"
+    assert review["acceptance"]["details"]["review_scope_violation"]["kind"] == "target"
     assert formal.read_bytes() == b"existing-formal-output"
 
 
