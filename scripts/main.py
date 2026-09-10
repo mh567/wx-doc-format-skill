@@ -6,6 +6,27 @@ import json
 import sys
 from pathlib import Path
 
+def _deferred_legacy_callable(module_name: str, attribute: str):
+    """Resolve one stable legacy helper when its module is unavailable.
+
+    The native v2 chain imports this module while the legacy parser, model
+    normalization, finalizer and renderer are not importable.  The bindings
+    below still prefer the direct import, so a normal run loads the legacy
+    modules at their original position in the import order and keeps the
+    legacy output contract unchanged.
+    """
+
+    def deferred(*args, **kwargs):
+        from importlib import import_module
+
+        return getattr(import_module(module_name), attribute)(*args, **kwargs)
+
+    deferred.__name__ = attribute
+    deferred.__qualname__ = attribute
+    deferred.__doc__ = f"Deferred access to {module_name}.{attribute} for the legacy path."
+    return deferred
+
+
 DOCX_IMPORT_ERROR = None
 try:
     from docx import Document
@@ -22,17 +43,41 @@ from text_utils import (
     set_table_autofit_to_window,
 )
 from document_model import summarize_document_model, validate_document_model, compare_document_models
-from docx_pipeline import parse_docx_to_model
-from md_pipeline import audit_markdown_preservation, parse_md_to_model
-from model_normalization import normalize_document_model, summarize_source_document_model
+try:
+    from docx_pipeline import parse_docx_to_model
+    from md_pipeline import audit_markdown_preservation, parse_md_to_model
+    from model_normalization import normalize_document_model, summarize_source_document_model
+except ImportError:
+    parse_docx_to_model = _deferred_legacy_callable("docx_pipeline", "parse_docx_to_model")
+    parse_md_to_model = _deferred_legacy_callable("md_pipeline", "parse_md_to_model")
+    audit_markdown_preservation = _deferred_legacy_callable(
+        "md_pipeline", "audit_markdown_preservation"
+    )
+    normalize_document_model = _deferred_legacy_callable(
+        "model_normalization", "normalize_document_model"
+    )
+    summarize_source_document_model = _deferred_legacy_callable(
+        "model_normalization", "summarize_source_document_model"
+    )
 from word_model_renderer import (
     render_document_model,
     style_from_profile,
 )
-from docx_render import render_docx_direct
+try:
+    from docx_render import render_docx_direct
+except ImportError:
+    render_docx_direct = _deferred_legacy_callable("docx_render", "render_docx_direct")
 from audit import audit_document, collect_content_warnings
 from reporting import new_report, add_risk_warnings, write_markdown_report
-from template_finalizer import apply_template_finalizer, extract_template_toc_fragment
+try:
+    from template_finalizer import apply_template_finalizer, extract_template_toc_fragment
+except ImportError:
+    apply_template_finalizer = _deferred_legacy_callable(
+        "template_finalizer", "apply_template_finalizer"
+    )
+    extract_template_toc_fragment = _deferred_legacy_callable(
+        "template_finalizer", "extract_template_toc_fragment"
+    )
 from template_profile import load_template_profile
 from note_semantics import audit_note_preservation
 from appendix_semantics import audit_appendix_preservation

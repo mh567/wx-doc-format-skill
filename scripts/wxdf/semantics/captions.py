@@ -109,14 +109,188 @@ def audit_caption_placement(ast: Mapping[str, Any]) -> dict[str, Any]:
     return {"passed": not issues, "issues": issues, "associations": associations}
 
 
+def _caption_block(parent_id: str, index: int, caption_id: str, target_id: str, caption_type: str) -> dict[str, Any]:
+    """Build the generated caption node for one eligible target."""
+
+    return {
+        "operation": "create_node",
+        "property_scope": ["children"],
+        "value": {
+            "node_id": caption_id,
+            "parent_id": parent_id,
+            "index": index,
+            "node": {
+                "block_type": "paragraph",
+                "role": "caption",
+                "caption_type": caption_type,
+                "target_id": target_id,
+                "inline_content": [],
+                "generated_by": "caption_semantics.sequence_caption",
+                "generation_basis": [target_id],
+            },
+        },
+    }
+
+
+def _generated_caption_candidates(
+    ast: Mapping[str, Any],
+    target_id: str,
+    caption_type: str,
+    *,
+    evidence_source: str,
+    constraint: str,
+) -> list[dict[str, Any]]:
+    """Create one caption node and its caption_target association.
+
+    A caption eligible target without an authored caption still needs a
+    caption node so that sequence numbering and caption placement stay
+    explicit in the Source AST.  The node is inserted immediately before a
+    table and immediately after a figure.
+    """
+
+    document = ast["document"]
+    blocks = document["blocks"]
+    containers = document["containers"]
+    children = document["children"]
+    parent_id = next(
+        (
+            candidate_parent
+            for candidate_parent, child_ids in children.items()
+            if target_id in child_ids
+        ),
+        document["root_id"],
+    )
+    sibling_ids = list(children.get(parent_id, []))
+    position = sibling_ids.index(target_id) if target_id in sibling_ids else len(sibling_ids)
+    # A table caption sits above its table, a figure caption sits below.
+    insert_at = position + 1 if caption_type == "figure" else position
+    caption_id = f"native-caption-{target_id}"
+    suffix = 2
+    while caption_id in blocks or caption_id in containers:
+        caption_id = f"native-caption-{target_id}-{suffix}"
+        suffix += 1
+    target_ref = blocks[target_id].get("source_ref")
+    source_refs = [copy.deepcopy(dict(target_ref))] if isinstance(target_ref, Mapping) else []
+    return [
+        {
+            "candidate_id": f"caption-node-{caption_id}",
+            "module_id": "caption_semantics",
+            "module_version": "1.0",
+            "target_source_refs": source_refs,
+            "target_node_ids": [caption_id],
+            "proposal": _caption_block(
+                parent_id,
+                insert_at,
+                caption_id,
+                target_id,
+                caption_type,
+            ),
+            "positive_evidence": [{"kind": "format_contract", "source": evidence_source}],
+            "negative_evidence": [],
+            "scope": {"stage": "relation"},
+            "constraints": [{"kind": constraint}],
+            "rationale": "caption node generated for a caption eligible target",
+            "confidence": None,
+        },
+        {
+            "candidate_id": f"caption-association-{caption_id}",
+            "module_id": "caption_semantics",
+            "module_version": "1.0",
+            # The association binds the caption to its target, so the
+            # precondition carries the target reference.  A generated caption
+            # node has no source reference of its own.
+            "target_source_refs": source_refs,
+            "target_node_ids": [target_id],
+            "proposal": {
+                "operation": "update_association",
+                "property_scope": ["association"],
+                "value": {
+                    "association": {
+                        "kind": "caption_target",
+                        "source_id": caption_id,
+                        "target_id": target_id,
+                    }
+                },
+            },
+            "positive_evidence": [{"kind": "format_contract", "source": evidence_source}],
+            "negative_evidence": [],
+            "scope": {"stage": "relation"},
+            "constraints": [{"kind": constraint}],
+            "rationale": "caption target association derived from caption eligibility",
+            "confidence": None,
+        },
+    ]
+
+
+def _authored_caption_role_candidates(ast: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Assert the caption role for captions materialized in the Source AST.
+
+    Structure recognition proposes a default role for every paragraph, so an
+    authored caption restates its role here.  Its ``caption_type`` and
+    ``target_id`` come from the Source AST build.
+    """
+
+    result: list[dict[str, Any]] = []
+    for node_id, block in ast["document"]["blocks"].items():
+        if block.get("role") != "caption":
+            continue
+        if not block.get("target_id"):
+            continue
+        source_ref = block.get("source_ref")
+        result.append({
+            "candidate_id": f"caption-role-{node_id}",
+            "module_id": "caption_semantics",
+            "module_version": "1.0",
+            "target_source_refs": [copy.deepcopy(dict(source_ref))] if isinstance(source_ref, Mapping) else [],
+            "target_node_ids": [node_id],
+            "proposal": {
+                "operation": "update_role",
+                "property_scope": ["role"],
+                "value": {"role": "caption"},
+            },
+            "positive_evidence": [{"kind": "format_contract", "source": "authored_caption_role"}],
+            "negative_evidence": [],
+            "scope": {"stage": "relation"},
+            "constraints": [{"kind": "preserve_caption_target"}],
+            "rationale": "authored caption keeps its caption role against the default paragraph role",
+            "confidence": None,
+        })
+    return result
+
+
+def _captioned_targets(ast: Mapping[str, Any]) -> set[str]:
+    return {
+        str(block.get("target_id"))
+        for block in ast["document"]["blocks"].values()
+        if block.get("role") == "caption" and block.get("target_id")
+    }
+
+
 def collect_caption_candidates(ast: Mapping[str, Any]) -> list[dict[str, Any]]:
     validate_ast(ast)
-    result: list[dict[str, Any]] = []
+    result: list[dict[str, Any]] = _authored_caption_role_candidates(ast)
+    captioned = _captioned_targets(ast)
     for node_id, block in ast["document"]["blocks"].items():
         if block.get("block_type") == "table" and block.get("table_type") == "data":
             result.append({"candidate_id": f"caption-target-{node_id}", "module_id": "caption_semantics", "module_version": "1.0", "target_source_refs": [copy.deepcopy(dict(block["source_ref"]))] if isinstance(block.get("source_ref"), Mapping) else [], "target_node_ids": [node_id], "proposal": {"operation": "create_overlay", "property_scope": ["overlay"], "value": {"caption_type": "table", "eligible": True}}, "positive_evidence": [{"kind": "format_contract", "source": "data_table_caption_eligibility"}], "negative_evidence": [], "scope": {"stage": "relation"}, "constraints": [{"kind": "caption_above_table"}], "rationale": "data table is caption eligible", "confidence": None})
+            if node_id not in captioned:
+                result.extend(_generated_caption_candidates(
+                    ast,
+                    node_id,
+                    "table",
+                    evidence_source="data_table_caption_eligibility",
+                    constraint="caption_above_table",
+                ))
         elif block.get("block_type") == "image":
             result.append({"candidate_id": f"caption-target-{node_id}", "module_id": "caption_semantics", "module_version": "1.0", "target_source_refs": [copy.deepcopy(dict(block["source_ref"]))] if isinstance(block.get("source_ref"), Mapping) else [], "target_node_ids": [node_id], "proposal": {"operation": "create_overlay", "property_scope": ["overlay"], "value": {"caption_type": "figure", "eligible": True}}, "positive_evidence": [{"kind": "format_contract", "source": "image_caption_eligibility"}], "negative_evidence": [], "scope": {"stage": "relation"}, "constraints": [{"kind": "caption_below_figure"}], "rationale": "image is figure caption eligible", "confidence": None})
+            if node_id not in captioned:
+                result.extend(_generated_caption_candidates(
+                    ast,
+                    node_id,
+                    "figure",
+                    evidence_source="image_caption_eligibility",
+                    constraint="caption_below_figure",
+                ))
     return result
 
 

@@ -2,22 +2,49 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 import hashlib
 from pathlib import Path
+import re
 from types import MappingProxyType
 from typing import Any, Mapping, Sequence
 
 from docx import Document
+from docx.oxml.ns import qn
 from lxml import etree
 
 from template_profile import load_template_profile
-from template_finalizer import extract_template_toc_fragment
 from toc_contract import TOC_MAX_LEVEL
 
 
 class TemplateCapabilityError(ValueError):
     """Raised when a template cannot express required semantic roles."""
+
+
+def extract_template_toc_fragment(document: Any) -> list:
+    """Copy the template TOC content control and its trailing page break.
+
+    The native chain owns this read of the template OOXML so that loading a
+    template never depends on the legacy finalizer.
+    """
+
+    children = list(document.element.body)
+    for index, child in enumerate(children):
+        if child.tag != qn("w:sdt"):
+            continue
+        instructions = [node.text or "" for node in child.iter(qn("w:instrText"))]
+        if not any(re.search(r"\bTOC\b", value, re.I) for value in instructions):
+            continue
+        fragment = [deepcopy(child)]
+        if index + 1 < len(children):
+            following = children[index + 1]
+            if following.tag == qn("w:p") and any(
+                node.get(qn("w:type")) == "page" for node in following.iter(qn("w:br"))
+            ):
+                fragment.append(deepcopy(following))
+        return fragment
+    return []
 
 
 def _freeze(value: Any) -> Any:

@@ -399,6 +399,19 @@ def table_semantics_module(*, native: bool = False) -> RegisteredModule:
     )
 
 
+def _materializes_caption_node(candidate: Mapping[str, Any]) -> bool:
+    """Return whether a caption candidate creates a caption block."""
+
+    proposal = candidate.get("proposal")
+    if not isinstance(proposal, Mapping) or proposal.get("operation") != "create_node":
+        return False
+    value = proposal.get("value")
+    if not isinstance(value, Mapping):
+        return False
+    node = value.get("node")
+    return isinstance(node, Mapping) and node.get("role") == "caption"
+
+
 def caption_semantics_module(*, native: bool = False) -> RegisteredModule:
     def execute(context: ModuleExecutionContext) -> dict[str, Any]:
         semantics = collect_source_caption_semantics(
@@ -407,18 +420,21 @@ def caption_semantics_module(*, native: bool = False) -> RegisteredModule:
         )
         context.provide("caption_semantics_result", semantics)
         captions = semantics["captions"]
+        generated_count = 0
+        if native:
+            candidates = collect_caption_candidates(context.require("source_ast"))
+            context.provide("caption_semantics_candidates", candidates)
+            generated_count = sum(
+                1 for candidate in candidates if _materializes_caption_node(candidate)
+            )
         evidence = {
             "caption_count": len(captions),
             "table_caption_count": sum(item.get("caption_type") == "table" for item in captions),
             "figure_caption_count": sum(item.get("caption_type") == "figure" for item in captions),
             "associated_count": sum(item.get("status") == "associated" for item in captions),
             "issue_count": len(semantics["issues"]),
+            "generated_caption_count": generated_count,
         }
-        if native:
-            context.provide(
-                "caption_semantics_candidates",
-                collect_caption_candidates(context.require("source_ast")),
-            )
         context.evidence["caption-semantics"] = evidence
         context.provide("caption_semantics", evidence)
         return evidence

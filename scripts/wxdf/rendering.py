@@ -15,6 +15,7 @@ from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from lxml import etree
 
 from table_formatting import normalize_table
+from text_utils import caption_parts
 
 from .render_plan import build_render_plan
 from .template import TemplateBundle
@@ -158,6 +159,45 @@ def _write_inline(paragraph: Any, inline_content: list[Mapping[str, Any]], resou
             _write_image(paragraph, item.get("resource_id"), resources)
 
 
+_CAPTION_SEQUENCE = {"table": ("表 ", "Table"), "figure": ("图 ", "Figure")}
+
+
+def _write_caption(
+    paragraph: Any,
+    block: Mapping[str, Any],
+    resources: Mapping[str, Any],
+) -> str:
+    """Write a caption run with a Word SEQ field and return its visible text.
+
+    An authored caption keeps its full visible content in the Source AST, and
+    its leading label and number are projected away here so that the sequence
+    field owns the numbering.  A generated caption carries no content and
+    renders as the bare sequence field.
+
+    The returned text matches what a reader sees for the paragraph, including
+    the placeholder digit of the sequence field, so the saved output audit can
+    compare paragraph text without special casing captions.
+    """
+
+    caption_type = str(block.get("caption_type") or "table")
+    prefix, sequence = _CAPTION_SEQUENCE.get(caption_type, _CAPTION_SEQUENCE["table"])
+    paragraph.add_run(prefix)
+
+    field = OxmlElement("w:fldSimple")
+    field.set(qn("w:instr"), f"SEQ {sequence} \\* ARABIC")
+    field_run = OxmlElement("w:r")
+    field_text = OxmlElement("w:t")
+    field_text.text = "1"
+    field_run.append(field_text)
+    field.append(field_run)
+    paragraph._p.append(field)
+
+    inline_content = list(block.get("inline_content") or [])
+    _, _, _, body = caption_parts(_text(inline_content, resources))
+    paragraph.add_run(f" {body}")
+    return f"{prefix}1 {body}"
+
+
 def _style_for_block(block: Mapping[str, Any], styles: Mapping[str, str]) -> str | None:
     appendix_role = block.get("appendix_role")
     if appendix_role == "title":
@@ -248,7 +288,11 @@ def render(
                     paragraph = parent.add_paragraph(style=style) if style else parent.add_paragraph()
                 except KeyError:
                     paragraph = parent.add_paragraph()
-        _write_inline(paragraph, block.get("inline_content", []), resources)
+        caption_text: str | None = None
+        if block.get("role") == "caption":
+            caption_text = _write_caption(paragraph, block, resources)
+        else:
+            _write_inline(paragraph, block.get("inline_content", []), resources)
         if pending_page_break:
             paragraph.paragraph_format.page_break_before = True
             pending_page_break = False
@@ -257,7 +301,7 @@ def render(
         render_map[node_id] = {
             "kind": "paragraph",
             "paragraph": paragraph_counter,
-            "text": paragraph.text,
+            "text": caption_text if caption_text is not None else paragraph.text,
             "inline_content": block.get("inline_content", []),
             "role": block.get("role"),
             "style": actual_style,
@@ -342,6 +386,10 @@ def render(
         elif block.get("block_type") == "table":
             add_table(block_id, block_id, parent=parent)
         elif block.get("block_type") == "image":
+            if block.get("generated_by") == "source_ast.inline_image":
+                # The image node materializes an inline token whose pixels are
+                # already rendered by the paragraph that carries the token.
+                return
             resource_id = block.get("resource_id")
             resource = resources.get(resource_id)
             if resource is None:

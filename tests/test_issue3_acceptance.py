@@ -174,7 +174,13 @@ def test_l07_first_table_and_sublist_get_one_evidenced_anchor(tmp_path: Path) ->
         for parent_id, children in document["children"].items()
         if table_id in children and document["containers"].get(parent_id, {}).get("kind") == "list_item"
     )
-    table_child = next(child_id for child_id in document["children"][first_item] if not child_id.startswith("generated-anchor-"))
+    # T02 materializes a generated caption node directly above the table, so
+    # select the table by block type rather than by child position.
+    table_child = next(
+        child_id
+        for child_id in document["children"][first_item]
+        if document["blocks"].get(child_id, {}).get("block_type") == "table"
+    )
     assert document["blocks"][table_child]["block_type"] == "table"
     nested_item = items["子列表"]
     nested_list = next(parent for parent, children in document["children"].items() if nested_item in children)
@@ -523,6 +529,10 @@ def test_l09_merged_and_nested_table_cells_are_unique_and_scope_local(tmp_path: 
     for child_id in document["children"]["root"]:
         if child_id in document["blocks"]:
             block = document["blocks"][child_id]
+            # T02 materializes a generated caption node directly above its
+            # table.  This case asserts the outer block and table sequence.
+            if block.get("role") == "caption":
+                continue
             if block.get("block_type") == "table":
                 root_labels.append(("table", None))
             else:
