@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "objective": "complete_skill_native_v2_cutover",
+  "branch": "dev",
+  "baseline_head": "d5a7a0f0ea5cb4d36c3db75112ce98cf176760a1",
+  "implementation_started": false,
+  "current_task": "T00",
+  "next_task": "T00",
+  "release_authorized": false,
+  "tasks": [
+    {"id": "T00", "status": "pending", "depends_on": []},
+    {"id": "T01", "status": "pending", "depends_on": ["T00"]},
+    {"id": "T02", "status": "pending", "depends_on": ["T01"]},
+    {"id": "T03", "status": "pending", "depends_on": ["T02"]},
+    {"id": "T04", "status": "pending", "depends_on": ["T03"]},
+    {"id": "T05", "status": "pending", "depends_on": ["T04"]},
+    {"id": "T06", "status": "pending", "depends_on": ["T05"]},
+    {"id": "T07", "status": "pending", "depends_on": ["T06"]},
+    {"id": "T08", "status": "pending", "depends_on": ["T07"]},
+    {"id": "T09", "status": "pending", "depends_on": ["T08"]}
+  ],
+  "external_gates": [
+    "kylin_v10_arm64_real_machine_acceptance",
+    "remote_push_and_release_authorization"
+  ]
+}
