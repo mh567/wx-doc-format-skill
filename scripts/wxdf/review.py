@@ -15,7 +15,7 @@ MODE_MANIFEST: dict[str, dict[str, Any]] = {
     "modular_pure": {"status": "enabled", "entrypoint": "ConversionKernel.convert", "contract": "T09"},
     "modular_online": {"status": "enabled", "entrypoint": "EnhancementExecutor", "contract": "T03"},
     "modular_file": {"status": "enabled", "entrypoint": "CheckpointStore", "contract": "T04"},
-    "modular_review": {"status": "closed", "entrypoint": "ReviewEvaluator", "reason": "modular post-audit rerender integration is pending"},
+    "modular_review": {"status": "enabled", "entrypoint": "ReviewEvaluator", "contract": "T05"},
     "legacy_online": {"status": "enabled", "entrypoint": "legacy CLI", "contract": "legacy"},
     "legacy_file": {"status": "enabled", "entrypoint": "legacy CLI", "contract": "1.0"},
     "legacy_review": {"status": "enabled", "entrypoint": "legacy CLI", "contract": "legacy"},
@@ -110,6 +110,67 @@ def _decision_targets(decisions: Iterable[Mapping[str, Any]] | None) -> set[str]
     return targets
 
 
+def build_review_packet(
+    baseline_bundle: Mapping[str, Any],
+    findings: Iterable[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Build a bounded post-audit view with stable AST targets."""
+
+    normalized = _normalized(baseline_bundle)
+    source_ast = normalized.get("source_ast") or baseline_bundle.get("source_ast") or {}
+    document = source_ast.get("document", {}) if isinstance(source_ast, Mapping) else {}
+    nodes = {
+        **dict(document.get("blocks") or {}),
+        **dict(document.get("containers") or {}),
+    }
+    finding_list = [copy.deepcopy(dict(item)) for item in findings if isinstance(item, Mapping)]
+    targets: list[dict[str, Any]] = []
+    for finding in finding_list:
+        node_id = str(finding.get("block_id") or "")
+        node = nodes.get(node_id)
+        if finding.get("repairable") is not True or not isinstance(node, Mapping):
+            continue
+        targets.append(
+            {
+                **finding,
+                "block_id": node_id,
+                "source_ref": copy.deepcopy(dict(node.get("source_ref") or {})),
+                "current": {
+                    key: copy.deepcopy(node[key])
+                    for key in (
+                        "block_type",
+                        "kind",
+                        "role",
+                        "level",
+                        "semantic_role",
+                        "table_type",
+                        "caption_type",
+                    )
+                    if key in node
+                },
+            }
+        )
+    artifacts = baseline_bundle.get("artifacts") or {}
+    return {
+        "schema_version": "2.0",
+        "baseline_revision": source_ast.get("revision"),
+        "baseline_semantic_digest": normalized.get("semantic_digest"),
+        "baseline_presentation_digest": normalized.get("presentation_digest"),
+        "baseline_artifact": artifacts.get("docx") if isinstance(artifacts, Mapping) else None,
+        "finding_count": len(finding_list),
+        "repairable_count": len(targets),
+        "targets": targets,
+    }
+
+
+def _high_risk_finding_ids(findings: Iterable[Mapping[str, Any]]) -> set[str]:
+    return {
+        str(finding.get("audit_id") or "")
+        for finding in findings
+        if str(finding.get("severity") or "low") in {"critical", "high"}
+    }
+
+
 def evaluate_candidate(
     baseline_bundle: Mapping[str, Any],
     candidate_bundle: Mapping[str, Any],
@@ -129,6 +190,10 @@ def evaluate_candidate(
         "baseline_presentation_digest": baseline_normalized.get("presentation_digest"),
         "candidate_presentation_digest": candidate_normalized.get("presentation_digest"),
     }
+    audit_exception = candidate_bundle.get("audit_exception")
+    if audit_exception:
+        details["audit_exception"] = copy.deepcopy(audit_exception)
+        return AcceptanceDecision("rejected", "audit_exception", False, semantic_changed, presentation_changed, details)
     if not semantic_changed and not presentation_changed:
         return AcceptanceDecision("no_effect", "no_effect", False, False, False, details)
 
@@ -145,6 +210,10 @@ def evaluate_candidate(
     after_score = _finding_score(after)
     details["before_score"] = before_score
     details["after_score"] = after_score
+    new_high_risk = sorted(_high_risk_finding_ids(after) - _high_risk_finding_ids(before))
+    details["new_high_risk_findings"] = new_high_risk
+    if new_high_risk:
+        return AcceptanceDecision("rejected", "new_high_risk_findings", False, semantic_changed, presentation_changed, details)
     if after_score[:3] > before_score[:3]:
         return AcceptanceDecision("rejected", "protection_audit_regressed", False, semantic_changed, presentation_changed, details)
 
@@ -181,4 +250,11 @@ def accept_candidate(
     return decision, accepted
 
 
-__all__ = ["AcceptanceDecision", "MODE_MANIFEST", "accept_candidate", "evaluate_candidate", "mode_manifest"]
+__all__ = [
+    "AcceptanceDecision",
+    "MODE_MANIFEST",
+    "accept_candidate",
+    "build_review_packet",
+    "evaluate_candidate",
+    "mode_manifest",
+]

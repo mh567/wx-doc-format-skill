@@ -582,6 +582,7 @@ class ConversionKernel:
         from .registry import build_native_v2_registry
         from .run_store import (
             CheckpointError,
+            append_native_waiting_requests,
             complete_native_checkpoint,
             prepare_native_resume,
             write_native_waiting_checkpoint,
@@ -598,7 +599,7 @@ class ConversionKernel:
             "contract_versions": {"source_facts": "1.0", "ast": "2.0", "decision_set": "2.0", "normalized": "1.0"},
             "module_chain": [
                 "SourceParser", "SourceFacts", "SemanticModuleCandidateSet", "SemanticResolverDecisionSet",
-                "TransactionManagerSourceAST", "NormalizationPolicy", "RenderPlan", "Renderer", "AuditModule", "Publisher",
+                "TransactionManagerSourceAST", "NormalizationPolicy", "RenderPlan", "Renderer", "AuditModule", "ReviewEvaluator", "Publisher",
             ],
         }
         enhancement_mode = str(options.get("llm_enhance") or "off")
@@ -631,6 +632,9 @@ class ConversionKernel:
                 diagnostics=[diagnostic],
             )
         staging_path = request.output_path.with_name(f".{request.output_path.name}.native-v2.staging")
+        review_candidate_path = request.output_path.with_name(
+            f".{request.output_path.name}.native-v2.review-candidate.staging"
+        )
         store = SourceStore()
         context: Any = None
         checkpoint: dict[str, Any] | None = None
@@ -671,6 +675,9 @@ class ConversionKernel:
                         },
                     )
                 options.update(resume_options)
+                options["enhancement_request_sink"] = []
+                options["available_response_ids"] = list(response_map)
+                options["file_protocol_source_ast"] = copy.deepcopy(checkpoint["source_ast"])
                 def replay_response(payload: Mapping[str, Any]) -> Mapping[str, Any]:
                     request_id = str(payload.get("request_id") or "")
                     if request_id not in response_map:
@@ -678,7 +685,6 @@ class ConversionKernel:
                     return copy.deepcopy(response_map[request_id])
 
                 options["enhancement_call"] = replay_response
-                options["protocol_mode"] = None
             context = ModuleExecutionContext(
                 request=request,
                 services={
@@ -691,43 +697,83 @@ class ConversionKernel:
             registry.execute(execution_plan, context)
             result = self._native_v2_run_result(request, options, report, execution_plan, context, metrics)
             if checkpoint is not None and result.exit_code == 0:
-                committed = context.require("transaction_commit")
+                review_result = context.require("review_result")
+                committed = review_result["transaction_commit"]
                 enhancement = context.require("enhancement_result")
+                relation_commit = context.require("transaction_commit")
+                relation_decision_set = context.require("decision_set")
                 applied_request_ids = {
                     str(record.get("request_summary", {}).get("request_id"))
                     for record in enhancement.get("results", [])
                     if record.get("status") == "completed"
                     and record.get("request_summary", {}).get("request_id")
                 }
+                request_transaction_ids = {
+                    request_id: relation_commit.transaction_id
+                    for request_id in applied_request_ids
+                }
+                checkpoint_decision_set = relation_decision_set
+                if review_result["acceptance"].get("accepted") is True:
+                    review_request_id = (
+                        review_result.get("enhancement", {})
+                        .get("request_summary", {})
+                        .get("request_id")
+                    )
+                    if review_request_id:
+                        review_request_id = str(review_request_id)
+                        applied_request_ids.add(review_request_id)
+                        request_transaction_ids[review_request_id] = committed.transaction_id
+                    review_decision_set = review_result["decision_set"]
+                    checkpoint_decision_set = {
+                        **relation_decision_set,
+                        "transaction_id": committed.transaction_id,
+                        "decisions": [
+                            *relation_decision_set.get("decisions", []),
+                            *review_decision_set.get("decisions", []),
+                        ],
+                        "unresolved": [
+                            *relation_decision_set.get("unresolved", []),
+                            *review_decision_set.get("unresolved", []),
+                        ],
+                    }
                 complete_native_checkpoint(
                     options["checkpoint_path"],
                     checkpoint,
                     status=result.status,
                     source_ast=committed.snapshot.ast,
-                    normalized=context.require("normalized"),
-                    decision_set=context.require("decision_set"),
+                    normalized=review_result["normalized"],
+                    decision_set=checkpoint_decision_set,
                     overlays=committed.snapshot.overlays,
                     presentation_overrides=committed.snapshot.presentation_overrides,
                     transactions=committed.snapshot.transactions,
                     transaction_id=committed.transaction_id,
                     applied_request_ids=applied_request_ids,
+                    request_transaction_ids=request_transaction_ids,
                 )
             return result
         except NativeFileProtocolPause:
-            checkpoint = write_native_waiting_checkpoint(
-                checkpoint_path=options["checkpoint_path"],
-                requests_path=options["requests_path"],
-                responses_path=options["responses_path"],
-                profile="wx_full_rules-native-v2",
-                list_policy=request.list_policy,
-                configuration=options.get("checkpoint_configuration") or {},
-                source_facts=context.require("source_facts"),
-                source_ast=context.require("source_ast"),
-                candidate_set=context.require("candidate_set"),
-                modules=self._native_checkpoint_modules(execution_plan),
-                requests=list(options.get("enhancement_request_sink") or []),
-                template_path=request.template_path,
-            )
+            pending_requests = list(options.get("enhancement_request_sink") or [])
+            if checkpoint is None:
+                checkpoint = write_native_waiting_checkpoint(
+                    checkpoint_path=options["checkpoint_path"],
+                    requests_path=options["requests_path"],
+                    responses_path=options["responses_path"],
+                    profile="wx_full_rules-native-v2",
+                    list_policy=request.list_policy,
+                    configuration=options.get("checkpoint_configuration") or {},
+                    source_facts=context.require("source_facts"),
+                    source_ast=context.require("source_ast"),
+                    candidate_set=context.require("candidate_set"),
+                    modules=self._native_checkpoint_modules(execution_plan),
+                    requests=pending_requests,
+                    template_path=request.template_path,
+                )
+            else:
+                checkpoint = append_native_waiting_requests(
+                    options["checkpoint_path"],
+                    checkpoint,
+                    pending_requests,
+                )
             return RunResult(
                 status="waiting_external",
                 exit_code=0,
@@ -854,6 +900,8 @@ class ConversionKernel:
         finally:
             if staging_path.is_file():
                 staging_path.unlink()
+            if review_candidate_path.is_file():
+                review_candidate_path.unlink()
             store.close()
 
     def _native_v2_run_result(
@@ -874,18 +922,42 @@ class ConversionKernel:
         appendix_candidates = list(context.require("appendix_semantics_candidates"))
         appendix_semantics = context.require("appendix_semantics")
         list_result = context.require("list_semantics_result")
-        committed = context.require("transaction_commit")
+        review_result = context.require("review_result")
+        committed = review_result["transaction_commit"]
         snapshot = committed.snapshot
-        normalized = context.require("normalized")
-        model_findings = context.require("model_audit")
-        saved_findings = context.require("saved_output_audit")
-        appendix_audit = context.require("appendix_audit")
+        normalized = review_result["normalized"]
+        selected_audits = review_result["audits"]
+        model_findings = selected_audits["model"]
+        saved_findings = selected_audits["saved_output"]
+        appendix_audit = selected_audits["appendix"]
         published = context.require("published_output")
         integrity = context.require("source_facts_integrity")
         source_facts_digest = context.require("source_facts_digest")
         source_facts_digest_after = str(integrity["digest_after"])
         source_facts_immutable = bool(integrity["immutable"])
         ledger_replay = self._native_ledger_replay_report(context)
+        review_decision_set = review_result.get("decision_set") or {}
+        transaction_decision_set = (
+            review_decision_set
+            if review_result.get("status") == "accepted"
+            else decision_set
+        )
+        native_review = {
+            key: copy.deepcopy(review_result.get(key))
+            for key in (
+                "status",
+                "enabled",
+                "triggered",
+                "acceptance",
+                "baseline_artifact",
+                "candidate_artifact",
+                "selected_artifact",
+                "enhancement",
+                "decision_set",
+                "audit_exception",
+            )
+            if review_result.get(key) is not None
+        }
 
         appendix_range_candidate_ids = {
             str(candidate.get("candidate_id"))
@@ -949,6 +1021,8 @@ class ConversionKernel:
                 "decision_ledger_replay": ledger_replay,
                 "model_audit": model_findings,
                 "saved_output_audit": saved_findings,
+                "review_packet": context.require("review_packet"),
+                "native_review": native_review,
                 "appendix_semantics": appendix_semantics,
                 "appendix_semantics_consumption": appendix_consumption,
                 "appendix_preservation_audit": appendix_audit,
@@ -1041,15 +1115,17 @@ class ConversionKernel:
             "native_transaction": {
                 "status": committed.status,
                 "transaction_id": committed.transaction_id,
-                "decision_count": len(decision_set["decisions"]),
-                "unresolved_count": len(decision_set.get("unresolved") or []),
-                "expected_revision": decision_set["expected_revision"],
+                "decision_count": len(transaction_decision_set["decisions"]),
+                "unresolved_count": len(transaction_decision_set.get("unresolved") or []),
+                "expected_revision": transaction_decision_set["expected_revision"],
                 "committed_revision": snapshot.ast["revision"],
                 "metrics": committed.metrics,
                 "overlays": snapshot.overlays,
                 "presentation_overrides": snapshot.presentation_overrides,
             },
             "decision_set": decision_set,
+            "review_packet": context.require("review_packet"),
+            "native_review": native_review,
             "enhancement": enhancement,
             "decision_ledger_replay": ledger_replay,
             "execution_plan": {

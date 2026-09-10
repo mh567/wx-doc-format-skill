@@ -32,6 +32,22 @@ class CommitResult:
     transaction_id: str
 
 
+@dataclass(frozen=True)
+class CandidateRevision:
+    """An isolated transaction result with an immutable rollback baseline."""
+
+    baseline: StageSnapshot
+    candidate: CommitResult
+
+    def rollback(self) -> StageSnapshot:
+        return StageSnapshot(
+            ast=copy.deepcopy(self.baseline.ast),
+            transactions=dict(self.baseline.transactions),
+            overlays=copy.deepcopy(self.baseline.overlays),
+            presentation_overrides=copy.deepcopy(self.baseline.presentation_overrides),
+        )
+
+
 def make_snapshot(ast: Mapping[str, Any]) -> StageSnapshot:
     validate_ast(ast)
     return StageSnapshot(ast=ast if isinstance(ast, dict) else copy.deepcopy(dict(ast)))
@@ -412,3 +428,21 @@ def apply_stage_batch(
     )
     committed.transactions[transaction_id] = decision_digest
     return CommitResult(status="committed", snapshot=committed, metrics=metrics, transaction_id=transaction_id)
+
+
+def stage_candidate_revision(
+    snapshot: StageSnapshot,
+    decisions: Sequence[Mapping[str, Any]],
+    *,
+    expected_revision: int,
+) -> CandidateRevision:
+    """Apply review decisions without mutating the rollback revision."""
+
+    baseline = StageSnapshot(
+        ast=copy.deepcopy(snapshot.ast),
+        transactions=dict(snapshot.transactions),
+        overlays=copy.deepcopy(snapshot.overlays),
+        presentation_overrides=copy.deepcopy(snapshot.presentation_overrides),
+    )
+    candidate = apply_stage_batch(snapshot, decisions, expected_revision)
+    return CandidateRevision(baseline=baseline, candidate=candidate)

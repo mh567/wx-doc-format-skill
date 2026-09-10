@@ -15,6 +15,59 @@ from .render_plan import build_render_plan
 from .validation import validate_ast
 
 
+def collect_audit_findings(
+    audits: Mapping[str, Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Normalize native audit issues into the review finding contract."""
+
+    findings: list[dict[str, Any]] = []
+    for audit_name, audit in audits.items():
+        if not isinstance(audit, Mapping):
+            continue
+        for index, raw_issue in enumerate(audit.get("issues") or []):
+            issue = dict(raw_issue) if isinstance(raw_issue, Mapping) else {"message": str(raw_issue)}
+            code = str(issue.get("code") or issue.get("type") or "audit_issue")
+            block_id = issue.get("block_id") or issue.get("node_id") or issue.get("target_id")
+            severity = issue.get("severity")
+            if severity not in {"critical", "high", "medium", "low"}:
+                severity = "critical" if audit_name == "saved_output" else "high"
+            repairable = bool(issue.get("repairable") is True and block_id)
+            identity = str(block_id) if block_id else str(index)
+            finding: dict[str, Any] = {
+                "audit_id": str(issue.get("audit_id") or f"{audit_name}:{code}:{identity}"),
+                "severity": severity,
+                "category": audit_name,
+                "repairable": repairable,
+                "evidence": issue,
+            }
+            if block_id:
+                finding["block_id"] = str(block_id)
+            findings.append(finding)
+    return findings
+
+
+def audit_bundle(
+    path: Path | str,
+    normalized: Mapping[str, Any],
+    render_map: Mapping[str, Any],
+    *,
+    appendix_audit: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Run the complete native audit set and expose normalized findings."""
+
+    audits = {
+        "model": check_model(normalized),
+        "saved_output": check_saved_output(path, normalized, render_map),
+        "appendix": dict(appendix_audit or {"passed": True, "issues": []}),
+    }
+    findings = collect_audit_findings(audits)
+    return {
+        **audits,
+        "findings": findings,
+        "passed": all(audit.get("passed") is True for audit in audits.values()),
+    }
+
+
 def check_model(normalized: Mapping[str, Any]) -> dict[str, Any]:
     issues: list[dict[str, Any]] = []
     try:

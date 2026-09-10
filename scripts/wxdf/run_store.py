@@ -329,6 +329,73 @@ def write_native_waiting_checkpoint(
     return checkpoint
 
 
+def append_native_waiting_requests(
+    checkpoint_path: Path | str,
+    checkpoint: Mapping[str, Any],
+    requests: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Append later-stage requests while preserving the waiting checkpoint."""
+
+    checkpoint_path = _path(checkpoint_path)
+    updated = copy.deepcopy(dict(checkpoint))
+    if updated.get("status") != "waiting_external":
+        raise CheckpointError(
+            "native requests can only be appended to a waiting checkpoint",
+            code="invalid_checkpoint_state",
+        )
+    request_path = Path(updated["files"]["requests_path"])
+    previous = request_path.read_bytes()
+    expected = "".join(_canonical(item) + "\n" for item in updated.get("requests", [])).encode("utf-8")
+    if previous != expected:
+        raise CheckpointError(
+            "native request file changed before later-stage append",
+            code="request_identity_conflict",
+        )
+    existing_by_id = {
+        str(item.get("request_id")): item
+        for item in updated.get("requests", [])
+        if isinstance(item, Mapping) and item.get("request_id")
+    }
+    for raw_request in requests:
+        request = copy.deepcopy(dict(raw_request))
+        request_id = str(request.get("request_id") or "")
+        if not request_id:
+            raise CheckpointError("native request has no request ID", code="invalid_request")
+        existing = existing_by_id.get(request_id)
+        if existing is not None:
+            if existing != request:
+                raise CheckpointError(
+                    f"request identity changed for {request_id}",
+                    code="request_identity_conflict",
+                )
+            continue
+        if request.get("request_sha256") != request_digest(request):
+            raise CheckpointError(
+                f"request content changed for {request_id}",
+                code="request_identity_conflict",
+            )
+        updated["requests"].append(request)
+        existing_by_id[request_id] = request
+    if updated["requests"] == checkpoint.get("requests"):
+        return updated
+
+    payload = "".join(_canonical(item) + "\n" for item in updated["requests"])
+    temporary = request_path.with_name(request_path.name + ".append.tmp")
+    temporary.write_text(payload, encoding="utf-8")
+    os.replace(temporary, request_path)
+    updated["resource_summary"]["fingerprints"]["requests"] = file_digest(request_path)
+    updated["budget"]["limit"] = len(updated["requests"])
+    updated["round"] = int(updated.get("round") or 0) + 1
+    try:
+        save_checkpoint(updated, checkpoint_path)
+    except Exception:
+        rollback = request_path.with_name(request_path.name + ".rollback.tmp")
+        rollback.write_bytes(previous)
+        os.replace(rollback, request_path)
+        raise
+    return updated
+
+
 def prepare_native_resume(
     checkpoint_path: Path | str,
     *,
@@ -553,6 +620,7 @@ def complete_native_checkpoint(
     transactions: Mapping[str, str],
     transaction_id: str,
     applied_request_ids: set[str],
+    request_transaction_ids: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Persist the completed semantic, presentation and transaction snapshot."""
 
@@ -567,34 +635,56 @@ def complete_native_checkpoint(
         {"transaction_id": saved_id, "content_sha256": digest}
         for saved_id, digest in sorted(transaction_digests.items())
     ]
-    transaction_digest = transaction_digests.get(transaction_id)
+    request_transaction_ids = dict(request_transaction_ids or {})
     response_transaction_bindings: dict[str, dict[str, str]] = {}
     for response in completed["responses"]:
         if response.get("request_id") in applied_request_ids:
+            response_transaction_id = request_transaction_ids.get(
+                str(response["request_id"]),
+                transaction_id,
+            )
+            response_transaction_digest = transaction_digests.get(response_transaction_id)
+            if response_transaction_digest is None:
+                raise CheckpointError(
+                    f"transaction state is missing for response {response['request_id']}",
+                    code="transaction_state_missing",
+                )
             response["applied"] = True
             response["apply_started"] = False
-            response["transaction_id"] = transaction_id
-            response["transaction_content_sha256"] = transaction_digest
+            response["transaction_id"] = response_transaction_id
+            response["transaction_content_sha256"] = response_transaction_digest
             response_transaction_bindings[str(response["request_id"])] = _response_transaction_binding(
                 response,
-                transaction_id,
-                str(transaction_digest),
+                response_transaction_id,
+                response_transaction_digest,
             )
     fresh_decisions = [
         decision
         for decision in decision_set.get("decisions", [])
         if not decision.get("revision_id")
     ]
-    accepted_decision_set = {
-        **dict(decision_set),
-        "decisions": fresh_decisions,
-    }
+    accepted_ledger = completed["decision_ledger"]
+    decisions_by_transaction: dict[str, list[Mapping[str, Any]]] = {}
+    for decision in fresh_decisions:
+        decision_transaction_id = str(decision.get("transaction_id") or transaction_id)
+        decisions_by_transaction.setdefault(decision_transaction_id, []).append(decision)
+    for accepted_transaction_id, accepted_decisions in sorted(
+        decisions_by_transaction.items(),
+        key=lambda item: min(int(decision.get("expected_revision") or 0) for decision in item[1]),
+    ):
+        accepted_ledger = accept_decisions(
+            accepted_ledger,
+            {
+                "transaction_id": accepted_transaction_id,
+                "decisions": accepted_decisions,
+            },
+        )
     completed.update({
         "status": status,
         "resume_stage": None,
         "source_ast": copy.deepcopy(dict(source_ast)),
         "normalized_ast": copy.deepcopy(dict(normalized)),
-        "decision_ledger": accept_decisions(completed["decision_ledger"], accepted_decision_set),
+        "decision_ledger": accepted_ledger,
         "content_overlay": overlay_entries(overlays),
         "presentation_override": overlay_entries(presentation_overrides),
         "target_map": checkpoint_target_map(source_ast),
@@ -1114,6 +1204,7 @@ def complete_pending_response(
 
 __all__ = [
     "CheckpointError",
+    "append_native_waiting_requests",
     "apply_response",
     "checkpoint_target_map",
     "complete_native_checkpoint",

@@ -15,6 +15,14 @@ class PublicationError(RuntimeError):
     """Raised when a required publication artifact is missing or invalid."""
 
 
+def validate_acceptance(acceptance: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Return an accepted record before any publication path is mutated."""
+
+    if not isinstance(acceptance, Mapping) or acceptance.get("accepted") is not True:
+        raise PublicationError("publication requires an accepted candidate record")
+    return dict(acceptance)
+
+
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -25,7 +33,9 @@ def publish_bundle(
     *,
     run_id: str | None = None,
     required: tuple[str, ...] | None = None,
+    acceptance: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    acceptance_record = validate_acceptance(acceptance)
     destination = Path(destination)
     run_id = run_id or uuid.uuid4().hex
     required = required or tuple(artifacts)
@@ -34,7 +44,13 @@ def publish_bundle(
         raise PublicationError(f"missing artifact: {missing[0]}")
     staging = destination / ".staging" / run_id
     staging.mkdir(parents=True, exist_ok=True)
-    manifest: dict[str, Any] = {"schema_version": "1.0", "run_id": run_id, "status": "staging", "files": {}}
+    manifest: dict[str, Any] = {
+        "schema_version": "1.0",
+        "run_id": run_id,
+        "status": "staging",
+        "acceptance": acceptance_record,
+        "files": {},
+    }
     for name in required:
         source = Path(artifacts[name])
         target = staging / name

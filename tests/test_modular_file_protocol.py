@@ -24,7 +24,12 @@ TEMPLATE = ROOT / "assets" / "wx_template.docx"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from wxdf.run_store import CheckpointError, record_response, request_digest
+from wxdf.run_store import (
+    CheckpointError,
+    append_native_waiting_requests,
+    record_response,
+    request_digest,
+)
 from wxdf.validation import validate_checkpoint
 
 
@@ -223,6 +228,26 @@ def test_native_generate_writes_complete_waiting_checkpoint_and_requests(tmp_pat
     assert requests and requests[0]["request_sha256"].startswith("sha256:")
     assert requests[0]["items"][0]["source_ast"] == checkpoint["source_ast"]
     assert not output.exists()
+
+
+def test_later_review_request_append_rejects_changed_request_file(tmp_path: Path) -> None:
+    checkpoint_path, _output, _source_ast = _generate(tmp_path)
+    checkpoint_bytes = checkpoint_path.read_bytes()
+    checkpoint = json.loads(checkpoint_bytes)
+    request_path = Path(checkpoint["files"]["requests_path"])
+    request_path.write_bytes(request_path.read_bytes() + b"\n")
+    changed_request_bytes = request_path.read_bytes()
+    request = copy.deepcopy(checkpoint["requests"][0])
+    request["request_id"] = "native-review-request"
+    request["capability"] = "document_review"
+    request["request_sha256"] = request_digest(request)
+
+    with pytest.raises(CheckpointError, match="request file") as error:
+        append_native_waiting_requests(checkpoint_path, checkpoint, [request])
+
+    assert error.value.code == "request_identity_conflict"
+    assert checkpoint_path.read_bytes() == checkpoint_bytes
+    assert request_path.read_bytes() == changed_request_bytes
 
 
 def test_response_and_request_identity_conflicts_are_stable() -> None:

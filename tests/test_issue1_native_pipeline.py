@@ -304,6 +304,7 @@ def test_native_v2_preflight_builds_plan_from_registered_modules() -> None:
         "native-normalizer",
         "native-renderer",
         "native-auditor",
+        "native-reviewer",
         "native-publisher",
     ]
     assert [module.module_id for module in registry.build({"pipeline": "modular", "list_policy": "wx-default-v2", "source_type": "markdown", "node_kinds": ["document"], "available_audits": ["model_audit", "saved_output_audit"]}).modules] == [module.module_id for module in plan.modules]
@@ -329,7 +330,7 @@ def test_native_v2_default_factory_has_a_single_full_chain_shape() -> None:
     assert default_plan == injected_plan
     assert "native-candidate-set" in default_plan
     assert "source-facts-parser" in default_plan
-    assert len(default_plan) == 16
+    assert len(default_plan) == 17
 
 
 def test_native_fail_policy_blocks_unresolved_decisions_before_publish() -> None:

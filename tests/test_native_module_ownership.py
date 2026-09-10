@@ -415,6 +415,8 @@ def test_native_registry_composes_the_semantic_modules_with_the_stage_chain() ->
     assert module_ids.index("native-candidate-set") < module_ids.index("native-resolver")
     assert module_ids.index("native-resolver") < module_ids.index("native-transaction")
     assert module_ids.index("native-transaction") < module_ids.index("native-normalizer")
+    assert module_ids.index("native-auditor") < module_ids.index("native-reviewer")
+    assert module_ids.index("native-reviewer") < module_ids.index("native-publisher")
     assert not [module_id for module_id in module_ids if module_id.startswith("legacy")]
 
 
@@ -427,7 +429,7 @@ def test_composed_native_chain_only_exchanges_declared_capabilities() -> None:
         assert set(module.requires) <= declared, module.module_id
 
 
-def test_default_factory_returns_one_full_sixteen_module_chain() -> None:
+def test_default_factory_returns_one_full_seventeen_module_chain() -> None:
     """The default call builds the only native chain: no shallow eight module shape."""
 
     default_modules = [
@@ -457,9 +459,10 @@ def test_default_factory_returns_one_full_sixteen_module_chain() -> None:
         "native-normalizer",
         "native-renderer",
         "native-auditor",
+        "native-reviewer",
         "native-publisher",
     ]
-    assert len(default_modules) == 16
+    assert len(default_modules) == 17
 
 
 def test_no_registered_module_forwards_precomputed_legacy_values() -> None:
@@ -627,7 +630,7 @@ def test_native_report_execution_plan_lists_every_executed_module(tmp_path: Path
     evidence = report["native_module_evidence"]
 
     assert planned == list(evidence)
-    assert len(planned) == 16
+    assert len(planned) == 17
     for module_id in (*FROZEN_SEMANTIC_MODULES, "protected-content"):
         assert module_id in planned
     assert [

@@ -111,7 +111,7 @@ def test_native_registry_executes_bound_stage_implementations() -> None:
     assert results == calls
     assert calls == [module.module_id for module in plan.modules]
     assert calls[0] == "source-facts-parser"
-    assert len(calls) == 16
+    assert len(calls) == 17
 
 
 def test_kernel_rejects_modular_conversion_without_complete_capability_adapter(tmp_path: Path) -> None:

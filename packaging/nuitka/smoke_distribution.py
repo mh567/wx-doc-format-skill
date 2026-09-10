@@ -63,8 +63,12 @@ def validate_modular_manifest(manifest: dict) -> None:
         "contract": "T04",
     }:
         raise RuntimeError("modular_file must expose the T04 CheckpointStore contract")
-    if modes["modular_review"].get("status") != "closed":
-        raise RuntimeError("modular_review must remain closed in the release manifest")
+    if modes["modular_review"] != {
+        "status": "enabled",
+        "entrypoint": "ReviewEvaluator",
+        "contract": "T05",
+    }:
+        raise RuntimeError("modular_review must expose the T05 ReviewEvaluator contract")
 
 
 def smoke(package_dir: Path) -> None:

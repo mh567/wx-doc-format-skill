@@ -893,7 +893,7 @@ def _native_candidate_set(context: ModuleExecutionContext) -> list[Mapping[str, 
         "enhancement_candidate_count": len(enhancement_candidates),
         "enhancement_status": enhancement_result["status"],
     }
-    if options.get("protocol_mode") == "generate_requests":
+    if options.get("protocol_mode") == "generate_requests" and enhancement_result["requested_capabilities"]:
         raise NativeFileProtocolPause()
     blocking_results = [
         record
@@ -930,7 +930,8 @@ def _native_enhancement_candidates(
     selected = [
         capability
         for capability in CAPABILITY_REGISTRY
-        if should_enhance({}, capability, normalized_mode)
+        if capability != "document_review"
+        and should_enhance({}, capability, normalized_mode)
     ]
     configured_budget = options.get("enhancement_budget", len(selected))
     budget = configured_budget if isinstance(configured_budget, int) and not isinstance(configured_budget, bool) else -1
@@ -1156,24 +1157,32 @@ def _native_renderer(context: ModuleExecutionContext) -> Mapping[str, Any]:
 
 
 def _native_auditor(context: ModuleExecutionContext) -> dict[str, Any]:
-    from .auditing import check_model, check_saved_output
+    from .auditing import audit_bundle
 
     normalized = context.require("normalized")
     render_result = context.require("render_result")
     appendix_semantics = context.require("appendix_semantics")
     staging_path = context.services["staging_path"]
     with context.stage("audit"):
-        model_findings = check_model(normalized)
-        saved_findings = check_saved_output(staging_path, normalized, render_result["render_map"])
         appendix_findings = (
             audit_native_appendix(normalized["source_ast"], appendix_semantics)
             if appendix_semantics is not None
             else {"passed": True, "issues": []}
         )
+        audits = audit_bundle(
+            staging_path,
+            normalized,
+            render_result["render_map"],
+            appendix_audit=appendix_findings,
+        )
+    model_findings = audits["model"]
+    saved_findings = audits["saved_output"]
+    appendix_findings = audits["appendix"]
     digest_after = digest_source_facts(dict(context.require("source_facts")))
     context.provide("model_audit", model_findings)
     context.provide("saved_output_audit", saved_findings)
     context.provide("appendix_audit", appendix_findings)
+    context.provide("audit_findings", audits["findings"])
     context.provide("source_facts_integrity", {
         "digest_after": digest_after,
         "immutable": digest_after == context.require("source_facts_digest"),
@@ -1181,11 +1190,349 @@ def _native_auditor(context: ModuleExecutionContext) -> dict[str, Any]:
     return {"model": model_findings, "saved": saved_findings, "appendix": appendix_findings}
 
 
+def _json_copy(value: Any) -> Any:
+    return json.loads(json.dumps(value, ensure_ascii=False))
+
+
+def _baseline_acceptance(audits_passed: bool, reason: str) -> Any:
+    from .review import AcceptanceDecision
+
+    return AcceptanceDecision(
+        "accepted" if audits_passed else "rejected",
+        reason,
+        audits_passed,
+        False,
+        False,
+    )
+
+
+def _native_reviewer(context: ModuleExecutionContext) -> dict[str, Any]:
+    """Run one post-audit candidate revision and retain a rollback baseline."""
+
+    from llm_enhancer import normalize_mode, should_enhance
+
+    from .auditing import audit_bundle
+    from .enhancement import EnhancementExecutor, build_native_request, serialize_native_request
+    from .normalization import normalize
+    from .rendering import render
+    from .resolver import resolve
+    from .review import AcceptanceDecision, accept_candidate, build_review_packet
+    from .run_store import request_digest
+    from .transaction import stage_candidate_revision
+
+    request = context.request
+    options = request.options or {}
+    baseline_commit = context.require("transaction_commit")
+    baseline_normalized = context.require("normalized")
+    baseline_render = context.require("render_result")
+    baseline_audits = {
+        "model": context.require("model_audit"),
+        "saved_output": context.require("saved_output_audit"),
+        "appendix": context.require("appendix_audit"),
+        "findings": list(context.require("audit_findings")),
+    }
+    baseline_audits["passed"] = all(
+        baseline_audits[name].get("passed") is True
+        for name in ("model", "saved_output", "appendix")
+    )
+    baseline_path = Path(context.services["staging_path"])
+    candidate_path = baseline_path.with_name(
+        f".{request.output_path.name}.native-v2.review-candidate.staging"
+    )
+    if candidate_path.is_file():
+        candidate_path.unlink()
+    baseline_bundle = {
+        "source_ast": baseline_commit.snapshot.ast,
+        "normalized_ast": baseline_normalized,
+        "findings": baseline_audits["findings"],
+        "artifacts": {"docx": str(baseline_path)},
+        "round": 0,
+    }
+    packet = build_review_packet(baseline_bundle, baseline_audits["findings"])
+    context.provide("review_packet", packet)
+    mode = normalize_mode(str(options.get("llm_enhance") or "off"))
+    enabled = should_enhance({"review_packet": packet}, "C", mode)
+
+    def finish(
+        *,
+        status: str,
+        acceptance: Any,
+        selected_commit: Any = baseline_commit,
+        selected_normalized: Mapping[str, Any] = baseline_normalized,
+        selected_render: Mapping[str, Any] = baseline_render,
+        selected_audits: Mapping[str, Any] = baseline_audits,
+        selected_artifact: Path | None = None,
+        enhancement: Mapping[str, Any] | None = None,
+        decision_set: Mapping[str, Any] | None = None,
+        audit_exception: Mapping[str, Any] | None = None,
+        candidate_artifact: Path | None = None,
+    ) -> dict[str, Any]:
+        result = {
+            "status": status,
+            "enabled": enabled,
+            "triggered": status in {"accepted", "rolled_back"},
+            "review_packet": packet,
+            "acceptance": acceptance.to_dict(),
+            "baseline_artifact": str(baseline_path),
+            "candidate_artifact": str(candidate_artifact) if candidate_artifact is not None else None,
+            "selected_artifact": str(selected_artifact) if selected_artifact is not None else None,
+            "transaction_commit": selected_commit,
+            "normalized": selected_normalized,
+            "render_result": selected_render,
+            "audits": selected_audits,
+            "enhancement": dict(enhancement or {}),
+            "decision_set": dict(decision_set or {}),
+            "audit_exception": dict(audit_exception) if audit_exception is not None else None,
+        }
+        context.provide("review_result", result)
+        context.provide("acceptance", result["acceptance"])
+        context.evidence["native-reviewer"] = {
+            "status": status,
+            "enabled": enabled,
+            "triggered": result["triggered"],
+            "baseline_revision": baseline_commit.snapshot.ast["revision"],
+            "selected_revision": selected_commit.snapshot.ast["revision"],
+        }
+        return result
+
+    if not enabled:
+        acceptance = _baseline_acceptance(
+            bool(baseline_audits["passed"]),
+            "baseline_audits_passed" if baseline_audits["passed"] else "baseline_audit_failed",
+        )
+        return finish(
+            status="not_requested",
+            acceptance=acceptance,
+            selected_artifact=baseline_path if acceptance.accepted else None,
+        )
+    if not packet["targets"]:
+        acceptance = _baseline_acceptance(
+            bool(baseline_audits["passed"]),
+            "no_repairable_findings" if baseline_audits["passed"] else "baseline_audit_failed",
+        )
+        return finish(
+            status="no_repairable_findings",
+            acceptance=acceptance,
+            selected_artifact=baseline_path if acceptance.accepted else None,
+        )
+
+    consumed = int((context.require("enhancement_result") or {}).get("consumed") or 0)
+    configured_budget = options.get("enhancement_budget", consumed + 1)
+    total_budget = (
+        configured_budget
+        if isinstance(configured_budget, int) and not isinstance(configured_budget, bool)
+        else -1
+    )
+    remaining = max(0, total_budget - consumed)
+    enhancement_request = build_native_request(
+        "document_review",
+        baseline_commit.snapshot.ast,
+        budget=min(1, remaining),
+        timeout_seconds=float(options.get("enhancement_timeout_seconds", 30.0)),
+        request_id=f"native-{baseline_commit.snapshot.ast['revision']}-document_review",
+    )
+    request_sink = options.get("enhancement_request_sink")
+    if isinstance(request_sink, list):
+        file_ast = options.get("file_protocol_source_ast")
+        file_request = (
+            build_native_request(
+                "document_review",
+                file_ast,
+                budget=min(1, remaining),
+                timeout_seconds=float(options.get("enhancement_timeout_seconds", 30.0)),
+                request_id=enhancement_request.request_id,
+            )
+            if isinstance(file_ast, Mapping)
+            else enhancement_request
+        )
+        serialized = serialize_native_request(file_request)
+        serialized["review_packet"] = _json_copy(packet)
+        serialized["request_sha256"] = request_digest(serialized)
+        request_sink.append(serialized)
+    if options.get("protocol_mode") == "generate_requests":
+        raise NativeFileProtocolPause()
+    if (
+        options.get("protocol_mode") == "resume"
+        and enhancement_request.request_id not in set(options.get("available_response_ids") or ())
+    ):
+        raise NativeFileProtocolPause()
+
+    enhancement_result = EnhancementExecutor().execute(
+        enhancement_request,
+        context={"review_packet": packet},
+        call=options.get("enhancement_call"),
+    )
+    enhancement_record = enhancement_result.to_dict()
+    if enhancement_result.status != "completed" or not enhancement_result.candidates:
+        diagnostic = {
+            "type": "EnhancementError",
+            "message": f"document review ended with {enhancement_result.status}",
+        }
+        acceptance = AcceptanceDecision(
+            "rejected",
+            "review_response_failed",
+            False,
+            False,
+            False,
+            {"audit_exception": diagnostic},
+        )
+        return finish(
+            status="rolled_back",
+            acceptance=acceptance,
+            enhancement=enhancement_record,
+            audit_exception=diagnostic,
+            candidate_artifact=candidate_path,
+        )
+
+    decision_set = resolve(
+        enhancement_result.candidates,
+        {"revision": baseline_commit.snapshot.ast["revision"]},
+        None,
+    )
+    if decision_set.get("unresolved") or not decision_set.get("decisions"):
+        acceptance = AcceptanceDecision(
+            "rejected",
+            "candidate_resolution_failed",
+            False,
+            False,
+            False,
+            {"unresolved": _json_copy(decision_set.get("unresolved") or [])},
+        )
+        return finish(
+            status="rolled_back",
+            acceptance=acceptance,
+            enhancement=enhancement_record,
+            decision_set=decision_set,
+            candidate_artifact=candidate_path,
+        )
+
+    revision = stage_candidate_revision(
+        baseline_commit.snapshot,
+        decision_set["decisions"],
+        expected_revision=baseline_commit.snapshot.ast["revision"],
+    )
+    candidate_commit = revision.candidate
+    candidate_bundle: dict[str, Any] = {
+        "source_ast": candidate_commit.snapshot.ast,
+        "normalized_ast": baseline_normalized,
+        "findings": baseline_audits["findings"],
+        "artifacts": {"docx": str(candidate_path)},
+        "round": 1,
+    }
+    try:
+        template = context.require("template_bundle")
+        resources = context.require("resources")
+        candidate_normalized = normalize(
+            candidate_commit.snapshot.ast,
+            template,
+            strategy=request.list_policy,
+            overlay=candidate_commit.snapshot.overlays,
+            presentation_override=candidate_commit.snapshot.presentation_overrides,
+            context={
+                "transaction_id": candidate_commit.transaction_id,
+                "decision_set_version": decision_set["decision_set_version"],
+            },
+        )
+        if hasattr(template, "path"):
+            candidate_render = render(
+                candidate_normalized,
+                candidate_path,
+                template_bundle=template,
+                resources=resources,
+            )
+        else:
+            candidate_render = render(candidate_normalized, candidate_path, resources=resources)
+        metrics = context.services.get("metrics")
+        if metrics is not None:
+            metrics.record_render()
+        appendix_semantics = context.require("appendix_semantics")
+        appendix_findings = (
+            audit_native_appendix(candidate_normalized["source_ast"], appendix_semantics)
+            if appendix_semantics is not None
+            else {"passed": True, "issues": []}
+        )
+        candidate_audits = audit_bundle(
+            candidate_path,
+            candidate_normalized,
+            candidate_render["render_map"],
+            appendix_audit=appendix_findings,
+        )
+        candidate_bundle.update(
+            {
+                "normalized_ast": candidate_normalized,
+                "findings": candidate_audits["findings"],
+            }
+        )
+        acceptance, _accepted_bundle = accept_candidate(
+            baseline_bundle,
+            candidate_bundle,
+            {
+                "baseline": baseline_audits["findings"],
+                "candidate": candidate_audits["findings"],
+            },
+            decisions=decision_set["decisions"],
+        )
+    except Exception as exc:
+        audit_exception = {"type": type(exc).__name__, "message": str(exc)}
+        candidate_bundle["audit_exception"] = audit_exception
+        acceptance, _accepted_bundle = accept_candidate(
+            baseline_bundle,
+            candidate_bundle,
+            {
+                "baseline": baseline_audits["findings"],
+                "candidate": candidate_bundle.get("findings") or [],
+            },
+            decisions=decision_set["decisions"],
+        )
+        if candidate_path.is_file():
+            candidate_path.unlink()
+        return finish(
+            status="rolled_back",
+            acceptance=acceptance,
+            enhancement=enhancement_record,
+            decision_set=decision_set,
+            audit_exception=audit_exception,
+            candidate_artifact=candidate_path,
+        )
+
+    if not acceptance.accepted:
+        if candidate_path.is_file():
+            candidate_path.unlink()
+        return finish(
+            status="rolled_back",
+            acceptance=acceptance,
+            enhancement=enhancement_record,
+            decision_set=decision_set,
+            candidate_artifact=candidate_path,
+        )
+    return finish(
+        status="accepted",
+        acceptance=acceptance,
+        selected_commit=candidate_commit,
+        selected_normalized=candidate_normalized,
+        selected_render=candidate_render,
+        selected_audits=candidate_audits,
+        selected_artifact=candidate_path,
+        enhancement=enhancement_record,
+        decision_set=decision_set,
+        candidate_artifact=candidate_path,
+    )
+
+
 def _native_publisher(context: ModuleExecutionContext) -> bool:
+    from .publication import PublicationError, validate_acceptance
+
+    review_result = context.require("review_result")
+    try:
+        validate_acceptance(context.require("acceptance"))
+    except PublicationError:
+        context.provide("published_output", None)
+        return False
+    audits = review_result["audits"]
     audits_passed = (
-        context.require("model_audit").get("passed") is True
-        and context.require("saved_output_audit").get("passed") is True
-        and context.require("appendix_audit").get("passed") is True
+        audits["model"].get("passed") is True
+        and audits["saved_output"].get("passed") is True
+        and audits["appendix"].get("passed") is True
     )
     fatal_diagnostics = [
         item
@@ -1194,7 +1541,12 @@ def _native_publisher(context: ModuleExecutionContext) -> bool:
     ]
     output_path = context.request.output_path
     if audits_passed and not fatal_diagnostics:
-        context.services["staging_path"].replace(output_path)
+        selected_artifact = Path(review_result["selected_artifact"])
+        if not selected_artifact.is_file():
+            context.provide("published_output", None)
+            return False
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        selected_artifact.replace(output_path)
         context.provide("published_output", str(output_path))
         return True
     context.provide("published_output", None)
@@ -1322,6 +1674,7 @@ def native_stage_executors() -> dict[str, Callable[[ModuleExecutionContext], Any
         "native-normalizer": _native_normalizer,
         "native-renderer": _native_renderer,
         "native-auditor": _native_auditor,
+        "native-reviewer": _native_reviewer,
         "native-publisher": _native_publisher,
     }
 

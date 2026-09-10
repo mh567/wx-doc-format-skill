@@ -273,6 +273,7 @@ def test_l01_nested_ordered_unordered_ordered_runs_full_native_acceptance(tmp_pa
         "RenderPlan",
         "Renderer",
         "AuditModule",
+        "ReviewEvaluator",
         "Publisher",
     ]
     assert report["execution_plan"]["profile"] == "wx_full_rules-native-v2"
@@ -295,6 +296,7 @@ def test_l01_nested_ordered_unordered_ordered_runs_full_native_acceptance(tmp_pa
         "native-normalizer",
         "native-renderer",
         "native-auditor",
+        "native-reviewer",
         "native-publisher",
     ]
     assert executed_modules == list(report["native_module_evidence"])

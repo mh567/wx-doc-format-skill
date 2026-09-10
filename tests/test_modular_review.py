@@ -12,7 +12,9 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 from test_modular_ast import _ast
+from wxdf import auditing, review, transaction
 from wxdf.review import MODE_MANIFEST, accept_candidate, evaluate_candidate, mode_manifest
+from wxdf.transaction import make_snapshot
 
 
 def _bundle(*, level: int = 1, presentation: str = "presentation-1", text: str = "段落0") -> dict:
@@ -90,7 +92,11 @@ def test_mode_manifest_matches_current_preflight_surface() -> None:
         "entrypoint": "CheckpointStore",
         "contract": "T04",
     }
-    assert manifest["modular_review"]["status"] == "closed"
+    assert manifest["modular_review"] == {
+        "status": "enabled",
+        "entrypoint": "ReviewEvaluator",
+        "contract": "T05",
+    }
     assert all(item["status"] in {"enabled", "closed"} for item in manifest.values())
 
 
@@ -107,3 +113,138 @@ def test_accept_candidate_persists_accepted_revision_without_changing_overlay_co
     assert accepted["decision_ledger"]["revision"] == 1
     assert len(accepted["decision_ledger"]["revisions"]) == 1
     assert accepted["acceptance"]["reason"] == "target_audit_improved"
+
+
+def test_new_high_risk_finding_rejects_candidate_even_when_total_score_improves() -> None:
+    baseline = _bundle(level=1)
+    candidate = _bundle(level=2)
+    target = {
+        "audit_id": "heading:p0",
+        "severity": "high",
+        "repairable": True,
+        "block_id": "p0",
+        "category": "semantic",
+        "evidence": {"type": "heading_hierarchy"},
+    }
+    second = {**target, "audit_id": "heading:p1", "block_id": "p1"}
+    introduced = {
+        "audit_id": "saved:new-risk",
+        "severity": "high",
+        "repairable": False,
+        "block_id": "p0",
+        "category": "saved_output",
+        "evidence": {"type": "new_high_risk"},
+    }
+
+    decision = evaluate_candidate(
+        baseline,
+        candidate,
+        _findings([target, second], [introduced]),
+        decisions=[{"target_node_ids": ["p0"]}],
+    )
+
+    assert decision.accepted is False
+    assert decision.reason == "new_high_risk_findings"
+    assert decision.details["new_high_risk_findings"] == ["saved:new-risk"]
+
+
+def test_audit_exception_rejects_candidate_and_returns_unchanged_baseline() -> None:
+    baseline = _bundle(level=1)
+    candidate = _bundle(level=2)
+    candidate["audit_exception"] = {"type": "RuntimeError", "message": "audit failed"}
+
+    decision, selected = accept_candidate(
+        baseline,
+        candidate,
+        _findings([], []),
+        decisions=[{"target_node_ids": ["p0"]}],
+    )
+
+    assert decision.accepted is False
+    assert decision.reason == "audit_exception"
+    assert selected == baseline
+    assert selected is not baseline
+
+
+def test_review_packet_contains_only_stable_repairable_targets() -> None:
+    bundle = _bundle(level=1)
+    findings = [
+        {
+            "audit_id": "model:heading:p0",
+            "severity": "high",
+            "repairable": True,
+            "block_id": "p0",
+            "category": "model",
+            "evidence": {"code": "heading_hierarchy"},
+        },
+        {
+            "audit_id": "saved:paragraph-order",
+            "severity": "critical",
+            "repairable": False,
+            "category": "saved_output",
+            "evidence": {"code": "paragraph_order_changed"},
+        },
+    ]
+
+    assert callable(getattr(review, "build_review_packet", None))
+    packet = review.build_review_packet(bundle, findings)
+
+    assert packet["schema_version"] == "2.0"
+    assert packet["baseline_revision"] == 1
+    assert packet["repairable_count"] == 1
+    assert packet["targets"][0]["block_id"] == "p0"
+    assert packet["targets"][0]["source_ref"]["source_id"] == "p0"
+
+
+def test_audit_findings_preserve_risk_and_repairability_across_audit_sources() -> None:
+    assert callable(getattr(auditing, "collect_audit_findings", None))
+    findings = auditing.collect_audit_findings(
+        {
+            "model": {
+                "passed": False,
+                "issues": [
+                    {
+                        "code": "heading_hierarchy",
+                        "node_id": "p0",
+                        "severity": "high",
+                        "repairable": True,
+                    }
+                ],
+            },
+            "saved_output": {
+                "passed": False,
+                "issues": [{"code": "paragraph_order_changed"}],
+            },
+        }
+    )
+
+    assert findings[0]["audit_id"] == "model:heading_hierarchy:p0"
+    assert findings[0]["repairable"] is True
+    assert findings[1]["severity"] == "critical"
+    assert findings[1]["repairable"] is False
+
+
+def test_candidate_revision_keeps_baseline_snapshot_independent_for_rollback() -> None:
+    snapshot = make_snapshot(_ast(1))
+    baseline = copy.deepcopy(snapshot.ast)
+    assert callable(getattr(transaction, "stage_candidate_revision", None))
+    revision = transaction.stage_candidate_revision(
+        snapshot,
+        [
+            {
+                "decision_id": "review-p0",
+                "operation": "update_role",
+                "target_node_ids": ["p0"],
+                "expected_revision": 1,
+                "property_scope": ["role"],
+                "value": {"role": "note"},
+            }
+        ],
+        expected_revision=1,
+    )
+
+    assert revision.baseline.ast == baseline
+    assert revision.candidate.snapshot.ast["revision"] == 2
+    assert revision.candidate.snapshot.ast["document"]["blocks"]["p0"]["role"] == "note"
+    revision.candidate.snapshot.ast["document"]["blocks"]["p0"]["role"] = "body"
+    assert revision.rollback().ast == baseline
