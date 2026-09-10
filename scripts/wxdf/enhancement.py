@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import shlex
@@ -16,6 +17,9 @@ from llm_enhancer import (  # noqa: F401  # re-exported compatibility surface
     _resolve_capability,
     _resolve_legacy_phase,
 )
+
+from .contracts import AST_SCHEMA_VERSION, ContractError, PATCH_SCHEMA_VERSION
+from .validation import validate_ast, validate_patch
 
 
 CAPABILITY_INPUT_SCHEMA_VERSION = "2.0"
@@ -46,6 +50,7 @@ class EnhancementResult:
     request_id: str | None = None
     consumed: int = 0
     request_summary: Mapping[str, Any] = field(default_factory=dict)
+    candidates: tuple[Mapping[str, Any], ...] = ()
 
     def __getitem__(self, key: str) -> Any:
         return self.to_dict()[key]
@@ -54,6 +59,7 @@ class EnhancementResult:
         return {
             "status": self.status,
             "responses": [dict(item) for item in self.responses],
+            "candidates": [dict(item) for item in self.candidates],
             "diagnostics": [dict(item) for item in self.diagnostics],
             "request_id": self.request_id,
             "consumed": self.consumed,
@@ -62,8 +68,86 @@ class EnhancementResult:
 
 
 def _digest(value: Any) -> str:
-    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    payload = json.dumps(_thaw(value), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+class _FrozenDict(dict):
+    """JSON compatible mapping used for external read only views."""
+
+    @staticmethod
+    def _reject(*_args: Any, **_kwargs: Any) -> None:
+        raise TypeError("mapping is read-only")
+
+    __setitem__ = _reject
+    __delitem__ = _reject
+    clear = _reject
+    pop = _reject
+    popitem = _reject
+    setdefault = _reject
+    update = _reject
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> dict[str, Any]:
+        result = {copy.deepcopy(key, memo): copy.deepcopy(value, memo) for key, value in self.items()}
+        memo[id(self)] = result
+        return result
+
+
+def _freeze(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        frozen = _FrozenDict()
+        dict.__init__(frozen, {key: _freeze(item) for key, item in value.items()})
+        return frozen
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze(item) for item in value)
+    return copy.deepcopy(value)
+
+
+def _thaw(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _thaw(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw(item) for item in value]
+    return copy.deepcopy(value)
+
+
+def build_native_request(
+    capability: str,
+    source_ast: Mapping[str, Any],
+    *,
+    budget: int | None = None,
+    timeout_seconds: float = 30.0,
+    request_id: str | None = None,
+) -> EnhancementRequest:
+    """Build one revision bound immutable AST view for a native capability."""
+
+    ast = copy.deepcopy(dict(source_ast))
+    validate_ast(ast)
+    view_sha256 = _digest(ast)
+    view = _freeze(
+        {
+            "view_schema_version": CAPABILITY_INPUT_SCHEMA_VERSION,
+            "ast_schema_version": ast["schema_version"],
+            "revision": ast["revision"],
+            "view_sha256": view_sha256,
+            "source_ast": ast,
+        }
+    )
+    return EnhancementRequest(
+        capability=capability,
+        phase=capability,
+        items=(view,),
+        budget=budget,
+        timeout_seconds=timeout_seconds,
+        request_id=request_id,
+        view_sha256=view_sha256,
+        model_revision=int(ast["revision"]),
+        contract_versions={
+            "capability_input": CAPABILITY_INPUT_SCHEMA_VERSION,
+            "ast": AST_SCHEMA_VERSION,
+            "patch": PATCH_SCHEMA_VERSION,
+        },
+    )
 
 
 def _coerce_request(request: EnhancementRequest | Mapping[str, Any]) -> EnhancementRequest:
@@ -128,6 +212,8 @@ def _normalise_responses(raw: Any, expected: int) -> tuple[Mapping[str, Any], ..
         raw = raw["responses"]
     if isinstance(raw, Mapping):
         values = [raw]
+    elif isinstance(raw, str):
+        values = [raw]
     elif isinstance(raw, Sequence) and not isinstance(raw, (str, bytes)):
         values = list(raw)
     else:
@@ -147,6 +233,106 @@ def _normalise_responses(raw: Any, expected: int) -> tuple[Mapping[str, Any], ..
         else:
             result.append({"raw": value})
     return tuple(result)
+
+
+def _native_ast(request: EnhancementRequest) -> dict[str, Any] | None:
+    if len(request.items) != 1:
+        return None
+    view = request.items[0]
+    if not isinstance(view, Mapping) or view.get("view_schema_version") != CAPABILITY_INPUT_SCHEMA_VERSION:
+        return None
+    ast = view.get("source_ast")
+    if not isinstance(ast, Mapping):
+        return None
+    return _thaw(ast)
+
+
+def _no_response(raw: Any) -> bool:
+    if raw is None:
+        return True
+    if isinstance(raw, str) and not raw.strip():
+        return True
+    if isinstance(raw, Mapping) and "responses" in raw:
+        responses = raw.get("responses")
+        return isinstance(responses, Sequence) and not isinstance(responses, (str, bytes)) and len(responses) == 0
+    return isinstance(raw, Sequence) and not isinstance(raw, (str, bytes)) and len(raw) == 0
+
+
+def _source_ref_matches(expected: Mapping[str, Any], current: Mapping[str, Any]) -> bool:
+    for field in ("source_id", "part", "content_sha256", "span", "node_path", "parser_version"):
+        if field in expected or field in current:
+            if expected.get(field) != current.get(field):
+                return False
+    return True
+
+
+def _validate_candidate_targets(candidates: Sequence[Mapping[str, Any]], ast: Mapping[str, Any]) -> None:
+    document = ast["document"]
+    nodes = {**document["blocks"], **document["containers"]}
+    for candidate in candidates:
+        targets = [str(value) for value in candidate.get("target_node_ids") or []]
+        if not targets or any(target not in nodes for target in targets):
+            raise LookupError("candidate target is absent from the current AST revision")
+        current_refs = [
+            nodes[target].get("source_ref")
+            for target in targets
+            if isinstance(nodes[target].get("source_ref"), Mapping)
+        ]
+        expected_refs = [
+            ref for ref in candidate.get("target_source_refs") or [] if isinstance(ref, Mapping)
+        ]
+        if not expected_refs or not current_refs:
+            raise LookupError("candidate source reference is absent from the current AST revision")
+        if not all(any(_source_ref_matches(expected, current) for current in current_refs) for expected in expected_refs):
+            raise LookupError("candidate source reference changed after the request")
+
+
+def _extract_native_candidates(
+    response: Mapping[str, Any],
+    ast: Mapping[str, Any],
+    view_sha256: str | None,
+) -> tuple[Mapping[str, Any], ...]:
+    current_revision = int(ast["revision"])
+    payload = _thaw(response)
+    if "patch_schema_version" in payload:
+        validate_patch(payload)
+        if payload["base_revision"] != current_revision:
+            raise LookupError("Patch base revision is stale")
+        for decision in payload["decisions"]:
+            if decision["expected_revision"] != current_revision:
+                raise LookupError("Patch decision revision is stale")
+            if any(
+                str(target) not in ast["document"]["blocks"]
+                and str(target) not in ast["document"]["containers"]
+                for target in decision["target_node_ids"]
+            ):
+                raise LookupError("Patch decision target is absent from the current AST revision")
+        candidates = payload["candidates"]
+    elif "candidate_set_version" in payload:
+        if payload.get("candidate_set_version") != PATCH_SCHEMA_VERSION:
+            raise ContractError("unsupported_version", "candidate_set_version", "unsupported CandidateSet version", contract="CandidateSet 2.0")
+        if payload.get("base_revision") != current_revision:
+            raise LookupError("CandidateSet base revision is stale")
+        response_view_sha256 = payload.get("view_sha256")
+        if response_view_sha256 is not None and response_view_sha256 != view_sha256:
+            raise LookupError("CandidateSet view digest is stale")
+        candidates = payload.get("candidates")
+        if not isinstance(candidates, list):
+            raise ContractError("invalid_type", "candidates", "CandidateSet candidates must be a list", contract="CandidateSet 2.0")
+        validate_patch(
+            {
+                "patch_schema_version": PATCH_SCHEMA_VERSION,
+                "patch_id": "candidate-set-validation",
+                "base_revision": current_revision,
+                "phase": "relation",
+                "candidates": candidates,
+                "decisions": [],
+            }
+        )
+    else:
+        raise ContractError("missing_required", "$", "response must be Patch 2.0 or CandidateSet 2.0", contract="native enhancement")
+    _validate_candidate_targets(candidates, ast)
+    return tuple(_freeze(candidate) for candidate in candidates)
 
 
 class EnhancementExecutor:
@@ -176,6 +362,8 @@ class EnhancementExecutor:
     ) -> EnhancementResult:
         request = _coerce_request(request)
         context = dict(context or {})
+        native_ast = _native_ast(request)
+        native = native_ast is not None
         phase = request.phase or request.capability
         capability = _resolve_capability(request.capability or phase)
         summary = {
@@ -189,22 +377,30 @@ class EnhancementExecutor:
             "items_sha256": _digest([dict(item) for item in request.items]),
         }
         if capability is None or capability not in self.registry:
-            return EnhancementResult("unsupported", diagnostics=({"code": "CAPABILITY_UNSUPPORTED", "capability": request.capability},), request_id=request.request_id, request_summary=summary)
+            status = "missing_capability" if native else "unsupported"
+            return EnhancementResult(status, diagnostics=({"code": "CAPABILITY_UNSUPPORTED", "capability": request.capability},), request_id=request.request_id, request_summary=summary)
         if not request.items:
             return EnhancementResult("completed", diagnostics=({"code": "NO_TARGETS"},), request_id=request.request_id, request_summary=summary)
         if request.budget is not None and (not isinstance(request.budget, int) or request.budget < 0):
             return EnhancementResult("failed", diagnostics=({"code": "INVALID_BUDGET"},), request_id=request.request_id, request_summary=summary)
         if request.budget is not None and len(request.items) > request.budget:
-            return EnhancementResult("failed", diagnostics=({"code": "ENHANCEMENT_BUDGET_EXCEEDED", "required": len(request.items), "remaining": request.budget},), request_id=request.request_id, consumed=0, request_summary=summary)
+            status = "budget_exhausted" if native else "failed"
+            return EnhancementResult(status, diagnostics=({"code": "ENHANCEMENT_BUDGET_EXCEEDED", "required": len(request.items), "remaining": request.budget},), request_id=request.request_id, consumed=0, request_summary=summary)
 
         if responses is not None:
+            if native and _no_response(responses):
+                return EnhancementResult("no_response", diagnostics=({"code": "NO_RESPONSE"},), request_id=request.request_id, request_summary=summary)
             try:
                 normalised = _normalise_responses(responses, len(request.items))
             except ValueError as exc:
-                return EnhancementResult("failed", diagnostics=({"code": "RESPONSE_COUNT_MISMATCH", "message": str(exc)},), request_id=request.request_id, request_summary=summary)
+                status = "invalid_patch" if native else "failed"
+                return EnhancementResult(status, diagnostics=({"code": "RESPONSE_COUNT_MISMATCH", "message": str(exc)},), request_id=request.request_id, request_summary=summary)
             identity_error = self._validate_response_identity(request, normalised)
             if identity_error is not None:
-                return EnhancementResult("failed", diagnostics=(identity_error,), request_id=request.request_id, request_summary=summary)
+                status = "stale_target" if native and identity_error.get("code") == "STALE_RESPONSE" else "invalid_patch" if native else "failed"
+                return EnhancementResult(status, diagnostics=(identity_error,), request_id=request.request_id, request_summary=summary)
+            if native_ast is not None:
+                return self._native_result(request, summary, normalised, native_ast, consumed=0)
             return EnhancementResult("completed", responses=normalised, request_id=request.request_id, consumed=0, request_summary=summary)
 
         adapter = call if call is not None else llm_call
@@ -232,20 +428,67 @@ class EnhancementExecutor:
             "context": context,
             "prompt": context.get("prompt"),
         }
-        completed, raw, error = _run_with_timeout(adapter, payload, request.timeout_seconds)
+        completed, raw, error = _run_with_timeout(adapter, _freeze(payload), request.timeout_seconds)
         consumed = len(request.items)
         if isinstance(error, TimeoutError):
-            return EnhancementResult("failed", diagnostics=({"code": "ENHANCEMENT_TIMEOUT", "message": str(error)},), request_id=request.request_id, consumed=consumed, request_summary=summary)
+            status = "timeout" if native else "failed"
+            return EnhancementResult(status, diagnostics=({"code": "ENHANCEMENT_TIMEOUT", "message": str(error)},), request_id=request.request_id, consumed=consumed, request_summary=summary)
         if error is not None:
             return EnhancementResult("failed", diagnostics=({"code": "ENHANCEMENT_CALL_FAILED", "message": str(error)},), request_id=request.request_id, consumed=consumed, request_summary=summary)
+        if native and _no_response(raw):
+            return EnhancementResult("no_response", diagnostics=({"code": "NO_RESPONSE"},), request_id=request.request_id, consumed=consumed, request_summary=summary)
         try:
             normalised = _normalise_responses(raw, len(request.items))
         except ValueError as exc:
-            return EnhancementResult("failed", diagnostics=({"code": "RESPONSE_COUNT_MISMATCH", "message": str(exc)},), request_id=request.request_id, consumed=consumed, request_summary=summary)
+            status = "invalid_patch" if native else "failed"
+            return EnhancementResult(status, diagnostics=({"code": "RESPONSE_COUNT_MISMATCH", "message": str(exc)},), request_id=request.request_id, consumed=consumed, request_summary=summary)
         identity_error = self._validate_response_identity(request, normalised)
         if identity_error is not None:
-            return EnhancementResult("failed", diagnostics=(identity_error,), request_id=request.request_id, consumed=consumed, request_summary=summary)
+            status = "stale_target" if native and identity_error.get("code") == "STALE_RESPONSE" else "invalid_patch" if native else "failed"
+            return EnhancementResult(status, diagnostics=(identity_error,), request_id=request.request_id, consumed=consumed, request_summary=summary)
+        if native_ast is not None:
+            return self._native_result(request, summary, normalised, native_ast, consumed=consumed)
         return EnhancementResult("completed", responses=normalised, request_id=request.request_id, consumed=consumed, request_summary=summary)
+
+    @staticmethod
+    def _native_result(
+        request: EnhancementRequest,
+        summary: Mapping[str, Any],
+        responses: Sequence[Mapping[str, Any]],
+        ast: Mapping[str, Any],
+        *,
+        consumed: int,
+    ) -> EnhancementResult:
+        candidates: list[Mapping[str, Any]] = []
+        try:
+            for response in responses:
+                candidates.extend(_extract_native_candidates(response, ast, request.view_sha256))
+        except LookupError as exc:
+            return EnhancementResult(
+                "stale_target",
+                responses=tuple(responses),
+                diagnostics=({"code": "STALE_TARGET", "message": str(exc)},),
+                request_id=request.request_id,
+                consumed=consumed,
+                request_summary=summary,
+            )
+        except (ContractError, TypeError, ValueError, KeyError) as exc:
+            return EnhancementResult(
+                "invalid_patch",
+                responses=tuple(responses),
+                diagnostics=({"code": "INVALID_PATCH", "message": str(exc)},),
+                request_id=request.request_id,
+                consumed=consumed,
+                request_summary=summary,
+            )
+        return EnhancementResult(
+            "completed",
+            responses=tuple(responses),
+            candidates=tuple(candidates),
+            request_id=request.request_id,
+            consumed=consumed,
+            request_summary=summary,
+        )
 
     @staticmethod
     def _validate_response_identity(request: EnhancementRequest, responses: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
@@ -266,4 +509,5 @@ __all__ = [
     "EnhancementRequest",
     "EnhancementResult",
     "CAPABILITY_REGISTRY",
+    "build_native_request",
 ]

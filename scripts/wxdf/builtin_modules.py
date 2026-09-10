@@ -772,10 +772,107 @@ def _native_candidate_set(context: ModuleExecutionContext) -> list[Mapping[str, 
             "active_revision_count": len(ledger_view.get("active_revisions") or []),
             "baseline_ast_revision": source_ast["revision"],
         }
+    enhancement_candidates, enhancement_result = _native_enhancement_candidates(
+        context.require("source_ast"),
+        options,
+    )
+    candidates.extend(enhancement_candidates)
     context.provide("candidate_set", candidates)
     context.provide("ledger_view", ledger_view)
     context.provide("ledger_replay", ledger_replay)
+    context.provide("enhancement_result", enhancement_result)
+    context.evidence["native-candidate-set"] = {
+        "rule_candidate_count": len(candidates) - len(enhancement_candidates),
+        "enhancement_candidate_count": len(enhancement_candidates),
+        "enhancement_status": enhancement_result["status"],
+    }
     return candidates
+
+
+def _native_enhancement_candidates(
+    source_ast: Mapping[str, Any],
+    options: Mapping[str, Any],
+) -> tuple[list[Mapping[str, Any]], dict[str, Any]]:
+    """Collect validated native candidates from explicitly enabled adapters."""
+
+    from llm_enhancer import CAPABILITY_REGISTRY, normalize_mode, should_enhance
+
+    from .enhancement import EnhancementExecutor, build_native_request
+
+    mode = str(options.get("llm_enhance") or "off")
+    if mode == "off":
+        return [], {
+            "status": "disabled",
+            "mode": mode,
+            "requested_capabilities": [],
+            "candidate_count": 0,
+            "consumed": 0,
+            "results": [],
+        }
+
+    normalized_mode = normalize_mode(mode)
+    selected = [
+        capability
+        for capability in CAPABILITY_REGISTRY
+        if should_enhance({}, capability, normalized_mode)
+    ]
+    configured_budget = options.get("enhancement_budget", len(selected))
+    budget = configured_budget if isinstance(configured_budget, int) and not isinstance(configured_budget, bool) else -1
+    timeout = options.get("enhancement_timeout_seconds", 30.0)
+    timeout = float(timeout) if isinstance(timeout, (int, float)) and not isinstance(timeout, bool) else 30.0
+    adapter = options.get("enhancement_call")
+    executor = EnhancementExecutor()
+    candidates: list[Mapping[str, Any]] = []
+    records: list[dict[str, Any]] = []
+    consumed = 0
+
+    for capability in selected:
+        remaining = max(0, budget - consumed)
+        request = build_native_request(
+            capability,
+            source_ast,
+            budget=min(1, remaining),
+            timeout_seconds=timeout,
+            request_id=f"native-{source_ast['revision']}-{capability}",
+        )
+        result = executor.execute(request, call=adapter)
+        consumed += result.consumed
+        for candidate in result.candidates:
+            item = json.loads(json.dumps(candidate, ensure_ascii=False))
+            item["candidate_id"] = f"enhancement-{capability}-{item['candidate_id']}"
+            item["module_id"] = f"enhancement-{capability}"
+            candidates.append(item)
+        records.append(
+            {
+                "capability": capability,
+                "status": result.status,
+                "candidate_count": len(result.candidates),
+                "consumed": result.consumed,
+                "diagnostics": [dict(item) for item in result.diagnostics],
+                "request_summary": dict(result.request_summary),
+            }
+        )
+
+    statuses = {record["status"] for record in records}
+    if not selected:
+        status = "no_targets"
+    elif statuses == {"completed"}:
+        status = "completed"
+    elif "completed" in statuses:
+        status = "completed_with_warnings"
+    elif len(statuses) == 1:
+        status = next(iter(statuses))
+    else:
+        status = "failed"
+    return candidates, {
+        "status": status,
+        "mode": mode,
+        "requested_capabilities": selected,
+        "candidate_count": len(candidates),
+        "consumed": consumed,
+        "budget": {"limit": budget, "remaining": max(0, budget - consumed)},
+        "results": records,
+    }
 
 
 def _copy_refs(value: Any) -> list[dict[str, Any]]:

@@ -1287,7 +1287,9 @@ def _legacy_adapter_argv(args) -> list[str]:
 def _modular_native_v2_enabled(args) -> bool:
     """Select the native modular seam from explicit mode and source contracts."""
 
-    if args.llm_enhance != "off" or args.resume or args.generate_requests:
+    if args.resume or args.generate_requests:
+        return False
+    if args.llm_enhance != "off" and not args.llm_command:
         return False
     if args.input is None:
         return False
@@ -1556,7 +1558,20 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
         modular_output_path = args.output
         if modular_output_path is None and args.generate_requests is not None:
             modular_output_path = args.generate_requests / ".pending-output.docx"
+        if (
+            args.modular_profile == "native-v2"
+            and args.llm_enhance != "off"
+            and not args.llm_command
+            and modular_protocol_mode is None
+        ):
+            parser.error("native-v2 enhancement requires an explicit local --llm-command")
         native_v2 = _modular_native_v2_enabled(args)
+        enhancement_call = None
+        if native_v2 and args.llm_enhance != "off":
+            local_command = _llm_call_from_command(args.llm_command or "")
+            if local_command is not None:
+                def enhancement_call(payload, *, _local_command=local_command):
+                    return _local_command(json.dumps(payload, ensure_ascii=False))
         result = ConversionKernel(
             modular_runner=None if native_v2 else lambda request: _run_legacy_full_adapter(args, request),
         ).convert(
@@ -1574,6 +1589,7 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
                     "report_path": args.report,
                     "release": _os.environ.get("WX_DOC_FORMAT_RELEASE") == "1",
                     "profile": "native_v2" if native_v2 else None,
+                    "enhancement_call": enhancement_call,
                 },
             )
         )

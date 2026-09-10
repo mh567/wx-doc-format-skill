@@ -699,6 +699,7 @@ class ConversionKernel:
         """Translate the committed native artifacts into the RunResult contract."""
 
         candidates = list(context.require("candidate_set"))
+        enhancement = context.require("enhancement_result")
         decision_set = context.require("decision_set")
         list_candidates = list(context.require("list_semantics_candidates"))
         appendix_candidates = list(context.require("appendix_semantics_candidates"))
@@ -775,6 +776,7 @@ class ConversionKernel:
                 "source_facts_digest_after": source_facts_digest_after,
                 "source_facts_immutable": source_facts_immutable,
                 "decision_set": decision_set,
+                "enhancement": enhancement,
                 "decision_ledger_replay": ledger_replay,
                 "model_audit": model_findings,
                 "saved_output_audit": saved_findings,
@@ -879,6 +881,7 @@ class ConversionKernel:
                 "presentation_overrides": snapshot.presentation_overrides,
             },
             "decision_set": decision_set,
+            "enhancement": enhancement,
             "decision_ledger_replay": ledger_replay,
             "execution_plan": {
                 "profile": "wx_full_rules-native-v2",
