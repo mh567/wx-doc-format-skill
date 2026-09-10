@@ -1416,6 +1416,12 @@ def _run_legacy_full_adapter(args, request: ConversionRequest) -> RunResult:
 
 def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) -> None:
     global SKILL_VERSION
+    cli_arguments = list(sys.argv[1:] if argv is None else argv)
+    explicit_options = {
+        argument.split("=", 1)[0]
+        for argument in cli_arguments
+        if argument.startswith("--")
+    }
     parser = argparse.ArgumentParser(description="Convert MD or DOCX to template-formatted DOCX.")
     parser.add_argument("--version", action="store_true", help="Print the installed Skill version and exit.")
     parser.add_argument("--input", type=Path, help="Source file (optional when --resume is used)")
@@ -1486,7 +1492,7 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
             "the pipeline (enhance → validate → apply → render)."
         ),
     )
-    args = parser.parse_args(argv)
+    args = parser.parse_args(cli_arguments)
 
     SKILL_VERSION = _load_version()
     if args.version:
@@ -1533,53 +1539,56 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
             native_checkpoint = True
             run_info = raw_run_info
         run_args = run_info.get("configuration" if native_checkpoint else "args", {})
+        def restore_native(flag: str, *aliases: str) -> bool:
+            return not native_checkpoint or not explicit_options.intersection((flag, *aliases))
+
         # Only fill in input/output/template from run.json if the user
         # didn't provide them on the CLI (allows override).
-        if native_checkpoint and run_args.get("input"):
+        if native_checkpoint and restore_native("--input") and run_args.get("input"):
             args.input = Path(run_args["input"])
         elif not args.input and "input" in run_args:
             args.input = Path(run_args["input"])
-        if native_checkpoint and run_args.get("output"):
+        if native_checkpoint and restore_native("--output") and run_args.get("output"):
             args.output = Path(run_args["output"])
         elif not args.output and "output" in run_args:
             args.output = Path(run_args["output"])
-        if native_checkpoint and run_args.get("template"):
+        if native_checkpoint and restore_native("--template") and run_args.get("template"):
             args.template = Path(run_args["template"])
         elif not args.template and run_args.get("template"):
             args.template = Path(run_args["template"])
-        if native_checkpoint and run_args.get("report"):
+        if native_checkpoint and restore_native("--report") and run_args.get("report"):
             args.report = Path(run_args["report"])
         elif not args.report and run_args.get("report"):
             args.report = Path(run_args["report"])
-        if native_checkpoint and run_args.get("report_md"):
+        if native_checkpoint and restore_native("--report-md") and run_args.get("report_md"):
             args.report_md = Path(run_args["report_md"])
         elif not args.report_md and run_args.get("report_md"):
             args.report_md = Path(run_args["report_md"])
-        if native_checkpoint and run_args.get("ast"):
+        if native_checkpoint and restore_native("--ast") and run_args.get("ast"):
             args.ast = Path(run_args["ast"])
         elif not args.ast and run_args.get("ast"):
             args.ast = Path(run_args["ast"])
-        if native_checkpoint and run_args.get("source_ast"):
+        if native_checkpoint and restore_native("--source-ast") and run_args.get("source_ast"):
             args.source_ast = Path(run_args["source_ast"])
         elif not args.source_ast and run_args.get("source_ast"):
             args.source_ast = Path(run_args["source_ast"])
-        if "fail_on_risk" in run_args:
+        if "fail_on_risk" in run_args and restore_native("--fail-on-risk"):
             args.fail_on_risk = bool(run_args["fail_on_risk"])
-        if "llm_enhance" in run_args:
+        if "llm_enhance" in run_args and restore_native("--llm-enhance"):
             args.llm_enhance = run_args["llm_enhance"]
-        if "llm_hint" in run_args and run_args["llm_hint"]:
+        if "llm_hint" in run_args and run_args["llm_hint"] and restore_native("--llm-hint"):
             args.llm_hint = run_args["llm_hint"]
-        if "strict_normalize" in run_args:
+        if "strict_normalize" in run_args and restore_native("--strict-normalize", "--no-strict-normalize"):
             args.strict_normalize = run_args["strict_normalize"]
-        if "table_row_height_cm" in run_args:
+        if "table_row_height_cm" in run_args and restore_native("--table-row-height-cm"):
             args.table_row_height_cm = run_args["table_row_height_cm"]
-        if "table_row_height_rule" in run_args:
+        if "table_row_height_rule" in run_args and restore_native("--table-row-height-rule"):
             args.table_row_height_rule = run_args["table_row_height_rule"]
-        if "pipeline" in run_args:
+        if "pipeline" in run_args and restore_native("--pipeline"):
             args.pipeline = run_args["pipeline"]
-        if "modular_profile" in run_args:
+        if "modular_profile" in run_args and restore_native("--modular-profile"):
             args.modular_profile = run_args["modular_profile"]
-        if "list_policy" in run_args:
+        if "list_policy" in run_args and restore_native("--list-policy"):
             args.list_policy = run_args["list_policy"]
 
     if _os.environ.get("WX_DOC_FORMAT_RELEASE") == "1" and (args.ast or args.source_ast):
@@ -1599,7 +1608,7 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
     if args.pipeline == "legacy" and args.list_policy != "legacy":
         parser.error("legacy pipeline only accepts --list-policy legacy")
 
-    if args.pipeline == "modular":
+    if args.pipeline == "modular" or native_checkpoint:
         modular_protocol_mode = "resume" if args.resume else "generate_requests" if args.generate_requests else None
         modular_output_path = args.output
         if modular_output_path is None and args.generate_requests is not None:
@@ -1611,7 +1620,7 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
             and modular_protocol_mode is None
         ):
             parser.error("native-v2 enhancement requires an explicit local --llm-command")
-        native_v2 = _modular_native_v2_enabled(args)
+        native_v2 = native_checkpoint or _modular_native_v2_enabled(args)
         enhancement_call = None
         if native_v2 and args.llm_enhance != "off":
             local_command = _llm_call_from_command(args.llm_command or "")
@@ -1642,6 +1651,10 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
             })
         elif native_v2 and native_checkpoint:
             kernel_options["checkpoint_path"] = args.resume.resolve()
+            kernel_options["checkpoint_configuration"] = _native_checkpoint_configuration(
+                args,
+                output_path=modular_output_path,
+            )
         result = ConversionKernel(
             modular_runner=None if native_v2 else lambda request: _run_legacy_full_adapter(args, request),
         ).convert(

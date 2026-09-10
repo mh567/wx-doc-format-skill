@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
+import hashlib
+import json
 from typing import Any
 
 from .contracts import (
@@ -76,6 +78,11 @@ def _positive_int(value: Any, path: str, contract: str) -> None:
     _type(value, int, path, contract)
     if value < 1:
         _fail("non_positive_integer", path, "value must be positive", contract)
+
+
+def _canonical_digest(value: Any) -> str:
+    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return _HASH_PREFIX + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _sha256(value: Any, path: str, contract: str) -> None:
@@ -713,7 +720,47 @@ def validate_checkpoint(checkpoint: Mapping[str, Any]) -> None:
             _fail("invalid_revision", "decision_ledger", str(exc), contract)
     validate_ast(checkpoint["source_ast"])
     if checkpoint["normalized_ast"] is not None:
-        validate_ast(checkpoint["normalized_ast"])
+        normalized = _mapping(checkpoint["normalized_ast"], "normalized_ast", contract)
+        if normalized.get("schema_version") == AST_SCHEMA_VERSION and "document" in normalized:
+            validate_ast(normalized)
+        else:
+            fields = (
+                "schema_version",
+                "source_revision",
+                "source_ast",
+                "overlay",
+                "presentation_override",
+                "presentation",
+                "generated_nodes",
+                "template_preflight",
+                "diagnostics",
+                "semantic_digest",
+                "presentation_digest",
+                "context",
+            )
+            _require_fields(normalized, fields, "normalized_ast", contract)
+            if normalized["schema_version"] != "1.0":
+                _fail("unsupported_version", "normalized_ast.schema_version", "unsupported normalized snapshot version", contract)
+            _non_negative_int(normalized["source_revision"], "normalized_ast.source_revision", contract)
+            validate_ast(normalized["source_ast"])
+            if normalized["source_ast"]["revision"] != normalized["source_revision"]:
+                _fail("revision_mismatch", "normalized_ast.source_revision", "normalized source revision does not match its Source AST", contract)
+            for field in ("overlay", "presentation_override", "presentation", "template_preflight", "context"):
+                _mapping(normalized[field], f"normalized_ast.{field}", contract)
+            for field in ("generated_nodes", "diagnostics"):
+                _list(normalized[field], f"normalized_ast.{field}", contract)
+            _sha256(normalized["semantic_digest"], "normalized_ast.semantic_digest", contract)
+            _sha256(normalized["presentation_digest"], "normalized_ast.presentation_digest", contract)
+            expected_semantic = _canonical_digest({
+                "source_revision": normalized["source_revision"],
+                "source_ast": normalized["source_ast"],
+                "overlay": normalized["overlay"],
+            })
+            if normalized["semantic_digest"] != expected_semantic:
+                _fail("digest_mismatch", "normalized_ast.semantic_digest", "normalized semantic digest does not match its snapshot", contract)
+            expected_presentation = _canonical_digest(normalized["presentation"])
+            if normalized["presentation_digest"] != expected_presentation:
+                _fail("digest_mismatch", "normalized_ast.presentation_digest", "normalized presentation digest does not match its snapshot", contract)
     for field in ("content_overlay", "presentation_override", "modules", "requests", "responses"):
         _list(checkpoint[field], field, contract)
     applied_transactions = _list(checkpoint["applied_transactions"], "applied_transactions", contract)

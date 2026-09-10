@@ -271,6 +271,40 @@ def test_valid_contract_fixtures_pass_all_validators() -> None:
     assert validate_checkpoint(_valid_checkpoint()) is None
 
 
+def test_checkpoint_accepts_a_complete_normalized_snapshot_and_legacy_ast_shape() -> None:
+    from wxdf.normalization import normalize
+
+    normalized = normalize(
+        _valid_ast(),
+        {
+            "resolved_styles": {
+                "list_letter": "List Number",
+                "list_decimal": "List Number 2",
+                "list_dash": "List Bullet",
+                "list_bullet": "List Bullet 2",
+            },
+            "numbering_ids": {},
+        },
+        strategy="wx-default-v2",
+    )
+    checkpoint = _valid_checkpoint()
+    checkpoint["normalized_ast"] = normalized
+
+    assert validate_checkpoint(checkpoint) is None
+
+    checkpoint["normalized_ast"] = _valid_ast()
+    assert validate_checkpoint(checkpoint) is None
+
+    schema = json.loads((CONTRACT_DIR / "checkpoint.schema.json").read_text(encoding="utf-8"))
+    normalized_contract = schema["properties"]["normalized_ast"]
+    assert any(
+        candidate.get("properties", {}).get("schema_version", {}).get("const") == "1.0"
+        and "semantic_digest" in candidate.get("required", [])
+        and "presentation_digest" in candidate.get("required", [])
+        for candidate in normalized_contract["anyOf"]
+    )
+
+
 def test_source_facts_require_explicit_offset_units_and_source_refs() -> None:
     facts = _valid_source_facts()
     facts["units"]["u1"]["source_ref"]["span"]["unit"] = "twips"

@@ -252,7 +252,7 @@ def render(
     diagnostics: list[dict[str, Any]] = []
     paragraph_counter = 0
     table_counter = 0
-    initial_cell_paragraphs: set[int] = set()
+    initial_cell_paragraphs: set[Any] = set()
     pending_page_break = False
 
     def add_paragraph(
@@ -273,7 +273,7 @@ def render(
             except KeyError:
                 paragraph = doc.add_paragraph()
         else:
-            parent_key = id(parent._tc)
+            parent_key = parent._tc
             if parent_key not in initial_cell_paragraphs and parent.paragraphs:
                 paragraph = parent.paragraphs[0]
                 paragraph.clear()
@@ -343,7 +343,7 @@ def render(
             except (KeyError, ValueError):
                 pass
         if parent is not None:
-            initial_cell_paragraphs.add(id(parent._tc))
+            initial_cell_paragraphs.add(parent._tc)
         table_body_style = styles.get("table_body")
         if table_body_style and table_body_style in doc.styles:
             normalize_table(
@@ -397,7 +397,7 @@ def render(
             if parent is None:
                 paragraph = doc.add_paragraph()
             else:
-                parent_key = id(parent._tc)
+                parent_key = parent._tc
                 if parent_key not in initial_cell_paragraphs and parent.paragraphs:
                     paragraph = parent.paragraphs[0]
                     paragraph.clear()

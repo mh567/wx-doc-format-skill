@@ -573,6 +573,7 @@ class ConversionKernel:
         from .builtin_modules import (
             LedgerReplayBlocked,
             ModuleExecutionContext,
+            NativeEnhancementBlocked,
             NativeFileProtocolPause,
             UnresolvedDecisionError,
         )
@@ -648,12 +649,14 @@ class ConversionKernel:
                     "patch": "2.0",
                     "checkpoint": "2.0",
                 }
-                checkpoint, ready, response_map = prepare_native_resume(
+                checkpoint, ready, response_map, resume_options = prepare_native_resume(
                     options["checkpoint_path"],
                     source_path=request.input_path,
                     template_path=request.template_path,
                     contracts=contracts,
                     modules=self._native_checkpoint_modules(execution_plan),
+                    configuration=options.get("checkpoint_configuration") or {},
+                    source_store=store,
                 )
                 if not ready:
                     status = str(checkpoint["status"])
@@ -667,6 +670,7 @@ class ConversionKernel:
                             "checkpoint": str(options["checkpoint_path"]),
                         },
                     )
+                options.update(resume_options)
                 def replay_response(payload: Mapping[str, Any]) -> Mapping[str, Any]:
                     request_id = str(payload.get("request_id") or "")
                     if request_id not in response_map:
@@ -688,6 +692,13 @@ class ConversionKernel:
             result = self._native_v2_run_result(request, options, report, execution_plan, context, metrics)
             if checkpoint is not None and result.exit_code == 0:
                 committed = context.require("transaction_commit")
+                enhancement = context.require("enhancement_result")
+                applied_request_ids = {
+                    str(record.get("request_summary", {}).get("request_id"))
+                    for record in enhancement.get("results", [])
+                    if record.get("status") == "completed"
+                    and record.get("request_summary", {}).get("request_id")
+                }
                 complete_native_checkpoint(
                     options["checkpoint_path"],
                     checkpoint,
@@ -699,6 +710,7 @@ class ConversionKernel:
                     presentation_overrides=committed.snapshot.presentation_overrides,
                     transactions=committed.snapshot.transactions,
                     transaction_id=committed.transaction_id,
+                    applied_request_ids=applied_request_ids,
                 )
             return result
         except NativeFileProtocolPause:
@@ -734,6 +746,23 @@ class ConversionKernel:
                 exit_code=1,
                 report={**report, "status": "failed"},
                 diagnostics=[{"code": exc.code, "severity": "error", "message": str(exc)}],
+                metrics=metrics.snapshot(),
+            )
+        except NativeEnhancementBlocked as exc:
+            diagnostics = exc.diagnostics or [{
+                "code": "NATIVE_ENHANCEMENT_BLOCKED",
+                "severity": "error",
+                "message": str(exc),
+            }]
+            report.update({
+                "status": "failed",
+                "enhancement": exc.result,
+            })
+            return RunResult(
+                status="failed",
+                exit_code=1,
+                report=report,
+                diagnostics=diagnostics,
                 metrics=metrics.snapshot(),
             )
         except LedgerReplayBlocked as exc:

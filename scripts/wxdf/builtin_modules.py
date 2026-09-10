@@ -53,6 +53,21 @@ class NativeFileProtocolPause(RuntimeError):
         super().__init__("native file protocol is waiting for external responses")
 
 
+class NativeEnhancementBlocked(RuntimeError):
+    """Stop native execution when a requested enhancement was not validated."""
+
+    def __init__(self, result: Mapping[str, Any]) -> None:
+        self.result = dict(result)
+        self.diagnostics = [
+            dict(diagnostic)
+            for record in result.get("results", [])
+            if isinstance(record, Mapping)
+            for diagnostic in record.get("diagnostics", [])
+            if isinstance(diagnostic, Mapping)
+        ]
+        super().__init__("native enhancement response validation failed")
+
+
 @dataclass
 class ModuleExecutionContext:
     """Per-conversion capability bus shared by executable modules.
@@ -148,7 +163,12 @@ def _source_facts_summary(facts: Mapping[str, Any]) -> dict[str, Any]:
 def source_facts_module(*, native: bool = False) -> RegisteredModule:
     def execute(context: ModuleExecutionContext) -> dict[str, Any]:
         with context.stage("source"):
-            facts = parse(context.request.input_path, {"source_store": context.services.get("store")})
+            restored = (context.request.options or {}).get("restored_source_facts")
+            facts = (
+                json.loads(json.dumps(restored, ensure_ascii=False))
+                if isinstance(restored, Mapping)
+                else parse(context.request.input_path, {"source_store": context.services.get("store")})
+            )
             metrics = context.services.get("metrics")
             if metrics is not None:
                 metrics.record_source_opened()
@@ -704,7 +724,12 @@ def native_semantic_modules() -> tuple[RegisteredModule, ...]:
 def _native_source_ast(context: ModuleExecutionContext) -> dict[str, Any]:
     facts = context.require("source_facts")
     with context.stage("relation"):
-        ast = build_source_ast(facts)
+        restored = (context.request.options or {}).get("restored_source_ast")
+        ast = (
+            json.loads(json.dumps(restored, ensure_ascii=False))
+            if isinstance(restored, Mapping)
+            else build_source_ast(facts)
+        )
     context.provide("source_ast", ast)
     evidence = {
         "block_count": len(ast["document"]["blocks"]),
@@ -795,6 +820,13 @@ def _native_candidate_set(context: ModuleExecutionContext) -> list[Mapping[str, 
     }
     if options.get("protocol_mode") == "generate_requests":
         raise NativeFileProtocolPause()
+    blocking_results = [
+        record
+        for record in enhancement_result.get("results", [])
+        if record.get("status") != "completed"
+    ]
+    if blocking_results:
+        raise NativeEnhancementBlocked(enhancement_result)
     return candidates
 
 
@@ -927,9 +959,20 @@ def _native_transaction(context: ModuleExecutionContext) -> Any:
 
     source_ast = context.require("source_ast")
     decision_set = context.require("decision_set")
+    snapshot = make_snapshot(source_ast)
+    restored = (context.request.options or {}).get("restored_transaction_snapshot")
+    if isinstance(restored, Mapping):
+        snapshot.transactions = {
+            str(transaction_id): str(digest)
+            for transaction_id, digest in (restored.get("transactions") or {}).items()
+        }
+        snapshot.overlays = json.loads(json.dumps(restored.get("overlays") or {}, ensure_ascii=False))
+        snapshot.presentation_overrides = json.loads(
+            json.dumps(restored.get("presentation_overrides") or {}, ensure_ascii=False)
+        )
     with context.stage("transaction"):
         committed = apply_stage_batch(
-            make_snapshot(source_ast),
+            snapshot,
             decision_set["decisions"],
             expected_revision=source_ast["revision"],
         )
@@ -1195,6 +1238,7 @@ def native_stage_executors() -> dict[str, Callable[[ModuleExecutionContext], Any
 
 __all__ = [
     "LedgerReplayBlocked",
+    "NativeEnhancementBlocked",
     "NativeFileProtocolPause",
     "ModuleExecutionContext",
     "UnresolvedDecisionError",

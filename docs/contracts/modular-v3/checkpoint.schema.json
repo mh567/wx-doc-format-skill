@@ -25,7 +25,34 @@
     "source_facts": {"type": "object"},
     "decision_ledger": {"type": "object"},
     "source_ast": {"type": "object"},
-    "normalized_ast": {"type": ["object", "null"]},
+    "normalized_ast": {
+      "anyOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "required": ["schema_version", "revision", "document"],
+          "properties": {"schema_version": {"const": "2.0"}}
+        },
+        {
+          "type": "object",
+          "required": ["schema_version", "source_revision", "source_ast", "overlay", "presentation_override", "presentation", "generated_nodes", "template_preflight", "diagnostics", "semantic_digest", "presentation_digest", "context"],
+          "properties": {
+            "schema_version": {"const": "1.0"},
+            "source_revision": {"type": "integer", "minimum": 0},
+            "source_ast": {"type": "object"},
+            "overlay": {"type": "object"},
+            "presentation_override": {"type": "object"},
+            "presentation": {"type": "object"},
+            "generated_nodes": {"type": "array"},
+            "template_preflight": {"type": "object"},
+            "diagnostics": {"type": "array"},
+            "semantic_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+            "presentation_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+            "context": {"type": "object"}
+          }
+        }
+      ]
+    },
     "content_overlay": {"type": "array"},
     "presentation_override": {"type": "array"},
     "target_map": {"type": "object", "required": ["revision", "entries", "view_sha256"]},

@@ -95,6 +95,39 @@ def overlay_entries(values: Mapping[str, Mapping[str, Any]]) -> list[dict[str, A
     return entries
 
 
+def _resource_entries(source_facts: Mapping[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {"id": str(resource_id), **copy.deepcopy(dict(resource))}
+        for resource_id, resource in sorted(source_facts.get("resources", {}).items())
+        if isinstance(resource, Mapping)
+    ]
+
+
+def _read_json_lines(path: Path, *, kind: str) -> list[dict[str, Any]]:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise CheckpointError(f"cannot read native {kind} file: {path}", code="checkpoint_read_failed") from exc
+    values: list[dict[str, Any]] = []
+    for line_number, line in enumerate(lines, 1):
+        if not line.strip():
+            continue
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise CheckpointError(
+                f"invalid native {kind} JSON at line {line_number}",
+                code=f"invalid_{kind}",
+            ) from exc
+        if not isinstance(value, dict):
+            raise CheckpointError(
+                f"native {kind} at line {line_number} must be an object",
+                code=f"invalid_{kind}",
+            )
+        values.append(value)
+    return values
+
+
 def write_native_waiting_checkpoint(
     *,
     checkpoint_path: Path | str,
@@ -135,11 +168,7 @@ def write_native_waiting_checkpoint(
         "checkpoint": "2.0",
     }
     source_sha256 = str(source_facts["source"]["content_sha256"])
-    resources = [
-        {"id": str(resource_id), **copy.deepcopy(dict(resource))}
-        for resource_id, resource in sorted(source_facts.get("resources", {}).items())
-        if isinstance(resource, Mapping)
-    ]
+    resources = _resource_entries(source_facts)
     fingerprints = {
         "source": source_sha256,
         "template": file_digest(template_path),
@@ -149,6 +178,7 @@ def write_native_waiting_checkpoint(
         "modules": _digest(modules),
         "parser": _digest(source_facts.get("parser", {})),
         "protocol": "2.0",
+        "requests": file_digest(requests_path),
     }
     candidate_baseline_id = _digest({
         "source_ast": source_ast,
@@ -204,40 +234,46 @@ def prepare_native_resume(
     template_path: Path | str | None,
     contracts: Mapping[str, str],
     modules: list[dict[str, Any]],
-) -> tuple[dict[str, Any], bool, dict[str, dict[str, Any]]]:
+    configuration: Mapping[str, Any],
+    source_store: Any,
+) -> tuple[dict[str, Any], bool, dict[str, dict[str, Any]], dict[str, Any]]:
     """Validate identities and commit external responses before execution."""
 
     checkpoint_path = _path(checkpoint_path)
     checkpoint = load_checkpoint(checkpoint_path)
+    request_path = Path(checkpoint["files"]["requests_path"])
+    from .parsers import parse
+
+    current_source_facts = parse(source_path, {"source_store": source_store})
     checkpoint = load_checkpoint(
         checkpoint_path,
         expected_fingerprints={
-            "source": file_digest(source_path),
+            "source": current_source_facts["source"]["content_sha256"],
             "template": file_digest(template_path),
-            "configuration": _digest(checkpoint.get("configuration", {})),
+            "configuration": _digest(configuration),
             "contracts": _digest(contracts),
             "modules": _digest(modules),
+            "parser": _digest(current_source_facts.get("parser", {})),
+            "resources": _digest(_resource_entries(current_source_facts)),
+            "requests": file_digest(request_path),
         },
     )
+    if _digest(current_source_facts) != _digest(checkpoint["source_facts"]):
+        raise CheckpointError("current SourceFacts do not match the checkpoint", code="fingerprint_mismatch")
+    on_disk_requests = _read_json_lines(request_path, kind="request")
+    if on_disk_requests != checkpoint["requests"]:
+        raise CheckpointError("native request file does not match the checkpoint", code="request_identity_conflict")
+    if checkpoint["status"] not in {"completed", "completed_with_warnings"}:
+        for request in on_disk_requests:
+            items = request.get("items")
+            if not isinstance(items, list) or len(items) != 1 or not isinstance(items[0], Mapping):
+                raise CheckpointError("native request has an invalid source view", code="invalid_request")
+            if items[0].get("source_ast") != checkpoint["source_ast"]:
+                raise CheckpointError("native request Source AST does not match the checkpoint", code="request_identity_conflict")
+            if request.get("view_sha256") != _digest(checkpoint["source_ast"]):
+                raise CheckpointError("native request view digest does not match the checkpoint", code="request_identity_conflict")
     response_path = Path(checkpoint["files"]["responses_path"])
-    responses: list[dict[str, Any]] = []
-    if response_path.is_file():
-        for line_number, line in enumerate(response_path.read_text(encoding="utf-8").splitlines(), 1):
-            if not line.strip():
-                continue
-            try:
-                response = json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise CheckpointError(
-                    f"invalid native response JSON at line {line_number}",
-                    code="invalid_response",
-                ) from exc
-            if not isinstance(response, dict):
-                raise CheckpointError(
-                    f"native response at line {line_number} must be an object",
-                    code="invalid_response",
-                )
-            responses.append(response)
+    responses = _read_json_lines(response_path, kind="response") if response_path.is_file() else []
     recorded = checkpoint
     for response in responses:
         recorded, _outcome = record_response(recorded, response)
@@ -251,8 +287,19 @@ def prepare_native_resume(
         }
         for item in recorded["responses"]
     }
+    resume_options = {
+        "restored_source_facts": copy.deepcopy(current_source_facts),
+        "restored_source_ast": copy.deepcopy(recorded["source_ast"]),
+        "decision_ledger": copy.deepcopy(recorded["decision_ledger"]),
+        "checkpoint_resume_stage": recorded["resume_stage"],
+        "restored_transaction_snapshot": {
+            "transactions": _checkpoint_transactions(recorded),
+            "overlays": _entries_to_overlay(recorded.get("content_overlay")),
+            "presentation_overrides": _entries_to_overlay(recorded.get("presentation_override")),
+        },
+    }
     if checkpoint["status"] in {"completed", "completed_with_warnings"}:
-        return recorded, False, response_map
+        return recorded, False, response_map, resume_options
     required_ids = {
         str(item["request_id"])
         for item in recorded["requests"]
@@ -261,7 +308,7 @@ def prepare_native_resume(
     ready = bool(required_ids) and set(response_map) == required_ids
     if ready:
         save_checkpoint(recorded, checkpoint_path)
-    return recorded, ready, response_map
+    return recorded, ready, response_map, resume_options
 
 
 def complete_native_checkpoint(
@@ -276,6 +323,7 @@ def complete_native_checkpoint(
     presentation_overrides: Mapping[str, Mapping[str, Any]],
     transactions: Mapping[str, str],
     transaction_id: str,
+    applied_request_ids: set[str],
 ) -> dict[str, Any]:
     """Persist the completed semantic, presentation and transaction snapshot."""
 
@@ -292,16 +340,26 @@ def complete_native_checkpoint(
     ]
     transaction_digest = transaction_digests.get(transaction_id)
     for response in completed["responses"]:
-        response["applied"] = True
-        response["apply_started"] = False
-        response["transaction_id"] = transaction_id
-        response["transaction_content_sha256"] = transaction_digest
+        if response.get("request_id") in applied_request_ids:
+            response["applied"] = True
+            response["apply_started"] = False
+            response["transaction_id"] = transaction_id
+            response["transaction_content_sha256"] = transaction_digest
+    fresh_decisions = [
+        decision
+        for decision in decision_set.get("decisions", [])
+        if not decision.get("revision_id")
+    ]
+    accepted_decision_set = {
+        **dict(decision_set),
+        "decisions": fresh_decisions,
+    }
     completed.update({
         "status": status,
         "resume_stage": None,
         "source_ast": copy.deepcopy(dict(source_ast)),
-        "normalized_ast": copy.deepcopy(dict(source_ast)),
-        "decision_ledger": accept_decisions(completed["decision_ledger"], decision_set),
+        "normalized_ast": copy.deepcopy(dict(normalized)),
+        "decision_ledger": accept_decisions(completed["decision_ledger"], accepted_decision_set),
         "content_overlay": overlay_entries(overlays),
         "presentation_override": overlay_entries(presentation_overrides),
         "target_map": checkpoint_target_map(source_ast),
@@ -342,6 +400,19 @@ def _validate_embedded_fingerprints(checkpoint: Mapping[str, Any]) -> None:
                     f"checkpoint {field} identity does not match its fingerprint",
                     code="fingerprint_mismatch",
                 )
+    if "configuration" in checkpoint:
+        source_facts = checkpoint.get("source_facts")
+        if isinstance(source_facts, Mapping):
+            embedded = {
+                "parser": source_facts.get("parser", {}),
+                "resources": _resource_entries(source_facts),
+            }
+            for fingerprint, value in embedded.items():
+                if fingerprint in fingerprints and fingerprints[fingerprint] != _digest(value):
+                    raise CheckpointError(
+                        f"checkpoint {fingerprint} identity does not match its fingerprint",
+                        code="fingerprint_mismatch",
+                    )
     seen_requests: set[str] = set()
     for request in checkpoint.get("requests", []):
         if not isinstance(request, Mapping):
