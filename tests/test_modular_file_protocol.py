@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import copy
 import base64
-import fcntl
 import hashlib
 import json
 import os
@@ -14,6 +13,11 @@ from xml.etree import ElementTree
 from zipfile import ZipFile
 
 import pytest
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -52,6 +56,29 @@ def _run(*arguments: str | Path) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         text=True,
     )
+
+
+def test_run_store_import_survives_without_fcntl_module() -> None:
+    script = """
+import builtins
+real_import = builtins.__import__
+def guarded_import(name, *args, **kwargs):
+    if name == 'fcntl':
+        raise ImportError('fcntl unavailable')
+    return real_import(name, *args, **kwargs)
+builtins.__import__ = guarded_import
+import wxdf.run_store
+"""
+
+    completed = subprocess.run(
+        [str(PYTHON), "-c", script],
+        cwd=ROOT,
+        env=_environment(),
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
 
 
 def _docx_content_digest(path: Path) -> str:
@@ -446,6 +473,7 @@ def test_later_request_append_recovers_request_file_after_injected_process_crash
     assert not journal_path.exists()
 
 
+@pytest.mark.skipif(fcntl is None, reason="POSIX lock probe")
 def test_later_request_append_recovers_checkpoint_commit_before_append_journal(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -482,6 +510,24 @@ def test_later_request_append_recovers_checkpoint_commit_before_append_journal(
     with pytest.raises(SystemExit, match="append checkpoint interruption"):
         append_native_waiting_requests(checkpoint_path, checkpoint, [extra_request])
     monkeypatch.setattr(publication.os, "replace", real_replace)
+    lock_path = checkpoint_path.with_name(
+        checkpoint_path.name + ".request-append.lock"
+    )
+    observed: list[str] = []
+
+    def inspect_recovery_lock(source: Path | str, target: Path | str) -> None:
+        if Path(target) == checkpoint_path and ".rollback-" in Path(source).name:
+            with lock_path.open("a+b") as contender:
+                try:
+                    fcntl.flock(contender.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    observed.append("blocked")
+                else:
+                    observed.append("acquired")
+                    fcntl.flock(contender.fileno(), fcntl.LOCK_UN)
+        real_replace(source, target)
+
+    monkeypatch.setattr(publication.os, "replace", inspect_recovery_lock)
 
     recovered_checkpoint, ready, _responses, _options = prepare_native_resume(
         checkpoint_path,
@@ -497,8 +543,148 @@ def test_later_request_append_recovers_checkpoint_commit_before_append_journal(
     assert recovered_checkpoint["status"] == "waiting_external"
     assert checkpoint_path.read_bytes() == checkpoint_bytes
     assert _read_requests(checkpoint_path) == original_requests
+    assert observed == ["blocked"]
     assert not append_journal.exists()
     assert not list(checkpoint_path.parent.glob(".wxdf-publication-*.journal"))
+
+
+def test_terminal_checkpoint_and_formal_artifacts_recover_as_one_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from wxdf import publication
+
+    checkpoint_path, output, source_ast_path = _generate(tmp_path)
+    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    report_path = Path(checkpoint["configuration"]["report"])
+    before = {
+        path: path.read_bytes() if path.is_file() else None
+        for path in (output, source_ast_path, report_path)
+    }
+    requests = _read_requests(checkpoint_path)
+    _write_responses(checkpoint_path, [_response(request) for request in requests])
+    real_replace = publication.os.replace
+    interrupted = False
+
+    def interrupt_after_checkpoint_install(source: Path | str, target: Path | str) -> None:
+        nonlocal interrupted
+        real_replace(source, target)
+        if (
+            not interrupted
+            and Path(target) == checkpoint_path
+            and ".staging-" in Path(source).name
+            and output.is_file()
+        ):
+            interrupted = True
+            raise SystemExit("injected terminal generation interruption")
+
+    monkeypatch.setattr(publication.os, "replace", interrupt_after_checkpoint_install)
+    with pytest.raises(SystemExit, match="terminal generation interruption"):
+        _direct_resume_after_prepare(checkpoint_path, monkeypatch, lambda: None)
+    monkeypatch.setattr(publication.os, "replace", real_replace)
+
+    recovered, ready, _responses, _options = prepare_native_resume(
+        checkpoint_path,
+        source_path=SOURCE,
+        template_path=TEMPLATE,
+        contracts=checkpoint["contracts"],
+        modules=checkpoint["modules"],
+        configuration=checkpoint["configuration"],
+        source_store=SourceStore(),
+    )
+
+    assert ready is True
+    assert recovered["status"] == "waiting_external"
+    for path, expected in before.items():
+        assert (path.read_bytes() if path.is_file() else None) == expected
+    assert not list(tmp_path.rglob(".wxdf-publication-*.journal"))
+
+
+def test_native_cli_preserves_kernel_published_terminal_report(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import main as cli_main
+    from wxdf.kernel import RunResult
+
+    source = tmp_path / "source.md"
+    source.write_text("# Heading\n", encoding="utf-8")
+    output = tmp_path / "output.docx"
+    report = tmp_path / "report.json"
+
+    class KernelThatPublishesReport:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def convert(self, _request) -> RunResult:
+            report.write_bytes(b"kernel-terminal-generation")
+            return RunResult(
+                status="completed",
+                exit_code=0,
+                report={"status": "completed"},
+                artifacts={"report": str(report)},
+            )
+
+    monkeypatch.setattr(cli_main, "ConversionKernel", KernelThatPublishesReport)
+
+    with pytest.raises(SystemExit) as stopped:
+        cli_main.main([
+            "--input", str(source),
+            "--output", str(output),
+            "--pipeline", "modular",
+            "--modular-profile", "native-v2",
+            "--list-policy", "wx-default-v2",
+            "--report", str(report),
+        ])
+
+    assert stopped.value.code == 0
+    assert report.read_bytes() == b"kernel-terminal-generation"
+
+
+def test_native_cli_supplies_release_report_transform_to_kernel(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import main as cli_main
+    from wxdf.kernel import RunResult
+
+    source = tmp_path / "source.md"
+    source.write_text("# Heading\n", encoding="utf-8")
+    output = tmp_path / "output.docx"
+    report = tmp_path / "report.json"
+
+    class KernelThatUsesReportTransform:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def convert(self, request) -> RunResult:
+            transform = request.options["report_transform"]
+            report.write_text(json.dumps(transform({
+                "status": "completed",
+                "review_packet": {"private": True},
+            })), encoding="utf-8")
+            return RunResult(
+                status="completed",
+                exit_code=0,
+                report={"status": "completed"},
+                artifacts={"report": str(report)},
+            )
+
+    monkeypatch.setattr(cli_main, "ConversionKernel", KernelThatUsesReportTransform)
+    monkeypatch.setenv("WX_DOC_FORMAT_RELEASE", "1")
+
+    with pytest.raises(SystemExit) as stopped:
+        cli_main.main([
+            "--input", str(source),
+            "--output", str(output),
+            "--pipeline", "modular",
+            "--modular-profile", "native-v2",
+            "--list-policy", "wx-default-v2",
+            "--report", str(report),
+        ])
+
+    assert stopped.value.code == 0
+    assert json.loads(report.read_text(encoding="utf-8")) == {"status": "completed"}
 
 
 def test_later_request_append_detects_change_immediately_before_replace(
@@ -541,6 +727,7 @@ def test_later_request_append_detects_change_immediately_before_replace(
     assert not journal_path.exists()
 
 
+@pytest.mark.skipif(fcntl is None, reason="POSIX lock probe")
 def test_later_request_append_holds_exclusive_lock_through_final_replace(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1386,6 +1573,32 @@ def test_terminal_resume_recomputes_transaction_digest_from_ledger_revision_cont
     assert output.read_bytes() == before_output
 
 
+def test_terminal_resume_rejects_active_revision_status_tampering(
+    tmp_path: Path,
+) -> None:
+    checkpoint_path, output = _complete_force_a_checkpoint(tmp_path)
+    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    revision = next(
+        item
+        for item in checkpoint["decision_ledger"]["revisions"]
+        if item["status"] == "active"
+    )
+    revision["status"] = "invalidated"
+    checkpoint_path.write_text(
+        json.dumps(checkpoint, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    before_checkpoint = checkpoint_path.read_bytes()
+    before_output = output.read_bytes()
+
+    resumed = _run("--resume", checkpoint_path)
+
+    assert resumed.returncode != 0
+    assert "transaction_state_mismatch" in resumed.stderr
+    assert checkpoint_path.read_bytes() == before_checkpoint
+    assert output.read_bytes() == before_output
+
+
 def test_terminal_resume_migrates_valid_legacy_t04_transaction_proofs(
     tmp_path: Path,
 ) -> None:
@@ -1449,6 +1662,63 @@ def test_terminal_resume_migrates_valid_legacy_t04_transaction_proofs(
         binding["transaction_id"]: binding["transaction_content_sha256"]
         for binding in migrated["response_transaction_bindings"].values()
     } == migrated["transaction_content_digests"]
+
+
+def test_terminal_resume_rejects_legacy_proof_when_ledger_replay_differs_from_ast(
+    tmp_path: Path,
+) -> None:
+    checkpoint_path, output = _complete_force_a_checkpoint(tmp_path)
+    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    checkpoint.pop("transaction_digest_version", None)
+    revisions_by_transaction: dict[str, list[dict]] = {}
+    for revision in checkpoint["decision_ledger"]["revisions"]:
+        revisions_by_transaction.setdefault(revision["transaction_id"], []).append(revision)
+    legacy_stage_digests = {
+        transaction_id: "sha256:" + hashlib.sha256(
+            ("legacy-stage:" + transaction_id).encode("utf-8")
+        ).hexdigest()
+        for transaction_id in revisions_by_transaction
+    }
+    for transaction_id, revisions in revisions_by_transaction.items():
+        legacy_ledger_digest = _legacy_ledger_transaction_digest(revisions)
+        for revision in revisions:
+            revision["transaction_content_sha256"] = legacy_ledger_digest
+    checkpoint["transaction_content_digests"] = copy.deepcopy(legacy_stage_digests)
+    checkpoint["applied_transactions"] = [
+        {"transaction_id": transaction_id, "content_sha256": digest}
+        for transaction_id, digest in sorted(legacy_stage_digests.items())
+    ]
+    bindings = {}
+    for response in checkpoint["responses"]:
+        transaction_id = response["transaction_id"]
+        digest = legacy_stage_digests[transaction_id]
+        response["transaction_content_sha256"] = digest
+        binding = {
+            "request_id": response["request_id"],
+            "response_sha256": response["response_sha256"],
+            "transaction_id": transaction_id,
+            "transaction_content_sha256": digest,
+        }
+        bindings[response["request_id"]] = {
+            **binding,
+            "binding_sha256": _binding_digest(binding),
+        }
+    checkpoint["response_transaction_bindings"] = bindings
+    paragraph = next(iter(checkpoint["source_ast"]["document"]["blocks"].values()))
+    paragraph["role"] = "note"
+    checkpoint_path.write_text(
+        json.dumps(checkpoint, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    before_checkpoint = checkpoint_path.read_bytes()
+    before_output = output.read_bytes()
+
+    resumed = _run("--resume", checkpoint_path)
+
+    assert resumed.returncode != 0
+    assert "resume_snapshot_mismatch" in resumed.stderr
+    assert checkpoint_path.read_bytes() == before_checkpoint
+    assert output.read_bytes() == before_output
 
 
 def test_native_resume_rejects_unknown_transaction_digest_version(tmp_path: Path) -> None:

@@ -73,6 +73,7 @@ def _canonical_decision_content(decision: Mapping[str, Any]) -> dict[str, Any]:
         "preconditions": copy.deepcopy(list(decision.get("preconditions") or [])),
         "evidence": copy.deepcopy(list(decision.get("evidence") or [])),
         "supersedes": copy.deepcopy(list(decision.get("supersedes") or [])),
+        "status": str(decision.get("status") or "active"),
     }
 
 

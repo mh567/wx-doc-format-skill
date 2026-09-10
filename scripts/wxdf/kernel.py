@@ -569,8 +569,13 @@ class ConversionKernel:
         )
         from .publication import PublicationError, recover_pending_publications
 
+        recovery_targets = [request.output_path]
+        for key in ("source_ast_path", "normalized_ast_path", "report_path", "checkpoint_path"):
+            value = options.get(key)
+            if value is not None:
+                recovery_targets.append(Path(value))
         try:
-            recover_pending_publications(request.output_path)
+            recover_pending_publications(recovery_targets)
         except PublicationError as exc:
             return RunResult(
                 status="failed",
@@ -781,7 +786,7 @@ class ConversionKernel:
                             *review_decision_set.get("unresolved", []),
                         ],
                     }
-                complete_native_checkpoint(
+                completed_checkpoint = complete_native_checkpoint(
                     options["checkpoint_path"],
                     checkpoint,
                     status=result.status,
@@ -803,7 +808,53 @@ class ConversionKernel:
                         if terminal_review_rollback
                         else None
                     ),
+                    persist=False,
                 )
+                publication_payloads = (
+                    dict(context.require("pending_publication_payloads"))
+                    if result.exit_code == 0
+                    else {}
+                )
+                report_path = options.get("report_path")
+                if result.exit_code != 0 and report_path is not None:
+                    report_path = Path(report_path)
+                    result.artifacts["report"] = str(report_path)
+                    result.report["artifacts"] = dict(result.artifacts)
+                    report_payload = result.as_report()
+                    report_transform = options.get("report_transform")
+                    if callable(report_transform):
+                        report_payload = report_transform(report_payload)
+                    publication_payloads[report_path] = json.dumps(
+                        report_payload,
+                        ensure_ascii=False,
+                        indent=2,
+                    ).encode("utf-8")
+                publication_payloads[Path(options["checkpoint_path"])] = (
+                    json.dumps(
+                        completed_checkpoint,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ) + "\n"
+                ).encode("utf-8")
+                try:
+                    from .publication import publish_files_atomically
+
+                    publish_files_atomically(publication_payloads)
+                except (OSError, PublicationError) as exc:
+                    diagnostic = {
+                        "code": "PUBLICATION_FAILED",
+                        "severity": "error",
+                        "message": str(exc),
+                    }
+                    return RunResult(
+                        status="failed",
+                        exit_code=1,
+                        report={**result.report, "status": "failed"},
+                        artifacts={},
+                        diagnostics=[*result.diagnostics, diagnostic],
+                        metrics=result.metrics,
+                    )
             return result
         except NativeFileProtocolPause:
             pending_requests = list(options.get("enhancement_request_sink") or [])
@@ -1208,13 +1259,19 @@ class ConversionKernel:
                     indent=2,
                 ).encode("utf-8")
                 artifacts[artifact_key] = str(path)
-        report["artifacts"] = artifacts
-        result = RunResult(status=status, exit_code=0, report=report, artifacts=artifacts, diagnostics=diagnostics, metrics=metrics.snapshot())
         report_path = options.get("report_path")
         if report_path is not None:
             report_path = Path(report_path)
+            artifacts["report"] = str(report_path)
+        report["artifacts"] = artifacts
+        result = RunResult(status=status, exit_code=0, report=report, artifacts=artifacts, diagnostics=diagnostics, metrics=metrics.snapshot())
+        if report_path is not None:
+            report_payload = result.as_report()
+            report_transform = options.get("report_transform")
+            if callable(report_transform):
+                report_payload = report_transform(report_payload)
             publication_payloads[report_path] = json.dumps(
-                result.as_report(),
+                report_payload,
                 ensure_ascii=False,
                 indent=2,
             ).encode("utf-8")
@@ -1222,6 +1279,9 @@ class ConversionKernel:
             from .publication import PublicationError, publish_files_atomically
 
             publication_payloads[request.output_path] = Path(published).read_bytes()
+            if options.get("protocol_mode") == "resume" and options.get("checkpoint_path") is not None:
+                context.provide("pending_publication_payloads", publication_payloads)
+                return result
             publish_files_atomically(publication_payloads)
         except (OSError, PublicationError) as exc:
             diagnostic = {

@@ -5,10 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import uuid
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 
 class PublicationError(RuntimeError):
@@ -17,6 +18,8 @@ class PublicationError(RuntimeError):
 
 _JOURNAL_SCHEMA_VERSION = "1.0"
 _JOURNAL_PATTERN = ".wxdf-publication-*.journal"
+_RESERVED_BUNDLE_NAMES = {"manifest.json", "COMMITTED"}
+_TRANSACTION_ID_PATTERN = re.compile(r"[0-9a-f]{32}")
 
 
 def validate_acceptance(acceptance: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -72,17 +75,78 @@ def _cleanup_transaction(journal: Mapping[str, Any]) -> None:
             Path(raw_path).unlink(missing_ok=True)
 
 
-def _recover_journal(journal_path: Path) -> str:
+def _validate_journal_paths(
+    journal: Mapping[str, Any],
+    journal_path: Path,
+    trusted_targets: set[Path],
+) -> dict[str, Any]:
+    trusted_roots = {target.parent for target in trusted_targets}
+    if journal.get("schema_version") != _JOURNAL_SCHEMA_VERSION:
+        raise ValueError("unsupported publication journal version")
+    transaction_id = journal.get("transaction_id")
+    if not isinstance(transaction_id, str) or _TRANSACTION_ID_PATTERN.fullmatch(transaction_id) is None:
+        raise ValueError("publication journal transaction ID is invalid")
+    expected_name = f".wxdf-publication-{transaction_id}.journal"
+    discovered = journal_path.resolve()
+    if discovered.name != expected_name or discovered.parent not in trusted_roots:
+        raise ValueError("publication journal is outside a trusted publication root")
+    raw_entries = journal.get("entries")
+    if not isinstance(raw_entries, list) or not raw_entries:
+        raise ValueError("publication journal has no entries")
+    entries: list[dict[str, Any]] = []
+    entry_roots: set[Path] = set()
+    for raw_entry in raw_entries:
+        if not isinstance(raw_entry, Mapping):
+            raise ValueError("publication journal entry is invalid")
+        target = Path(str(raw_entry.get("target") or ""))
+        if not target.is_absolute() or target != target.resolve() or target not in trusted_targets:
+            raise ValueError(
+                "publication target is not a trusted publication target or is outside a trusted publication root"
+            )
+        expected_staged = target.with_name(f".{target.name}.staging-{transaction_id}")
+        expected_backup = target.with_name(f".{target.name}.rollback-{transaction_id}")
+        if Path(str(raw_entry.get("staged") or "")) != expected_staged:
+            raise ValueError("publication staged path does not match its transaction")
+        if Path(str(raw_entry.get("backup") or "")) != expected_backup:
+            raise ValueError("publication backup path does not match its transaction")
+        entries.append({
+            "target": str(target),
+            "staged": str(expected_staged),
+            "backup": str(expected_backup),
+            "had_original": raw_entry.get("had_original") is True,
+        })
+        entry_roots.add(target.parent)
+    expected_journal_paths = [
+        root / expected_name
+        for root in sorted(entry_roots, key=str)
+    ]
+    raw_journal_paths = journal.get("journal_paths")
+    if not isinstance(raw_journal_paths, list) or [Path(str(path)) for path in raw_journal_paths] != expected_journal_paths:
+        raise ValueError("publication journal copies do not match trusted roots")
+    if discovered not in expected_journal_paths:
+        raise ValueError("publication journal is outside a trusted publication root")
+    state = journal.get("state")
+    if state not in {"prepared", "committed"}:
+        raise ValueError("publication journal state is invalid")
+    return {
+        "schema_version": _JOURNAL_SCHEMA_VERSION,
+        "transaction_id": transaction_id,
+        "state": state,
+        "entries": entries,
+        "journal_paths": [str(path) for path in expected_journal_paths],
+    }
+
+
+def _recover_journal(journal_path: Path, trusted_targets: set[Path]) -> str:
+    trusted_roots = {target.parent for target in trusted_targets}
     try:
-        journal = json.loads(journal_path.read_text(encoding="utf-8"))
-        if journal.get("schema_version") != _JOURNAL_SCHEMA_VERSION:
-            raise ValueError("unsupported publication journal version")
-        entries = journal.get("entries")
-        if not isinstance(entries, list) or not entries:
-            raise ValueError("publication journal has no entries")
+        journal = _validate_journal_paths(
+            json.loads(journal_path.read_text(encoding="utf-8")),
+            journal_path,
+            trusted_targets,
+        )
+        entries = journal["entries"]
         state = journal.get("state")
-        if state not in {"prepared", "committed"}:
-            raise ValueError("publication journal state is invalid")
         journal_identity = {
             "schema_version": journal.get("schema_version"),
             "transaction_id": journal.get("transaction_id"),
@@ -93,7 +157,11 @@ def _recover_journal(journal_path: Path) -> str:
             copy_path = Path(raw_path)
             if not copy_path.is_file():
                 continue
-            journal_copy = json.loads(copy_path.read_text(encoding="utf-8"))
+            journal_copy = _validate_journal_paths(
+                json.loads(copy_path.read_text(encoding="utf-8")),
+                copy_path,
+                trusted_targets,
+            )
             copy_identity = {
                 "schema_version": journal_copy.get("schema_version"),
                 "transaction_id": journal_copy.get("transaction_id"),
@@ -132,14 +200,35 @@ def _recover_journal(journal_path: Path) -> str:
         raise PublicationError(f"publication recovery failed: {exc}") from exc
 
 
-def recover_pending_publications(path: Path | str) -> dict[str, Any]:
-    """Recover interrupted publication transactions adjacent to one target."""
+def recover_pending_publications(
+    path: Path | str | Iterable[Path | str],
+) -> dict[str, Any]:
+    """Recover interrupted transactions only within caller-trusted roots."""
 
-    target = Path(path)
+    if isinstance(path, (Path, str)):
+        targets = [Path(path)]
+    else:
+        targets = [Path(item) for item in path]
+    if not targets:
+        raise PublicationError("publication recovery requires a trusted target")
+    trusted_targets = {target.resolve() for target in targets}
+    trusted_roots = {target.parent for target in trusted_targets}
     statuses: list[str] = []
-    for journal_path in sorted(target.parent.glob(_JOURNAL_PATTERN)):
+    journal_paths = sorted({
+        journal_path
+        for root in trusted_roots
+        for journal_path in root.glob(_JOURNAL_PATTERN)
+    }, key=str)
+    for journal_path in journal_paths:
         if journal_path.exists():
-            statuses.append(_recover_journal(journal_path))
+            statuses.append(_recover_journal(journal_path, trusted_targets))
+    for target in targets:
+        prefix = f".{target.name}.staging-"
+        for candidate in target.parent.glob(prefix + "*"):
+            transaction_id = candidate.name.removeprefix(prefix)
+            if _TRANSACTION_ID_PATTERN.fullmatch(transaction_id) is not None:
+                _remove_path(candidate)
+    target = targets[0]
     if "recovered" in statuses:
         return {"status": "recovered", "target": str(target)}
     if statuses:
@@ -193,7 +282,10 @@ def _commit_staged_paths(
         _write_journal_copies(journal)
     except Exception as exc:
         try:
-            _recover_journal(journal_paths[0])
+            _recover_journal(
+                journal_paths[0],
+                {target.resolve() for target in targets},
+            )
         except PublicationError as rollback_exc:
             raise PublicationError(
                 f"atomic publication failed: {exc}; rollback failed: {rollback_exc}"
@@ -218,8 +310,7 @@ def publish_files_atomically(
         raise PublicationError("publication requires at least one target")
     if len(targets) != len(set(targets)):
         raise PublicationError("publication targets must be unique")
-    for target in targets:
-        recover_pending_publications(target)
+    recover_pending_publications(targets)
     transaction_id = uuid.uuid4().hex
     staged: dict[Path, Path] = {}
     try:
@@ -252,6 +343,10 @@ def publish_bundle(
     missing = [name for name in required if name not in artifacts or not Path(artifacts[name]).is_file()]
     if missing:
         raise PublicationError(f"missing artifact: {missing[0]}")
+    for name in required:
+        relative = Path(name)
+        if relative.as_posix() in _RESERVED_BUNDLE_NAMES:
+            raise PublicationError(f"reserved artifact name: {name}")
     destination.parent.mkdir(parents=True, exist_ok=True)
     transaction_id = uuid.uuid4().hex
     staging = destination.parent / f".{destination.name}.staging-{transaction_id}"
@@ -304,8 +399,15 @@ def recover_publication(destination: Path | str) -> dict[str, Any]:
         return {"status": "incomplete", "destination": str(destination)}
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        marker_run_id = marker.read_text(encoding="utf-8")
     except (OSError, json.JSONDecodeError):
         return {"status": "incomplete", "destination": str(destination)}
+    if marker_run_id != manifest.get("run_id"):
+        return {
+            "status": "incomplete",
+            "destination": str(destination),
+            "reason": "marker_mismatch",
+        }
     for item in manifest.get("files", {}).values():
         path = destination / item["path"]
         if not path.is_file() or _sha256(path) != item.get("sha256"):

@@ -104,6 +104,7 @@ def _reviewable_model_audit(real_check, *, always_fail: bool = False, raise_on_n
                     "repairable": True,
                     "allowed_operations": ["update_role"],
                     "property_scope": ["role"],
+                    "allowed_values": {"role": ["note"]},
                 }
             )
         return result
@@ -275,7 +276,11 @@ def test_native_entry_recovers_interrupted_formal_generation_before_validation(
         template_path=TEMPLATE,
         pipeline="modular",
         list_policy="wx-default-v2",
-        options={"profile": "native_v2", "llm_enhance": "off"},
+        options={
+            "profile": "native_v2",
+            "llm_enhance": "off",
+            "report_path": report,
+        },
     ))
 
     assert result.status == "failed"

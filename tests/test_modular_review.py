@@ -246,6 +246,10 @@ def test_review_packet_contains_only_stable_repairable_targets() -> None:
     assert packet["targets"][0]["source_ref"]["source_id"] == "p0"
     assert packet["targets"][0]["allowed_operations"] == ["update_role"]
     assert packet["targets"][0]["property_scope"] == ["role", "level"]
+    assert packet["targets"][0]["allowed_values"] == {
+        "role": ["heading"],
+        "level": [2],
+    }
 
 
 @pytest.mark.parametrize(
@@ -288,6 +292,37 @@ def test_review_packet_rejects_candidate_decisions_outside_explicit_authority(de
 
     assert violation is not None
     assert violation["code"] == "review_scope_violation"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        {"role": "note", "level": 2},
+        {"role": "heading", "level": 1},
+    ],
+    ids=["role", "level"],
+)
+def test_heading_review_authority_rejects_values_outside_finding(value: dict) -> None:
+    baseline = _bundle(level=1)
+    finding = {
+        "audit_id": "model:heading_level_jump:p0",
+        "severity": "high",
+        "repairable": True,
+        "block_id": "p0",
+        "category": "model",
+        "evidence": {"code": "heading_level_jump", "expected_level": 2},
+    }
+    packet = build_review_packet(baseline, [finding])
+
+    violation = review.validate_review_decisions(packet, [{
+        "operation": "update_role",
+        "target_node_ids": ["p0"],
+        "property_scope": ["role", "level"],
+        "value": value,
+    }])
+
+    assert violation is not None
+    assert violation["kind"] == "value"
 
 
 def test_candidate_rejects_out_of_scope_ast_semantic_mutation_after_authorized_decision() -> None:

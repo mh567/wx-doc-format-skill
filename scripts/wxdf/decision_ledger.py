@@ -54,6 +54,24 @@ def _source_digest(facts: Mapping[str, Any]) -> str | None:
     return None
 
 
+def _source_ref_identities(facts: Mapping[str, Any]) -> set[str]:
+    identities: set[str] = set()
+
+    def visit(value: Any) -> None:
+        if isinstance(value, Mapping):
+            source_ref = value.get("source_ref")
+            if isinstance(source_ref, Mapping):
+                identities.add(json.dumps(source_ref, ensure_ascii=False, sort_keys=True))
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    visit(facts)
+    return identities
+
+
 def _facts_digest(facts: Mapping[str, Any]) -> str:
     payload = json.dumps(facts, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -214,13 +232,15 @@ def _precondition_ok(facts: Mapping[str, Any], revision: Mapping[str, Any]) -> t
     if digest is None:
         return False, "current source digest is unavailable"
     has_source_digest = False
+    source_ref_identities = _source_ref_identities(facts)
     for ref in revision.get("target_source_refs", []):
         if not isinstance(ref, Mapping):
             return False, "target source reference is not an object"
         expected = ref.get("content_sha256")
         if expected:
             has_source_digest = True
-            if expected != digest:
+            ref_identity = json.dumps(ref, ensure_ascii=False, sort_keys=True)
+            if expected != digest and ref_identity not in source_ref_identities:
                 return False, "target source digest changed"
     for condition in revision.get("preconditions", []):
         if not isinstance(condition, Mapping):
@@ -391,12 +411,15 @@ def _revision_decision(revision: Mapping[str, Any], expected_revision: int) -> d
     decision.update(
         {
             "decision_id": f"ledger-{revision['revision_id']}",
+            "target_source_refs": copy.deepcopy(list(revision["target_source_refs"])),
             "target_node_ids": list(revision["target_node_ids"]),
             "expected_revision": expected_revision,
             "property_scope": list(revision["property_scope"]),
             "preconditions": list(revision["preconditions"]),
             "evidence": list(revision["evidence"]),
             "transaction_id": revision["transaction_id"],
+            "status": revision["status"],
+            "supersedes": list(revision.get("supersedes") or []),
         }
     )
     return decision

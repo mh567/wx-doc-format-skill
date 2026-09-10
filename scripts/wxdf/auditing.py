@@ -56,6 +56,12 @@ def collect_audit_findings(
             for field in ("allowed_operations", "property_scope"):
                 if isinstance(issue.get(field), list):
                     finding[field] = list(issue[field])
+            if isinstance(issue.get("allowed_values"), Mapping):
+                finding["allowed_values"] = {
+                    str(name): list(values)
+                    for name, values in issue["allowed_values"].items()
+                    if isinstance(values, list)
+                }
             findings.append(finding)
     return findings
 

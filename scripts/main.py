@@ -1633,6 +1633,7 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
             "source_ast_path": args.source_ast,
             "normalized_ast_path": args.ast,
             "report_path": args.report,
+            "report_transform": report_for_output,
             "release": _os.environ.get("WX_DOC_FORMAT_RELEASE") == "1",
             "profile": "native_v2" if native_v2 else None,
             "enhancement_call": enhancement_call,
@@ -1667,7 +1668,13 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
                 options=kernel_options,
             )
         )
-        if args.report is not None:
+        kernel_published_report = (
+            native_v2
+            and result.status != "waiting_external"
+            and args.report is not None
+            and result.artifacts.get("report") == str(args.report)
+        )
+        if args.report is not None and not kernel_published_report:
             args.report.parent.mkdir(parents=True, exist_ok=True)
             args.report.write_text(json.dumps(report_for_output(result.as_report()), ensure_ascii=False, indent=2), encoding="utf-8")
         if result.diagnostics:

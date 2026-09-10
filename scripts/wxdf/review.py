@@ -22,10 +22,14 @@ MODE_MANIFEST: dict[str, dict[str, Any]] = {
 }
 
 
-_REPAIR_AUTHORITIES: dict[str, dict[str, tuple[str, ...]]] = {
+_REPAIR_AUTHORITIES: dict[str, dict[str, Any]] = {
     "heading_level_jump": {
         "allowed_operations": ("update_role",),
         "property_scope": ("role", "level"),
+        "allowed_values": {
+            "role": ("heading",),
+            "level": "expected_level",
+        },
     },
 }
 
@@ -247,6 +251,7 @@ def build_review_packet(
         if authority is None:
             raw_operations = finding.get("allowed_operations")
             raw_scope = finding.get("property_scope")
+            raw_values = finding.get("allowed_values")
             if (
                 isinstance(raw_operations, list)
                 and raw_operations
@@ -254,16 +259,35 @@ def build_review_packet(
                 and isinstance(raw_scope, list)
                 and raw_scope
                 and all(isinstance(value, str) and value for value in raw_scope)
+                and isinstance(raw_values, Mapping)
+                and set(raw_scope).issubset(raw_values)
+                and all(
+                    isinstance(values, list) and values
+                    for values in raw_values.values()
+                )
             ):
                 authority = {
                     "allowed_operations": tuple(raw_operations),
                     "property_scope": tuple(raw_scope),
+                    "allowed_values": copy.deepcopy(dict(raw_values)),
                 }
         if (
             finding.get("repairable") is not True
             or not isinstance(node, Mapping)
             or authority is None
         ):
+            continue
+        allowed_values: dict[str, list[Any]] = {}
+        for property_name, configured in authority["allowed_values"].items():
+            if isinstance(configured, str):
+                resolved = evidence.get(configured)
+                if resolved is None:
+                    allowed_values = {}
+                    break
+                allowed_values[str(property_name)] = [copy.deepcopy(resolved)]
+            else:
+                allowed_values[str(property_name)] = copy.deepcopy(list(configured))
+        if set(authority["property_scope"]) != set(allowed_values):
             continue
         targets.append(
             {
@@ -272,6 +296,7 @@ def build_review_packet(
                 "source_ref": copy.deepcopy(dict(node.get("source_ref") or {})),
                 "allowed_operations": list(authority["allowed_operations"]),
                 "property_scope": list(authority["property_scope"]),
+                "allowed_values": allowed_values,
                 "current": {
                     key: copy.deepcopy(node[key])
                     for key in (
@@ -344,6 +369,23 @@ def validate_review_decisions(
                     "decision_index": index,
                     "property_scope": sorted(scope),
                 }
+            allowed_values = authority.get("allowed_values")
+            value = decision.get("value")
+            if not isinstance(allowed_values, Mapping) or not isinstance(value, Mapping):
+                return {
+                    "code": "review_scope_violation",
+                    "kind": "value",
+                    "decision_index": index,
+                }
+            for property_name, proposed in value.items():
+                permitted = allowed_values.get(str(property_name))
+                if not isinstance(permitted, list) or proposed not in permitted:
+                    return {
+                        "code": "review_scope_violation",
+                        "kind": "value",
+                        "decision_index": index,
+                        "property": str(property_name),
+                    }
         value = decision.get("value")
         if operation == "update_role" and isinstance(value, Mapping):
             if not set(value).issubset(scope):

@@ -9,12 +9,22 @@ from __future__ import annotations
 
 import base64
 import copy
-import fcntl
 import hashlib
 import json
 import os
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Mapping
+
+try:
+    import fcntl as _fcntl
+except ImportError:
+    _fcntl = None
+
+try:
+    import msvcrt as _msvcrt
+except ImportError:
+    _msvcrt = None
 
 from .contracts import CHECKPOINT_STATUSES, STAGES, ContractError
 from .validation import validate_checkpoint
@@ -346,6 +356,38 @@ def _replace_bytes(path: Path, payload: bytes, suffix: str) -> None:
     os.replace(temporary, path)
 
 
+@contextmanager
+def _exclusive_file_lock(lock_path: Path):
+    """Hold one cross-process file lock on supported platforms."""
+
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+b") as lock_file:
+        if _fcntl is not None:
+            _fcntl.flock(lock_file.fileno(), _fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                _fcntl.flock(lock_file.fileno(), _fcntl.LOCK_UN)
+            return
+        if _msvcrt is not None:
+            lock_file.seek(0, os.SEEK_END)
+            if lock_file.tell() == 0:
+                lock_file.write(b"\0")
+                lock_file.flush()
+            lock_file.seek(0)
+            _msvcrt.locking(lock_file.fileno(), _msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                lock_file.seek(0)
+                _msvcrt.locking(lock_file.fileno(), _msvcrt.LK_UNLCK, 1)
+            return
+        raise CheckpointError(
+            "no supported request append lock backend",
+            code="lock_backend_unavailable",
+        )
+
+
 def _recover_native_request_append(checkpoint_path: Path) -> None:
     journal_path = _request_append_journal_path(checkpoint_path)
     if not journal_path.is_file():
@@ -410,19 +452,18 @@ def append_native_waiting_requests(
             "native checkpoint has no request path",
             code="invalid_checkpoint",
         ) from exc
-    lock_path = request_path.with_name(request_path.name + ".append.lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a+b") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        try:
+    checkpoint_lock_path = checkpoint_path.with_name(
+        checkpoint_path.name + ".request-append.lock"
+    )
+    request_lock_path = request_path.with_name(request_path.name + ".append.lock")
+    with _exclusive_file_lock(checkpoint_lock_path):
+        with _exclusive_file_lock(request_lock_path):
             return _append_native_waiting_requests_locked(
                 checkpoint_path,
                 checkpoint,
                 requests,
                 crash_at=crash_at,
             )
-        finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def _append_native_waiting_requests_locked(
@@ -530,9 +571,31 @@ def prepare_native_resume(
     """Validate identities and commit external responses before execution."""
 
     checkpoint_path = _path(checkpoint_path)
-    load_checkpoint(checkpoint_path)
-    _recover_native_request_append(checkpoint_path)
-    checkpoint = load_checkpoint(checkpoint_path)
+    checkpoint_lock_path = checkpoint_path.with_name(
+        checkpoint_path.name + ".request-append.lock"
+    )
+    with _exclusive_file_lock(checkpoint_lock_path):
+        from .publication import PublicationError, recover_pending_publications
+
+        recovery_targets = [checkpoint_path]
+        for field in ("output", "source_ast", "ast", "report", "report_md"):
+            value = configuration.get(field)
+            if value:
+                recovery_targets.append(Path(value))
+        try:
+            recover_pending_publications(recovery_targets)
+        except PublicationError as exc:
+            raise CheckpointError(
+                f"cannot recover native terminal generation: {exc}",
+                code="checkpoint_recovery_failed",
+            ) from exc
+        checkpoint = load_checkpoint(checkpoint_path)
+        request_lock_path = Path(checkpoint["files"]["requests_path"]).with_name(
+            Path(checkpoint["files"]["requests_path"]).name + ".append.lock"
+        )
+        with _exclusive_file_lock(request_lock_path):
+            _recover_native_request_append(checkpoint_path)
+            checkpoint = load_checkpoint(checkpoint_path)
     if (
         checkpoint["status"] == "waiting_external"
         and checkpoint.get("resume_stage") != "relation"
@@ -768,8 +831,9 @@ def complete_native_checkpoint(
     applied_request_ids: set[str],
     request_transaction_ids: Mapping[str, str] | None = None,
     review_outcome: Mapping[str, Any] | None = None,
+    persist: bool = True,
 ) -> dict[str, Any]:
-    """Persist the completed semantic, presentation and transaction snapshot."""
+    """Validate and optionally persist the terminal native checkpoint."""
 
     from .decision_ledger import accept_decisions
 
@@ -845,7 +909,10 @@ def complete_native_checkpoint(
     })
     if review_outcome is not None:
         completed["review_outcome"] = copy.deepcopy(dict(review_outcome))
-    save_checkpoint(completed, checkpoint_path)
+    _validate_for_store(completed)
+    _validate_embedded_fingerprints(completed)
+    if persist:
+        save_checkpoint(completed, checkpoint_path)
     return completed
 
 
@@ -864,6 +931,50 @@ def _stored_transaction_digests(checkpoint: Mapping[str, Any]) -> tuple[dict[str
         if isinstance(item, Mapping)
     }
     return transaction_digests, applied_digests
+
+
+def _validate_legacy_checkpoint_replay(
+    checkpoint: Mapping[str, Any],
+    canonical_digests: Mapping[str, str],
+) -> None:
+    """Require old proof maps to describe the semantic state replay produces."""
+
+    from .decision_ledger import LedgerError, _replay_snapshot, project_ledger
+    from .semantics.source_ast import build_source_ast
+    from .transaction import TransactionConflict, make_snapshot
+
+    try:
+        source_facts = checkpoint["source_facts"]
+        ledger = checkpoint["decision_ledger"]
+        base_ast = build_source_ast(source_facts)
+        base_node_ids = set(base_ast["document"]["blocks"]) | set(base_ast["document"]["containers"])
+        view = project_ledger(source_facts, ledger, existing_node_ids=base_node_ids)
+        if any(
+            item.get("code") in {"revision_precondition_failed", "revision_conflict"}
+            for item in view.get("diagnostics", [])
+        ):
+            raise LedgerError("legacy ledger cannot be replayed", code="replay_blocked")
+        replayed = _replay_snapshot(source_facts, ledger, make_snapshot(base_ast))
+    except (LedgerError, TransactionConflict, KeyError, TypeError, ValueError) as exc:
+        raise CheckpointError(
+            f"legacy checkpoint replay failed: {exc}",
+            code="resume_snapshot_mismatch",
+        ) from exc
+    expected_state = {
+        "source_ast": replayed.ast,
+        "content_overlay": overlay_entries(replayed.overlays),
+        "presentation_override": overlay_entries(replayed.presentation_overrides),
+    }
+    stored_state = {
+        "source_ast": checkpoint.get("source_ast"),
+        "content_overlay": checkpoint.get("content_overlay"),
+        "presentation_override": checkpoint.get("presentation_override"),
+    }
+    if stored_state != expected_state or set(replayed.transactions) != set(canonical_digests):
+        raise CheckpointError(
+            "legacy checkpoint semantic state does not match ledger replay",
+            code="resume_snapshot_mismatch",
+        )
 
 
 def _migrate_transaction_digest_version(checkpoint: dict[str, Any]) -> bool:
@@ -941,6 +1052,7 @@ def _migrate_transaction_digest_version(checkpoint: dict[str, Any]) -> bool:
                 f"legacy response binding changed for {request_id}",
                 code="response_transaction_binding_mismatch",
             )
+    _validate_legacy_checkpoint_replay(checkpoint, canonical_digests)
     for revision in ledger.get("revisions", []):
         if isinstance(revision, dict):
             revision["transaction_content_sha256"] = canonical_digests[str(revision["transaction_id"])]

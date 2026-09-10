@@ -15,6 +15,7 @@ from wxdf.publication import (
     PublicationError,
     publish_bundle,
     publish_files_atomically,
+    recover_pending_publications,
     recover_publication,
 )
 
@@ -63,6 +64,44 @@ def test_publication_failure_does_not_report_completed_and_recovery_is_explicit(
         )
     assert not (destination / "COMMITTED").exists()
     assert recover_publication(destination)["status"] == "incomplete"
+
+
+@pytest.mark.parametrize("reserved_name", ["manifest.json", "COMMITTED"])
+def test_publication_rejects_reserved_bundle_artifact_names(
+    tmp_path: Path,
+    reserved_name: str,
+) -> None:
+    artifact = tmp_path / "candidate.bin"
+    artifact.write_bytes(b"candidate")
+    destination = tmp_path / "published"
+
+    with pytest.raises(PublicationError, match="reserved artifact name"):
+        publish_bundle(
+            {reserved_name: artifact},
+            destination,
+            run_id="run-reserved",
+            acceptance=ACCEPTED,
+        )
+
+    assert not destination.exists()
+
+
+def test_publication_recovery_requires_marker_to_match_manifest_run_id(tmp_path: Path) -> None:
+    artifact = tmp_path / "candidate.docx"
+    artifact.write_bytes(b"candidate")
+    destination = tmp_path / "published"
+    publish_bundle(
+        {"docx": artifact},
+        destination,
+        run_id="run-bound",
+        acceptance=ACCEPTED,
+    )
+    (destination / "COMMITTED").write_text("different-run", encoding="utf-8")
+
+    recovered = recover_publication(destination)
+
+    assert recovered["status"] == "incomplete"
+    assert recovered["reason"] == "marker_mismatch"
 
 
 @pytest.mark.parametrize("acceptance", [None, {}, {"accepted": False, "status": "rejected"}])
@@ -165,7 +204,7 @@ def test_formal_file_commit_recovers_old_generation_after_process_interrupt(
         publish_files_atomically({formal: b"new-formal", report: b"new-report"})
     monkeypatch.setattr(publication.os, "replace", real_replace)
 
-    recovered = recover_publication(formal)
+    recovered = recover_pending_publications([formal, report])
 
     assert recovered["status"] == "recovered"
     assert formal.read_bytes() == b"old-formal"
@@ -208,13 +247,97 @@ def test_cross_directory_recovery_observes_committed_generation_marker(
         publish_files_atomically({formal: b"new-formal", report: b"new-report"})
     monkeypatch.setattr(publication.os, "replace", real_replace)
 
-    recovered = recover_publication(report)
+    recovered = recover_pending_publications([formal, report])
 
     assert recovered["status"] == "completed"
     assert formal.read_bytes() == b"new-formal"
     assert report.read_bytes() == b"new-report"
     assert not list(first_dir.glob(".wxdf-publication-*.journal"))
     assert not list(second_dir.glob(".wxdf-publication-*.journal"))
+
+
+def test_publication_recovery_rejects_poisoned_paths_outside_trusted_root(
+    tmp_path: Path,
+) -> None:
+    trusted = tmp_path / "trusted"
+    trusted.mkdir()
+    formal = trusted / "formal.docx"
+    formal.write_bytes(b"old-formal")
+    victim = tmp_path / "victim.txt"
+    victim.write_bytes(b"safe")
+    poison_backup = tmp_path / "poison-backup"
+    poison_backup.write_bytes(b"poison")
+    transaction_id = "a" * 32
+    journal_path = trusted / f".wxdf-publication-{transaction_id}.journal"
+    journal_path.write_text(
+        json.dumps({
+            "schema_version": "1.0",
+            "transaction_id": transaction_id,
+            "state": "prepared",
+            "entries": [{
+                "target": str(victim.resolve()),
+                "staged": str((tmp_path / "poison-staged").resolve()),
+                "backup": str(poison_backup.resolve()),
+                "had_original": True,
+            }],
+            "journal_paths": [str(journal_path.resolve())],
+        }),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(PublicationError, match="trusted publication root"):
+        recover_publication(formal)
+
+    assert victim.read_bytes() == b"safe"
+    assert poison_backup.read_bytes() == b"poison"
+
+
+def test_publication_recovery_rejects_untrusted_target_in_same_root(
+    tmp_path: Path,
+) -> None:
+    formal = tmp_path / "formal.docx"
+    victim = tmp_path / "unrelated.docx"
+    victim.write_bytes(b"do-not-touch")
+    transaction_id = "d" * 32
+    journal_path = tmp_path / f".wxdf-publication-{transaction_id}.journal"
+    journal_path.write_text(
+        json.dumps({
+            "schema_version": "1.0",
+            "transaction_id": transaction_id,
+            "state": "prepared",
+            "entries": [{
+                "target": str(victim.resolve()),
+                "staged": str((tmp_path / f".{victim.name}.staging-{transaction_id}").resolve()),
+                "backup": str((tmp_path / f".{victim.name}.rollback-{transaction_id}").resolve()),
+                "had_original": False,
+            }],
+            "journal_paths": [str(journal_path.resolve())],
+        }),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(PublicationError, match="trusted publication target"):
+        recover_publication(formal)
+
+    assert victim.read_bytes() == b"do-not-touch"
+
+
+def test_publication_recovery_removes_only_target_shaped_orphan_staging(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "formal.docx"
+    target.write_bytes(b"formal")
+    transaction_id = "b" * 32
+    orphan = tmp_path / f".{target.name}.staging-{transaction_id}"
+    unrelated = tmp_path / f".other.docx.staging-{transaction_id}"
+    orphan.write_bytes(b"orphan")
+    unrelated.write_bytes(b"unrelated")
+
+    recovered = recover_pending_publications(target)
+
+    assert recovered["status"] == "clean"
+    assert not orphan.exists()
+    assert unrelated.read_bytes() == b"unrelated"
 
 
 def test_bundle_commit_recovers_old_generation_after_process_interrupt(
