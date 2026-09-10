@@ -51,7 +51,13 @@ def validate_modular_manifest(manifest: dict) -> None:
         raise RuntimeError("Modular mode manifest is incomplete")
     if modes["modular_pure"].get("status") != "enabled":
         raise RuntimeError("modular_pure must be enabled in the release manifest")
-    for mode in ("modular_online", "modular_file", "modular_review"):
+    if modes["modular_online"] != {
+        "status": "enabled",
+        "entrypoint": "EnhancementExecutor",
+        "contract": "T03",
+    }:
+        raise RuntimeError("modular_online must expose the T03 EnhancementExecutor contract")
+    for mode in ("modular_file", "modular_review"):
         if modes[mode].get("status") != "closed":
             raise RuntimeError(f"{mode} must remain closed in the release manifest")
 

@@ -574,6 +574,30 @@ class ConversionKernel:
                 "TransactionManagerSourceAST", "NormalizationPolicy", "RenderPlan", "Renderer", "AuditModule", "Publisher",
             ],
         }
+        enhancement_mode = str(options.get("llm_enhance") or "off")
+        if enhancement_mode != "off" and options.get("enhancement_call") is None:
+            diagnostic = {
+                "code": "NATIVE_ENHANCEMENT_ADAPTER_MISSING",
+                "severity": "error",
+                "message": "native-v2 enhancement requires an explicitly injected adapter",
+            }
+            report.update({
+                "status": "failed",
+                "enhancement": {
+                    "status": "missing_adapter",
+                    "mode": enhancement_mode,
+                    "candidate_count": 0,
+                    "consumed": 0,
+                    "results": [],
+                    "diagnostics": [diagnostic],
+                },
+            })
+            return RunResult(
+                status="failed",
+                exit_code=1,
+                report=report,
+                diagnostics=[diagnostic],
+            )
         staging_path = request.output_path.with_name(f".{request.output_path.name}.native-v2.staging")
         store = SourceStore()
         context: Any = None

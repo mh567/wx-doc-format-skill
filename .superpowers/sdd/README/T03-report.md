@@ -98,6 +98,87 @@ main.py: error: native-v2 enhancement requires an explicit local --llm-command
 
 ## Concerns and limits
 
-- The worktree has no `scripts/.venv`. One older kernel CLI test hardcodes that path and fails with `FileNotFoundError`; it was deselected while all other relevant kernel tests ran through the shared interpreter required by the brief.
+- The worktree has no resident `scripts/.venv`. Initial verification deselected one older kernel CLI test that hardcodes that path. Review-fix verification temporarily linked that path to the brief-mandated shared environment, ran the complete kernel and full regression suites, then removed the link.
 - Timeout returns stop accepting the late result, while Python callable cancellation remains best effort because the existing executor uses a daemon thread.
 - CLI network backend auto-discovery stays unavailable for native-v2 by design under the approved authorization boundary. A caller must inject a controlled adapter programmatically.
+
+## Independent review fix report
+
+### Fixes delivered
+
+- Synchronized the distribution manifest and release smoke validator with the T03 `modular_online` contract. The release surface now records `EnhancementExecutor`, contract `T03`, and status `enabled`.
+- Isolated native-v2 from the legacy `WX_DOC_LLM_ENHANCE` compatibility toggle. Native-v2 honors `--llm-enhance off` and does not resolve or invoke the explicit command. The legacy CLI retains its environment toggle behavior.
+- Added a native-v2 kernel preflight failure when enhancement is enabled without a programmatically injected `enhancement_call`. It returns `NATIVE_ENHANCEMENT_ADAPTER_MISSING` before module execution and publication.
+- Blocked `_FrozenDict.__ior__` so mapping union update cannot mutate the adapter payload.
+
+Additional changed files for these fixes:
+
+- `packaging/nuitka/build_distribution.py`
+- `packaging/nuitka/smoke_distribution.py`
+- `tests/test_modular_distribution.py`
+- `tests/test_modular_kernel.py`
+
+### Fix RED evidence
+
+The five focused assertions were added before production changes:
+
+```text
+FAILED tests/test_modular_distribution.py::test_modular_manifest_matches_contracts_and_open_modes
+FAILED tests/test_modular_distribution.py::test_release_smoke_accepts_explicit_native_online_adapter_mode
+FAILED tests/test_modular_capability.py::test_native_enhancement_uses_an_immutable_versioned_view_and_accepts_candidates
+FAILED tests/test_modular_kernel.py::test_cli_native_v2_explicit_enhancement_off_ignores_legacy_env_toggle
+FAILED tests/test_modular_kernel.py::test_native_v2_enabled_enhancement_requires_programmatic_adapter_before_publish
+5 failed in 1.90s
+```
+
+Observed causes matched the four review findings: closed release manifest, smoke rejection of the enabled mode, mutable `__ior__`, environment-triggered adapter execution, and completed publication without an adapter.
+
+### Fix GREEN evidence
+
+```text
+PYTHONPATH="$(pwd)/tests" /Users/harris/Documents/zero项目/wx-doc-format-skill/scripts/.venv/bin/python3 -m pytest -q tests/test_modular_distribution.py::test_modular_manifest_matches_contracts_and_open_modes tests/test_modular_distribution.py::test_release_smoke_accepts_explicit_native_online_adapter_mode tests/test_modular_capability.py::test_native_enhancement_uses_an_immutable_versioned_view_and_accepts_candidates tests/test_modular_kernel.py::test_cli_native_v2_explicit_enhancement_off_ignores_legacy_env_toggle tests/test_modular_kernel.py::test_native_v2_enabled_enhancement_requires_programmatic_adapter_before_publish
+5 passed in 0.93s
+```
+
+Legacy compatibility guard:
+
+```text
+tests/test_modular_kernel.py::test_cli_legacy_keeps_legacy_env_enhancement_toggle
+1 passed in 2.30s
+```
+
+Requested modular suites:
+
+```text
+PYTHONPATH="$(pwd)/tests" /Users/harris/Documents/zero项目/wx-doc-format-skill/scripts/.venv/bin/python3 -m pytest -q tests/test_modular_capability.py tests/test_modular_review.py tests/test_modular_distribution.py tests/test_modular_kernel.py
+42 passed in 5.55s
+```
+
+Frozen T01 through T03 acceptance:
+
+```text
+PYTHONPATH="$(pwd)/tests" /Users/harris/Documents/zero项目/wx-doc-format-skill/scripts/.venv/bin/python3 -m pytest -q tests/test_native_skill_cutover.py -k 't01 or t02 or t03'
+6 passed, 11 deselected in 2.30s
+```
+
+Full regression excluding the performance suite:
+
+```text
+PYTHONPATH="$(pwd)/tests" /Users/harris/Documents/zero项目/wx-doc-format-skill/scripts/.venv/bin/python3 -m pytest tests/ --ignore=tests/test_modular_performance.py -q
+11 failed, 552 passed in 34.37s
+```
+
+All 11 failures are the frozen T04 through T09 acceptance tests. No implemented T00 through T03 or non-frozen regression failed.
+
+### Fix self-review
+
+- `git diff --check` passed.
+- The missing-adapter diagnostic is emitted before the staging path, SourceStore, module registry, renderer, and publisher are created or invoked.
+- The native-v2 environment conflict test passes an explicit local command with a marker and proves the marker remains absent. Its paired legacy test proves the compatibility path still calls the command.
+- The distribution build manifest exactly matches `wxdf.review.MODE_MANIFEST`, and the smoke validator requires the complete T03 online entry.
+- The temporary `scripts/.venv` symlink used by the older hardcoded kernel subprocess test pointed to the brief-mandated shared environment and was removed after verification. The required `input` symlink remains unchanged.
+
+### Remaining concerns
+
+- The 11 frozen T04 through T09 failures remain intentional future-card gates.
+- Native-v2 provides no environment, URL, credential, or network adapter discovery. Explicit local CLI command and explicit programmatic injection remain the only authorized enhancement seams.

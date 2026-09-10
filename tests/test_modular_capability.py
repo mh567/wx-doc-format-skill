@@ -210,6 +210,7 @@ def test_native_enhancement_uses_an_immutable_versioned_view_and_accepts_candida
     def adapter(payload: dict) -> dict:
         for label, mutate in (
             ("payload", lambda: payload.__setitem__("revision", 9)),
+            ("payload_merge", lambda: payload.__ior__({"revision": 9})),
             ("view", lambda: payload["items"][0].__setitem__("revision", 9)),
             ("ast", lambda: payload["items"][0]["source_ast"]["document"]["blocks"]["p0"].__setitem__("role", "note")),
         ):
@@ -223,7 +224,7 @@ def test_native_enhancement_uses_an_immutable_versioned_view_and_accepts_candida
 
     assert request.items[0]["view_schema_version"] == "2.0"
     assert request.items[0]["ast_schema_version"] == "2.0"
-    assert mutation_errors == ["payload", "view", "ast"]
+    assert mutation_errors == ["payload", "payload_merge", "view", "ast"]
     assert result.status == "completed"
     assert result.candidates[0]["candidate_id"] == "native-list-detect-p0"
     assert ast["document"]["blocks"]["p0"]["role"] == "body"

@@ -62,6 +62,18 @@ def test_modular_manifest_matches_contracts_and_open_modes() -> None:
         "normalized": "1.0",
     }
     assert manifest["open_modes"] == MODE_MANIFEST
+    assert manifest["open_modes"]["modular_online"] == {
+        "status": "enabled",
+        "entrypoint": "EnhancementExecutor",
+        "contract": "T03",
+    }
+
+
+def test_release_smoke_accepts_explicit_native_online_adapter_mode() -> None:
+    modular = build.modular_module_manifest()
+    modular["open_modes"] = json.loads(json.dumps(MODE_MANIFEST))
+
+    smoke.validate_modular_manifest({"modular": modular})
 
 
 def test_assembled_release_manifest_records_modular_runtime_surface(tmp_path: Path) -> None:

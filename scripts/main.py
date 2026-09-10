@@ -1492,8 +1492,9 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
     # Resume mode may pull input/output from run.json so we defer
     # the required check until after the resume handler runs.
 
-    # Backward compatibility: WX_DOC_LLM_ENHANCE env var → abc mode
-    if args.llm_enhance == "off" and _os.environ.get("WX_DOC_LLM_ENHANCE") == "1":
+    # Backward compatibility applies only outside the explicit native-v2 seam.
+    native_v2_cli = args.pipeline == "modular" and args.modular_profile == "native-v2"
+    if not native_v2_cli and args.llm_enhance == "off" and _os.environ.get("WX_DOC_LLM_ENHANCE") == "1":
         args.llm_enhance = "abc"
 
     # Normalize new capability names to legacy mode names

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -331,3 +333,108 @@ def test_cli_modular_mode_has_explicit_preflight_failure(tmp_path: Path) -> None
     assert saved_report["status"] == "completed"
     assert saved_report["capability_migration"]["document_structure"] == "native_consumed"
     assert saved_report["source_parser_equivalence_audit"]["status"] in {"equivalent", "mismatch"}
+
+
+def test_cli_native_v2_explicit_enhancement_off_ignores_legacy_env_toggle(tmp_path: Path) -> None:
+    report = tmp_path / "report.json"
+    output = tmp_path / "output.docx"
+    marker = tmp_path / "adapter-called"
+    probe = tmp_path / "probe.py"
+    probe.write_text(
+        "from pathlib import Path\n"
+        "import sys\n"
+        "Path(sys.argv[1]).write_text('called', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    llm_command = " ".join(
+        shlex.quote(value)
+        for value in (sys.executable, str(probe), str(marker))
+    )
+    env = os.environ.copy()
+    env["WX_DOC_LLM_ENHANCE"] = "1"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "main.py"),
+            "--input", str(ROOT / "input" / "test_baseline.md"),
+            "--output", str(output),
+            "--template", str(ROOT / "assets" / "wx_template.docx"),
+            "--pipeline", "modular",
+            "--modular-profile", "native-v2",
+            "--list-policy", "wx-default-v2",
+            "--llm-enhance", "off",
+            "--llm-command", llm_command,
+            "--report", str(report),
+        ],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert not marker.exists()
+    saved_report = json.loads(report.read_text(encoding="utf-8"))
+    assert saved_report["enhancement"]["status"] == "disabled"
+
+
+def test_cli_legacy_keeps_legacy_env_enhancement_toggle(tmp_path: Path) -> None:
+    output = tmp_path / "output.docx"
+    marker = tmp_path / "adapter-called"
+    probe = tmp_path / "probe.py"
+    probe.write_text(
+        "from pathlib import Path\n"
+        "import sys\n"
+        "Path(sys.argv[1]).write_text('called', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    llm_command = " ".join(
+        shlex.quote(value)
+        for value in (sys.executable, str(probe), str(marker))
+    )
+    env = os.environ.copy()
+    env["WX_DOC_LLM_ENHANCE"] = "1"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "main.py"),
+            "--input", str(ROOT / "input" / "test_baseline.md"),
+            "--output", str(output),
+            "--template", str(ROOT / "assets" / "wx_template.docx"),
+            "--pipeline", "legacy",
+            "--list-policy", "legacy",
+            "--llm-enhance", "off",
+            "--llm-command", llm_command,
+        ],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert marker.exists()
+
+
+def test_native_v2_enabled_enhancement_requires_programmatic_adapter_before_publish(tmp_path: Path) -> None:
+    output = tmp_path / "output.docx"
+    request = ConversionRequest(
+        input_path=ROOT / "input" / "test_baseline.md",
+        output_path=output,
+        template_path=ROOT / "assets" / "wx_template.docx",
+        pipeline="modular",
+        list_policy="wx-default-v2",
+        options={"profile": "native_v2", "llm_enhance": "a"},
+    )
+
+    result = ConversionKernel().convert(request)
+
+    assert result.status == "failed"
+    assert result.exit_code == 1
+    assert result.diagnostics == [{
+        "code": "NATIVE_ENHANCEMENT_ADAPTER_MISSING",
+        "severity": "error",
+        "message": "native-v2 enhancement requires an explicitly injected adapter",
+    }]
+    assert result.report["enhancement"]["status"] == "missing_adapter"
+    assert not output.exists()

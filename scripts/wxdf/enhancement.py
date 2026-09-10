@@ -86,6 +86,7 @@ class _FrozenDict(dict):
     popitem = _reject
     setdefault = _reject
     update = _reject
+    __ior__ = _reject
 
     def __deepcopy__(self, memo: dict[int, Any]) -> dict[str, Any]:
         result = {copy.deepcopy(key, memo): copy.deepcopy(value, memo) for key, value in self.items()}
