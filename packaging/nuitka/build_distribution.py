@@ -17,6 +17,13 @@ from xml.etree import ElementTree
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 ENTRYPOINT = Path(__file__).with_name("release_entrypoint.py")
 PUBLIC_DIR = Path(__file__).with_name("public")
+SCRIPTS_DIR = PROJECT_ROOT / "scripts"
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+from wxdf.review import mode_manifest
+
+
 SUPPORTED_PLATFORM_IDS = (
     "windows-x86_64",
     "macos-arm64",
@@ -26,6 +33,7 @@ PUBLIC_PACKAGE_PLATFORM_IDS = (
     "macos-arm64",
     "kylin-v10-arm64",
 )
+RUNTIME_COMPILATION_REPORT_NAME = "wxdf-compilation-report.xml"
 
 
 MODULAR_CONTRACT_VERSIONS = {
@@ -37,12 +45,7 @@ MODULAR_CONTRACT_VERSIONS = {
     "normalized": "1.0",
 }
 
-MODULAR_OPEN_MODES = {
-    "modular_pure": {"status": "enabled", "entrypoint": "ConversionKernel.convert", "contract": "T09"},
-    "modular_online": {"status": "enabled", "entrypoint": "EnhancementExecutor", "contract": "T03"},
-    "modular_file": {"status": "enabled", "entrypoint": "CheckpointStore", "contract": "T04"},
-    "modular_review": {"status": "enabled", "entrypoint": "ReviewEvaluator", "contract": "T05"},
-}
+MODULAR_OPEN_MODES = mode_manifest()
 
 RETIRED_RELEASE_MODULES = frozenset({
     "wxdf.migration",
@@ -141,7 +144,7 @@ def modular_module_manifest(
         "forbidden_runtime_modules": forbidden_runtime_modules,
         "runtime_evidence": runtime_evidence,
         "contract_versions": dict(MODULAR_CONTRACT_VERSIONS),
-        "open_modes": json.loads(json.dumps(MODULAR_OPEN_MODES)),
+        "open_modes": mode_manifest(),
     }
 
 
@@ -167,10 +170,17 @@ def _report_wxdf_modules(report_path: Path) -> tuple[str, ...]:
 
 def _write_runtime_module_manifest(dist_dir: Path, report_path: Path) -> None:
     report_modules = _report_wxdf_modules(report_path)
+    stored_report = dist_dir / RUNTIME_COMPILATION_REPORT_NAME
+    if report_path.resolve() != stored_report.resolve():
+        shutil.copy2(report_path, stored_report)
     manifest = modular_module_manifest(
         runtime_modules=report_modules,
         runtime_evidence="compilation_report",
     )
+    manifest["compilation_report"] = {
+        "name": RUNTIME_COMPILATION_REPORT_NAME,
+        "sha256": sha256_file(stored_report),
+    }
     (dist_dir / "wxdf-module-manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
@@ -189,15 +199,43 @@ def _verified_runtime_module_manifest(dist_dir: Path) -> dict:
         raise RuntimeError("Runtime module manifest must be a JSON object")
     if manifest.get("runtime_evidence") != "compilation_report":
         raise RuntimeError("Runtime module manifest runtime_evidence must be compilation_report")
+    report_identity = manifest.get("compilation_report")
+    if not isinstance(report_identity, dict):
+        raise RuntimeError("Runtime module manifest compilation_report must be an object")
+    if report_identity.get("name") != RUNTIME_COMPILATION_REPORT_NAME:
+        raise RuntimeError(
+            "Runtime module manifest compilation_report name must use the fixed runtime name"
+        )
+    report_path = dist_dir / RUNTIME_COMPILATION_REPORT_NAME
+    if not report_path.is_file():
+        raise RuntimeError(f"Runtime compilation report is missing: {report_path}")
+    if report_identity.get("sha256") != sha256_file(report_path):
+        raise RuntimeError("Runtime compilation report sha256 does not match manifest")
+    report_modules = list(_report_wxdf_modules(report_path))
+    report_forbidden = [
+        name for name in report_modules if _forbidden_release_module(name)
+    ]
+    if report_forbidden:
+        raise RuntimeError(
+            f"Runtime compilation report contains forbidden module: {report_forbidden[0]}"
+        )
     if manifest.get("module_set_status") != "matched":
         raise RuntimeError("Runtime module manifest module_set_status must be matched")
+    if manifest.get("open_modes") != mode_manifest():
+        raise RuntimeError("Runtime module manifest open_modes must match authoritative native modes")
+    if manifest.get("contract_versions") != MODULAR_CONTRACT_VERSIONS:
+        raise RuntimeError("Runtime module manifest contract_versions must match expected versions")
 
     source_modules = manifest.get("source_modules")
     runtime_modules = manifest.get("runtime_modules")
     expected_modules = list(release_module_names())
-    if source_modules != expected_modules or runtime_modules != source_modules:
+    if (
+        source_modules != expected_modules
+        or runtime_modules != source_modules
+        or report_modules != runtime_modules
+    ):
         raise RuntimeError(
-            "Runtime module manifest source_modules and runtime_modules must match release module set"
+            "Runtime compilation report, source_modules and runtime_modules must match release module set"
         )
     for field in (
         "forbidden_runtime_modules",

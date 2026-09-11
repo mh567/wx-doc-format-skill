@@ -40,13 +40,27 @@ def _write_runtime(path: Path, *, with_manifest: bool = True) -> None:
     path.write_text(f'#!/bin/sh\nprintf "%s\\n" "{version}"\n', encoding="utf-8")
     path.chmod(0o755)
     if with_manifest:
-        _write_module_manifest(path.parent)
+        _write_compilation_evidence(path.parent)
 
 
-def _write_module_manifest(dist: Path, **overrides) -> None:
-    manifest = build.modular_module_manifest(runtime_evidence="compilation_report")
+def _write_compilation_evidence(dist: Path) -> None:
+    report = dist / build.RUNTIME_COMPILATION_REPORT_NAME
+    module_elements = "".join(
+        f'<module name="{module_name}"/>'
+        for module_name in build.release_module_names()
+    )
+    report.write_text(
+        f"<nuitka-compilation-report>{module_elements}</nuitka-compilation-report>",
+        encoding="utf-8",
+    )
+    build._write_runtime_module_manifest(dist, report)
+
+
+def _mutate_module_manifest(dist: Path, **overrides) -> None:
+    manifest_path = dist / "wxdf-module-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest.update(overrides)
-    (dist / "wxdf-module-manifest.json").write_text(
+    manifest_path.write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
@@ -140,6 +154,79 @@ def test_public_package_requires_compilation_report_runtime_manifest(tmp_path: P
     assert not (tmp_path / "output").exists()
 
 
+def test_public_package_requires_the_manifest_compilation_report(tmp_path: Path) -> None:
+    dist = tmp_path / "runtime.dist"
+    dist.mkdir()
+    _write_runtime(dist / build.executable_name())
+    (dist / build.RUNTIME_COMPILATION_REPORT_NAME).unlink()
+
+    with pytest.raises(RuntimeError, match="Runtime compilation report is missing"):
+        build.assemble_package(dist, tmp_path / "output", build.platform_id())
+
+    assert not (tmp_path / "output").exists()
+
+
+def test_public_package_rejects_compilation_report_hash_tampering(tmp_path: Path) -> None:
+    dist = tmp_path / "runtime.dist"
+    dist.mkdir()
+    _write_runtime(dist / build.executable_name())
+    report = dist / build.RUNTIME_COMPILATION_REPORT_NAME
+    report.write_text(report.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="compilation report sha256"):
+        build.assemble_package(dist, tmp_path / "output", build.platform_id())
+
+    assert not (tmp_path / "output").exists()
+
+
+@pytest.mark.parametrize(
+    ("damage", "message"),
+    [
+        ("invalid_xml", "compilation report is invalid"),
+        ("empty_wxdf", "contains no wxdf modules"),
+        ("forbidden", "contains forbidden module: wxdf.migration"),
+        ("missing", "must match release module set"),
+        ("unexpected", "must match release module set"),
+    ],
+)
+def test_public_package_reparses_compilation_report_before_output(
+    tmp_path: Path,
+    damage: str,
+    message: str,
+) -> None:
+    dist = tmp_path / "runtime.dist"
+    dist.mkdir()
+    _write_runtime(dist / build.executable_name())
+    report = dist / build.RUNTIME_COMPILATION_REPORT_NAME
+    modules = list(build.release_module_names())
+    if damage == "invalid_xml":
+        report_text = '<nuitka-compilation-report><module name="wxdf.kernel">'
+    elif damage == "empty_wxdf":
+        report_text = '<nuitka-compilation-report><module name="main"/></nuitka-compilation-report>'
+    else:
+        if damage == "forbidden":
+            modules.append("wxdf.migration")
+        elif damage == "missing":
+            modules.pop()
+        else:
+            modules.append("wxdf.unexpected")
+        elements = "".join(f'<module name="{name}"/>' for name in modules)
+        report_text = f"<nuitka-compilation-report>{elements}</nuitka-compilation-report>"
+    report.write_text(report_text, encoding="utf-8")
+    manifest_path = dist / "wxdf-module-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["compilation_report"]["sha256"] = build.sha256_file(report)
+    manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match=message):
+        build.assemble_package(dist, tmp_path / "output", build.platform_id())
+
+    assert not (tmp_path / "output").exists()
+
+
 def test_public_package_rejects_invalid_runtime_manifest_json(tmp_path: Path) -> None:
     dist = tmp_path / "runtime.dist"
     dist.mkdir()
@@ -171,7 +258,59 @@ def test_public_package_rejects_unverified_runtime_manifest(
     dist = tmp_path / "runtime.dist"
     dist.mkdir()
     _write_runtime(dist / build.executable_name())
-    _write_module_manifest(dist, **overrides)
+    _mutate_module_manifest(dist, **overrides)
+
+    with pytest.raises(RuntimeError, match=message):
+        build.assemble_package(dist, tmp_path / "output", build.platform_id())
+
+    assert not (tmp_path / "output").exists()
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("legacy_mode", "open_modes"),
+        ("missing_mode", "open_modes"),
+        ("extra_mode", "open_modes"),
+        ("empty_mode_contract", "open_modes"),
+        ("missing_contract_version", "contract_versions"),
+        ("tampered_contract_version", "contract_versions"),
+    ],
+)
+def test_public_package_rejects_mode_or_contract_manifest_drift(
+    tmp_path: Path,
+    mutation: str,
+    message: str,
+) -> None:
+    dist = tmp_path / "runtime.dist"
+    dist.mkdir()
+    _write_runtime(dist / build.executable_name())
+    manifest_path = dist / "wxdf-module-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if mutation == "legacy_mode":
+        manifest["open_modes"]["legacy_online"] = {
+            "status": "enabled",
+            "entrypoint": "legacy CLI",
+            "contract": "legacy",
+        }
+    elif mutation == "missing_mode":
+        manifest["open_modes"].pop("modular_file")
+    elif mutation == "extra_mode":
+        manifest["open_modes"]["modular_extra"] = {
+            "status": "enabled",
+            "entrypoint": "ExtraMode",
+            "contract": "T99",
+        }
+    elif mutation == "empty_mode_contract":
+        manifest["open_modes"]["modular_review"]["contract"] = ""
+    elif mutation == "missing_contract_version":
+        manifest["contract_versions"].pop("ast")
+    else:
+        manifest["contract_versions"]["ast"] = "9.0"
+    manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
     with pytest.raises(RuntimeError, match=message):
         build.assemble_package(dist, tmp_path / "output", build.platform_id())
@@ -277,6 +416,12 @@ def test_runtime_manifest_writer_uses_only_compilation_report_evidence(tmp_path:
     assert manifest["runtime_evidence"] == "compilation_report"
     assert manifest["runtime_modules"] == list(build.release_module_names())
     assert manifest["module_set_status"] == "matched"
+    stored_report = dist / build.RUNTIME_COMPILATION_REPORT_NAME
+    assert stored_report.read_bytes() == report.read_bytes()
+    assert manifest["compilation_report"] == {
+        "name": build.RUNTIME_COMPILATION_REPORT_NAME,
+        "sha256": build.sha256_file(stored_report),
+    }
 
 
 def test_runtime_manifest_writer_leaves_no_fallback_for_missing_report(tmp_path: Path) -> None:

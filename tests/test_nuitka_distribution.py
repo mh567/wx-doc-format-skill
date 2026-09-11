@@ -56,11 +56,16 @@ public_assembler = _load_public_assembler_module()
 
 
 def _write_compilation_manifest(dist: Path) -> None:
-    manifest = build.modular_module_manifest(runtime_evidence="compilation_report")
-    (dist / "wxdf-module-manifest.json").write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+    report = dist / build.RUNTIME_COMPILATION_REPORT_NAME
+    elements = "".join(
+        f'<module name="{module_name}"/>'
+        for module_name in build.release_module_names()
+    )
+    report.write_text(
+        f"<nuitka-compilation-report>{elements}</nuitka-compilation-report>",
         encoding="utf-8",
     )
+    build._write_runtime_module_manifest(dist, report)
 
 
 def _write_posix_runtime(path: Path) -> None:
