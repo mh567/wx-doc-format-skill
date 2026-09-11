@@ -59,7 +59,7 @@ def test_modular_preflight_rejects_online_enhancement_without_legacy_fallback(tm
     assert not output.exists()
 
 
-def test_cli_modular_mode_runs_real_pure_rule_path(tmp_path: Path) -> None:
+def test_cli_rejects_transitional_modular_legacy_adapter_combination(tmp_path: Path) -> None:
     output = tmp_path / "candidate.docx"
     report = tmp_path / "report.json"
     command = [
@@ -76,13 +76,10 @@ def test_cli_modular_mode_runs_real_pure_rule_path(tmp_path: Path) -> None:
 
     completed = subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
 
-    assert completed.returncode == 0, completed.stderr
-    assert output.exists()
-    saved_report = json.loads(report.read_text(encoding="utf-8"))
-    assert saved_report["status"] == "completed"
-    assert saved_report["pipeline"] == "modular"
-    assert saved_report["migration_adapter"] == "legacy-full-v1"
-    assert saved_report["execution_plan"]["profile"] == "wx_full_rules"
+    assert completed.returncode == 2
+    assert "modular pipeline requires --list-policy wx-default-v2" in completed.stderr
+    assert not output.exists()
+    assert not report.exists()
 
 
 def test_modular_cli_exports_ast2_with_title_headers_and_caption_relations(tmp_path: Path) -> None:
@@ -109,14 +106,40 @@ def test_modular_cli_exports_ast2_with_title_headers_and_caption_relations(tmp_p
     normalized = json.loads(normalized_ast_path.read_text(encoding="utf-8"))
     assert source_ast["schema_version"] == "2.0"
     assert normalized["schema_version"] == "1.0"
-    assert source_ast["document"]["blocks"]["b0001"]["role"] == "title"
-    assert source_ast["document"]["blocks"]["b0008"]["header_rows"] == 1
-    assert normalized["source_ast"]["document"]["blocks"]["caption-auto-1"]["target_id"] == "b0008"
-    assert normalized["source_ast"]["document"]["associations"][0] == {
-        "kind": "caption_target",
-        "source_id": "caption-auto-1",
-        "target_id": "b0008",
+    source_document = source_ast["document"]
+    title_blocks = [
+        block for block in source_document["blocks"].values()
+        if block.get("block_type") == "paragraph" and block.get("role") == "title"
+    ]
+    assert len(title_blocks) == 1
+    assert title_blocks[0]["inline_content"][0]["text"] == "LLM 增强基准对比测试报告"
+
+    table_ids = [
+        block_id for block_id, block in source_document["blocks"].items()
+        if block.get("block_type") == "table"
+    ]
+    assert len(table_ids) == 2
+    for table_id in table_ids:
+        first_row_id = source_document["children"][table_id][0]
+        first_row_cells = source_document["children"][first_row_id]
+        assert first_row_cells
+        assert all(
+            source_document["containers"][cell_id]["cell_role"] == "header"
+            for cell_id in first_row_cells
+        )
+
+    normalized_document = normalized["source_ast"]["document"]
+    captions = {
+        block_id: block
+        for block_id, block in normalized_document["blocks"].items()
+        if block.get("block_type") == "paragraph" and block.get("role") == "caption"
     }
+    assert {block["target_id"] for block in captions.values()} == set(table_ids)
+    assert {
+        (association["source_id"], association["target_id"])
+        for association in normalized_document["associations"]
+        if association.get("kind") == "caption_target"
+    } == {(caption_id, caption["target_id"]) for caption_id, caption in captions.items()}
     assert normalized["presentation"]["template_contract"]["toc"]["mode"] == "template_fragment"
     assert normalized["presentation"]["template_contract"]["tables"]["name"] == "Table Grid"
 
@@ -204,6 +227,7 @@ def test_modular_cli_preserves_real_template_title_toc_and_table_captions(tmp_pa
     assert document_xml.count("SEQ Table") == 2
 
     saved_report = json.loads(report.read_text(encoding="utf-8"))
-    assert saved_report["template_finalizer"]
-    assert saved_report["toc_replacement_audit"]["passed"]
-    assert saved_report["caption_placement_audit"]["passed"]
+    assert saved_report["profile"] == "wx-default-v2"
+    assert saved_report["saved_output_audit"]["passed"] is True
+    assert saved_report["native_module_evidence"]["native-renderer"]["status"] == "completed"
+    assert saved_report["native_module_evidence"]["native-auditor"]["status"] == "completed"

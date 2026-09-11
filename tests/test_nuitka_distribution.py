@@ -280,7 +280,9 @@ def test_release_json_and_markdown_writes_receive_sanitized_report(tmp_path, mon
         "--report", str(json_report),
         "--report-md", str(markdown_report),
     ])
-    main.main()
+    with pytest.raises(SystemExit) as exc_info:
+        main.main()
+    assert exc_info.value.code == 0
 
     written = json.loads(json_report.read_text(encoding="utf-8"))
     assert "review_packet" not in written

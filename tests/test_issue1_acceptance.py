@@ -234,14 +234,14 @@ def _assert_saved_numbering(output: Path) -> None:
     assert seen_texts == list(paragraph_levels)
 
 
-def _run_legacy_default(source: Path, tmp_path: Path) -> tuple[dict, Path]:
+def _run_explicit_legacy(source: Path, tmp_path: Path) -> tuple[dict, Path]:
     completed, report_path, output, _, _ = _run_cli(
         source,
         tmp_path,
         "legacy",
-        pipeline=None,
-        modular_profile=None,
-        list_policy=None,
+        pipeline="legacy",
+        modular_profile="legacy-full-v1",
+        list_policy="legacy",
         write_ast=False,
     )
     assert completed.returncode == 0, completed.stderr
@@ -276,7 +276,7 @@ def test_l01_nested_ordered_unordered_ordered_runs_full_native_acceptance(tmp_pa
         "ReviewEvaluator",
         "Publisher",
     ]
-    assert report["execution_plan"]["profile"] == "wx_full_rules-native-v2"
+    assert report["execution_plan"]["profile"] == "wx-default-v2"
     executed_modules = [
         module["module_id"] for module in report["execution_plan"]["modules"]
     ]
@@ -319,11 +319,11 @@ def test_l01_nested_ordered_unordered_ordered_runs_full_native_acceptance(tmp_pa
     _assert_saved_numbering(output)
 
 
-def test_legacy_remains_the_default_cli_pipeline(tmp_path: Path) -> None:
+def test_explicit_legacy_diagnostic_pipeline_remains_available(tmp_path: Path) -> None:
     source = tmp_path / "legacy.md"
     source.write_text(NESTED_MARKDOWN, encoding="utf-8")
 
-    report, output = _run_legacy_default(source, tmp_path)
+    report, output = _run_explicit_legacy(source, tmp_path)
 
     assert "module_chain" not in report
     assert report["source_document_model_summary"]["schema_version"] == "1.0"

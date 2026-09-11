@@ -283,7 +283,7 @@ def test_native_generate_writes_complete_waiting_checkpoint_and_requests(tmp_pat
     assert checkpoint["transaction_digest_version"] == "2.0"
     assert checkpoint["status"] == "waiting_external"
     assert checkpoint["resume_stage"] == "relation"
-    assert checkpoint["profile"] == "wx_full_rules-native-v2"
+    assert checkpoint["profile"] == "wx-default-v2"
     assert checkpoint["list_policy"] == "wx-default-v2"
     assert checkpoint["configuration"]["output"] == str(output)
     assert checkpoint["decision_ledger"]["source_binding"]

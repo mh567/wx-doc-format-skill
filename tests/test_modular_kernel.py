@@ -306,7 +306,7 @@ def test_metrics_collect_stage_timings_and_counters_without_business_data() -> N
     assert snapshot["stage_order"] == ["source"]
 
 
-def test_cli_modular_mode_has_explicit_preflight_failure(tmp_path: Path) -> None:
+def test_cli_modular_selection_uses_native_v2_defaults(tmp_path: Path) -> None:
     report = tmp_path / "report.json"
     output = tmp_path / "output.docx"
     command = [
@@ -331,8 +331,11 @@ def test_cli_modular_mode_has_explicit_preflight_failure(tmp_path: Path) -> None
     assert output.exists()
     saved_report = json.loads(report.read_text(encoding="utf-8"))
     assert saved_report["status"] == "completed"
-    assert saved_report["capability_migration"]["document_structure"] == "native_consumed"
-    assert saved_report["source_parser_equivalence_audit"]["status"] in {"equivalent", "mismatch"}
+    assert saved_report["pipeline"] == "modular"
+    assert saved_report["profile"] == "wx-default-v2"
+    assert saved_report["list_policy"] == "wx-default-v2"
+    assert saved_report["capability_migration"]["document_structure"] == "consumed"
+    assert saved_report.get("migration_adapter") is None
 
 
 def test_cli_native_v2_explicit_enhancement_off_ignores_legacy_env_toggle(tmp_path: Path) -> None:

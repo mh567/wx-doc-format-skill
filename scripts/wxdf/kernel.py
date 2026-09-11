@@ -30,6 +30,9 @@ _WX_FULL_RULE_CAPABILITIES = (
     "source_parser_equivalence_audit",
 )
 
+_NATIVE_PROFILE = "wx-default-v2"
+
+
 @dataclass(frozen=True)
 class ConversionRequest:
     input_path: Path
@@ -555,6 +558,53 @@ class ConversionKernel:
             record["decision_count"] = len(decision_set.get("decisions") or [])
         return record
 
+    @staticmethod
+    def _lock_native_checkpoint_identity(checkpoint_path: Path) -> dict[str, Any]:
+        """Validate and migrate the native identity before responses are read."""
+
+        from .run_store import CheckpointError, load_checkpoint, save_checkpoint
+
+        checkpoint = load_checkpoint(checkpoint_path)
+        configuration = checkpoint.get("configuration")
+        if not isinstance(configuration, Mapping):
+            raise CheckpointError(
+                "native checkpoint has no configuration identity",
+                code="checkpoint_configuration_missing",
+            )
+        if configuration.get("pipeline") != "modular":
+            raise CheckpointError(
+                "native checkpoint pipeline is not modular",
+                code="checkpoint_pipeline_mismatch",
+            )
+        if configuration.get("modular_profile") != "native-v2":
+            raise CheckpointError(
+                "native checkpoint modular profile is not native-v2",
+                code="checkpoint_profile_mismatch",
+            )
+        if configuration.get("list_policy") != "wx-default-v2":
+            raise CheckpointError(
+                "native checkpoint configuration list policy is not wx-default-v2",
+                code="checkpoint_list_policy_mismatch",
+            )
+        if checkpoint.get("list_policy") != "wx-default-v2":
+            raise CheckpointError(
+                "native checkpoint list policy is not wx-default-v2",
+                code="checkpoint_list_policy_mismatch",
+            )
+
+        profile = checkpoint.get("profile")
+        if profile == "wx_full_rules-native-v2":
+            migrated = copy.deepcopy(checkpoint)
+            migrated["profile"] = _NATIVE_PROFILE
+            save_checkpoint(migrated, checkpoint_path)
+            return migrated
+        if profile != _NATIVE_PROFILE:
+            raise CheckpointError(
+                "native checkpoint profile is unsupported",
+                code="checkpoint_profile_mismatch",
+            )
+        return checkpoint
+
     def _convert_modular_native_v2(self, request: ConversionRequest) -> RunResult:
         """Execute the registered native Module chain and collect its RunResult."""
 
@@ -613,7 +663,7 @@ class ConversionKernel:
         report: dict[str, Any] = {
             "pipeline": "modular",
             "list_policy": request.list_policy,
-            "profile": "wx_full_rules-native-v2",
+            "profile": _NATIVE_PROFILE,
             "status": "running",
             "contract_versions": {"source_facts": "1.0", "ast": "2.0", "decision_set": "2.0", "normalized": "1.0"},
             "module_chain": [
@@ -666,6 +716,7 @@ class ConversionKernel:
                 registry=registry,
             )
             if protocol_mode == "resume":
+                self._lock_native_checkpoint_identity(Path(options["checkpoint_path"]))
                 contracts = {
                     "source_facts": "1.0",
                     "ast": "2.0",
@@ -688,7 +739,7 @@ class ConversionKernel:
                         exit_code=1 if status in {"failed", "cancelled"} else 0,
                         report={
                             "pipeline": "modular",
-                            "profile": "wx_full_rules-native-v2",
+                            "profile": _NATIVE_PROFILE,
                             "status": status,
                             "checkpoint": str(options["checkpoint_path"]),
                             **(
@@ -863,7 +914,7 @@ class ConversionKernel:
                     checkpoint_path=options["checkpoint_path"],
                     requests_path=options["requests_path"],
                     responses_path=options["responses_path"],
-                    profile="wx_full_rules-native-v2",
+                    profile=_NATIVE_PROFILE,
                     list_policy=request.list_policy,
                     configuration=options.get("checkpoint_configuration") or {},
                     source_facts=context.require("source_facts"),
@@ -953,7 +1004,7 @@ class ConversionKernel:
                 "decision_set": decision_set,
                 "decision_ledger_replay": self._native_ledger_replay_report(context),
                 "execution_plan": {
-                    "profile": "wx_full_rules-native-v2",
+                    "profile": _NATIVE_PROFILE,
                     "modules": self._native_execution_plan_report(execution_plan),
                 },
             })
@@ -1132,7 +1183,7 @@ class ConversionKernel:
                 "appendix_semantics_consumption": appendix_consumption,
                 "appendix_preservation_audit": appendix_audit,
                 "execution_plan": {
-                    "profile": "wx_full_rules-native-v2",
+                    "profile": _NATIVE_PROFILE,
                     "modules": self._native_execution_plan_report(execution_plan),
                 },
             })
@@ -1234,7 +1285,7 @@ class ConversionKernel:
             "enhancement": enhancement,
             "decision_ledger_replay": ledger_replay,
             "execution_plan": {
-                "profile": "wx_full_rules-native-v2",
+                "profile": _NATIVE_PROFILE,
                 "modules": self._native_execution_plan_report(execution_plan),
             },
             "native_module_evidence": copy.deepcopy(context.evidence),

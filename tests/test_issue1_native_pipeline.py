@@ -411,7 +411,7 @@ def test_legacy_candidate_source_reference_is_rechecked_at_commit() -> None:
         apply_stage_batch(make_snapshot(changed), decision_set["decisions"], expected_revision=changed["revision"])
 
 
-def test_explicit_legacy_profile_cannot_be_overridden_by_list_text(tmp_path: Path) -> None:
+def test_explicit_legacy_diagnostic_pipeline_cannot_be_overridden_by_list_text(tmp_path: Path) -> None:
     source = tmp_path / "listed.md"
     source.write_text("1. 列表项\n", encoding="utf-8")
     output = tmp_path / "listed.docx"
@@ -422,9 +422,9 @@ def test_explicit_legacy_profile_cannot_be_overridden_by_list_text(tmp_path: Pat
         "--input", str(source),
         "--output", str(output),
         "--template", str(ROOT / "assets" / "wx_template.docx"),
-        "--pipeline", "modular",
+        "--pipeline", "legacy",
         "--modular-profile", "legacy-full-v1",
-        "--list-policy", "wx-default-v2",
+        "--list-policy", "legacy",
         "--llm-enhance", "off",
         "--report", str(report),
     ]
@@ -433,8 +433,8 @@ def test_explicit_legacy_profile_cannot_be_overridden_by_list_text(tmp_path: Pat
 
     assert completed.returncode == 0, completed.stderr
     saved_report = json.loads(report.read_text(encoding="utf-8"))
-    assert saved_report["migration_adapter"] == "legacy-full-v1"
-    assert saved_report["execution_plan"]["profile"] == "wx_full_rules"
+    assert "module_chain" not in saved_report
+    assert saved_report["source_document_model_summary"]["schema_version"] == "1.0"
 
 
 def test_list_materialization_emits_structure_candidates_without_mutating_source_ast(tmp_path: Path) -> None:

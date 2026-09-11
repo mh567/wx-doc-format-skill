@@ -257,6 +257,7 @@ def render(
     paragraph_counter = 0
     table_counter = 0
     initial_cell_paragraphs: set[Any] = set()
+    semantic_table_cells: set[Any] = set()
     pending_page_break = False
 
     def add_paragraph(
@@ -269,6 +270,8 @@ def render(
     ) -> Any:
         nonlocal paragraph_counter, pending_page_break
         style = list_style or _style_for_block(block, styles)
+        if parent is not None and parent._tc in semantic_table_cells:
+            style = styles.get("table_body", "表正文")
         if parent is None:
             try:
                 if style:
@@ -373,6 +376,8 @@ def render(
                     end_row = min(row_count - 1, row_index + row_span - 1)
                     end_col = min(column_count - 1, column_cursor + col_span - 1)
                     cell = cell.merge(table.cell(end_row, end_col))
+                if str(block.get("table_type") or "data") != "layout":
+                    semantic_table_cells.add(cell._tc)
                 for occupied_row in range(row_index + 1, min(row_count, row_index + row_span)):
                     for occupied_col in range(column_cursor, column_cursor + col_span):
                         occupied.add((occupied_row, occupied_col))

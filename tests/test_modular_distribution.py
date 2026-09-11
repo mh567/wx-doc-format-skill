@@ -99,7 +99,7 @@ def test_assembled_release_manifest_records_modular_runtime_surface(tmp_path: Pa
     assert (package / "runtime" / "VERSION").is_file()
 
 
-def test_legacy_remains_the_default_and_modular_requires_explicit_selection() -> None:
+def test_programmatic_request_keeps_legacy_compatibility_while_cli_defaults_modular() -> None:
     request_defaults = ConversionRequest(
         input_path=ROOT / "input" / "test_baseline.md",
         output_path=ROOT / "wx_output" / "modular-v3" / "t16-default.docx",
@@ -114,4 +114,4 @@ def test_legacy_remains_the_default_and_modular_requires_explicit_selection() ->
     )
     assert modular.pipeline == "modular"
     cli_source = (ROOT / "scripts" / "main.py").read_text(encoding="utf-8")
-    assert 'parser.add_argument("--pipeline", choices=["legacy", "modular"], default="legacy")' in cli_source
+    assert 'default="modular"' in cli_source

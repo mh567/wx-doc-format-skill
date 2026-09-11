@@ -1427,9 +1427,30 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
     parser.add_argument("--input", type=Path, help="Source file (optional when --resume is used)")
     parser.add_argument("--output", type=Path, help="Output .docx path (optional when --resume is used)")
     parser.add_argument("--template", type=Path, default=None, help="DOCX template driving styles and numbering.")
-    parser.add_argument("--pipeline", choices=["legacy", "modular"], default="legacy")
-    parser.add_argument("--modular-profile", choices=["legacy-full-v1", "native-v2"], default="legacy-full-v1")
-    parser.add_argument("--list-policy", choices=["legacy", "wx-default-v2"], default="legacy")
+    parser.add_argument(
+        "--pipeline",
+        choices=["legacy", "modular"],
+        default="modular",
+        help="Execution pipeline (default: modular). legacy is a diagnostic pipeline only.",
+    )
+    parser.add_argument(
+        "--modular-profile",
+        choices=["legacy-full-v1", "native-v2"],
+        default=None,
+        help=(
+            "Pipeline profile (default: native-v2). The legacy diagnostic "
+            "pipeline uses legacy-full-v1."
+        ),
+    )
+    parser.add_argument(
+        "--list-policy",
+        choices=["legacy", "wx-default-v2"],
+        default=None,
+        help=(
+            "List policy (default: wx-default-v2). The legacy diagnostic "
+            "pipeline uses legacy."
+        ),
+    )
     parser.add_argument("--strict-normalize", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--report", type=Path, default=None)
     parser.add_argument("--report-md", type=Path, default=None)
@@ -1499,6 +1520,13 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
         print(SKILL_VERSION)
         return
 
+    if args.modular_profile is None:
+        args.modular_profile = (
+            "legacy-full-v1" if args.pipeline == "legacy" else "native-v2"
+        )
+    if args.list_policy is None:
+        args.list_policy = "legacy" if args.pipeline == "legacy" else "wx-default-v2"
+
     import os as _os
     if _os.environ.get("WX_DOC_FORMAT_RELEASE") == "1" and (args.ast or args.source_ast):
         parser.error("--ast and --source-ast are unavailable in release packages")
@@ -1534,10 +1562,24 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
             run_info = read_run_info(args.resume)
         except ValueError:
             raw_run_info = json.loads(args.resume.read_text(encoding="utf-8"))
-            if raw_run_info.get("checkpoint_schema_version") != "2.0":
-                raise
+            checkpoint_schema_version = raw_run_info.get("checkpoint_schema_version")
+            if checkpoint_schema_version != "2.0":
+                if checkpoint_schema_version is not None:
+                    parser.error(
+                        "CHECKPOINT_SCHEMA_UNSUPPORTED: checkpoint schema "
+                        f"{checkpoint_schema_version!r} cannot be resumed"
+                    )
+                parser.error(
+                    "CHECKPOINT_FORMAT_UNSUPPORTED: run.json is not a native Checkpoint 2.0"
+                )
             native_checkpoint = True
             run_info = raw_run_info
+        else:
+            if run_info.get("protocol_version") == "1.0":
+                parser.error(
+                    "LEGACY_CHECKPOINT_UNSUPPORTED: protocol 1.0 cannot resume "
+                    "after the native-v2 cutover; regenerate requests with the current CLI"
+                )
         run_args = run_info.get("configuration" if native_checkpoint else "args", {})
         def restore_native(flag: str, *aliases: str) -> bool:
             return not native_checkpoint or not explicit_options.intersection((flag, *aliases))
@@ -1605,8 +1647,18 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
         except ProtocolError as exc:
             raise SystemExit(f"--resume: {exc}") from exc
 
-    if args.pipeline == "legacy" and args.list_policy != "legacy":
-        parser.error("legacy pipeline only accepts --list-policy legacy")
+    if args.pipeline == "legacy":
+        if args.modular_profile != "legacy-full-v1":
+            parser.error(
+                "legacy diagnostic pipeline requires --modular-profile legacy-full-v1"
+            )
+        if args.list_policy != "legacy":
+            parser.error("legacy diagnostic pipeline requires --list-policy legacy")
+    else:
+        if args.modular_profile != "native-v2":
+            parser.error("modular pipeline requires --modular-profile native-v2")
+        if args.list_policy != "wx-default-v2":
+            parser.error("modular pipeline requires --list-policy wx-default-v2")
 
     if args.pipeline == "modular" or native_checkpoint:
         modular_protocol_mode = "resume" if args.resume else "generate_requests" if args.generate_requests else None
@@ -1674,9 +1726,12 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
             and args.report is not None
             and result.artifacts.get("report") == str(args.report)
         )
+        output_report = report_for_output(result.as_report())
         if args.report is not None and not kernel_published_report:
             args.report.parent.mkdir(parents=True, exist_ok=True)
-            args.report.write_text(json.dumps(report_for_output(result.as_report()), ensure_ascii=False, indent=2), encoding="utf-8")
+            args.report.write_text(json.dumps(output_report, ensure_ascii=False, indent=2), encoding="utf-8")
+        if args.report_md is not None:
+            write_markdown_report(output_report, args.report_md)
         if result.diagnostics:
             diagnostic = result.diagnostics[0]
             print(diagnostic.get("code", "MODULAR_CONVERSION_FAILED"), file=sys.stderr)
