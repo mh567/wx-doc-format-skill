@@ -7,6 +7,7 @@ import re
 import shutil
 import sys
 import tarfile
+import unicodedata
 from pathlib import Path, PurePosixPath
 
 NUITKA_DIR = Path(__file__).resolve().parent
@@ -68,6 +69,12 @@ def discover_artifacts(artifacts_dir: Path, version: str) -> dict[str, Path]:
 
 def verify_artifact(path: Path, version: str, platform_id: str) -> dict:
     package = f"wx-doc-format-skill-{version}-{platform_id}"
+
+    def collision_key(member_path: PurePosixPath) -> str:
+        value = member_path.as_posix()
+        # Conservatively reject macOS case and Unicode-normalization aliases.
+        return unicodedata.normalize("NFD", value.casefold()) if platform_id == "macos-arm64" else value
+
     try:
         with tarfile.open(path, "r:gz") as archive:
             members = {}
@@ -76,7 +83,7 @@ def verify_artifact(path: Path, version: str, platform_id: str) -> dict:
             for member in archive.getmembers():
                 member_path = PurePosixPath(member.name)
                 parts = member.name.split("/")
-                normalized = member_path.as_posix()
+                normalized = collision_key(member_path)
                 if (
                     member_path.is_absolute() or parts[0] != package
                     or any(part in {"", ".", ".."} for part in parts)
@@ -84,12 +91,15 @@ def verify_artifact(path: Path, version: str, platform_id: str) -> dict:
                     or normalized in names or not (member.isfile() or member.isdir())
                 ):
                     raise ValueError("unsafe or duplicate archive member")
+                required_owner = 0o500 if member.isdir() else 0o400
+                if member.mode & required_owner != required_owner:
+                    raise ValueError(f"archive member lacks required owner permissions {required_owner:o}: {member.name}")
                 if normalized in path_kinds and path_kinds[normalized] != member.isdir():
                     raise ValueError("archive file conflicts with a directory or descendant")
                 for parent in member_path.parents:
                     if parent == PurePosixPath("."):
                         continue
-                    ancestor = parent.as_posix()
+                    ancestor = collision_key(parent)
                     if path_kinds.get(ancestor) is False:
                         raise ValueError("archive member has a file as its parent")
                     path_kinds.setdefault(ancestor, True)

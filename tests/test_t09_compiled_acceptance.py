@@ -320,6 +320,93 @@ def test_public_assembly_rejects_non_executable_required_archive_files(tmp_path:
     assert not output.exists()
 
 
+@pytest.mark.parametrize("target", ["macos-arm64", "kylin-v10-arm64"])
+@pytest.mark.parametrize(("directories", "prepend"), [
+    (("runtime/WX-DOC-FORMAT",), False),
+    (("RUNTIME/wx-doc-format/child",), False),
+    (("runtime/WX-DOC-FORMAT/child",), True),
+    (("runtime/CaseFolder", "runtime/casefolder"), False),
+    (("runtime/Caf\u00e9", "runtime/Cafe\u0301"), False),
+])
+def test_public_assembly_applies_target_filesystem_collision_keys(
+    tmp_path: Path, target: str, directories: tuple[str, ...], prepend: bool,
+) -> None:
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    path = write_archive_fixture(artifacts, target)
+    root = f"wx-doc-format-skill-0.13.0-{target}"
+    with tarfile.open(path, "r:gz") as archive:
+        entries = [(member, archive.extractfile(member).read() if member.isfile() else None) for member in archive.getmembers()]
+    extra = []
+    for relative in directories:
+        member = tarfile.TarInfo(f"{root}/{relative}")
+        member.type = tarfile.DIRTYPE
+        member.mode = 0o755
+        extra.append((member, None))
+    with tarfile.open(path, "w:gz") as archive:
+        for member, data in (extra + entries if prepend else entries + extra):
+            archive.addfile(member, io.BytesIO(data) if data is not None else None)
+    output = tmp_path / "public"
+    if target == "macos-arm64":
+        with pytest.raises(ValueError, match="ARTIFACT_INVALID"):
+            public.assemble_public_skill(artifacts, output, (target,), "26.0")
+        assert not output.exists()
+    else:
+        assert public.assemble_public_skill(artifacts, output, (target,)) == output
+        assert (output / "artifacts" / "manifest.json").is_file()
+
+
+@pytest.mark.parametrize("target", ["macos-arm64", "kylin-v10-arm64"])
+@pytest.mark.parametrize(("relative", "mode"), [
+    ("scripts/install.sh", 0o111),
+    ("scripts/run.sh", 0o111),
+    ("runtime/wx-doc-format", 0o111),
+    ("VERSION", 0o200),
+    ("manifest.json", 0o000),
+    ("SHA256SUMS.txt", 0o200),
+    ("runtime", 0o600),
+    ("assets", 0o100),
+    ("", 0o400),
+])
+def test_public_assembly_rejects_owner_unreadable_or_unsearchable_members(
+    tmp_path: Path, target: str, relative: str, mode: int,
+) -> None:
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    path = write_archive_fixture(artifacts, target)
+    root = f"wx-doc-format-skill-0.13.0-{target}"
+    member_name = f"{root}/{relative}" if relative else root
+    with tarfile.open(path, "r:gz") as archive:
+        entries = [(member, archive.extractfile(member).read() if member.isfile() else None) for member in archive.getmembers()]
+    with tarfile.open(path, "w:gz") as archive:
+        for member, data in entries:
+            if member.name == member_name:
+                member.mode = mode
+            archive.addfile(member, io.BytesIO(data) if data is not None else None)
+    output = tmp_path / "public"
+    with pytest.raises(ValueError, match="ARTIFACT_INVALID.*owner"):
+        public.assemble_public_skill(artifacts, output, (target,), "26.0")
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("target", ["macos-arm64", "kylin-v10-arm64"])
+def test_public_assembly_accepts_minimal_owner_read_and_search_permissions(tmp_path: Path, target: str) -> None:
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    path = write_archive_fixture(artifacts, target)
+    root = f"wx-doc-format-skill-0.13.0-{target}"
+    entrypoints = {f"{root}/{relative}" for relative in ("scripts/install.sh", "scripts/run.sh", "runtime/wx-doc-format")}
+    with tarfile.open(path, "r:gz") as archive:
+        entries = [(member, archive.extractfile(member).read() if member.isfile() else None) for member in archive.getmembers()]
+    with tarfile.open(path, "w:gz") as archive:
+        for member, data in entries:
+            member.mode = 0o500 if member.isdir() or member.name in entrypoints else 0o400
+            archive.addfile(member, io.BytesIO(data) if data is not None else None)
+    output = tmp_path / "public"
+    assert public.assemble_public_skill(artifacts, output, (target,), "26.0") == output
+    assert (output / "artifacts" / "manifest.json").is_file()
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="Current POSIX build entrypoints")
 @pytest.mark.parametrize("target", ["macos-arm64", "linux-arm64"])
 @pytest.mark.parametrize("compile_status", [0, 37])
