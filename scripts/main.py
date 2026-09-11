@@ -1675,6 +1675,8 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
                 options=kernel_options,
             )
         )
+        if result.terminal_replay:
+            raise SystemExit(result.exit_code)
         kernel_published_report = (
             result.status != "waiting_external"
             and args.report is not None

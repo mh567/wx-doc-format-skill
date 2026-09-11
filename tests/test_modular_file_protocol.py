@@ -429,6 +429,121 @@ def test_native_resume_is_idempotent_and_changed_content_conflicts(tmp_path: Pat
     assert output.read_bytes() == baseline_output
 
 
+@pytest.mark.parametrize("terminal_status", ["completed", "completed_with_warnings", "rolled_back"])
+def test_native_cli_terminal_resume_preserves_all_formal_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, terminal_status: str,
+) -> None:
+    from docx import Document
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    monkeypatch.setenv("WX_DOC_FORMAT_RELEASE", "1")
+    source = tmp_path / "source.md"
+    source.write_text("# Replay acceptance\n\nBody.\n", encoding="utf-8")
+    if terminal_status == "completed_with_warnings":
+        source = tmp_path / "source.docx"
+        document = Document()
+        document.add_heading("Replay acceptance", 1)
+        paragraph = document.add_paragraph("Preserve invalid source numbering.")
+        numbering = OxmlElement("w:numPr")
+        number_id = OxmlElement("w:numId")
+        number_id.set(qn("w:val"), "99999")
+        numbering.append(number_id)
+        paragraph._p.get_or_add_pPr().append(numbering)
+        document.save(source)
+    elif terminal_status == "rolled_back":
+        source.write_text("# Replay acceptance\n\n### Jump\n\nBody.\n", encoding="utf-8")
+    output = tmp_path / "output.docx"
+    previous = Document()
+    previous.add_paragraph("Previous formal document.")
+    previous.save(output)
+    report = tmp_path / "report.json"
+    report_md = tmp_path / "report.md"
+    request_dir = tmp_path / "requests"
+    generated = _run(
+        "--input", source, "--output", output, "--template", TEMPLATE,
+        "--report", report, "--report-md", report_md,
+        "--llm-enhance", "all" if terminal_status == "rolled_back" else "force-a",
+        "--generate-requests", request_dir,
+    )
+    assert generated.returncode == 0, generated.stderr
+    checkpoint_path = request_dir / "run.json"
+    responses = {}
+    for _ in range(4):
+        checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        if checkpoint["status"] != "waiting_external":
+            break
+        for request in checkpoint["requests"]:
+            if request["request_id"] in responses:
+                continue
+            response = _response(request, marker=None)
+            if request["capability"] == "document_review":
+                target = request["review_packet"]["targets"][0]
+                response["candidates"] = [{
+                    "candidate_id": "rejected-replay-review",
+                    "module_id": "document_review", "module_version": "2.0",
+                    "target_source_refs": [target["source_ref"]],
+                    "target_node_ids": [target["block_id"]],
+                    "proposal": {"operation": "update_role", "property_scope": ["role", "level"],
+                                 "value": {"role": "heading", "level": 6}},
+                    "positive_evidence": [{"kind": "post_audit_review"}], "negative_evidence": [],
+                    "scope": {"stages": ["role", "normalize", "render", "audit"]},
+                    "constraints": [], "rationale": "Reject the real heading jump repair", "confidence": 0.95,
+                }]
+            responses[request["request_id"]] = response
+        _write_responses(checkpoint_path, list(responses.values()))
+        finished = _run("--resume", checkpoint_path)
+        assert finished.returncode in {0, 1}, finished.stderr
+    else:
+        pytest.fail("file protocol did not reach a terminal state")
+    expected_status = "failed" if terminal_status == "rolled_back" else terminal_status
+    assert checkpoint["status"] == expected_status
+    if terminal_status == "rolled_back":
+        assert checkpoint["review_outcome"]["status"] == "rolled_back"
+    before = {path: path.read_bytes() for path in (checkpoint_path, output, report, report_md)}
+    summary = json.loads(before[report])["public_summary"]
+    assert summary["status"] == expected_status
+    assert summary["audits"]["saved_output_audit"] == "passed"
+
+    repeated = _run("--resume", checkpoint_path)
+
+    assert repeated.returncode == (1 if terminal_status == "rolled_back" else 0), repeated.stderr
+    assert {path: path.read_bytes() for path in before} == before
+    assert json.loads(report.read_text(encoding="utf-8"))["public_summary"] == summary
+    assert "terminal_replay" not in report.read_text(encoding="utf-8")
+    assert "terminal_replay" not in report_md.read_text(encoding="utf-8")
+
+
+def test_native_cli_waiting_resume_still_publishes_pending_reports(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("WX_DOC_FORMAT_RELEASE", "1")
+    source = tmp_path / "source.md"
+    source.write_text("# Waiting acceptance\n\nBody.\n", encoding="utf-8")
+    output = tmp_path / "output.docx"
+    output.write_bytes(b"previous formal output")
+    report = tmp_path / "report.json"
+    report_md = tmp_path / "report.md"
+    request_dir = tmp_path / "requests"
+    generated = _run(
+        "--input", source, "--output", output, "--template", TEMPLATE,
+        "--report", report, "--report-md", report_md,
+        "--llm-enhance", "force-a", "--generate-requests", request_dir,
+    )
+    assert generated.returncode == 0, generated.stderr
+    checkpoint = request_dir / "run.json"
+    before = checkpoint.read_bytes(), output.read_bytes()
+    report.write_text("stale pending report", encoding="utf-8")
+    report_md.write_text("stale pending report", encoding="utf-8")
+
+    repeated = _run("--resume", checkpoint)
+
+    assert repeated.returncode == 0, repeated.stderr
+    assert (checkpoint.read_bytes(), output.read_bytes()) == before
+    assert json.loads(report.read_text(encoding="utf-8"))["public_summary"]["status"] == "waiting_external"
+    assert "stale pending report" not in report_md.read_text(encoding="utf-8")
+
+
 def test_later_request_append_recovers_request_file_after_injected_process_crash(
     tmp_path: Path,
 ) -> None:

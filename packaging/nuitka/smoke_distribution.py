@@ -233,9 +233,11 @@ def run_runtime_contracts(command: list[str], template: Path, evidence_dir: Path
     previous_formal = b"previous formal output"
     output.write_bytes(previous_formal)
     report = evidence_dir / "file.report.json"
+    report_md = evidence_dir / "file.report.md"
     request_dir = evidence_dir / "requests"
     _execute([*command, "--input", str(source), "--output", str(output), "--template", str(template),
-              "--report", str(report), "--llm-enhance", "all", "--generate-requests", str(request_dir)], evidence_dir, "file-generate")
+              "--report", str(report), "--report-md", str(report_md),
+              "--llm-enhance", "all", "--generate-requests", str(request_dir)], evidence_dir, "file-generate")
     checkpoint_path = request_dir / "run.json"
     responses = {}
     stages = []
@@ -264,10 +266,14 @@ def run_runtime_contracts(command: list[str], template: Path, evidence_dir: Path
     _assert_heading(output, "Jump", 1)
     if len(stages) < 2 or "document_review" not in capabilities:
         raise RuntimeError("File protocol did not exercise post-audit review")
-    before_replay = (checkpoint_path.read_bytes(), output.read_bytes())
+    replay_artifacts = (checkpoint_path, output, report, report_md)
+    before_replay = tuple(path.read_bytes() for path in replay_artifacts)
     _execute([*command, "--resume", str(checkpoint_path)], evidence_dir, "file-idempotent-resume")
-    if before_replay != (checkpoint_path.read_bytes(), output.read_bytes()):
-        raise RuntimeError("Terminal resume changed the checkpoint or formal DOCX")
+    if before_replay != tuple(path.read_bytes() for path in replay_artifacts):
+        raise RuntimeError("Terminal resume changed the checkpoint, formal DOCX, or report")
+    _validate_public_report(report)
+    if any(value in report_md.read_text(encoding="utf-8") for value in ("Traceback", "review_packet", "source_ast", "native_module_evidence")):
+        raise RuntimeError("Release Markdown report exposes private details after terminal resume")
     results["file_protocol"] = {"status": "passed", "idempotent": True, "waiting_stages": stages, "capabilities": capabilities}
     results["review"] = {"status": "passed", "heading_level": 1, "artifact": _validate_docx(output, text="Jump")}
     rejected = evidence_dir / "rejected.docx"

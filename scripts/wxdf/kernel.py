@@ -39,6 +39,8 @@ class RunResult:
     artifacts: dict[str, str] = field(default_factory=dict)
     diagnostics: list[dict[str, Any]] = field(default_factory=list)
     metrics: dict[str, Any] = field(default_factory=dict)
+    # Internal lifecycle control; never serialize into reports or public results.
+    terminal_replay: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -394,6 +396,14 @@ class ConversionKernel:
                     return RunResult(
                         status=status,
                         exit_code=1 if status in {"failed", "cancelled"} else 0,
+                        terminal_replay=(
+                            status in {"completed", "completed_with_warnings"}
+                            or (
+                                status == "failed"
+                                and isinstance(checkpoint.get("review_outcome"), Mapping)
+                                and checkpoint["review_outcome"].get("status") == "rolled_back"
+                            )
+                        ),
                         report={
                             "pipeline": "modular",
                             "profile": _NATIVE_PROFILE,

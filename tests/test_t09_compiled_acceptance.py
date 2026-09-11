@@ -206,6 +206,31 @@ def test_runtime_acceptance_resumes_file_stages_and_repairs_a_real_audit(tmp_pat
     assert result["review"]["heading_level"] == 1
 
 
+@pytest.mark.parametrize("report_kind", ["json", "markdown"])
+def test_runtime_acceptance_rejects_terminal_report_overwrite(tmp_path: Path, monkeypatch, report_kind: str) -> None:
+    monkeypatch.setenv("PYTHONPATH", str(ROOT / "scripts"))
+    # Simulate the regression at the runtime process boundary while retaining the real CLI flow.
+    forwarder = """import json, subprocess, sys
+from pathlib import Path
+entrypoint, report_kind, *arguments = sys.argv[1:]
+checkpoint = None
+if '--resume' in arguments:
+    checkpoint = json.loads(Path(arguments[arguments.index('--resume') + 1]).read_text())
+result = subprocess.run([sys.executable, entrypoint, *arguments])
+if checkpoint is not None and checkpoint.get('status') == 'completed':
+    report = Path(checkpoint['configuration']['report'])
+    if report_kind == 'markdown':
+        report = report.with_suffix('.md')
+    report.write_text('overwritten terminal report')
+sys.exit(result.returncode)
+"""
+    with pytest.raises(RuntimeError, match="Terminal resume changed.*report"):
+        smoke.run_runtime_contracts(
+            [sys.executable, "-c", forwarder, str(ROOT / "packaging/nuitka/release_entrypoint.py"), report_kind],
+            ROOT / "assets/wx_template.docx", tmp_path / "evidence",
+        )
+
+
 def test_runtime_acceptance_checks_rejected_review_and_release_export_guards(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("PYTHONPATH", str(ROOT / "scripts"))
     result = smoke.run_runtime_contracts(
