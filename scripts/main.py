@@ -594,7 +594,7 @@ def _public_audit_status(value: object) -> str:
     return "not_run"
 
 
-def _public_unexpected_styles_count(report: dict) -> int:
+def _public_unexpected_styles_count(report: dict) -> int | None:
     for container in (
         report,
         report.get("saved_output_audit"),
@@ -602,12 +602,15 @@ def _public_unexpected_styles_count(report: dict) -> int:
     ):
         if not isinstance(container, dict):
             continue
-        value = container.get("unexpected_styles")
+        if "unexpected_styles" not in container:
+            continue
+        value = container["unexpected_styles"]
         if isinstance(value, list):
             return len(value)
         if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
             return value
-    return 0
+        return None
+    return None
 
 
 def _public_diagnostic_codes(report: dict) -> list[str]:
@@ -639,15 +642,21 @@ def public_report_summary(report: dict) -> dict:
     status = _public_summary_scalar(report.get("status"))
     unexpected_styles_count = _public_unexpected_styles_count(report)
     diagnostic_codes = _public_diagnostic_codes(report)
+    if unexpected_styles_count is None:
+        diagnostic_codes = sorted({*diagnostic_codes, "WXDF-E-AUDIT-EVIDENCE-MISSING"})
     explicit_manual_review = report.get("manual_review_required")
     manual_review_required = (
-        explicit_manual_review
-        if isinstance(explicit_manual_review, bool)
+        True
+        if unexpected_styles_count is None
         else (
-            status != "completed"
-            or unexpected_styles_count > 0
-            or bool(diagnostic_codes)
-            or "failed" in audits.values()
+            explicit_manual_review
+            if isinstance(explicit_manual_review, bool)
+            else (
+                status != "completed"
+                or unexpected_styles_count > 0
+                or bool(diagnostic_codes)
+                or "failed" in audits.values()
+            )
         )
     )
     return {

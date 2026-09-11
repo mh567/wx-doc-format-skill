@@ -39,6 +39,7 @@ distribution = _load_module(
 )
 
 PLATFORMS = ("macos-arm64", "kylin-v10-arm64")
+MISSING = object()
 
 
 def _write_launcher_artifact(artifacts_dir: Path, platform_id: str) -> Path:
@@ -227,11 +228,32 @@ def test_public_launcher_stops_on_corrupt_manifest_before_cache_or_download(tmp_
 
 
 @pytest.mark.parametrize(
-    ("status", "audit_passed", "diagnostics", "manual_review"),
+    (
+        "status",
+        "audit_passed",
+        "diagnostics",
+        "manual_review",
+        "unexpected_styles_count",
+        "expected_diagnostic_codes",
+    ),
     [
-        ("completed", True, [], False),
-        ("failed", False, [{"code": "WXDF-E-FAILED", "message": "/private/input.docx"}], True),
-        ("waiting_external", None, [{"code": "WXDF-I-WAITING"}], True),
+        ("completed", True, [], False, 0, []),
+        (
+            "failed",
+            False,
+            [{"code": "WXDF-E-FAILED", "message": "/private/input.docx"}],
+            True,
+            1,
+            ["WXDF-E-FAILED"],
+        ),
+        (
+            "waiting_external",
+            None,
+            [{"code": "WXDF-I-WAITING"}],
+            True,
+            None,
+            ["WXDF-E-AUDIT-EVIDENCE-MISSING", "WXDF-I-WAITING"],
+        ),
     ],
 )
 def test_release_report_adds_a_stable_path_free_public_summary(
@@ -239,6 +261,8 @@ def test_release_report_adds_a_stable_path_free_public_summary(
     audit_passed: bool | None,
     diagnostics: list[dict],
     manual_review: bool,
+    unexpected_styles_count: int | None,
+    expected_diagnostic_codes: list[str],
 ) -> None:
     report = {
         "status": status,
@@ -274,11 +298,51 @@ def test_release_report_adds_a_stable_path_free_public_summary(
     assert summary["pipeline"] == "modular"
     assert summary["profile"] == "wx-default-v2"
     assert summary["list_policy"] == "wx-default-v2"
-    assert summary["unexpected_styles_count"] == (1 if audit_passed is False else 0)
+    assert summary["unexpected_styles_count"] == unexpected_styles_count
     assert summary["manual_review_required"] is manual_review
-    assert summary["diagnostic_codes"] == [item["code"] for item in diagnostics]
+    assert summary["diagnostic_codes"] == expected_diagnostic_codes
     assert "/private" not in json.dumps(summary)
     assert "review_packet" not in public
+
+
+@pytest.mark.parametrize(
+    "unexpected_styles",
+    [
+        pytest.param(MISSING, id="missing"),
+        pytest.param(None, id="null"),
+        "invalid",
+        False,
+        -1,
+    ],
+)
+def test_release_summary_fails_closed_when_unexpected_styles_evidence_is_missing_or_invalid(
+    unexpected_styles: object,
+) -> None:
+    report = {
+        "status": "completed",
+        "pipeline": "modular",
+        "profile": "wx-default-v2",
+        "list_policy": "wx-default-v2",
+        "audit": {"passed": True},
+        "model_audit": {"passed": True},
+        "saved_output_audit": {"passed": True},
+        "appendix_preservation_audit": {"passed": True},
+        "manual_review_required": False,
+    }
+    if unexpected_styles is not MISSING:
+        report["saved_output_audit"]["unexpected_styles"] = unexpected_styles
+
+    summary = main.report_for_output(report, release=True)["public_summary"]
+
+    assert summary["audits"] == {
+        "audit": "passed",
+        "model_audit": "passed",
+        "saved_output_audit": "passed",
+        "appendix_preservation_audit": "passed",
+    }
+    assert summary["unexpected_styles_count"] is None
+    assert summary["manual_review_required"] is True
+    assert "WXDF-E-AUDIT-EVIDENCE-MISSING" in summary["diagnostic_codes"]
 
 
 def test_public_manifests_declare_the_summary_contract(tmp_path: Path) -> None:
@@ -354,6 +418,64 @@ def test_offline_launcher_warns_for_candidate_and_stops_on_unavailable_before_ru
     assert unavailable.returncode == 3
     assert "WXDF-E-RUNTIME-UNAVAILABLE" in unavailable.stderr
     assert "WXDF-T07-OFFLINE-OK" not in unavailable.stdout
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX manifest validation contract")
+@pytest.mark.parametrize("launcher_kind", ["online", "offline"])
+@pytest.mark.parametrize("damage", ["trailing", "truncated", "corrupt_tail"])
+def test_public_launchers_reject_invalid_json_before_cache_download_or_runtime(
+    tmp_path: Path,
+    launcher_kind: str,
+    damage: str,
+) -> None:
+    environment = os.environ.copy()
+    shim_dir = tmp_path / "invalid-json-uname-shim"
+    shim_dir.mkdir()
+    uname = shim_dir / "uname"
+    uname.write_text(
+        '#!/bin/sh\nif [ "$1" = "-s" ]; then printf "Linux\\n"; else printf "aarch64\\n"; fi\n',
+        encoding="utf-8",
+    )
+    uname.chmod(0o755)
+    environment["PATH"] = f"{shim_dir}{os.pathsep}{environment['PATH']}"
+
+    if launcher_kind == "online":
+        package = _assemble(tmp_path / "online")
+        manifest_path = package / "artifacts" / "manifest.json"
+        environment["WX_DOC_FORMAT_ARCHIVE_DIR"] = str(tmp_path / "online" / "artifacts")
+        environment["WX_DOC_FORMAT_CACHE_DIR"] = str(tmp_path / "invalid-json-cache")
+    else:
+        runtime = tmp_path / "runtime.dist"
+        runtime.mkdir()
+        executable = runtime / distribution.executable_name("linux")
+        executable.write_text("#!/bin/sh\nprintf '%s\\n' 'WXDF-T07-INVALID-RAN'\n", encoding="utf-8")
+        executable.chmod(0o755)
+        package = distribution.assemble_package(
+            runtime,
+            tmp_path / "offline",
+            "kylin-v10-arm64",
+        )
+        manifest_path = package / "manifest.json"
+
+    manifest_text = manifest_path.read_text(encoding="utf-8").rstrip()
+    damaged = {
+        "trailing": manifest_text + "\ntrailing",
+        "truncated": manifest_text[:-1],
+        "corrupt_tail": manifest_text[:-1] + ",broken}",
+    }[damage]
+    manifest_path.write_text(damaged, encoding="utf-8")
+
+    completed = subprocess.run(
+        ["/bin/sh", str(package / "scripts" / "run.sh"), "--version"],
+        env=environment,
+        text=True,
+        capture_output=True,
+    )
+    assert completed.returncode == 3
+    assert "WXDF-E-MANIFEST-INVALID" in completed.stderr
+    assert "WXDF-T07-LAUNCHER-OK" not in completed.stdout
+    assert "WXDF-T07-INVALID-RAN" not in completed.stdout
+    assert not (tmp_path / "invalid-json-cache").exists()
 
 
 def test_public_launchers_use_native_v2_defaults_without_python_or_jq() -> None:

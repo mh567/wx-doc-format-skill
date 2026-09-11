@@ -70,9 +70,9 @@ metadata:
 
 仅使用 JSON 报告中的 `public_summary` 判断公开交付结果。该摘要的 `schema_version` 必须为 `1.0`，并包含 `status`、`pipeline`、`profile`、`list_policy`、`audits`、`unexpected_styles_count`、`manual_review_required` 和 `diagnostic_codes`。
 
-1. `status=completed`、已执行审计均为 `passed`、`unexpected_styles_count=0` 且输出文件存在时，可以交付 DOCX。
+1. `status=completed`、已执行审计均为 `passed`、`unexpected_styles_count` 为整数 `0` 且输出文件存在时，可以交付 DOCX。
 2. `status=waiting_external` 时继续 LLM 文件协议，暂不交付。
-3. `status=failed`、摘要缺失、摘要版本错误、审计失败或意外样式数量大于零时停止交付，并报告 `diagnostic_codes`。
+3. `status=failed`、摘要缺失、摘要版本错误、审计失败，或 `unexpected_styles_count` 为 `null`、非整数及非零值时停止交付，并报告 `diagnostic_codes`。
 4. `manual_review_required=true` 时，在交付说明中逐项列出人工复核要求。
 
 完成条件：已交付 DOCX、公开摘要结果与人工复核项，或已停止并给出稳定状态及诊断码。

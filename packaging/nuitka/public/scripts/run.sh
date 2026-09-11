@@ -23,6 +23,10 @@ if [ ! -r "$MANIFEST_PATH" ]; then
     echo "WXDF-E-MANIFEST-MISSING: offline runtime manifest is unavailable" >&2
     exit 3
 fi
+if ! LC_ALL=C awk -f "$PACKAGE_DIR/scripts/validate-manifest.awk" "$MANIFEST_PATH"; then
+    echo "WXDF-E-MANIFEST-INVALID: offline runtime manifest is not valid JSON" >&2
+    exit 3
+fi
 MANIFEST_COMPACT=$(LC_ALL=C tr -d ' \t\r\n' < "$MANIFEST_PATH")
 case "$MANIFEST_COMPACT" in
     *'"platforms":{'*) ;;

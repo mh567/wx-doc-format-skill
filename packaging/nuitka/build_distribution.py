@@ -22,6 +22,10 @@ SUPPORTED_PLATFORM_IDS = (
     "macos-arm64",
     "kylin-v10-arm64",
 )
+PUBLIC_PACKAGE_PLATFORM_IDS = (
+    "macos-arm64",
+    "kylin-v10-arm64",
+)
 
 
 MODULAR_CONTRACT_VERSIONS = {
@@ -216,6 +220,10 @@ def _copy_public_files(package_dir: Path) -> None:
         shutil.copy2(source, target)
         if target.suffix == ".sh":
             target.chmod(0o755)
+    shutil.copy2(
+        PUBLIC_DIR / "scripts" / "validate-manifest.awk",
+        adapter_dir / "validate-manifest.awk",
+    )
 
 
 def python_source_files(root: Path) -> list[Path]:
@@ -287,6 +295,8 @@ def assemble_package(dist_dir: Path, output_dir: Path, target: str | None = None
     resolved_target = target or platform_id()
     if resolved_target not in SUPPORTED_PLATFORM_IDS:
         raise ValueError(f"Unsupported platform identifier: {resolved_target}")
+    if resolved_target not in PUBLIC_PACKAGE_PLATFORM_IDS:
+        raise ValueError(f"Unsupported public package target: {resolved_target}")
     reject_python_sources(dist_dir)
     reject_unsafe_release_paths(dist_dir)
     package_dir = output_dir / f"wx-doc-format-skill-{version}-{resolved_target}"

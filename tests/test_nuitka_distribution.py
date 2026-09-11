@@ -439,12 +439,26 @@ def test_kylin_manifest_is_marked_as_candidate(tmp_path):
 def test_archive_name_keeps_full_version_and_private_build_files_stay_out(tmp_path):
     dist = tmp_path / "existing.dist"
     dist.mkdir()
-    (dist / "wx-doc-format.exe").write_bytes(b"compiled-placeholder")
-    package = build.assemble_package(dist, tmp_path / "output", "windows-x86_64")
-    archive = build.create_archive(package, "windows-x86_64")
-    assert archive.name == f"{package.name}.zip"
+    (dist / "wx-doc-format").write_bytes(b"compiled-placeholder")
+    package = build.assemble_package(dist, tmp_path / "output", "macos-arm64")
+    archive = build.create_archive(package, "macos-arm64")
+    assert archive.name == f"{package.name}.tar.gz"
     assert not (package / "compilation-report.xml").exists()
     assert not (package / "smoke_distribution.py").exists()
+
+
+def test_windows_runtime_build_identity_remains_without_public_package_assembly(tmp_path):
+    assert "windows-x86_64" in build.SUPPORTED_PLATFORM_IDS
+    assert "windows-x86_64" not in build.PUBLIC_PACKAGE_PLATFORM_IDS
+    assert build.platform_id("Windows", "AMD64") == "windows-x86_64"
+    assert build.executable_name("Windows") == "wx-doc-format.exe"
+
+    dist = tmp_path / "windows-runtime.dist"
+    dist.mkdir()
+    (dist / "wx-doc-format.exe").write_bytes(b"compiled-placeholder")
+    with pytest.raises(ValueError, match="public package target.*windows-x86_64"):
+        build.assemble_package(dist, tmp_path / "output", "windows-x86_64")
+    assert not (tmp_path / "output").exists()
 
 
 def test_expected_tag_version_must_match_version_file():
