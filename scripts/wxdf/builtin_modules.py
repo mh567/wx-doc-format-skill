@@ -1143,11 +1143,22 @@ def _native_renderer(context: ModuleExecutionContext) -> Mapping[str, Any]:
     template = context.require("template_bundle")
     resources = context.require("resources")
     staging_path = context.services["staging_path"]
+    options = context.request.options or {}
+    render_options = {
+        "table_row_height_cm": float(options.get("table_row_height_cm", 0.69)),
+        "table_row_height_rule": str(options.get("table_row_height_rule", "at-least")),
+    }
     with context.stage("render"):
         if hasattr(template, "path"):
-            result = render(normalized, staging_path, template_bundle=template, resources=resources)
+            result = render(
+                normalized,
+                staging_path,
+                template_bundle=template,
+                resources=resources,
+                **render_options,
+            )
         else:
-            result = render(normalized, staging_path, resources=resources)
+            result = render(normalized, staging_path, resources=resources, **render_options)
         metrics = context.services.get("metrics")
         if metrics is not None:
             metrics.record_render()
@@ -1469,9 +1480,17 @@ def _native_reviewer(context: ModuleExecutionContext) -> dict[str, Any]:
                 candidate_path,
                 template_bundle=template,
                 resources=resources,
+                table_row_height_cm=float(options.get("table_row_height_cm", 0.69)),
+                table_row_height_rule=str(options.get("table_row_height_rule", "at-least")),
             )
         else:
-            candidate_render = render(candidate_normalized, candidate_path, resources=resources)
+            candidate_render = render(
+                candidate_normalized,
+                candidate_path,
+                resources=resources,
+                table_row_height_cm=float(options.get("table_row_height_cm", 0.69)),
+                table_row_height_rule=str(options.get("table_row_height_rule", "at-least")),
+            )
         metrics = context.services.get("metrics")
         if metrics is not None:
             metrics.record_render()

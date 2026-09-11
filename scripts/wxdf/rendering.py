@@ -217,6 +217,103 @@ def _style_for_block(block: Mapping[str, Any], styles: Mapping[str, str]) -> str
     return styles.get("body", "Normal")
 
 
+def _measurement(value: Any, *, default_type: str = "dxa") -> tuple[str | None, str | None]:
+    if isinstance(value, Mapping):
+        raw_value = value.get("value")
+        raw_type = value.get("type")
+        return (
+            str(raw_value) if raw_value is not None else None,
+            str(raw_type) if raw_type is not None else default_type,
+        )
+    return (str(value), default_type) if value is not None else (None, None)
+
+
+def _apply_layout_table_contract(table: Any, layout: Any) -> None:
+    """Restore captured source formatting for a semantic layout table."""
+
+    tbl_pr = table._tbl.tblPr
+    tbl_style = tbl_pr.find(qn("w:tblStyle"))
+    if tbl_style is not None:
+        tbl_pr.remove(tbl_style)
+    if not isinstance(layout, Mapping):
+        return
+
+    if "autofit" in layout:
+        table.autofit = bool(layout["autofit"])
+
+    if "source_width" in layout:
+        width_value, width_type = _measurement(layout["source_width"])
+        width = tbl_pr.find(qn("w:tblW"))
+        if width is None:
+            width = OxmlElement("w:tblW")
+            tbl_pr.append(width)
+        if width_value is not None:
+            width.set(qn("w:w"), width_value)
+        if width_type is not None:
+            width.set(qn("w:type"), width_type)
+
+    source_margins = layout.get("source_margins")
+    if isinstance(source_margins, Mapping):
+        existing_margins = tbl_pr.find(qn("w:tblCellMar"))
+        if existing_margins is not None:
+            tbl_pr.remove(existing_margins)
+        margins = OxmlElement("w:tblCellMar")
+        for name in ("top", "left", "bottom", "right"):
+            if name not in source_margins:
+                continue
+            margin_value, margin_type = _measurement(source_margins[name])
+            margin = OxmlElement(f"w:{name}")
+            if margin_value is not None:
+                margin.set(qn("w:w"), margin_value)
+            if margin_type is not None:
+                margin.set(qn("w:type"), margin_type)
+            margins.append(margin)
+        tbl_pr.append(margins)
+
+    source_borders = layout.get("borders")
+    if source_borders == "none":
+        source_borders = {
+            name: {"val": "none"}
+            for name in ("top", "left", "bottom", "right", "insideH", "insideV")
+        }
+    if isinstance(source_borders, Mapping):
+        existing_borders = tbl_pr.find(qn("w:tblBorders"))
+        if existing_borders is not None:
+            tbl_pr.remove(existing_borders)
+        borders = OxmlElement("w:tblBorders")
+        for name in ("top", "left", "bottom", "right", "insideH", "insideV"):
+            border_contract = source_borders.get(name)
+            if not isinstance(border_contract, Mapping):
+                continue
+            edge = OxmlElement(f"w:{name}")
+            for attribute in ("val", "sz", "space", "color"):
+                value = border_contract.get(attribute)
+                if value is not None:
+                    edge.set(qn(f"w:{attribute}"), str(value))
+            borders.append(edge)
+        tbl_pr.append(borders)
+
+    row_heights = layout.get("row_heights")
+    if isinstance(row_heights, list):
+        for row, row_height in zip(table.rows, row_heights):
+            if not isinstance(row_height, Mapping):
+                row_height = {"value": row_height}
+            tr_pr = row._tr.get_or_add_trPr()
+            existing_height = tr_pr.find(qn("w:trHeight"))
+            if existing_height is not None:
+                tr_pr.remove(existing_height)
+            value = row_height.get("value")
+            rule = row_height.get("rule")
+            if value is None and rule is None:
+                continue
+            height = OxmlElement("w:trHeight")
+            if value is not None:
+                height.set(qn("w:val"), str(value))
+            if rule is not None:
+                height.set(qn("w:hRule"), str(rule))
+            tr_pr.append(height)
+
+
 def render(
     normalized: Mapping[str, Any],
     output_path: Path | str,
@@ -224,6 +321,8 @@ def render(
     template_path: Path | str | None = None,
     template_bundle: TemplateBundle | None = None,
     resources: Mapping[str, Any] | None = None,
+    table_row_height_cm: float = 0.69,
+    table_row_height_rule: str = "at-least",
 ) -> dict[str, Any]:
     """Render normalized nodes in children order and save a DOCX artifact."""
 
@@ -337,14 +436,22 @@ def render(
             ),
             default=1,
         )
+        table_type = str(block.get("table_type") or "data")
+        is_layout = table_type == "layout"
         try:
             if parent is None:
-                table = doc.add_table(rows=max(1, row_count), cols=max(1, column_count), style="Table Grid")
+                table = doc.add_table(
+                    rows=max(1, row_count),
+                    cols=max(1, column_count),
+                    style=None if is_layout else "Table Grid",
+                )
             else:
                 table = parent.add_table(rows=max(1, row_count), cols=max(1, column_count))
         except (KeyError, ValueError):
             table = parent.add_table(rows=max(1, row_count), cols=max(1, column_count)) if parent is not None else doc.add_table(rows=max(1, row_count), cols=max(1, column_count))
-        if parent is None:
+        if is_layout:
+            _apply_layout_table_contract(table, block.get("layout"))
+        elif parent is None:
             try:
                 table.style = "Table Grid"
             except (KeyError, ValueError):
@@ -356,9 +463,9 @@ def render(
             normalize_table(
                 table,
                 {"resolved_styles": dict(styles)},
-                0.69,
-                "at-least",
-                role=str(block.get("table_type") or "data"),
+                table_row_height_cm,
+                table_row_height_rule,
+                role=table_type,
                 path=str(len(doc.tables)),
             )
         occupied: set[tuple[int, int]] = set()
@@ -376,7 +483,7 @@ def render(
                     end_row = min(row_count - 1, row_index + row_span - 1)
                     end_col = min(column_count - 1, column_cursor + col_span - 1)
                     cell = cell.merge(table.cell(end_row, end_col))
-                if str(block.get("table_type") or "data") != "layout":
+                if not is_layout:
                     semantic_table_cells.add(cell._tc)
                 for occupied_row in range(row_index + 1, min(row_count, row_index + row_span)):
                     for occupied_col in range(column_cursor, column_cursor + col_span):

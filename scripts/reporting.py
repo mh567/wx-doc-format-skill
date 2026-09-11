@@ -231,6 +231,10 @@ def add_risk_warnings(report: dict, row_height_rule: str) -> None:
 
 
 def write_markdown_report(report: dict, path: Path) -> None:
+    if report.get("pipeline") == "modular":
+        _write_native_markdown_report(report, path)
+        return
+
     lines = ["# WX 文档格式转换报告", ""]
     audit = report.get("audit", {})
     parse_report = report.get("parse_report", {})
@@ -372,5 +376,49 @@ def write_markdown_report(report: dict, path: Path) -> None:
     for key, values in table_contract.items():
         if (key.endswith("issues") or key == "invalid_table_styles") and values:
             lines.append(f"- {key}：{values[:20]}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _native_audit_status(report: dict, key: str) -> str:
+    audit = report.get(key)
+    if not isinstance(audit, dict):
+        return "not_run"
+    return "passed" if audit.get("passed") is True else "failed"
+
+
+def _write_native_markdown_report(report: dict, path: Path) -> None:
+    saved_output_audit = report.get("saved_output_audit")
+    unexpected_styles = (
+        saved_output_audit.get("unexpected_styles", [])
+        if isinstance(saved_output_audit, dict)
+        else []
+    )
+    lines = [
+        "# WX 文档格式转换报告",
+        "",
+        "## Native 执行概览",
+        f"- pipeline：{report.get('pipeline', 'unknown')}",
+        f"- profile：{report.get('profile', 'unknown')}",
+        f"- list_policy：{report.get('list_policy', 'unknown')}",
+        f"- status：{report.get('status', 'unknown')}",
+        f"- model_audit：{_native_audit_status(report, 'model_audit')}",
+        f"- saved_output_audit：{_native_audit_status(report, 'saved_output_audit')}",
+        f"- unexpected_styles：{unexpected_styles}",
+        "",
+        "## 风险提示",
+    ]
+    risk_warnings = report.get("risk_warnings", [])
+    if risk_warnings:
+        lines.extend(f"- {warning}" for warning in risk_warnings)
+    else:
+        lines.append("- 无")
+    lines.extend(["", "## 内容型复核提示"])
+    content_warnings = report.get("content_warnings", [])
+    if content_warnings:
+        lines.extend(f"- {warning}" for warning in content_warnings)
+    else:
+        lines.append("- 无")
+    lines.append("")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")

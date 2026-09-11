@@ -202,6 +202,7 @@ def _has_inline_contract(inline_content: list[Mapping[str, Any]]) -> bool:
 
 def check_saved_output(path: Path | str, expected: Mapping[str, Any], render_map: Mapping[str, Any]) -> dict[str, Any]:
     issues: list[dict[str, Any]] = []
+    unexpected_styles: list[str] = []
     output = Path(path)
     styles_xml = None
     numbering_xml = None
@@ -224,12 +225,20 @@ def check_saved_output(path: Path | str, expected: Mapping[str, Any], render_map
             if "word/_rels/document.xml.rels" in names:
                 relationships_xml = archive.read("word/_rels/document.xml.rels")
     except (OSError, BadZipFile) as exc:
-        return {"passed": False, "issues": [{"code": "invalid_docx", "message": str(exc)}]}
+        return {
+            "passed": False,
+            "issues": [{"code": "invalid_docx", "message": str(exc)}],
+            "unexpected_styles": unexpected_styles,
+        }
 
     try:
         document = Document(output)
     except Exception as exc:
-        return {"passed": False, "issues": [{"code": "readback_failed", "message": str(exc)}]}
+        return {
+            "passed": False,
+            "issues": [{"code": "readback_failed", "message": str(exc)}],
+            "unexpected_styles": unexpected_styles,
+        }
     namespace = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
     ns = {"w": namespace}
     xml_paragraphs: list[Any] = []
@@ -395,6 +404,31 @@ def check_saved_output(path: Path | str, expected: Mapping[str, Any], render_map
                 except (TypeError, ValueError):
                     parsed_ilvl = 0
                 style_num_info[style_id] = (parsed_num_id, parsed_ilvl)
+    resolved_styles = expected_profile.get("resolved_styles", {}) if isinstance(expected_profile, Mapping) else {}
+    allowed_styles = {"Normal"}
+    if isinstance(resolved_styles, Mapping):
+        allowed_styles.update(str(name) for name in resolved_styles.values() if name)
+    toc_contract = expected.get("presentation", {}).get("template_contract", {}).get("toc", {})
+    if isinstance(toc_contract, Mapping):
+        try:
+            max_toc_level = int(toc_contract.get("max_level") or 0)
+        except (TypeError, ValueError):
+            max_toc_level = 0
+        allowed_styles.update(f"TOC {level}" for level in range(1, max_toc_level + 1))
+    allowed_styles_casefold = {name.casefold() for name in allowed_styles}
+    if document_xml is not None:
+        document_root_for_styles = ElementTree.fromstring(document_xml)
+        used_styles = set()
+        for paragraph in document_root_for_styles.findall(".//w:p", ns):
+            style = paragraph.find("w:pPr/w:pStyle", ns)
+            style_id = style.get(f"{{{namespace}}}val") if style is not None else None
+            used_styles.add(style_names.get(style_id, style_id) if style_id else "Normal")
+        unexpected_styles = sorted(
+            (name for name in used_styles if name and name.casefold() not in allowed_styles_casefold),
+            key=str.casefold,
+        )
+        if unexpected_styles:
+            issues.append({"code": "unexpected_styles", "styles": unexpected_styles})
     expected_numbered_style_ids = {style_id for style_id, name in style_names.items() if name in expected_numbered_styles}
     expected_style_ids_by_name = {name: style_id for style_id, name in style_names.items() if name in expected_numbered_styles}
     valid_num_fmts = {"decimal", "decimalZero", "lowerLetter", "upperLetter", "lowerRoman", "upperRoman", "bullet", "none"}
@@ -513,4 +547,10 @@ def check_saved_output(path: Path | str, expected: Mapping[str, Any], render_map
             mapping_mismatches.append({"text": actual.get("text"), "field": "abstract_num_id", "expected": expected_abstract_id, "actual": actual.get("abstract_num_id")})
     if mapping_mismatches:
         issues.append({"code": "list_numbering_mapping_mismatch", "items": mapping_mismatches})
-    return {"passed": not issues, "issues": issues, "paragraph_texts": actual_texts, "table_count": table_count}
+    return {
+        "passed": not issues,
+        "issues": issues,
+        "paragraph_texts": actual_texts,
+        "table_count": table_count,
+        "unexpected_styles": unexpected_styles,
+    }

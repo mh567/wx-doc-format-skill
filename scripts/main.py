@@ -1626,11 +1626,11 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
             args.table_row_height_cm = run_args["table_row_height_cm"]
         if "table_row_height_rule" in run_args and restore_native("--table-row-height-rule"):
             args.table_row_height_rule = run_args["table_row_height_rule"]
-        if "pipeline" in run_args and restore_native("--pipeline"):
+        if not native_checkpoint and "pipeline" in run_args:
             args.pipeline = run_args["pipeline"]
-        if "modular_profile" in run_args and restore_native("--modular-profile"):
+        if not native_checkpoint and "modular_profile" in run_args:
             args.modular_profile = run_args["modular_profile"]
-        if "list_policy" in run_args and restore_native("--list-policy"):
+        if not native_checkpoint and "list_policy" in run_args:
             args.list_policy = run_args["list_policy"]
 
     if _os.environ.get("WX_DOC_FORMAT_RELEASE") == "1" and (args.ast or args.source_ast):
@@ -1689,6 +1689,8 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
             "release": _os.environ.get("WX_DOC_FORMAT_RELEASE") == "1",
             "profile": "native_v2" if native_v2 else None,
             "enhancement_call": enhancement_call,
+            "table_row_height_cm": args.table_row_height_cm,
+            "table_row_height_rule": args.table_row_height_rule,
         }
         if native_v2 and args.generate_requests is not None:
             request_dir = args.generate_requests.resolve()

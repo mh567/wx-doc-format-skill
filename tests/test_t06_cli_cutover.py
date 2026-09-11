@@ -4,15 +4,26 @@ import json
 import os
 import shlex
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+from docx import Document
+from docx.enum.table import WD_ROW_HEIGHT_RULE
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PYTHON = ROOT / "scripts" / ".venv" / "bin" / "python3"
-MAIN = ROOT / "scripts" / "main.py"
+SCRIPTS = ROOT / "scripts"
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
+
+from wxdf.run_store import content_digest, save_checkpoint
+
+
+PYTHON = SCRIPTS / ".venv" / "bin" / "python3"
+MAIN = SCRIPTS / "main.py"
 SOURCE = ROOT / "input" / "test_baseline.md"
+TABLE_SOURCE = ROOT / "input" / "benchmark_report.md"
 TEMPLATE = ROOT / "assets" / "wx_template.docx"
 
 
@@ -64,6 +75,44 @@ def test_default_cli_records_canonical_native_identity(tmp_path: Path) -> None:
     assert report.get("migration_adapter") is None
 
 
+def test_default_cli_applies_explicit_table_row_contract_to_real_docx(tmp_path: Path) -> None:
+    output = tmp_path / "custom-row-contract.docx"
+
+    completed = _run(
+        "--input", TABLE_SOURCE,
+        "--output", output,
+        "--template", TEMPLATE,
+        "--table-row-height-cm", "2",
+        "--table-row-height-rule", "exact",
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    rows = [row for table in Document(output).tables for row in table.rows]
+    assert rows
+    assert all(row.height is not None and row.height.cm == pytest.approx(2, abs=0.02) for row in rows)
+    assert all(row.height_rule == WD_ROW_HEIGHT_RULE.EXACTLY for row in rows)
+
+
+def test_default_cli_keeps_default_table_row_contract(tmp_path: Path) -> None:
+    output = tmp_path / "default-row-contract.docx"
+    report_path = tmp_path / "default-row-contract-report.json"
+
+    completed = _run(
+        "--input", TABLE_SOURCE,
+        "--output", output,
+        "--template", TEMPLATE,
+        "--report", report_path,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    rows = [row for table in Document(output).tables for row in table.rows]
+    assert rows
+    assert all(row.height is not None and row.height.cm == pytest.approx(0.69, abs=0.02) for row in rows)
+    assert all(row.height_rule == WD_ROW_HEIGHT_RULE.AT_LEAST for row in rows)
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["saved_output_audit"]["unexpected_styles"] == []
+
+
 def test_help_names_native_defaults_and_legacy_diagnostic_mode() -> None:
     completed = _run("--help")
 
@@ -72,6 +121,51 @@ def test_help_names_native_defaults_and_legacy_diagnostic_mode() -> None:
     assert "default: native-v2" in completed.stdout
     assert "default: wx-default-v2" in completed.stdout
     assert "diagnostic" in completed.stdout.lower()
+
+
+def test_native_markdown_report_uses_native_identity_and_audit_results(tmp_path: Path) -> None:
+    output = tmp_path / "native-report.docx"
+    report_path = tmp_path / "native-report.json"
+    markdown_path = tmp_path / "native-report.md"
+
+    completed = _run(
+        "--input", SOURCE,
+        "--output", output,
+        "--template", TEMPLATE,
+        "--report", report_path,
+        "--report-md", markdown_path,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    text = markdown_path.read_text(encoding="utf-8")
+    assert "- pipeline：modular" in text
+    assert "- profile：wx-default-v2" in text
+    assert "- list_policy：wx-default-v2" in text
+    assert "- status：completed" in text
+    assert "- model_audit：passed" in text
+    assert "- saved_output_audit：passed" in text
+    assert "- unexpected_styles：[]" in text
+    assert "审计：failed" not in text
+
+
+def test_default_file_mode_waiting_report_records_list_policy(tmp_path: Path) -> None:
+    request_dir = tmp_path / "requests"
+    report_path = tmp_path / "waiting-report.json"
+
+    completed = _run(
+        "--input", SOURCE,
+        "--template", TEMPLATE,
+        "--llm-enhance", "force-a",
+        "--generate-requests", request_dir,
+        "--report", report_path,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["status"] == "waiting_external"
+    assert report["pipeline"] == "modular"
+    assert report["profile"] == "wx-default-v2"
+    assert report["list_policy"] == "wx-default-v2"
 
 
 @pytest.mark.parametrize(
@@ -127,6 +221,36 @@ def test_native_resume_rejects_checkpoint_identity_drift_before_response_recordi
     resumed = _run("--resume", checkpoint_path)
 
     assert resumed.returncode != 0
+    assert error_code in resumed.stderr
+    assert checkpoint_path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error_code"),
+    [
+        ("pipeline", "legacy", "checkpoint_pipeline_mismatch"),
+        ("modular_profile", "legacy-full-v1", "checkpoint_profile_mismatch"),
+        ("list_policy", "legacy", "checkpoint_list_policy_mismatch"),
+    ],
+)
+def test_native_resume_reports_checkpoint_configuration_identity_drift_in_kernel(
+    tmp_path: Path,
+    field: str,
+    value: str,
+    error_code: str,
+) -> None:
+    checkpoint_path = _generate_checkpoint(tmp_path)
+    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    checkpoint["configuration"][field] = value
+    checkpoint["resource_summary"]["fingerprints"]["configuration"] = content_digest(
+        checkpoint["configuration"]
+    )
+    save_checkpoint(checkpoint, checkpoint_path)
+    before = checkpoint_path.read_bytes()
+
+    resumed = _run("--resume", checkpoint_path)
+
+    assert resumed.returncode == 1
     assert error_code in resumed.stderr
     assert checkpoint_path.read_bytes() == before
 

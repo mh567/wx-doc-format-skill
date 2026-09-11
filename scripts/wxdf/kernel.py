@@ -740,6 +740,7 @@ class ConversionKernel:
                         report={
                             "pipeline": "modular",
                             "profile": _NATIVE_PROFILE,
+                            "list_policy": request.list_policy,
                             "status": status,
                             "checkpoint": str(options["checkpoint_path"]),
                             **(
@@ -936,6 +937,7 @@ class ConversionKernel:
                 report={
                     "pipeline": "modular",
                     "profile": checkpoint["profile"],
+                    "list_policy": checkpoint["list_policy"],
                     "status": "waiting_external",
                     "checkpoint": str(options["checkpoint_path"]),
                     "request_count": len(checkpoint["requests"]),
