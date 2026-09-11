@@ -4,8 +4,8 @@
   "branch": "dev",
   "baseline_head": "d5a7a0f0ea5cb4d36c3db75112ce98cf176760a1",
   "implementation_started": true,
-  "current_task": "T08",
-  "next_task": "T08",
+  "current_task": "T09",
+  "next_task": "T09",
   "release_authorized": false,
   "tasks": [
     {"id": "T00", "status": "done", "depends_on": []},
@@ -16,7 +16,7 @@
     {"id": "T05", "status": "done", "depends_on": ["T04"]},
     {"id": "T06", "status": "done", "depends_on": ["T05"]},
     {"id": "T07", "status": "done", "depends_on": ["T06"]},
-    {"id": "T08", "status": "pending", "depends_on": ["T07"]},
+    {"id": "T08", "status": "done", "depends_on": ["T07"]},
     {"id": "T09", "status": "pending", "depends_on": ["T08"]}
   ],
   "external_gates": [
