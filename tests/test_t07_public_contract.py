@@ -80,16 +80,20 @@ def _run_launcher(public_skill: Path, tmp_path: Path, *, platform_id: str) -> su
     environment = os.environ.copy()
     environment["WX_DOC_FORMAT_ARCHIVE_DIR"] = str(tmp_path / "artifacts")
     environment["WX_DOC_FORMAT_CACHE_DIR"] = str(tmp_path / f"cache-{platform_id}")
-    if platform_id == "kylin-v10-arm64":
-        shim_dir = tmp_path / "uname-shim"
-        shim_dir.mkdir(exist_ok=True)
-        uname = shim_dir / "uname"
-        uname.write_text(
-            '#!/bin/sh\nif [ "$1" = "-s" ]; then printf "Linux\\n"; else printf "aarch64\\n"; fi\n',
-            encoding="utf-8",
-        )
-        uname.chmod(0o755)
-        environment["PATH"] = f"{shim_dir}{os.pathsep}{environment['PATH']}"
+    system, machine = {"macos-arm64": ("Darwin", "arm64"), "kylin-v10-arm64": ("Linux", "aarch64")}[platform_id]
+    shim_dir = tmp_path / f"uname-shim-{platform_id}"
+    shim_dir.mkdir(exist_ok=True)
+    uname = shim_dir / "uname"
+    uname.write_text(
+        f'#!/bin/sh\nif [ "$1" = "-s" ]; then printf "{system}\\n"; else printf "{machine}\\n"; fi\n',
+        encoding="utf-8",
+    )
+    uname.chmod(0o755)
+    if platform_id == "macos-arm64":
+        version = shim_dir / "sw_vers"
+        version.write_text('#!/bin/sh\nprintf "26.0\\n"\n', encoding="utf-8")
+        version.chmod(0o755)
+    environment["PATH"] = f"{shim_dir}{os.pathsep}{environment['PATH']}"
     return subprocess.run(
         ["/bin/sh", str(public_skill / "scripts" / "run.sh"), "--version"],
         env=environment,

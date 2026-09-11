@@ -64,12 +64,18 @@ docker run --rm --platform linux/arm64 \
             exit 1
         fi
         tail -n 2 "$BUILD_ROOT/tests.log"
-        env NUITKA_CACHE_DIR="$BUILD_ROOT/cache" "$PYTHON" \
+        if env NUITKA_CACHE_DIR="$BUILD_ROOT/cache" "$PYTHON" \
             packaging/nuitka/build_distribution.py \
             --build-dir "$BUILD_ROOT/compile" \
             --output-dir "$OUTPUT_DIR" \
             --platform-id kylin-v10-arm64 \
-            --archive
+            --archive > "$BUILD_ROOT/compile.log" 2>&1; then
+            cat "$BUILD_ROOT/compile.log"
+        else
+            compile_status=$?
+            cat "$BUILD_ROOT/compile.log" >&2 || :
+            exit "$compile_status"
+        fi
         EVIDENCE_DIR=$(mktemp -d "$BUILD_ROOT/acceptance.XXXXXX")
         "$PYTHON" packaging/nuitka/smoke_distribution.py \
             "$OUTPUT_DIR/wx-doc-format-skill-$WXDF_VERSION-kylin-v10-arm64" \

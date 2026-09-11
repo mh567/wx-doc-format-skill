@@ -35,12 +35,18 @@ if ! "$PYTHON" -m pytest "$PROJECT_DIR/tests" -q > "$BUILD_ROOT/tests.log" 2>&1;
 fi
 tail -n 2 "$BUILD_ROOT/tests.log"
 
-env NUITKA_CACHE_DIR="$BUILD_ROOT/cache" "$PYTHON" \
+if env NUITKA_CACHE_DIR="$BUILD_ROOT/cache" "$PYTHON" \
     "$PROJECT_DIR/packaging/nuitka/build_distribution.py" \
     --build-dir "$BUILD_ROOT/compile" \
     --output-dir "$OUTPUT_DIR" \
     --platform-id macos-arm64 \
-    --archive
+    --archive > "$BUILD_ROOT/compile.log" 2>&1; then
+    cat "$BUILD_ROOT/compile.log"
+else
+    compile_status=$?
+    cat "$BUILD_ROOT/compile.log" >&2 || :
+    exit "$compile_status"
+fi
 
 SMOKE_ROOT=$(mktemp -d "/tmp/wx-doc-format-macos-smoke.XXXXXX")
 cp -R "$PACKAGE_DIR" "$SMOKE_ROOT/$PACKAGE_NAME"

@@ -72,20 +72,40 @@ def verify_artifact(path: Path, version: str, platform_id: str) -> dict:
         with tarfile.open(path, "r:gz") as archive:
             members = {}
             names = set()
+            path_kinds = {}
             for member in archive.getmembers():
-                parts = PurePosixPath(member.name).parts
+                member_path = PurePosixPath(member.name)
+                parts = member.name.split("/")
+                normalized = member_path.as_posix()
                 if (
-                    not parts or parts[0] != package or ".." in parts
+                    member_path.is_absolute() or parts[0] != package
+                    or any(part in {"", ".", ".."} for part in parts)
                     or any(character in member.name for character in ("\n", "\r", "\x00"))
-                    or member.name in names or not (member.isfile() or member.isdir())
+                    or normalized in names or not (member.isfile() or member.isdir())
                 ):
                     raise ValueError("unsafe or duplicate archive member")
-                names.add(member.name)
+                if normalized in path_kinds and path_kinds[normalized] != member.isdir():
+                    raise ValueError("archive file conflicts with a directory or descendant")
+                for parent in member_path.parents:
+                    if parent == PurePosixPath("."):
+                        continue
+                    ancestor = parent.as_posix()
+                    if path_kinds.get(ancestor) is False:
+                        raise ValueError("archive member has a file as its parent")
+                    path_kinds.setdefault(ancestor, True)
+                names.add(normalized)
+                path_kinds[normalized] = member.isdir()
                 if member.isfile():
-                    relative = "/".join(parts[1:])
+                    relative = member_path.relative_to(package).as_posix()
                     if PurePosixPath(relative).suffix.lower() in {".py", ".pyc", ".pyo"} or parts[-1] == RUNTIME_COMPILATION_REPORT_NAME:
                         raise ValueError("private build payload is forbidden")
                     members[relative] = member
+
+            runtime = "runtime/wx-doc-format.exe" if platform_id.startswith("windows-") else "runtime/wx-doc-format"
+            for required in ("scripts/install.sh", "scripts/run.sh", runtime):
+                member = members.get(required)
+                if member is None or not member.isfile() or not member.mode & 0o100:
+                    raise ValueError(f"required executable is missing or not owner-executable: {required}")
 
             def read(name: str) -> bytes:
                 member = members[name]

@@ -5,6 +5,7 @@ import io
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -260,3 +261,157 @@ def test_public_cli_rejects_artifacts_from_a_different_frozen_checkout(tmp_path:
     with pytest.raises(ValueError, match="SOURCE_IDENTITY_MISMATCH"):
         public.main(["--artifacts-dir", str(artifacts), "--output-dir", str(tmp_path / "public"), "--macos-min-version", "26.0"])
     assert not (tmp_path / "public").exists()
+
+
+@pytest.mark.parametrize(("relative", "kind", "prepend"), [
+    ("runtime/./wx-doc-format", "directory", False),
+    ("runtime/./wx-doc-format", "file", False),
+    ("runtime//wx-doc-format", "directory", False),
+    ("./runtime", "directory", False),
+    ("runtime/../runtime", "directory", False),
+    (".", "directory", False),
+    ("/absolute/runtime", "directory", False),
+    ("runtime", "directory", False),
+    ("runtime/wx-doc-format", "directory", False),
+    ("runtime/wx-doc-format/child", "directory", False),
+    ("runtime/wx-doc-format/child", "directory", True),
+])
+def test_public_assembly_rejects_ambiguous_tar_paths_before_creating_output(
+    tmp_path: Path, relative: str, kind: str, prepend: bool,
+) -> None:
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    path = write_archive_fixture(artifacts, "macos-arm64")
+    root = "wx-doc-format-skill-0.13.0-macos-arm64"
+    with tarfile.open(path, "r:gz") as archive:
+        entries = [(member, archive.extractfile(member).read() if member.isfile() else None) for member in archive.getmembers()]
+        payload = archive.extractfile(f"{root}/runtime/wx-doc-format").read()
+    added = tarfile.TarInfo(relative if relative.startswith("/") else f"{root}/{relative}")
+    added.type = tarfile.DIRTYPE if kind == "directory" else tarfile.REGTYPE
+    added.mode = 0o755
+    added.size = 0 if kind == "directory" else len(payload)
+    extra = [(added, None if kind == "directory" else payload)]
+    with tarfile.open(path, "w:gz") as archive:
+        for member, data in (extra + entries if prepend else entries + extra):
+            archive.addfile(member, io.BytesIO(data) if data is not None else None)
+    output = tmp_path / "public"
+    with pytest.raises(ValueError, match="ARTIFACT_INVALID") as rejected:
+        public.assemble_public_skill(artifacts, output, ("macos-arm64",), "26.0")
+    assert str(rejected.value).startswith(f"ARTIFACT_INVALID: {path.name}:")
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("relative", ["scripts/install.sh", "scripts/run.sh", "runtime/wx-doc-format"])
+def test_public_assembly_rejects_non_executable_required_archive_files(tmp_path: Path, relative: str) -> None:
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    path = write_archive_fixture(artifacts, "macos-arm64")
+    root = "wx-doc-format-skill-0.13.0-macos-arm64"
+    with tarfile.open(path, "r:gz") as archive:
+        entries = [(member, archive.extractfile(member).read() if member.isfile() else None) for member in archive.getmembers()]
+    with tarfile.open(path, "w:gz") as archive:
+        for member, data in entries:
+            if member.name == f"{root}/{relative}":
+                member.mode = 0o644
+            archive.addfile(member, io.BytesIO(data) if data is not None else None)
+    output = tmp_path / "public"
+    with pytest.raises(ValueError, match="ARTIFACT_INVALID.*executable"):
+        public.assemble_public_skill(artifacts, output, ("macos-arm64",), "26.0")
+    assert not output.exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Current POSIX build entrypoints")
+@pytest.mark.parametrize("target", ["macos-arm64", "linux-arm64"])
+@pytest.mark.parametrize("compile_status", [0, 37])
+def test_build_shell_preserves_compiler_logs_and_exit_status(
+    tmp_path: Path, target: str, compile_status: int,
+) -> None:
+    project = _clean_source(tmp_path)
+    entrypoint = project / "packaging" / "nuitka" / f"build-local-{target}.sh"
+    entrypoint.parent.mkdir(parents=True)
+    shutil.copy2(ROOT / "packaging" / "nuitka" / entrypoint.name, entrypoint)
+    (project / ".gitignore").write_text("build/\ndist/\n", encoding="ascii")
+    subprocess.run(["git", "-C", str(project), "add", "."], check=True)
+    subprocess.run([
+        "git", "-C", str(project), "-c", "user.name=T09 fixture", "-c", "user.email=t09@example.invalid",
+        "-c", "commit.gpgsign=false", "commit", "-qm", "build shell fixture",
+    ], check=True)
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    fake_python = tools / "build-python"
+    fake_python.write_text(f"#!{sys.executable}\n" + '''import json
+import os
+from pathlib import Path
+import sys
+arguments = sys.argv[1:]
+if any(value.endswith("build_distribution.py") for value in arguments):
+    print("compiler stdout", flush=True)
+    print("compiler stderr", file=sys.stderr, flush=True)
+    status = int(os.environ["T09_COMPILE_STATUS"])
+    if status == 0:
+        output = Path(arguments[arguments.index("--output-dir") + 1])
+        target = arguments[arguments.index("--platform-id") + 1]
+        (output / ("wx-doc-format-skill-0.13.0-" + target)).mkdir(parents=True)
+        (output / ("wx-doc-format-skill-0.13.0-" + target + ".tar.gz")).touch()
+    sys.exit(status)
+if any(value.endswith("smoke_distribution.py") for value in arguments):
+    evidence = Path(arguments[arguments.index("--evidence-dir") + 1])
+    evidence.mkdir(parents=True, exist_ok=True)
+    (evidence / "acceptance.json").write_text(json.dumps({"fixture": True}))
+    Path(os.environ["T09_SMOKE_MARKER"]).touch()
+elif arguments[:2] == ["-m", "pytest"]:
+    print("fixture full pytest passed")
+elif arguments[:3] == ["-m", "pip", "freeze"]:
+    print("fixture-dependency==1")
+''', encoding="utf-8")
+    fake_python.chmod(0o755)
+    (tools / "uname").write_text('#!/bin/sh\nif [ "$1" = "-s" ]; then printf "Darwin\\n"; else printf "arm64\\n"; fi\n', encoding="ascii")
+    (tools / "uname").chmod(0o755)
+    (tools / "yum").write_text("#!/bin/sh\nexit 0\n", encoding="ascii")
+    (tools / "yum").chmod(0o755)
+    (tools / "mktemp").write_text('#!/bin/sh\nexec /usr/bin/mktemp -d "$TMPDIR/build-smoke.XXXXXX"\n', encoding="ascii")
+    (tools / "mktemp").chmod(0o755)
+    (tools / "docker").write_text(f"#!{sys.executable}\n" + '''import os
+import shlex
+import subprocess
+import sys
+arguments = sys.argv[1:]
+if arguments == ["info"]:
+    sys.exit(0)
+assert arguments[0] == "run"
+environment = os.environ.copy()
+mounts = {}
+for index, argument in enumerate(arguments[:-1]):
+    if argument == "-v":
+        host, container = arguments[index + 1].rsplit(":", 1)
+        mounts[container] = host
+    elif argument == "-e":
+        key, value = arguments[index + 1].split("=", 1)
+        environment[key] = value
+body = arguments[-1].replace("/opt/python/cp313-cp313/bin/python", environment["T09_FAKE_PYTHON"])
+body = body.replace("/opt/_internal", environment["T09_ABSENT_INTERNAL"])
+for variable, container in (("BUILD_ROOT", "/build"), ("OUTPUT_DIR", "/artifacts")):
+    body = body.replace(variable + "=" + container, variable + "=" + shlex.quote(mounts[container]))
+sys.exit(subprocess.run(["/bin/bash", "-c", body], cwd=mounts["/workspace"], env=environment).returncode)
+''', encoding="utf-8")
+    (tools / "docker").chmod(0o755)
+    build_root = project / "build" / "nuitka" / f"local-{target}"
+    if target == "macos-arm64":
+        venv_bin = build_root / "venv" / "bin"
+        venv_bin.mkdir(parents=True)
+        (venv_bin / "python3").symlink_to(fake_python)
+    marker = tmp_path / "smoke-called"
+    environment = {
+        **os.environ, "PATH": str(tools) + os.pathsep + os.environ["PATH"],
+        "WXDF_BOOTSTRAP_PYTHON": str(fake_python), "T09_FAKE_PYTHON": str(fake_python),
+        "T09_COMPILE_STATUS": str(compile_status), "T09_SMOKE_MARKER": str(marker),
+        "T09_ABSENT_INTERNAL": str(tmp_path / "absent-internal"),
+        "TMPDIR": str(tmp_path),
+    }
+    result = subprocess.run(["/bin/sh", str(entrypoint)], env=environment, text=True, capture_output=True)
+    assert result.returncode == compile_status, result.stderr
+    assert "fixture full pytest passed" in (build_root / "tests.log").read_text()
+    compile_log = build_root / "compile.log"
+    assert compile_log.is_file(), result.stdout + result.stderr
+    assert compile_log.read_text().splitlines() == ["compiler stdout", "compiler stderr"]
+    assert marker.exists() is (compile_status == 0)
