@@ -314,6 +314,66 @@ def _apply_layout_table_contract(table: Any, layout: Any) -> None:
             tr_pr.append(height)
 
 
+def _apply_layout_paragraph_format(paragraph: Any, contract: Any) -> None:
+    """Restore only the approved direct paragraph properties for layout cells."""
+
+    if not isinstance(contract, Mapping):
+        return
+    properties = paragraph._p.get_or_add_pPr()
+
+    def replace_element(element_name: str, attributes: Any, allowed: tuple[str, ...]) -> None:
+        existing = properties.find(qn(f"w:{element_name}"))
+        if existing is not None:
+            properties.remove(existing)
+        if not isinstance(attributes, Mapping):
+            return
+        captured = {
+            name: attributes[name]
+            for name in allowed
+            if name in attributes and attributes[name] is not None
+        }
+        if not captured:
+            return
+        element = OxmlElement(f"w:{element_name}")
+        for name, value in captured.items():
+            element.set(qn(f"w:{name}"), str(value))
+        properties.append(element)
+
+    pagination = contract.get("pagination")
+    if isinstance(pagination, Mapping):
+        for element_name in ("keepNext", "keepLines", "pageBreakBefore", "widowControl"):
+            if element_name not in pagination:
+                continue
+            existing = properties.find(qn(f"w:{element_name}"))
+            if existing is not None:
+                properties.remove(existing)
+            element = OxmlElement(f"w:{element_name}")
+            value = pagination[element_name]
+            if value is not None:
+                element.set(qn("w:val"), str(value))
+            properties.append(element)
+    replace_element(
+        "spacing",
+        contract.get("spacing"),
+        (
+            "before", "beforeLines", "beforeAutospacing",
+            "after", "afterLines", "afterAutospacing", "line", "lineRule",
+        ),
+    )
+    replace_element(
+        "ind",
+        contract.get("indentation"),
+        (
+            "left", "leftChars", "right", "rightChars",
+            "firstLine", "firstLineChars", "hanging", "hangingChars",
+            "start", "startChars", "end", "endChars",
+        ),
+    )
+    alignment = contract.get("alignment")
+    if alignment is not None:
+        replace_element("jc", {"val": alignment}, ("val",))
+
+
 def render(
     normalized: Mapping[str, Any],
     output_path: Path | str,
@@ -357,6 +417,7 @@ def render(
     table_counter = 0
     initial_cell_paragraphs: set[Any] = set()
     semantic_table_cells: set[Any] = set()
+    layout_table_cells: set[Any] = set()
     pending_page_break = False
 
     def add_paragraph(
@@ -399,6 +460,11 @@ def render(
             caption_text = _write_caption(paragraph, block, resources)
         else:
             _write_inline(paragraph, block.get("inline_content", []), resources)
+        if parent is not None and parent._tc in layout_table_cells:
+            _apply_layout_paragraph_format(
+                paragraph,
+                block.get("source_paragraph_format"),
+            )
         if pending_page_break:
             paragraph.paragraph_format.page_break_before = True
             pending_page_break = False
@@ -483,7 +549,9 @@ def render(
                     end_row = min(row_count - 1, row_index + row_span - 1)
                     end_col = min(column_count - 1, column_cursor + col_span - 1)
                     cell = cell.merge(table.cell(end_row, end_col))
-                if not is_layout:
+                if is_layout:
+                    layout_table_cells.add(cell._tc)
+                else:
                     semantic_table_cells.add(cell._tc)
                 for occupied_row in range(row_index + 1, min(row_count, row_index + row_span)):
                     for occupied_col in range(column_cursor, column_cursor + col_span):

@@ -431,6 +431,59 @@ def _docx_inline_content(paragraph: Any, handle: SourceHandle, node_path: list[s
     return content
 
 
+def _docx_source_paragraph_format(paragraph: Any) -> dict[str, Any]:
+    """Capture the safe direct-format subset needed by layout table cells."""
+
+    from docx.oxml.ns import qn
+
+    properties = paragraph._p.pPr
+    if properties is None:
+        return {}
+    result: dict[str, Any] = {}
+    alignment = properties.find(qn("w:jc"))
+    if alignment is not None and alignment.get(qn("w:val")) is not None:
+        result["alignment"] = alignment.get(qn("w:val"))
+
+    for contract_name, element_name, attributes in (
+        (
+            "spacing",
+            "spacing",
+            (
+                "before", "beforeLines", "beforeAutospacing",
+                "after", "afterLines", "afterAutospacing", "line", "lineRule",
+            ),
+        ),
+        (
+            "indentation",
+            "ind",
+            (
+                "left", "leftChars", "right", "rightChars",
+                "firstLine", "firstLineChars", "hanging", "hangingChars",
+                "start", "startChars", "end", "endChars",
+            ),
+        ),
+    ):
+        element = properties.find(qn(f"w:{element_name}"))
+        if element is None:
+            continue
+        captured = {
+            attribute: element.get(qn(f"w:{attribute}"))
+            for attribute in attributes
+            if element.get(qn(f"w:{attribute}")) is not None
+        }
+        if captured:
+            result[contract_name] = captured
+
+    pagination = {}
+    for element_name in ("keepNext", "keepLines", "pageBreakBefore", "widowControl"):
+        element = properties.find(qn(f"w:{element_name}"))
+        if element is not None:
+            pagination[element_name] = element.get(qn("w:val"))
+    if pagination:
+        result["pagination"] = pagination
+    return result
+
+
 def _parse_docx(source: Path | str, *, store: SourceStore) -> dict[str, Any]:
     from docx import Document
     from docx.table import Table, _Cell
@@ -463,6 +516,9 @@ def _parse_docx(source: Path | str, *, store: SourceStore) -> dict[str, Any]:
             "inline_content": _docx_inline_content(paragraph, handle, node_path, facts["resources"], parser_version),
             "style": paragraph.style.name if paragraph.style is not None else None,
         }
+        source_paragraph_format = _docx_source_paragraph_format(paragraph)
+        if source_paragraph_format:
+            facts["units"][unit_id]["source_paragraph_format"] = source_paragraph_format
         facts["children"].setdefault(parent_id, []).append(unit_id)
         evidence = {"source_position": source_position, "style": paragraph.style.name if paragraph.style is not None else None}
         if descriptor is not None:

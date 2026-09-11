@@ -5,6 +5,10 @@ import sys
 from pathlib import Path
 
 from docx import Document
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+from docx.shared import Inches, Pt
 
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
@@ -13,6 +17,7 @@ if str(SCRIPTS) not in sys.path:
 
 from modular_support import build_docx_fixture
 from wxdf.parsers import parse, summarize_source_facts
+from wxdf.semantics.source_ast import build_source_ast
 from wxdf.source_store import SourceStore
 from wxdf.validation import validate_source_facts
 
@@ -56,6 +61,62 @@ def test_docx_parser_emits_numbering_indentation_and_table_scope_facts(tmp_path:
     assert list_evidence
     assert all("indent_value" in item and "indent_unit" in item for item in list_evidence)
     assert all("numbering_definition_ref" in item for item in list_evidence)
+
+
+def test_docx_layout_paragraph_format_is_captured_and_propagated_by_whitelist(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "layout-format.docx"
+    document = Document()
+    table = document.add_table(rows=1, cols=2)
+    table.cell(0, 0).paragraphs[0]._p.append(OxmlElement("m:oMath"))
+    paragraph = table.cell(0, 1).paragraphs[0]
+    paragraph.text = "(1)"
+    paragraph.style = "Quote"
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    paragraph.paragraph_format.space_before = Pt(7)
+    paragraph.paragraph_format.space_after = Pt(13)
+    paragraph.paragraph_format.line_spacing = 1.5
+    paragraph.paragraph_format.left_indent = Inches(0.2)
+    paragraph.paragraph_format.right_indent = Inches(0.1)
+    paragraph.paragraph_format.first_line_indent = Inches(0.15)
+    paragraph.paragraph_format.keep_with_next = True
+    paragraph.paragraph_format.keep_together = True
+    paragraph.paragraph_format.page_break_before = True
+    paragraph.paragraph_format.widow_control = False
+    borders = OxmlElement("w:tblBorders")
+    for name in ("top", "left", "bottom", "right", "insideH", "insideV"):
+        edge = OxmlElement(f"w:{name}")
+        edge.set(qn("w:val"), "none")
+        borders.append(edge)
+    table._tbl.tblPr.append(borders)
+    document.save(source)
+
+    facts = parse(source)
+    paragraph_id, unit = next(
+        (unit_id, unit)
+        for unit_id, unit in facts["units"].items()
+        if any(item.get("text") == "(1)" for item in unit.get("inline_content", []))
+    )
+    expected = {
+        "alignment": "right",
+        "spacing": {"before": "140", "after": "260", "line": "360", "lineRule": "auto"},
+        "indentation": {"left": "288", "right": "144", "firstLine": "216"},
+        "pagination": {
+            "keepNext": None,
+            "keepLines": None,
+            "pageBreakBefore": None,
+            "widowControl": "0",
+        },
+    }
+
+    assert facts["containers"][next(
+        node_id
+        for node_id, container in facts["containers"].items()
+        if container.get("kind") == "table"
+    )]["table_semantics"]["table_type"] == "layout"
+    assert unit["source_paragraph_format"] == expected
+    assert build_source_ast(facts)["document"]["blocks"][paragraph_id]["source_paragraph_format"] == expected
 
 
 def test_source_store_opens_source_once_and_resolves_declared_parts(tmp_path: Path) -> None:

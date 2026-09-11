@@ -406,8 +406,23 @@ def _write_native_markdown_report(report: dict, path: Path) -> None:
         f"- saved_output_audit：{_native_audit_status(report, 'saved_output_audit')}",
         f"- unexpected_styles：{unexpected_styles}",
         "",
-        "## 风险提示",
+        "## 诊断",
     ]
+    diagnostics = report.get("diagnostics", [])
+    if diagnostics:
+        for diagnostic in diagnostics:
+            if isinstance(diagnostic, dict):
+                lines.append(
+                    f"- {diagnostic.get('code', 'UNKNOWN')}：{diagnostic.get('message', '')}"
+                )
+            else:
+                lines.append(f"- {diagnostic}")
+    else:
+        lines.append("- 无")
+    lines.extend([
+        "",
+        "## 风险提示",
+    ])
     risk_warnings = report.get("risk_warnings", [])
     if risk_warnings:
         lines.extend(f"- {warning}" for warning in risk_warnings)

@@ -163,6 +163,10 @@ def build_source_ast(facts: Mapping[str, Any]) -> dict[str, Any]:
             }
             if role == "heading":
                 block["level"] = int(unit.get("level") or 1)
+            if isinstance(unit.get("source_paragraph_format"), Mapping):
+                block["source_paragraph_format"] = copy.deepcopy(
+                    dict(unit["source_paragraph_format"])
+                )
             blocks[unit_id] = block
             image_nodes = _inline_image_nodes(str(unit_id), unit, resources)
             if image_nodes:

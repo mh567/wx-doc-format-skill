@@ -617,6 +617,17 @@ class ConversionKernel:
             list_policy=request.list_policy,
             options=options,
         )
+        report: dict[str, Any] = {
+            "pipeline": "modular",
+            "list_policy": request.list_policy,
+            "profile": _NATIVE_PROFILE,
+            "status": "running",
+            "contract_versions": {"source_facts": "1.0", "ast": "2.0", "decision_set": "2.0", "normalized": "1.0"},
+            "module_chain": [
+                "SourceParser", "SourceFacts", "SemanticModuleCandidateSet", "SemanticResolverDecisionSet",
+                "TransactionManagerSourceAST", "NormalizationPolicy", "RenderPlan", "Renderer", "AuditModule", "ReviewEvaluator", "Publisher",
+            ],
+        }
         from .publication import PublicationError, recover_pending_publications
 
         recovery_targets = [request.output_path]
@@ -630,6 +641,7 @@ class ConversionKernel:
             return RunResult(
                 status="failed",
                 exit_code=1,
+                report={**report, "status": "failed"},
                 diagnostics=[{
                     "code": "PUBLICATION_RECOVERY_FAILED",
                     "severity": "error",
@@ -637,7 +649,12 @@ class ConversionKernel:
                 }],
             )
         if not request.input_path.is_file():
-            return RunResult(status="failed", exit_code=1, diagnostics=[{"code": "INPUT_NOT_FOUND", "message": str(request.input_path)}])
+            return RunResult(
+                status="failed",
+                exit_code=1,
+                report={**report, "status": "failed"},
+                diagnostics=[{"code": "INPUT_NOT_FOUND", "message": str(request.input_path)}],
+            )
 
         from .builtin_modules import (
             LedgerReplayBlocked,
@@ -660,17 +677,6 @@ class ConversionKernel:
         from .transaction import TransactionConflict
 
         metrics = MetricsCollector()
-        report: dict[str, Any] = {
-            "pipeline": "modular",
-            "list_policy": request.list_policy,
-            "profile": _NATIVE_PROFILE,
-            "status": "running",
-            "contract_versions": {"source_facts": "1.0", "ast": "2.0", "decision_set": "2.0", "normalized": "1.0"},
-            "module_chain": [
-                "SourceParser", "SourceFacts", "SemanticModuleCandidateSet", "SemanticResolverDecisionSet",
-                "TransactionManagerSourceAST", "NormalizationPolicy", "RenderPlan", "Renderer", "AuditModule", "ReviewEvaluator", "Publisher",
-            ],
-        }
         enhancement_mode = str(options.get("llm_enhance") or "off")
         protocol_mode = options.get("protocol_mode")
         if (

@@ -10,6 +10,10 @@ from pathlib import Path
 import pytest
 from docx import Document
 from docx.enum.table import WD_ROW_HEIGHT_RULE
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+from docx.shared import Inches, Pt
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -75,6 +79,87 @@ def test_default_cli_records_canonical_native_identity(tmp_path: Path) -> None:
     assert report.get("migration_adapter") is None
 
 
+@pytest.mark.parametrize("release", [False, True])
+def test_default_cli_missing_input_reports_canonical_native_failure(
+    tmp_path: Path,
+    release: bool,
+) -> None:
+    missing = tmp_path / "missing.md"
+    output = tmp_path / "missing.docx"
+    report_path = tmp_path / "missing-report.json"
+    markdown_path = tmp_path / "missing-report.md"
+
+    environment = _environment()
+    if release:
+        environment["WX_DOC_FORMAT_RELEASE"] = "1"
+    completed = _run(
+        "--input", missing,
+        "--output", output,
+        "--template", TEMPLATE,
+        "--report", report_path,
+        "--report-md", markdown_path,
+        environment=environment,
+    )
+
+    assert completed.returncode == 1
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["pipeline"] == "modular"
+    assert report["profile"] == "wx-default-v2"
+    assert report["list_policy"] == "wx-default-v2"
+    assert report["status"] == "failed"
+    assert [diagnostic["code"] for diagnostic in report["diagnostics"]] == ["INPUT_NOT_FOUND"]
+    text = markdown_path.read_text(encoding="utf-8")
+    assert "- pipeline：modular" in text
+    assert "- profile：wx-default-v2" in text
+    assert "- list_policy：wx-default-v2" in text
+    assert "- status：failed" in text
+    assert "INPUT_NOT_FOUND" in text
+    for legacy_line in (
+        "首部结构审计：failed",
+        "表格语义审计：failed",
+        "题注位置审计：failed",
+        "注语义保留审计：failed",
+    ):
+        assert legacy_line not in text
+    assert not output.exists()
+
+
+def test_default_cli_publication_recovery_failure_keeps_native_report_identity(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.md"
+    source.write_text("# 测试\n", encoding="utf-8")
+    output = tmp_path / "recovery.docx"
+    report_path = tmp_path / "recovery-report.json"
+    markdown_path = tmp_path / "recovery-report.md"
+    journal = tmp_path / f".wxdf-publication-{'e' * 32}.journal"
+    journal.write_text("invalid recovery journal", encoding="utf-8")
+
+    completed = _run(
+        "--input", source,
+        "--output", output,
+        "--template", TEMPLATE,
+        "--report", report_path,
+        "--report-md", markdown_path,
+    )
+
+    assert completed.returncode == 1
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert (
+        report["pipeline"],
+        report["profile"],
+        report["list_policy"],
+        report["status"],
+    ) == ("modular", "wx-default-v2", "wx-default-v2", "failed")
+    assert [diagnostic["code"] for diagnostic in report["diagnostics"]] == [
+        "PUBLICATION_RECOVERY_FAILED"
+    ]
+    text = markdown_path.read_text(encoding="utf-8")
+    assert "PUBLICATION_RECOVERY_FAILED" in text
+    assert "审计：failed" not in text
+    assert not output.exists()
+
+
 def test_default_cli_applies_explicit_table_row_contract_to_real_docx(tmp_path: Path) -> None:
     output = tmp_path / "custom-row-contract.docx"
 
@@ -111,6 +196,74 @@ def test_default_cli_keeps_default_table_row_contract(tmp_path: Path) -> None:
     assert all(row.height_rule == WD_ROW_HEIGHT_RULE.AT_LEAST for row in rows)
     report = json.loads(report_path.read_text(encoding="utf-8"))
     assert report["saved_output_audit"]["unexpected_styles"] == []
+
+
+def test_default_cli_preserves_layout_paragraph_format_and_normalizes_data_table(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "layout-paragraph-format.docx"
+    output = tmp_path / "layout-paragraph-format-output.docx"
+    report_path = tmp_path / "layout-paragraph-format-report.json"
+    document = Document()
+    layout = document.add_table(rows=1, cols=2)
+    layout.cell(0, 0).paragraphs[0]._p.append(OxmlElement("m:oMath"))
+    layout_paragraph = layout.cell(0, 1).paragraphs[0]
+    layout_paragraph.text = "(1)"
+    layout_paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    layout_paragraph.paragraph_format.space_before = Pt(7)
+    layout_paragraph.paragraph_format.space_after = Pt(13)
+    layout_paragraph.paragraph_format.line_spacing = 1.5
+    layout_paragraph.paragraph_format.left_indent = Inches(0.2)
+    layout_paragraph.paragraph_format.right_indent = Inches(0.1)
+    layout_paragraph.paragraph_format.first_line_indent = Inches(0.15)
+    layout_paragraph.paragraph_format.keep_with_next = True
+    layout_paragraph.paragraph_format.keep_together = True
+    layout_paragraph.paragraph_format.page_break_before = True
+    layout_paragraph.paragraph_format.widow_control = False
+    borders = OxmlElement("w:tblBorders")
+    for name in ("top", "left", "bottom", "right", "insideH", "insideV"):
+        edge = OxmlElement(f"w:{name}")
+        edge.set(qn("w:val"), "none")
+        borders.append(edge)
+    layout._tbl.tblPr.append(borders)
+    data = document.add_table(rows=2, cols=2)
+    data.cell(0, 0).text = "名称"
+    data.cell(0, 1).text = "说明"
+    data.cell(1, 0).text = "A"
+    data_paragraph = data.cell(1, 1).paragraphs[0]
+    data_paragraph.text = "数据内容"
+    data_paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    data_paragraph.paragraph_format.space_after = Pt(13)
+    document.save(source)
+
+    completed = _run(
+        "--input", source,
+        "--output", output,
+        "--template", TEMPLATE,
+        "--report", report_path,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    saved = Document(output)
+    saved_layout, saved_data = saved.tables
+    restored = saved_layout.cell(0, 1).paragraphs[0]
+    assert restored.alignment == WD_ALIGN_PARAGRAPH.RIGHT
+    assert restored.paragraph_format.space_before == Pt(7)
+    assert restored.paragraph_format.space_after == Pt(13)
+    assert restored.paragraph_format.line_spacing == pytest.approx(1.5)
+    assert restored.paragraph_format.left_indent == Inches(0.2)
+    assert restored.paragraph_format.right_indent == Inches(0.1)
+    assert restored.paragraph_format.first_line_indent == Inches(0.15)
+    assert restored.paragraph_format.keep_with_next is True
+    assert restored.paragraph_format.keep_together is True
+    assert restored.paragraph_format.page_break_before is True
+    assert restored.paragraph_format.widow_control is False
+    normalized_data = saved_data.cell(1, 1).paragraphs[0]
+    assert normalized_data.style.name == "表正文"
+    assert normalized_data.alignment == WD_ALIGN_PARAGRAPH.CENTER
+    assert normalized_data.paragraph_format.space_after is None
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["saved_output_audit"]["passed"] is True
 
 
 def test_help_names_native_defaults_and_legacy_diagnostic_mode() -> None:
