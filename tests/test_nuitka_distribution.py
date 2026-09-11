@@ -531,6 +531,28 @@ def test_local_build_entrypoints_cover_supported_build_targets():
     assert "standalone runtime" in windows_text
 
 
+def test_windows_compile_only_entrypoint_checks_every_native_stage_before_success_output():
+    source = (
+        ROOT / "packaging" / "nuitka" / "build-local-windows-x86_64.ps1"
+    ).read_text(encoding="utf-8")
+
+    assert source.count('if ($LASTEXITCODE -ne 0)') == 5
+    for stage in (
+        "venv creation via py",
+        "venv creation via BootstrapPython",
+        "dependency installation",
+        "test suite",
+        "standalone compilation",
+    ):
+        assert f'{stage} failed with exit code $LASTEXITCODE' in source
+
+    build_position = source.index("--compile-only")
+    runtime_check_position = source.index("Test-Path -LiteralPath $RuntimeDir -PathType Container")
+    success_output_position = source.index("Write-Output")
+    assert build_position < runtime_check_position < success_output_position
+    assert "standalone compilation succeeded but runtime directory is missing" in source
+
+
 def test_public_adapters_enforce_printable_ascii_install_path():
     nuitka_dir = ROOT / "packaging" / "nuitka"
     for filename in ("install.sh", "run.sh", "install.ps1", "run.ps1"):
