@@ -79,7 +79,7 @@ def verify_artifact(path: Path, version: str, platform_id: str) -> dict:
         with tarfile.open(path, "r:gz") as archive:
             members = {}
             names = set()
-            path_kinds = {}
+            path_records = {}
             for member in archive.getmembers():
                 member_path = PurePosixPath(member.name)
                 parts = member.name.split("/")
@@ -94,17 +94,20 @@ def verify_artifact(path: Path, version: str, platform_id: str) -> dict:
                 required_owner = 0o500 if member.isdir() else 0o400
                 if member.mode & required_owner != required_owner:
                     raise ValueError(f"archive member lacks required owner permissions {required_owner:o}: {member.name}")
-                if normalized in path_kinds and path_kinds[normalized] != member.isdir():
-                    raise ValueError("archive file conflicts with a directory or descendant")
-                for parent in member_path.parents:
-                    if parent == PurePosixPath("."):
+                for current_path in (member_path, *member_path.parents):
+                    if current_path == PurePosixPath("."):
                         continue
-                    ancestor = collision_key(parent)
-                    if path_kinds.get(ancestor) is False:
-                        raise ValueError("archive member has a file as its parent")
-                    path_kinds.setdefault(ancestor, True)
+                    key = collision_key(current_path)
+                    original = current_path.as_posix()
+                    directory = member.isdir() or current_path != member_path
+                    previous = path_records.get(key)
+                    if previous is not None:
+                        if previous[0] != original:
+                            raise ValueError(f"archive paths alias the same target: {previous[0]} and {original}")
+                        if previous[1] != directory:
+                            raise ValueError("archive file conflicts with a directory or descendant")
+                    path_records.setdefault(key, (original, directory))
                 names.add(normalized)
-                path_kinds[normalized] = member.isdir()
                 if member.isfile():
                     relative = member_path.relative_to(package).as_posix()
                     if PurePosixPath(relative).suffix.lower() in {".py", ".pyc", ".pyo"} or parts[-1] == RUNTIME_COMPILATION_REPORT_NAME:

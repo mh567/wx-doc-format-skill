@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import io
 import json
@@ -353,6 +354,64 @@ def test_public_assembly_applies_target_filesystem_collision_keys(
         assert not output.exists()
     else:
         assert public.assemble_public_skill(artifacts, output, (target,)) == output
+        assert (output / "artifacts" / "manifest.json").is_file()
+
+
+@pytest.mark.parametrize("target", ["macos-arm64", "kylin-v10-arm64"])
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize(("extra_specs", "aliased"), [
+    pytest.param((("runtime/CaseFolder/a.dat", False), ("runtime/casefolder/b.dat", False)), True, id="implicit-case"),
+    pytest.param((("runtime/Caf\u00e9/a.dat", False), ("runtime/Cafe\u0301/b.dat", False)), True, id="implicit-unicode"),
+    pytest.param((("runtime/CaseFolder/first/a.dat", False), ("runtime/casefolder/second/b.dat", False)), True, id="deep-ancestor-case"),
+    pytest.param((("runtime/CaseFolder", True), ("runtime/casefolder/a.dat", False)), True, id="mixed-case"),
+    pytest.param((("runtime/Caf\u00e9", True), ("runtime/Cafe\u0301/a.dat", False)), True, id="mixed-unicode"),
+    pytest.param((("runtime/CaseFolder/a.dat", False), ("runtime/CaseFolder/b.dat", False)), False, id="identical-implicit"),
+    pytest.param((("runtime/Caf\u00e9", True), ("runtime/Caf\u00e9/a.dat", False)), False, id="identical-mixed"),
+])
+def test_public_assembly_validates_implicit_ancestor_spellings_independent_of_order(
+    tmp_path: Path, target: str, reverse: bool, extra_specs: tuple[tuple[str, bool], ...], aliased: bool,
+) -> None:
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    path = write_archive_fixture(artifacts, target)
+    root = f"wx-doc-format-skill-0.13.0-{target}"
+    with tarfile.open(path, "r:gz") as archive:
+        entries = [(member, archive.extractfile(member).read() if member.isfile() else None) for member in archive.getmembers()]
+        manifest = json.load(archive.extractfile(f"{root}/manifest.json"))
+    specs = tuple(reversed(extra_specs)) if reverse else extra_specs
+    for relative, directory in specs:
+        member = tarfile.TarInfo(f"{root}/{relative}")
+        member.type = tarfile.DIRTYPE if directory else tarfile.REGTYPE
+        member.mode = 0o755 if directory else 0o644
+        data = None if directory else b"declared archive payload\n"
+        if data is not None:
+            member.size = len(data)
+            manifest["files"].append({"path": relative, "size": len(data), "sha256": hashlib.sha256(data).hexdigest()})
+        entries.append((member, data))
+    manifest["files"].sort(key=lambda item: item["path"])
+    manifest_data = (json.dumps(manifest, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    payloads = {member.name: data for member, data in entries if data is not None and member.name != f"{root}/SHA256SUMS.txt"}
+    payloads[f"{root}/manifest.json"] = manifest_data
+    sums_data = "".join(
+        f"{hashlib.sha256(data).hexdigest()}  {name[len(root) + 1:]}\n"
+        for name, data in sorted(payloads.items())
+    ).encode("utf-8")
+    with tarfile.open(path, "w:gz") as archive:
+        for member, data in entries:
+            if member.name == f"{root}/manifest.json":
+                data = manifest_data
+            elif member.name == f"{root}/SHA256SUMS.txt":
+                data = sums_data
+            if data is not None:
+                member.size = len(data)
+            archive.addfile(member, io.BytesIO(data) if data is not None else None)
+    output = tmp_path / "public"
+    if target == "macos-arm64" and aliased:
+        with pytest.raises(ValueError, match="ARTIFACT_INVALID.*alias"):
+            public.assemble_public_skill(artifacts, output, (target,), "26.0")
+        assert not output.exists()
+    else:
+        assert public.assemble_public_skill(artifacts, output, (target,), "26.0") == output
         assert (output / "artifacts" / "manifest.json").is_file()
 
 
