@@ -42,6 +42,14 @@ PLATFORMS = ("macos-arm64", "kylin-v10-arm64")
 MISSING = object()
 
 
+def _write_compilation_manifest(runtime: Path) -> None:
+    manifest = distribution.modular_module_manifest(runtime_evidence="compilation_report")
+    (runtime / "wxdf-module-manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
 def _write_launcher_artifact(artifacts_dir: Path, platform_id: str) -> Path:
     version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
     archive = artifacts_dir / public_assembler.artifact_name(version, platform_id)
@@ -114,6 +122,7 @@ def test_root_skill_is_the_exact_source_for_snapshots_and_generated_packages(tmp
     runtime.mkdir()
     executable = runtime / distribution.executable_name()
     executable.write_bytes(b"compiled-placeholder")
+    _write_compilation_manifest(runtime)
     offline = distribution.assemble_package(runtime, tmp_path / "offline", "macos-arm64")
     assert (offline / "SKILL.md").read_bytes() == expected
 
@@ -352,6 +361,7 @@ def test_public_manifests_declare_the_summary_contract(tmp_path: Path) -> None:
     runtime = tmp_path / "runtime.dist"
     runtime.mkdir()
     (runtime / distribution.executable_name()).write_bytes(b"compiled-placeholder")
+    _write_compilation_manifest(runtime)
     offline_skill = distribution.assemble_package(runtime, tmp_path / "offline", "macos-arm64")
     offline = json.loads((offline_skill / "manifest.json").read_text(encoding="utf-8"))
 
@@ -382,6 +392,7 @@ def test_offline_launcher_warns_for_candidate_and_stops_on_unavailable_before_ru
     executable = runtime / distribution.executable_name("linux")
     executable.write_text("#!/bin/sh\nprintf '%s\\n' 'WXDF-T07-OFFLINE-OK'\n", encoding="utf-8")
     executable.chmod(0o755)
+    _write_compilation_manifest(runtime)
     package = distribution.assemble_package(runtime, tmp_path / "offline", "kylin-v10-arm64")
 
     environment = os.environ.copy()
@@ -450,6 +461,7 @@ def test_public_launchers_reject_invalid_json_before_cache_download_or_runtime(
         executable = runtime / distribution.executable_name("linux")
         executable.write_text("#!/bin/sh\nprintf '%s\\n' 'WXDF-T07-INVALID-RAN'\n", encoding="utf-8")
         executable.chmod(0o755)
+        _write_compilation_manifest(runtime)
         package = distribution.assemble_package(
             runtime,
             tmp_path / "offline",

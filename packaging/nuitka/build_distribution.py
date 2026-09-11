@@ -46,6 +46,7 @@ MODULAR_OPEN_MODES = {
 
 RETIRED_RELEASE_MODULES = frozenset({
     "wxdf.migration",
+    "wxdf.semantics.compat",
     "wxdf.semantics.appendix_bridge",
     "wxdf.semantics.caption_bridge",
     "wxdf.semantics.equivalence",
@@ -148,7 +149,7 @@ def _report_wxdf_modules(report_path: Path) -> tuple[str, ...]:
     """Extract wxdf module names from a Nuitka compilation report."""
 
     if not report_path.is_file():
-        return ()
+        raise RuntimeError(f"Nuitka compilation report is missing: {report_path}")
     try:
         root = ElementTree.parse(report_path).getroot()
     except ElementTree.ParseError as exc:
@@ -159,17 +160,58 @@ def _report_wxdf_modules(report_path: Path) -> tuple[str, ...]:
         if element.tag.rsplit("}", 1)[-1] == "module"
         and str(element.get("name") or "").startswith("wxdf")
     }
+    if not modules:
+        raise RuntimeError("Nuitka compilation report contains no wxdf modules")
     return tuple(sorted(modules))
 
 
 def _write_runtime_module_manifest(dist_dir: Path, report_path: Path) -> None:
     report_modules = _report_wxdf_modules(report_path)
-    evidence = "compilation_report" if report_modules else "explicit_nuitka_inclusion"
-    manifest = modular_module_manifest(runtime_modules=report_modules or None, runtime_evidence=evidence)
+    manifest = modular_module_manifest(
+        runtime_modules=report_modules,
+        runtime_evidence="compilation_report",
+    )
     (dist_dir / "wxdf-module-manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+
+
+def _verified_runtime_module_manifest(dist_dir: Path) -> dict:
+    manifest_path = dist_dir / "wxdf-module-manifest.json"
+    if not manifest_path.is_file():
+        raise RuntimeError(f"Runtime module manifest is missing: {manifest_path}")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Runtime module manifest is invalid: {manifest_path}") from exc
+    if not isinstance(manifest, dict):
+        raise RuntimeError("Runtime module manifest must be a JSON object")
+    if manifest.get("runtime_evidence") != "compilation_report":
+        raise RuntimeError("Runtime module manifest runtime_evidence must be compilation_report")
+    if manifest.get("module_set_status") != "matched":
+        raise RuntimeError("Runtime module manifest module_set_status must be matched")
+
+    source_modules = manifest.get("source_modules")
+    runtime_modules = manifest.get("runtime_modules")
+    expected_modules = list(release_module_names())
+    if source_modules != expected_modules or runtime_modules != source_modules:
+        raise RuntimeError(
+            "Runtime module manifest source_modules and runtime_modules must match release module set"
+        )
+    for field in (
+        "forbidden_runtime_modules",
+        "missing_runtime_modules",
+        "unexpected_runtime_modules",
+    ):
+        if manifest.get(field) != []:
+            raise RuntimeError(f"Runtime module manifest {field} must be empty")
+    forbidden = [name for name in runtime_modules if _forbidden_release_module(name)]
+    if forbidden:
+        raise RuntimeError(
+            f"Runtime module manifest contains forbidden module: {forbidden[0]}"
+        )
+    return manifest
 
 
 def platform_id(system: str | None = None, machine: str | None = None) -> str:
@@ -308,7 +350,12 @@ def reject_unsafe_release_paths(root: Path) -> None:
         raise ValueError("Release package paths must not contain newlines")
 
 
-def _write_integrity_files(package_dir: Path, target: str, version: str) -> None:
+def _write_integrity_files(
+    package_dir: Path,
+    target: str,
+    version: str,
+    runtime_module_manifest: dict,
+) -> None:
     reject_unsafe_release_paths(package_dir)
     payload_files = sorted(
         path for path in package_dir.rglob("*")
@@ -324,9 +371,7 @@ def _write_integrity_files(package_dir: Path, target: str, version: str) -> None
         "compatibility_status": "candidate" if platform_status == "candidate" else "native",
         "offline": True,
         "public_report_summary": PUBLIC_REPORT_SUMMARY_CONTRACT,
-        "modular": json.loads(
-            (package_dir / "runtime" / "wxdf-module-manifest.json").read_text(encoding="utf-8")
-        ) if (package_dir / "runtime" / "wxdf-module-manifest.json").is_file() else modular_module_manifest(),
+        "modular": json.loads(json.dumps(runtime_module_manifest)),
         "files": [
             {
                 "path": path.relative_to(package_dir).as_posix(),
@@ -357,6 +402,7 @@ def assemble_package(dist_dir: Path, output_dir: Path, target: str | None = None
         raise ValueError(f"Unsupported platform identifier: {resolved_target}")
     if resolved_target not in PUBLIC_PACKAGE_PLATFORM_IDS:
         raise ValueError(f"Unsupported public package target: {resolved_target}")
+    runtime_module_manifest = _verified_runtime_module_manifest(dist_dir)
     reject_python_sources(dist_dir)
     reject_unsafe_release_paths(dist_dir)
     package_dir = output_dir / f"wx-doc-format-skill-{version}-{resolved_target}"
@@ -375,7 +421,12 @@ def assemble_package(dist_dir: Path, output_dir: Path, target: str | None = None
         expected_executable.chmod(expected_executable.stat().st_mode | 0o111)
     reject_python_sources(package_dir)
     reject_unsafe_release_paths(package_dir)
-    _write_integrity_files(package_dir, resolved_target, version)
+    _write_integrity_files(
+        package_dir,
+        resolved_target,
+        version,
+        runtime_module_manifest,
+    )
     return package_dir
 
 

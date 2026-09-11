@@ -16,9 +16,6 @@ MODE_MANIFEST: dict[str, dict[str, Any]] = {
     "modular_online": {"status": "enabled", "entrypoint": "EnhancementExecutor", "contract": "T03"},
     "modular_file": {"status": "enabled", "entrypoint": "CheckpointStore", "contract": "T04"},
     "modular_review": {"status": "enabled", "entrypoint": "ReviewEvaluator", "contract": "T05"},
-    "legacy_online": {"status": "enabled", "entrypoint": "legacy CLI", "contract": "legacy"},
-    "legacy_file": {"status": "enabled", "entrypoint": "legacy CLI", "contract": "1.0"},
-    "legacy_review": {"status": "enabled", "entrypoint": "legacy CLI", "contract": "legacy"},
 }
 
 

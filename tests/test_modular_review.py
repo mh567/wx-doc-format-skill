@@ -134,6 +134,12 @@ def test_mode_manifest_matches_current_preflight_surface() -> None:
     manifest = mode_manifest()
 
     assert manifest == MODE_MANIFEST
+    assert set(manifest) == {
+        "modular_pure",
+        "modular_online",
+        "modular_file",
+        "modular_review",
+    }
     assert manifest["modular_pure"]["status"] == "enabled"
     assert manifest["modular_online"]["status"] == "enabled"
     assert manifest["modular_online"]["contract"] == "T03"

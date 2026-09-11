@@ -385,14 +385,12 @@ def build_native_v2_registry(
 
 
 def build_plan(config: dict, module_descriptors: Iterable[ModuleDescriptor]) -> ExecutionPlan:
-    pipeline = config.get("pipeline", "legacy")
-    list_policy = config.get("list_policy", "legacy")
-    if pipeline not in {"legacy", "modular"}:
+    pipeline = config.get("pipeline", "modular")
+    list_policy = config.get("list_policy", "wx-default-v2")
+    if pipeline != "modular":
         raise PlanError(f"unsupported pipeline {pipeline!r}")
-    if list_policy not in {"legacy", "wx-default-v2"}:
+    if list_policy != "wx-default-v2":
         raise PlanError(f"unsupported list policy {list_policy!r}")
-    if pipeline == "legacy" and list_policy != "legacy":
-        raise PlanError("legacy pipeline only accepts legacy list policy")
 
     modules = tuple(module_descriptors)
     module_ids: set[str] = set()

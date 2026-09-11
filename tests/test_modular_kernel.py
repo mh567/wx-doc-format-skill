@@ -22,6 +22,25 @@ from wxdf.registry import ModuleDescriptor, ModuleRegistry, PlanError, Registere
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_plan_builder_defaults_to_native_identity() -> None:
+    plan = build_plan({}, [])
+
+    assert plan.pipeline == "modular"
+    assert plan.list_policy == "wx-default-v2"
+
+
+@pytest.mark.parametrize(
+    ("config", "message"),
+    [
+        ({"pipeline": "legacy", "list_policy": "wx-default-v2"}, "unsupported pipeline 'legacy'"),
+        ({"pipeline": "modular", "list_policy": "legacy"}, "unsupported list policy 'legacy'"),
+    ],
+)
+def test_plan_builder_rejects_retired_runtime_identity(config: dict, message: str) -> None:
+    with pytest.raises(PlanError, match=message):
+        build_plan(config, [])
+
+
 def test_plan_builder_rejects_missing_dependencies() -> None:
     with pytest.raises(PlanError, match="missing dependency"):
         build_plan(

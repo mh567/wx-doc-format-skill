@@ -20,6 +20,7 @@ from wxdf.contracts import (
     SOURCE_FACTS_SCHEMA_VERSION,
 )
 from wxdf.kernel import ConversionRequest
+from wxdf.review import mode_manifest
 
 
 def _load_module(name: str, path: Path):
@@ -34,10 +35,21 @@ build = _load_module("wx_modular_distribution_build", ROOT / "packaging" / "nuit
 smoke = _load_module("wx_modular_distribution_smoke", ROOT / "packaging" / "nuitka" / "smoke_distribution.py")
 
 
-def _write_runtime(path: Path) -> None:
+def _write_runtime(path: Path, *, with_manifest: bool = True) -> None:
     version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
     path.write_text(f'#!/bin/sh\nprintf "%s\\n" "{version}"\n', encoding="utf-8")
     path.chmod(0o755)
+    if with_manifest:
+        _write_module_manifest(path.parent)
+
+
+def _write_module_manifest(dist: Path, **overrides) -> None:
+    manifest = build.modular_module_manifest(runtime_evidence="compilation_report")
+    manifest.update(overrides)
+    (dist / "wxdf-module-manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
 
 def test_nuitka_command_explicitly_includes_the_complete_wxdf_surface(tmp_path: Path) -> None:
@@ -94,6 +106,10 @@ def test_modular_manifest_matches_contracts_and_open_modes() -> None:
     }
 
 
+def test_distribution_and_review_publish_the_same_native_modes() -> None:
+    assert build.MODULAR_OPEN_MODES == mode_manifest()
+
+
 def test_release_smoke_accepts_explicit_native_online_adapter_mode() -> None:
     modular = build.modular_module_manifest()
 
@@ -109,8 +125,58 @@ def test_assembled_release_manifest_records_modular_runtime_surface(tmp_path: Pa
     manifest = json.loads((package / "manifest.json").read_text(encoding="utf-8"))
 
     smoke.validate_modular_manifest(manifest)
-    assert manifest["modular"]["runtime_evidence"] == "explicit_nuitka_inclusion"
+    assert manifest["modular"]["runtime_evidence"] == "compilation_report"
     assert (package / "runtime" / "VERSION").is_file()
+
+
+def test_public_package_requires_compilation_report_runtime_manifest(tmp_path: Path) -> None:
+    dist = tmp_path / "runtime.dist"
+    dist.mkdir()
+    _write_runtime(dist / build.executable_name(), with_manifest=False)
+
+    with pytest.raises(RuntimeError, match="Runtime module manifest is missing"):
+        build.assemble_package(dist, tmp_path / "output", build.platform_id())
+
+    assert not (tmp_path / "output").exists()
+
+
+def test_public_package_rejects_invalid_runtime_manifest_json(tmp_path: Path) -> None:
+    dist = tmp_path / "runtime.dist"
+    dist.mkdir()
+    _write_runtime(dist / build.executable_name())
+    (dist / "wxdf-module-manifest.json").write_text("{", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="Runtime module manifest is invalid"):
+        build.assemble_package(dist, tmp_path / "output", build.platform_id())
+
+    assert not (tmp_path / "output").exists()
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"runtime_evidence": "explicit_nuitka_inclusion"}, "runtime_evidence"),
+        ({"module_set_status": "mismatch"}, "module_set_status"),
+        ({"runtime_modules": ["wxdf"]}, "source_modules and runtime_modules"),
+        ({"forbidden_runtime_modules": ["wxdf.migration"]}, "forbidden_runtime_modules"),
+        ({"missing_runtime_modules": ["wxdf.kernel"]}, "missing_runtime_modules"),
+        ({"unexpected_runtime_modules": ["wxdf.extra"]}, "unexpected_runtime_modules"),
+    ],
+)
+def test_public_package_rejects_unverified_runtime_manifest(
+    tmp_path: Path,
+    overrides: dict,
+    message: str,
+) -> None:
+    dist = tmp_path / "runtime.dist"
+    dist.mkdir()
+    _write_runtime(dist / build.executable_name())
+    _write_module_manifest(dist, **overrides)
+
+    with pytest.raises(RuntimeError, match=message):
+        build.assemble_package(dist, tmp_path / "output", build.platform_id())
+
+    assert not (tmp_path / "output").exists()
 
 
 def test_programmatic_request_defaults_to_native_identity() -> None:
@@ -128,6 +194,7 @@ def test_release_module_set_excludes_development_and_retired_bridges() -> None:
     release_modules = set(build.release_module_names())
 
     assert "wxdf.migration" not in release_modules
+    assert "wxdf.semantics.compat" not in release_modules
     assert not any(name.startswith("wxdf.legacy_") for name in release_modules)
     assert not any(name.endswith("_bridge") for name in release_modules)
     assert {
@@ -163,6 +230,63 @@ def test_compilation_report_surfaces_forbidden_wxdf_modules(tmp_path: Path) -> N
         "wxdf.legacy_removed",
         "wxdf.migration",
     ]
+
+
+def test_compilation_report_must_exist(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeError, match="compilation report is missing"):
+        build._report_wxdf_modules(tmp_path / "missing.xml")
+
+
+def test_compilation_report_must_contain_a_wxdf_module(tmp_path: Path) -> None:
+    report = tmp_path / "compilation-report.xml"
+    report.write_text(
+        '<nuitka-compilation-report><module name="main"/></nuitka-compilation-report>',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="contains no wxdf modules"):
+        build._report_wxdf_modules(report)
+
+
+def test_compilation_report_rejects_truncated_xml(tmp_path: Path) -> None:
+    report = tmp_path / "compilation-report.xml"
+    report.write_text('<nuitka-compilation-report><module name="wxdf.kernel">', encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="compilation report is invalid"):
+        build._report_wxdf_modules(report)
+
+
+def test_runtime_manifest_writer_uses_only_compilation_report_evidence(tmp_path: Path) -> None:
+    dist = tmp_path / "runtime.dist"
+    dist.mkdir()
+    report = tmp_path / "compilation-report.xml"
+    module_elements = "".join(
+        f'<module name="{module_name}"/>'
+        for module_name in build.release_module_names()
+    )
+    report.write_text(
+        f"<nuitka-compilation-report>{module_elements}</nuitka-compilation-report>",
+        encoding="utf-8",
+    )
+
+    build._write_runtime_module_manifest(dist, report)
+
+    manifest = json.loads(
+        (dist / "wxdf-module-manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["runtime_evidence"] == "compilation_report"
+    assert manifest["runtime_modules"] == list(build.release_module_names())
+    assert manifest["module_set_status"] == "matched"
+
+
+def test_runtime_manifest_writer_leaves_no_fallback_for_missing_report(tmp_path: Path) -> None:
+    dist = tmp_path / "runtime.dist"
+    dist.mkdir()
+
+    with pytest.raises(RuntimeError, match="compilation report is missing"):
+        build._write_runtime_module_manifest(dist, tmp_path / "missing.xml")
+
+    assert not (dist / "wxdf-module-manifest.json").exists()
 
 
 @pytest.mark.parametrize(

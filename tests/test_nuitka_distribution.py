@@ -55,6 +55,14 @@ def _load_public_assembler_module():
 public_assembler = _load_public_assembler_module()
 
 
+def _write_compilation_manifest(dist: Path) -> None:
+    manifest = build.modular_module_manifest(runtime_evidence="compilation_report")
+    (dist / "wxdf-module-manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
 def _write_posix_runtime(path: Path) -> None:
     version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
     path.write_text(
@@ -62,6 +70,7 @@ def _write_posix_runtime(path: Path) -> None:
         encoding="utf-8",
     )
     path.chmod(0o755)
+    _write_compilation_manifest(path.parent)
 
 
 def test_load_version_from_source_tree_and_release_runtime(tmp_path):
@@ -126,6 +135,7 @@ def test_skip_compile_package_assembly_writes_runtime_and_manifest(tmp_path):
     binary_name = build.executable_name()
     binary = dist / binary_name
     binary.write_bytes(b"compiled-placeholder")
+    _write_compilation_manifest(dist)
 
     package = build.assemble_package(dist, tmp_path / "output", build.platform_id())
 
@@ -150,6 +160,7 @@ def test_package_assembly_rejects_python_sources(tmp_path, suffix):
     dist.mkdir()
     (dist / build.executable_name()).write_bytes(b"compiled-placeholder")
     (dist / f"private_logic{suffix}").write_bytes(b"private")
+    _write_compilation_manifest(dist)
     with pytest.raises(ValueError, match="Python source files are forbidden"):
         build.assemble_package(dist, tmp_path / "output", build.platform_id())
 
@@ -159,6 +170,7 @@ def test_package_assembly_rejects_newlines_in_paths(tmp_path):
     dist.mkdir()
     (dist / build.executable_name()).write_bytes(b"compiled-placeholder")
     (dist / "unsafe\nname.dat").write_bytes(b"private")
+    _write_compilation_manifest(dist)
     with pytest.raises(ValueError, match="must not contain newlines"):
         build.assemble_package(dist, tmp_path / "output", build.platform_id())
 
@@ -167,6 +179,7 @@ def test_skip_compile_cli_uses_existing_standalone_directory(tmp_path, monkeypat
     dist = tmp_path / "existing.dist"
     dist.mkdir()
     (dist / build.executable_name()).write_bytes(b"compiled-placeholder")
+    _write_compilation_manifest(dist)
 
     def unexpected_compile(_build_dir):
         raise AssertionError("Nuitka compilation must be skipped")
@@ -445,6 +458,7 @@ def test_posix_installer_rejects_staged_runtime_version_mismatch(tmp_path):
     binary = dist / build.executable_name()
     binary.write_text('#!/bin/sh\nprintf "%s\\n" "wrong-version"\n', encoding="utf-8")
     binary.chmod(0o755)
+    _write_compilation_manifest(dist)
     package = build.assemble_package(dist, tmp_path / "output", build.platform_id())
     destination = tmp_path / "installed" / "wx-doc-format"
     result = subprocess.run(
@@ -461,6 +475,7 @@ def test_kylin_manifest_is_marked_as_candidate(tmp_path):
     dist = tmp_path / "existing.dist"
     dist.mkdir()
     (dist / build.executable_name("linux")).write_bytes(b"compiled-placeholder")
+    _write_compilation_manifest(dist)
     package = build.assemble_package(dist, tmp_path / "output", "kylin-v10-arm64")
     manifest = json.loads((package / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["compatibility_status"] == "candidate"
@@ -470,6 +485,7 @@ def test_archive_name_keeps_full_version_and_private_build_files_stay_out(tmp_pa
     dist = tmp_path / "existing.dist"
     dist.mkdir()
     (dist / "wx-doc-format").write_bytes(b"compiled-placeholder")
+    _write_compilation_manifest(dist)
     package = build.assemble_package(dist, tmp_path / "output", "macos-arm64")
     archive = build.create_archive(package, "macos-arm64")
     assert archive.name == f"{package.name}.tar.gz"
