@@ -24,7 +24,7 @@ if str(SCRIPTS) not in sys.path:
 from wxdf.run_store import content_digest, save_checkpoint
 
 
-PYTHON = SCRIPTS / ".venv" / "bin" / "python3"
+PYTHON = Path(sys.executable)
 MAIN = SCRIPTS / "main.py"
 SOURCE = ROOT / "input" / "test_baseline.md"
 TABLE_SOURCE = ROOT / "input" / "benchmark_report.md"

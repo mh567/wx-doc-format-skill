@@ -18,7 +18,7 @@ from docx.oxml.ns import qn
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
-PYTHON = SCRIPTS / ".venv" / "bin" / "python3"
+PYTHON = Path(sys.executable)
 TEMPLATE = ROOT / "assets" / "wx_template.docx"
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"

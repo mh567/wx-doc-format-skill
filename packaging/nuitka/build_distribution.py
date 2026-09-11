@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.metadata
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -85,6 +87,48 @@ PUBLIC_REPORT_SUMMARY_CONTRACT = {
         "diagnostic_codes",
     ],
 }
+
+
+def capture_source_identity(project_root: Path = PROJECT_ROOT) -> dict:
+    """Identify the clean source tree used by this build process."""
+    def git(*arguments: str) -> str:
+        return subprocess.check_output(
+            ["git", "-C", str(project_root), *arguments], text=True,
+        ).strip()
+
+    if git("status", "--porcelain", "--untracked-files=all"):
+        raise RuntimeError("SOURCE_DIRTY: candidate builds require a clean committed source tree")
+    return {
+        "version": (project_root / "VERSION").read_text(encoding="utf-8").strip(),
+        "commit": git("rev-parse", "HEAD"),
+        "tree": git("rev-parse", "HEAD^{tree}"),
+        "toolchain": {
+            "python": platform.python_version(),
+            "nuitka": importlib.metadata.version("Nuitka"),
+            "system": platform.system(),
+            "machine": platform.machine(),
+            "build_image": os.environ.get("WXDF_LINUX_BUILD_IMAGE", "native"),
+        },
+    }
+
+
+def validate_source_identity(identity: object, *, version: str | None = None) -> dict:
+    if not isinstance(identity, dict):
+        raise RuntimeError("SOURCE_IDENTITY_INVALID: source identity is missing")
+    for field in ("commit", "tree"):
+        if not isinstance(identity.get(field), str) or not re.fullmatch(r"[0-9a-f]{40}", identity[field]):
+            raise RuntimeError(f"SOURCE_IDENTITY_INVALID: invalid {field}")
+    if not isinstance(identity.get("version"), str) or not identity["version"]:
+        raise RuntimeError("SOURCE_IDENTITY_INVALID: version is missing")
+    if version is not None and identity["version"] != version:
+        raise RuntimeError("SOURCE_IDENTITY_MISMATCH: version differs from the package")
+    toolchain = identity.get("toolchain")
+    if not isinstance(toolchain, dict) or any(
+        not isinstance(toolchain.get(field), str) or not toolchain[field]
+        for field in ("python", "nuitka", "system", "machine", "build_image")
+    ):
+        raise RuntimeError("SOURCE_IDENTITY_INVALID: incomplete toolchain")
+    return identity
 
 
 def wxdf_module_names() -> tuple[str, ...]:
@@ -176,7 +220,9 @@ def _report_wxdf_modules(report_path: Path) -> tuple[str, ...]:
     return tuple(sorted(modules))
 
 
-def _write_runtime_module_manifest(dist_dir: Path, report_path: Path) -> None:
+def _write_runtime_module_manifest(
+    dist_dir: Path, report_path: Path, *, source_identity: dict | None = None,
+) -> None:
     report_modules = _report_wxdf_modules(report_path)
     stored_report = dist_dir / RUNTIME_COMPILATION_REPORT_NAME
     if report_path.resolve() != stored_report.resolve():
@@ -189,6 +235,9 @@ def _write_runtime_module_manifest(dist_dir: Path, report_path: Path) -> None:
         "name": RUNTIME_COMPILATION_REPORT_NAME,
         "sha256": sha256_file(stored_report),
     }
+    manifest["source_identity"] = validate_source_identity(
+        source_identity if source_identity is not None else capture_source_identity(PROJECT_ROOT),
+    )
     (dist_dir / "wxdf-module-manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
@@ -205,6 +254,10 @@ def _verified_runtime_module_manifest(dist_dir: Path) -> dict:
         raise RuntimeError(f"Runtime module manifest is invalid: {manifest_path}") from exc
     if not isinstance(manifest, dict):
         raise RuntimeError("Runtime module manifest must be a JSON object")
+    validate_source_identity(
+        manifest.get("source_identity"),
+        version=(PROJECT_ROOT / "VERSION").read_text(encoding="utf-8").strip(),
+    )
     if manifest.get("runtime_evidence") != "compilation_report":
         raise RuntimeError("Runtime module manifest runtime_evidence must be compilation_report")
     report_identity = manifest.get("compilation_report")
@@ -331,17 +384,20 @@ def nuitka_command(build_dir: Path) -> list[str]:
 
 
 def compile_standalone(build_dir: Path) -> Path:
+    identity = capture_source_identity(PROJECT_ROOT)
     build_dir.mkdir(parents=True, exist_ok=True)
     environment = os.environ.copy()
     scripts_path = str(PROJECT_ROOT / "scripts")
     previous = environment.get("PYTHONPATH")
     environment["PYTHONPATH"] = scripts_path if not previous else os.pathsep.join((scripts_path, previous))
     subprocess.run(nuitka_command(build_dir), cwd=PROJECT_ROOT, env=environment, check=True)
+    if capture_source_identity(PROJECT_ROOT) != identity:
+        raise RuntimeError("SOURCE_IDENTITY_MISMATCH: source changed during compilation")
     dist_dir = build_dir / "release_entrypoint.dist"
     if not dist_dir.is_dir():
         raise RuntimeError(f"Nuitka standalone directory was not created: {dist_dir}")
     ensure_runtime_layout(dist_dir)
-    _write_runtime_module_manifest(dist_dir, build_dir / "compilation-report.xml")
+    _write_runtime_module_manifest(dist_dir, build_dir / "compilation-report.xml", source_identity=identity)
     return dist_dir
 
 
@@ -412,6 +468,7 @@ def _write_integrity_files(
         "schema_version": 1,
         "product": "wx-doc-format-skill",
         "version": version,
+        "source_identity": runtime_module_manifest["source_identity"],
         "platform": target,
         "platforms": {target: {"status": platform_status}},
         "compatibility_status": "candidate" if platform_status == "candidate" else "native",
@@ -457,7 +514,7 @@ def assemble_package(dist_dir: Path, output_dir: Path, target: str | None = None
     package_dir.mkdir(parents=True)
     _copy_public_files(package_dir)
     runtime_dir = package_dir / "runtime"
-    shutil.copytree(dist_dir, runtime_dir)
+    shutil.copytree(dist_dir, runtime_dir, ignore=shutil.ignore_patterns(RUNTIME_COMPILATION_REPORT_NAME))
     ensure_runtime_layout(runtime_dir)
     shutil.copy2(PROJECT_ROOT / "VERSION", runtime_dir / "VERSION")
     expected_executable = runtime_dir / executable_name("windows" if resolved_target.startswith("windows-") else None)
@@ -533,12 +590,18 @@ def main(argv: list[str] | None = None) -> Path:
         raise SystemExit("--compile-only cannot be combined with --skip-compile")
     if args.compile_only and args.archive:
         raise SystemExit("--compile-only cannot be combined with --archive")
+    identity = capture_source_identity(PROJECT_ROOT)
     dist_dir = args.dist_dir if args.skip_compile else compile_standalone(args.build_dir)
     if args.compile_only:
         runtime_dir = dist_dir.resolve()
         print(runtime_dir)
         return runtime_dir
+    runtime_identity = _verified_runtime_module_manifest(dist_dir)["source_identity"]
+    if any(runtime_identity[field] != identity[field] for field in ("version", "commit", "tree")):
+        raise RuntimeError("SOURCE_IDENTITY_MISMATCH: existing runtime differs from the current frozen source")
     package_dir = assemble_package(dist_dir.resolve(), args.output_dir.resolve(), args.target)
+    if capture_source_identity(PROJECT_ROOT) != identity:
+        raise RuntimeError("SOURCE_IDENTITY_MISMATCH: source changed while assembling the package")
     print(package_dir)
     if args.archive:
         print(create_archive(package_dir, args.target or platform_id()))

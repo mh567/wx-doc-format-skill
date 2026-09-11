@@ -888,28 +888,10 @@ def test_t06_default_cli_invocation_uses_native_pipeline_and_policy(tmp_path: Pa
 
 def _write_launcher_artifact(artifacts_dir: Path, version: str, platform_id: str) -> Path:
     """Write a dummy release artifact that the public launcher can install."""
+    from test_t09_compiled_acceptance import write_archive_fixture
 
-    archive = artifacts_dir / public_assembler.artifact_name(version, platform_id)
-    package = f"wx-doc-format-skill-{version}-{platform_id}"
-    install = (
-        "#!/bin/sh\n"
-        "set -eu\n"
-        'mkdir -p "$1/scripts"\n'
-        'cp "$(dirname -- "$0")/run.sh" "$1/scripts/run.sh"\n'
-        'chmod +x "$1/scripts/run.sh"\n'
-    )
-    launcher = "#!/bin/sh\nprintf '%s\\n' \"WXDF-T07-LAUNCHER-OK\"\n"
-    with tarfile.open(archive, "w:gz") as tar:
-        for relative, text in (
-            ("scripts/install.sh", install),
-            ("scripts/run.sh", launcher),
-        ):
-            payload = text.encode("utf-8")
-            info = tarfile.TarInfo(f"{package}/{relative}")
-            info.size = len(payload)
-            info.mode = 0o755
-            tar.addfile(info, io.BytesIO(payload))
-    return archive
+    assert version == (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+    return write_archive_fixture(artifacts_dir, platform_id, marker="WXDF-T07-LAUNCHER-OK")
 
 
 def _run_public_launcher(public_skill: Path, tmp_path: Path, *, platform: str) -> subprocess.CompletedProcess:

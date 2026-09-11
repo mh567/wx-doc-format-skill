@@ -76,6 +76,16 @@ macOS ARM64 与 Linux ARM64 发布入口负责锁定依赖、执行测试、编�
 
 以下公开包合同仅适用于当前发布目标。版本发布前先更新 `VERSION`，然后从同一私有提交重建所有本次提供的平台制品。制品内 `VERSION`、运行时 `--version`、归档名和发布标签必须一致。
 
+候选源码身份的冻结顺序：
+
+1. 在隔离私有工作树完成 RED、实现、全量测试及源码审查，提交候选源码 C。
+2. 从干净 C 构建 macOS 和 Linux ARM64。构建解释器执行全量测试；Linux 容器使用 C 的独立源码 clone，不读取宿主虚拟环境软链。
+3. 编译前后及组包后检查 version、commit、tree 和工具链身份。清单绑定该身份及经过验证的完整 Nuitka XML hash。完整 XML 保留在私有构建证据中，公开 runtime 不携带该 XML 或其中的源码路径。
+4. 如果构建暴露代码问题，修复并创建新 C，两平台全部重建。完成后的证据记录通过仅文档提交追加，已有制品继续指向原候选 C。
+5. 已存在公开标签的版本不用于新制品替换。本轮 T09 候选版本为 `0.13.0`，不移动 `v0.12.19`。
+
+每个平台保留全量测试日志、实际依赖版本、编译日志与 XML、包内清单、归档 SHA256 和真实 standalone 验收报告。macOS 记录全部 Mach-O 架构及 ARM64 切片最大 `minos`；Linux 容器通过后仍维持候选标识。普通 Markdown/DOCX、command 增强、文件协议和恢复、复核提交与拒绝保护、报告脱敏、ZIP、离线安装、ASCII 门禁必须通过。页面级视觉排版不由 ZIP 或结构审计证明。
+
 详细命令和平台前置条件见 [`packaging/nuitka/README.md`](../packaging/nuitka/README.md)。
 
 ## 4. 生成公开 Skill
@@ -83,7 +93,7 @@ macOS ARM64 与 Linux ARM64 发布入口负责锁定依赖、执行测试、编�
 当前发布目标仅包含 macOS ARM64 和 Linux ARM64。Windows x86_64 不再进入打包、验收或发布门禁。
 
 ```bash
-scripts/.venv/bin/python3 packaging/nuitka/assemble_public_skill.py \
+build/nuitka/local-macos-arm64/venv/bin/python3 packaging/nuitka/assemble_public_skill.py \
   --artifacts-dir dist/local \
   --output-dir dist/public-skill \
   --require-platform macos-arm64 \
@@ -92,6 +102,8 @@ scripts/.venv/bin/python3 packaging/nuitka/assemble_public_skill.py \
 ```
 
 `<measured-minos>` 使用本次 macOS 制品的实测值，不沿用旧版本数字。
+
+在冻结 C 的干净工作树生成公开 Skill。生成入口读取归档内部元数据并校验完整文件集和 hash，要求两个平台及当前检出的 version、commit 和 tree 相同。公开清单保留平台各自的工具链身份。候选源码之后的证据提交不作为公开生成的源码身份。
 
 生成树必须通过：
 
@@ -102,6 +114,8 @@ find dist/public-skill -type f \( -name '*.py' -o -name '*.pyc' -o -name '*.pyo'
 ```
 
 完成条件：Skill validator 和 shell 语法通过，`find` 无输出，`artifacts/manifest.json` 只列出实际上传的平台，每个归档 SHA256 与 `dist/local/` 一致。
+
+发布授权前可使用 `smoke_distribution.py --public-skill dist/public-skill` 验证本机 HTTP 空缓存下载、安装和缓存复用。该步骤需要临时本地监听权限，不访问 GitHub。Kylin V10 ARM64 真机、远程 GitHub 安装、公开同步、push、tag 和 Release 是独立门禁，未授权时保持待办。
 
 ## 5. 发布公开仓库
 

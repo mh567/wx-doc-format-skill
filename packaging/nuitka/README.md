@@ -2,6 +2,14 @@
 
 本目录当前交付 macOS ARM64 和 Linux ARM64 两个平台。这两个发布入口会安装锁定依赖、运行测试、编译 standalone 运行时、组装离线包并执行真实转换冒烟。历史 Windows x86_64 入口只编译 standalone 运行时。
 
+## 冻结候选源码
+
+先更新 `VERSION`、完成源码测试并提交候选源码 C，再从干净的同一 C 构建两个平台。构建入口记录 version、commit、tree，以及 Python、Nuitka、操作系统、架构和构建镜像。编译前后及组包后重新检查工作树，源码漂移直接失败。`--skip-compile` 也必须提供属于当前 C 的 runtime。
+
+直接依赖版本来自 `requirements-runtime.txt` 和 `requirements-build.txt`。每个平台另存 `dependency-versions.txt` 记录实际解析的完整环境。全量测试使用构建解释器，结果保存在对应 `build/nuitka/local-*/tests.log`。只纳入 `input/test_baseline.md` 和 `input/benchmark_report.md` 两个 Markdown 基线；真实 DOCX 和协议输入由验收程序在临时证据目录中生成。
+
+公开版本 `0.12.19` 已有标签，本轮候选使用 `0.13.0`。已发布版本的标签移动及资产替换仍需单独授权。若真实构建暴露代码问题，修复后创建新 C，并重建两个平台。构建完成后的证据提交仅允许修改文档，不与候选源码身份混用。
+
 ## macOS ARM64
 
 需要 macOS ARM64、Xcode Command Line Tools 和 Python 3.13。
@@ -10,10 +18,10 @@
 packaging/nuitka/build-local-macos-arm64.sh
 ```
 
-可以通过 `WXDF_BOOTSTRAP_PYTHON` 指定 Python 3.13 可执行文件。发布前必须检查 Mach-O 的 `minos`，本地编译结果会受当前 macOS SDK 和 Python 工具链影响。
+可以通过 `WXDF_BOOTSTRAP_PYTHON` 指定 Python 3.13 可执行文件。冒烟会检查 runtime 中全部 Mach-O 的架构和 ARM64 切片最低系统版本，以其中最大值作为实测 `minos`。本地编译结果会受当前 macOS SDK 和 Python 工具链影响。
 
 ```bash
-otool -l dist/local/wx-doc-format-skill-*/runtime/wx-doc-format
+python3.13 -c 'import json; print(json.load(open("build/nuitka/local-macos-arm64/acceptance.json"))["binary"]["macos_min_version"])'
 ```
 
 ## Linux ARM64
@@ -26,7 +34,7 @@ docker context use colima
 packaging/nuitka/build-local-linux-arm64.sh
 ```
 
-默认镜像按 SHA256 摘要固定。如需使用内网镜像仓库，设置 `WXDF_LINUX_BUILD_IMAGE`。生成的 `kylin-v10-arm64` 归档是候选制品，交付前必须在 Kylin V10 ARM64 真机完成安装和转换冒烟。
+默认镜像按 SHA256 摘要固定。如需使用内网镜像仓库，设置 `WXDF_LINUX_BUILD_IMAGE`。入口从当前 C 新建可独立读取 Git 身份的本地源码 clone，并在容器中测试、编译及验收。容器不依赖宿主 `scripts/.venv` 软链。生成的 `kylin-v10-arm64` 归档是容器候选制品，交付前必须在 Kylin V10 ARM64 真机完成安装和转换冒烟。
 
 ## Windows x86_64
 
@@ -57,18 +65,37 @@ wx-doc-format-skill-<version>-kylin-v10-arm64.tar.gz
 
 上述公开包合同仅适用于 macOS ARM64 与 Kylin V10 ARM64。发布包的安装目录必须只包含可打印 ASCII 字符。安装器会验证 `SHA256SUMS.txt`、完整文件集和运行时版本。调用 `scripts/run.sh` 时也会重新检查安装路径。
 
+完整 Nuitka XML 先经过 root、completion、standalone、模块集合、能力合同及 SHA256 检查，保留在私有构建目录。公开离线包排除该 XML；包清单及 runtime 模块清单仅保留可核验模块摘要、XML hash 和源码身份，不复制 XML 中的源码路径。
+
+`smoke_distribution.py` 首先拒绝脚本伪装的运行时。真实入口验收包括普通 Markdown、程序生成的真实 DOCX、外部 command 增强、文件协议多阶段等待及 resume、审计后复核修复、终态恢复幂等、拒绝复核时保护原输出、报告脱敏、ZIP 完整性、AST/legacy 拒绝门禁、离线安装与 ASCII 路径拒绝。外部增强响应由确定性本地适配器提供，不访问模型服务。该适配器属于私有验收工具，公开 runtime 和安装启动器不依赖 Python 源文件。
+
+构建脚本保留私有证据目录并打印其路径，摘要另存 `build/nuitka/local-*/acceptance.json`。证据包含命令、返回码、stdout/stderr、请求、checkpoint、报告和输入输出文件，不进入公开安装包。
+
 ## 组装公开 Skill
 
 公开仓库只保留薄 Skill 和平台运行时引导脚本。组装时要求当前交付的 macOS ARM64 和 Linux ARM64 平台：
 
 ```bash
-scripts/.venv/bin/python3 packaging/nuitka/assemble_public_skill.py \
+build/nuitka/local-macos-arm64/venv/bin/python3 packaging/nuitka/assemble_public_skill.py \
   --artifacts-dir dist/local \
   --output-dir dist/public-skill \
   --require-platform macos-arm64 \
   --require-platform kylin-v10-arm64 \
-  --macos-min-version 26.0
+  --macos-min-version <measured-minos>
 ```
+
+生成入口打开每个归档，验证内部 VERSION、平台、package/runtime manifest、完整文件集合、每个文件大小与 SHA256、模块与能力合同，以及两平台同版本、同 commit 和 tree。CLI 还要求归档身份等于当前干净检出 C。仅文件名匹配的旧包不能通过。
+
+生成后先运行开发流程中的 Skill validator、shell、无 Python 文件和 SHA256 门禁，再从当前平台执行在线薄 Skill 验收：
+
+```bash
+build/nuitka/local-macos-arm64/venv/bin/python3 packaging/nuitka/smoke_distribution.py \
+  dist/local/wx-doc-format-skill-0.13.0-macos-arm64 \
+  --public-skill dist/public-skill \
+  --evidence-dir /tmp/wxdf-t09-public-acceptance
+```
+
+证据目录必须为新的 ASCII 路径。上述在线测试通过临时 `127.0.0.1` HTTP 服务验证薄 Skill 空缓存下载、归档校验、安装和缓存复用，结束后关闭监听。Linux 平台使用对应候选目录在 ARM64 容器内执行。该本地验证不替代远程 GitHub 下载、真实用户环境或 Kylin 真机验收。
 
 `dist/public-skill/` 用于替换公开仓库当前文件。`dist/local/` 中列入 `artifacts/SHA256SUMS.txt` 的归档作为同版本 GitHub Release 资产上传。
 

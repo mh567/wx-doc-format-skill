@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from test_t09_compiled_acceptance import fixture_source_identity
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -54,7 +55,7 @@ def _write_compilation_evidence(dist: Path) -> None:
         f"{module_elements}</nuitka-compilation-report>",
         encoding="utf-8",
     )
-    build._write_runtime_module_manifest(dist, report)
+    build._write_runtime_module_manifest(dist, report, source_identity=fixture_source_identity(dist.parent))
 
 
 def _mutate_module_manifest(dist: Path, **overrides) -> None:
@@ -495,7 +496,7 @@ def test_runtime_manifest_writer_uses_only_compilation_report_evidence(tmp_path:
         encoding="utf-8",
     )
 
-    build._write_runtime_module_manifest(dist, report)
+    build._write_runtime_module_manifest(dist, report, source_identity=fixture_source_identity(dist.parent))
 
     manifest = json.loads(
         (dist / "wxdf-module-manifest.json").read_text(encoding="utf-8")

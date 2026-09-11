@@ -1,11 +1,18 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import http.server
 import json
+import os
 import platform
+import re
+import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import zipfile
 from pathlib import Path
 
@@ -16,6 +23,7 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 from wxdf.review import mode_manifest
+from docx import Document
 
 
 def _retired_module_literal(name: object) -> bool:
@@ -92,61 +100,344 @@ def validate_modular_manifest(manifest: dict) -> None:
             )
 
 
-def smoke(package_dir: Path) -> None:
+def _write_json(path: Path, value: object) -> None:
+    path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _execute(command: list[str], evidence_dir: Path, label: str, *, expected: int = 0, environment: dict | None = None) -> subprocess.CompletedProcess:
+    result = subprocess.run(command, capture_output=True, text=True, timeout=120, env=environment)
+    _write_json(evidence_dir / f"{label}.process.json", {
+        "command": command, "returncode": result.returncode,
+        "stdout": result.stdout, "stderr": result.stderr,
+    })
+    if result.returncode != expected:
+        raise RuntimeError(f"{label}: expected exit {expected}, got {result.returncode}: {result.stderr[-1000:]}")
+    if "Traceback (most recent call last)" in result.stderr:
+        raise RuntimeError(f"{label}: release process exposed a traceback")
+    return result
+
+
+def _validate_public_report(path: Path, *, status: str = "completed") -> dict:
+    report = json.loads(path.read_text(encoding="utf-8"))
+    keys = report_keys(report)
+    forbidden = {key for key in keys if key in {"review_packet", "unknown_pattern_packet", "blocks", "ast"}
+                 or key.startswith("ast_") or key.endswith("_ast")
+                 or any(part in key for part in ("candidate", "confidence", "decision", "evidence", "frame", "score", "stack", "traceback"))}
+    if forbidden:
+        raise RuntimeError(f"Release report exposes sensitive fields: {sorted(forbidden)}")
+    summary = report.get("public_summary") or {}
+    if summary.get("status") != status or summary.get("pipeline") != "modular" or summary.get("profile") != "wx-default-v2" or summary.get("list_policy") != "wx-default-v2":
+        raise RuntimeError(f"Release report has unexpected native identity: {summary}")
+    if status == "completed":
+        if summary.get("unexpected_styles_count") != 0 or summary.get("manual_review_required") is not False:
+            raise RuntimeError(f"Release report did not pass public audits: {summary}")
+        if any(summary.get("audits", {}).get(name) != "passed" for name in ("model_audit", "saved_output_audit", "appendix_preservation_audit")) or "failed" in summary.get("audits", {}).values():
+            raise RuntimeError(f"Release report contains a failed audit: {summary}")
+    if status == "completed" and "unexpected_styles" not in keys:
+        raise RuntimeError("Release report does not expose unexpected_styles")
+    return summary
+
+
+def _validate_docx(path: Path, *, text: str) -> dict:
+    with zipfile.ZipFile(path) as archive:
+        if archive.testzip() is not None:
+            raise RuntimeError("DOCX ZIP checksum validation failed")
+    document = Document(path)
+    if text not in [paragraph.text for paragraph in document.paragraphs]:
+        raise RuntimeError(f"DOCX did not preserve text: {text}")
+    return {"sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "size": path.stat().st_size}
+
+
+def native_response(request: dict, *, enhance_role: bool = True, reject_review: bool = False) -> dict:
+    """Deterministic local adapter for exercising the external response contract."""
+    candidates = []
+    if request["capability"] == "list_detect" and enhance_role:
+        blocks = request["items"][0]["source_ast"]["document"]["blocks"]
+        target_id, target = next((key, value) for key, value in blocks.items() if value.get("role") == "body")
+        candidates.append({
+            "candidate_id": "acceptance-" + request["request_id"],
+            "module_id": "enhancement-list_detect", "module_version": "2.0",
+            "target_source_refs": [target["source_ref"]], "target_node_ids": [target_id],
+            "proposal": {"operation": "update_role", "property_scope": ["role", "level"], "value": {"role": "heading", "level": 2}},
+            "positive_evidence": [{"kind": "acceptance_fixture"}], "negative_evidence": [],
+            "scope": {"stages": ["role"]}, "constraints": [], "confidence": 0.95,
+            "rationale": "Exercise the explicit local enhancement adapter",
+        })
+    if request["capability"] == "document_review":
+        packet = request.get("review_packet") or request.get("context", {}).get("review_packet")
+        target = packet["targets"][0]
+        candidates.append({
+            "candidate_id": "acceptance-review-" + request["request_id"],
+            "module_id": "document_review", "module_version": "2.0",
+            "target_source_refs": [target["source_ref"]], "target_node_ids": [target["block_id"]],
+            "proposal": {"operation": "update_role", "property_scope": ["role", "level"],
+                         "value": {"role": "heading", "level": 6 if reject_review else target["evidence"]["expected_level"]}},
+            "positive_evidence": [{"kind": "post_audit_review"}], "negative_evidence": [],
+            "scope": {"stages": ["role", "normalize", "render", "audit"]},
+            "constraints": [], "rationale": "Repair the real audited heading jump", "confidence": 0.95,
+        })
+    return {
+        "request_id": request["request_id"], "response_id": "response-" + request["request_id"],
+        "candidate_set_version": "2.0", "base_revision": request["model_revision"],
+        "view_sha256": request["view_sha256"], "candidates": candidates,
+    }
+
+
+def _assert_heading(path: Path, text: str, level: int) -> None:
+    paragraph = next(item for item in Document(path).paragraphs if item.text == text)
+    if paragraph.style.name.lower() != f"heading {level}":
+        raise RuntimeError(f"Enhancement was not committed to DOCX: {paragraph.style.name}")
+
+
+def run_runtime_contracts(command: list[str], template: Path, evidence_dir: Path) -> dict:
+    """Exercise release behavior through a runnable CLI, keeping private evidence."""
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    markdown = evidence_dir / "source.md"
+    markdown.write_text("# Acceptance\n\n## Scope\n\nPreserved body.\n\n1. First item\n2. Second item\n\n| Name | Value |\n| --- | --- |\n| A | B |\n", encoding="utf-8")
+    source_docx = evidence_dir / "source.docx"
+    document = Document()
+    document.add_heading("Acceptance", level=1)
+    document.add_heading("Scope", level=2)
+    document.add_paragraph("Preserved body.")
+    document.add_paragraph("First item", style="List Number")
+    table = document.add_table(rows=2, cols=2)
+    for row, values in zip(table.rows, (("Name", "Value"), ("A", "B"))):
+        for cell, value in zip(row.cells, values):
+            cell.text = value
+    document.save(source_docx)
+    results = {}
+    for label, source in (("markdown", markdown), ("docx", source_docx)):
+        output = evidence_dir / f"{label}.docx"
+        report = evidence_dir / f"{label}.report.json"
+        report_md = evidence_dir / f"{label}.report.md"
+        _execute([*command, "--input", str(source), "--output", str(output), "--template", str(template),
+                  "--report", str(report), "--report-md", str(report_md)], evidence_dir, label)
+        summary = _validate_public_report(report)
+        artifact = _validate_docx(output, text="Preserved body.")
+        if not report_md.is_file() or any(value in report_md.read_text(encoding="utf-8") for value in ("Traceback", "review_packet", "source_ast", "native_module_evidence")):
+            raise RuntimeError("Release Markdown report is missing or exposes a traceback")
+        results[label] = {"status": "passed", "artifact": artifact, "public_summary": summary}
+    source = evidence_dir / "command-source.md"
+    source.write_text("# Command acceptance\n\n## Scope\n\nCommand target.\n", encoding="utf-8")
+    output = evidence_dir / "command.docx"
+    report = evidence_dir / "command.report.json"
+    adapter = shlex.join([sys.executable, str(Path(__file__).resolve()), "--respond"])
+    _execute([*command, "--input", str(source), "--output", str(output), "--template", str(template),
+              "--report", str(report), "--llm-enhance", "force-a", "--llm-command", adapter], evidence_dir, "command")
+    _validate_public_report(report)
+    _assert_heading(output, "Command target.", 2)
+    results["command_enhancement"] = {"status": "passed", "heading_level": 2, "artifact": _validate_docx(output, text="Command target.")}
+    source = evidence_dir / "review-source.md"
+    source.write_text("# Review acceptance\n\n### Jump\n\nReview body.\n", encoding="utf-8")
+    output = evidence_dir / "file.docx"
+    previous_formal = b"previous formal output"
+    output.write_bytes(previous_formal)
+    report = evidence_dir / "file.report.json"
+    request_dir = evidence_dir / "requests"
+    _execute([*command, "--input", str(source), "--output", str(output), "--template", str(template),
+              "--report", str(report), "--llm-enhance", "all", "--generate-requests", str(request_dir)], evidence_dir, "file-generate")
+    checkpoint_path = request_dir / "run.json"
+    responses = {}
+    stages = []
+    capabilities = []
+    for attempt in range(6):
+        checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        if checkpoint.get("checkpoint_schema_version") != "2.0" or checkpoint.get("configuration", {}).get("pipeline") != "modular" or checkpoint.get("profile") != "wx-default-v2" or checkpoint.get("list_policy") != "wx-default-v2":
+            raise RuntimeError("File protocol checkpoint has a non-native identity")
+        if checkpoint["status"] == "completed":
+            break
+        if checkpoint["status"] != "waiting_external" or output.read_bytes() != previous_formal:
+            raise RuntimeError("File protocol published before all stages were accepted")
+        _validate_public_report(report, status="waiting_external")
+        stages.append(checkpoint["resume_stage"])
+        for request in checkpoint["requests"]:
+            if request["request_id"] not in responses:
+                capabilities.append(request["capability"])
+                responses[request["request_id"]] = native_response(request, enhance_role=False)
+        Path(checkpoint["files"]["responses_path"]).write_text(
+            "".join(json.dumps(response, ensure_ascii=False) + "\n" for response in responses.values()), encoding="utf-8",
+        )
+        _execute([*command, "--resume", str(checkpoint_path)], evidence_dir, f"file-resume-{attempt}")
+    else:
+        raise RuntimeError("File protocol did not terminate within its bounded stage count")
+    _validate_public_report(report)
+    _assert_heading(output, "Jump", 1)
+    if len(stages) < 2 or "document_review" not in capabilities:
+        raise RuntimeError("File protocol did not exercise post-audit review")
+    before_replay = (checkpoint_path.read_bytes(), output.read_bytes())
+    _execute([*command, "--resume", str(checkpoint_path)], evidence_dir, "file-idempotent-resume")
+    if before_replay != (checkpoint_path.read_bytes(), output.read_bytes()):
+        raise RuntimeError("Terminal resume changed the checkpoint or formal DOCX")
+    results["file_protocol"] = {"status": "passed", "idempotent": True, "waiting_stages": stages, "capabilities": capabilities}
+    results["review"] = {"status": "passed", "heading_level": 1, "artifact": _validate_docx(output, text="Jump")}
+    rejected = evidence_dir / "rejected.docx"
+    rejected.write_bytes(previous_formal)
+    rejected_report = evidence_dir / "rejected.report.json"
+    rejection_adapter = shlex.join([sys.executable, str(Path(__file__).resolve()), "--respond", "--reject-review"])
+    _execute([*command, "--input", str(source), "--output", str(rejected), "--template", str(template),
+              "--report", str(rejected_report), "--llm-enhance", "force-c", "--llm-command", rejection_adapter], evidence_dir, "rejected-review", expected=1)
+    _validate_public_report(rejected_report, status="failed")
+    if rejected.read_bytes() != previous_formal:
+        raise RuntimeError("Rejected review replaced the prior formal output")
+    results["rejected_review"] = {"status": "passed", "formal_preserved": True}
+    for option in ("--ast", "--source-ast"):
+        forbidden = evidence_dir / (option.removeprefix("--") + ".forbidden.json")
+        _execute([*command, "--input", str(markdown), "--output", str(evidence_dir / "forbidden.docx"),
+                  "--template", str(template), option, str(forbidden)], evidence_dir, "guard-" + option.removeprefix("--"), expected=2)
+        if forbidden.exists():
+            raise RuntimeError("Release runtime exported a private AST")
+    retired = _execute([*command, "--pipeline", "legacy", "--version"], evidence_dir, "guard-legacy", expected=2)
+    if "LEGACY_MODE_UNAVAILABLE" not in retired.stderr:
+        raise RuntimeError("Release runtime did not reject legacy mode with its stable code")
+    legacy_checkpoint = evidence_dir / "legacy-run.json"
+    _write_json(legacy_checkpoint, {"protocol_version": "1.0", "args": {}})
+    legacy = _execute([*command, "--resume", str(legacy_checkpoint)], evidence_dir, "guard-legacy-checkpoint", expected=2)
+    if "LEGACY_CHECKPOINT_UNSUPPORTED" not in legacy.stderr:
+        raise RuntimeError("Release runtime did not reject the retired checkpoint")
+    results["release_guards"] = {"status": "passed", "ast_exports_rejected": True, "legacy_rejected": True}
+    _write_json(evidence_dir / "runtime-acceptance.json", results)
+    return results
+
+
+def inspect_binary_metadata(package_dir: Path) -> dict:
     executable = runtime_executable(package_dir)
+    description = subprocess.check_output(["file", "-b", str(executable)], text=True).strip()
+    expected = "Mach-O" if platform.system() == "Darwin" else "ELF"
+    if expected not in description:
+        raise RuntimeError(f"COMPILED_RUNTIME_REQUIRED: {description}")
+    if platform.system() != "Darwin":
+        if "aarch64" not in description.lower() and "arm64" not in description.lower():
+            raise RuntimeError(f"RUNTIME_ARCHITECTURE_MISMATCH: {description}")
+        return {"format": "ELF", "architecture": "aarch64", "description": description}
+    images = []
+    for path in sorted((package_dir / "runtime").rglob("*")):
+        if not path.is_file():
+            continue
+        kind = subprocess.check_output(["file", "-b", str(path)], text=True)
+        if "Mach-O" not in kind:
+            continue
+        architecture = subprocess.check_output(["lipo", "-archs", str(path)], text=True).strip()
+        if "arm64" not in architecture.split():
+            raise RuntimeError(f"RUNTIME_ARCHITECTURE_MISMATCH: {path.name}: {architecture}")
+        commands = subprocess.check_output(["otool", "-arch", "arm64", "-l", str(path)], text=True)
+        versions = re.findall(r"\bminos\s+(\d+(?:\.\d+)*)", commands)
+        versions += re.findall(r"cmd LC_VERSION_MIN_MACOSX\s+cmdsize \d+\s+version (\d+(?:\.\d+)*)", commands)
+        if not versions:
+            raise RuntimeError(f"MACOS_MINOS_MISSING: {path.name}")
+        minimum = max(versions, key=lambda value: tuple(map(int, value.split("."))))
+        images.append({"path": path.relative_to(package_dir).as_posix(), "architecture": architecture, "minos": minimum})
+    maximum = max((item["minos"] for item in images), key=lambda value: tuple(map(int, value.split("."))))
+    return {"format": "Mach-O", "architecture": "arm64", "macos_min_version": maximum, "images": images}
+
+
+def run_installation_contracts(package_dir: Path, evidence_dir: Path, *, public_skill: Path | None = None) -> dict:
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("WX_DOC_FORMAT_")}
+    version = (package_dir / "VERSION").read_text(encoding="utf-8").strip()
+    source = evidence_dir / "installation-source.md"
+    source.write_text("# Installation acceptance\n\nPreserved body.\n", encoding="utf-8")
+
+    def installed_conversion(launcher: Path, label: str, env: dict) -> dict:
+        checked = _execute(["/bin/sh", str(launcher), "--version"], evidence_dir, label + "-version", environment=env)
+        if not checked.stdout.splitlines() or checked.stdout.splitlines()[-1].strip() != version:
+            raise RuntimeError(f"{label}: installed runtime version mismatch")
+        output = evidence_dir / f"{label}.docx"
+        report = evidence_dir / f"{label}.report.json"
+        _execute(["/bin/sh", str(launcher), "--input", str(source), "--output", str(output),
+                  "--template", str(package_dir / "assets" / "wx_template.docx"), "--report", str(report)],
+                 evidence_dir, label + "-conversion", environment=env)
+        _validate_public_report(report)
+        return {"status": "passed", "artifact": _validate_docx(output, text="Preserved body.")}
+
+    offline = evidence_dir / "offline-skills" / "wx-doc-format"
+    if offline.exists():
+        raise RuntimeError("INSTALLATION_TARGET_NOT_EMPTY: use fresh acceptance evidence directories")
+    _execute(["/bin/sh", str(package_dir / "scripts" / "install.sh"), str(offline)], evidence_dir, "offline-install", environment=environment)
+    results = {"offline": installed_conversion(offline / "scripts" / "run.sh", "offline", environment)}
+    nonascii = evidence_dir / "nonascii-路径"
+    _execute(["/bin/sh", str(package_dir / "scripts" / "install.sh"), str(nonascii)], evidence_dir, "ascii-installer", expected=2, environment=environment)
+    shutil.copytree(package_dir / "scripts", nonascii / "scripts")
+    _execute(["/bin/sh", str(nonascii / "scripts" / "run.sh"), "--version"], evidence_dir, "ascii-launcher", expected=2, environment=environment)
+    results["ascii_guards"] = {"status": "passed", "installer": True, "launcher": True}
+    if public_skill is not None:
+        archive_name = package_dir.name + ".tar.gz"
+        downloads = []
+
+        class ArtifactHandler(http.server.SimpleHTTPRequestHandler):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, directory=str(package_dir.parent), **kwargs)
+
+            def do_GET(self):
+                if self.path != "/" + archive_name:
+                    self.send_error(404)
+                    return
+                downloads.append(self.path)
+                super().do_GET()
+
+            def log_message(self, *_args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), ArtifactHandler)
+        worker = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
+        worker.start()
+        try:
+            online_environment = {
+                **environment,
+                "WX_DOC_FORMAT_RELEASE_BASE_URL": f"http://127.0.0.1:{server.server_port}",
+                "WX_DOC_FORMAT_CACHE_DIR": str(evidence_dir / "online-cache"),
+            }
+            results["online_http"] = installed_conversion(public_skill / "scripts" / "run.sh", "online", online_environment)
+            if len(downloads) != 1:
+                raise RuntimeError(f"Online acceptance expected one empty-cache download, observed {len(downloads)}")
+            results["online_http"]["download_count"] = len(downloads)
+            online_environment["WX_DOC_FORMAT_CACHE_DIR"] = str(evidence_dir / "cache-路径")
+            _execute(["/bin/sh", str(public_skill / "scripts" / "run.sh"), "--version"], evidence_dir, "ascii-cache", expected=2, environment=online_environment)
+            results["ascii_guards"]["cache"] = True
+        finally:
+            server.shutdown()
+            server.server_close()
+            worker.join(timeout=5)
+    _write_json(evidence_dir / "installation-acceptance.json", results)
+    return results
+
+
+def smoke(package_dir: Path, *, evidence_dir: Path | None = None, public_skill: Path | None = None) -> dict:
+    executable = runtime_executable(package_dir)
+    binary = inspect_binary_metadata(package_dir)
     version = (package_dir / "VERSION").read_text(encoding="utf-8").strip()
     manifest = json.loads((package_dir / "manifest.json").read_text(encoding="utf-8"))
     validate_modular_manifest(manifest)
     version_result = subprocess.run([str(executable), "--version"], text=True, capture_output=True, check=True)
     if version_result.stdout.strip() != version:
         raise RuntimeError("Runtime version does not match package VERSION")
-    with tempfile.TemporaryDirectory(prefix="wx-doc-format-smoke-") as temporary:
-        temp_dir = Path(temporary)
-        source = temp_dir / "source.md"
-        output = temp_dir / "output.docx"
-        report = temp_dir / "report.json"
-        source.write_text("# 冒烟测试\n\n这是离线发布包转换测试。\n", encoding="utf-8")
-        subprocess.run(
-            [
-                str(executable),
-                "--input", str(source),
-                "--output", str(output),
-                "--template", str(package_dir / "assets" / "wx_template.docx"),
-                "--report", str(report),
-            ],
-            check=True,
-        )
-        if not output.is_file() or not zipfile.is_zipfile(output):
-            raise RuntimeError("Runtime smoke conversion did not create a valid DOCX")
-        if not report.is_file():
-            raise RuntimeError("Runtime smoke conversion did not create a report")
-        public_report = json.loads(report.read_text(encoding="utf-8"))
-        keys = report_keys(public_report)
-        exact_forbidden = {"review_packet", "unknown_pattern_packet", "blocks"}
-        forbidden_fragments = (
-            "candidate", "confidence", "decision", "evidence", "frame",
-            "score", "stack", "traceback",
-        )
-        leaked = {
-            key for key in keys
-            if key in exact_forbidden
-            or key == "ast"
-            or key.startswith("ast_")
-            or key.endswith("_ast")
-            or any(fragment in key for fragment in forbidden_fragments)
-        }
-        if leaked:
-            raise RuntimeError(f"Release report exposes sensitive fields: {sorted(leaked)}")
-        if "unexpected_styles" not in keys:
-            raise RuntimeError("Release report does not expose unexpected_styles")
+    destination = evidence_dir or Path(tempfile.mkdtemp(prefix="wx-doc-format-acceptance-"))
+    destination.mkdir(parents=True, exist_ok=True)
+    result = {
+        "status": "passed", "version": version, "source_identity": manifest["source_identity"],
+        "binary": binary,
+        "contracts": run_runtime_contracts([str(executable)], package_dir / "assets" / "wx_template.docx", destination / "runtime"),
+        "installation": run_installation_contracts(package_dir, destination / "installation", public_skill=public_skill),
+    }
+    _write_json(destination / "acceptance.json", result)
+    return result
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Smoke test an assembled offline package.")
-    parser.add_argument("package_dir", type=Path)
+    parser.add_argument("package_dir", type=Path, nargs="?")
+    parser.add_argument("--respond", action="store_true", help="Run the local acceptance response adapter")
+    parser.add_argument("--reject-review", action="store_true", help="Exercise review rollback with a rejected response")
+    parser.add_argument("--evidence-dir", type=Path, help="Keep private acceptance logs and artifacts in this directory")
+    parser.add_argument("--public-skill", type=Path, help="Exercise the thin Skill against a local HTTP archive server")
     args = parser.parse_args()
+    if args.respond:
+        print(json.dumps(native_response(json.load(sys.stdin), reject_review=args.reject_review), ensure_ascii=False))
+        return
+    if args.package_dir is None:
+        parser.error("package_dir is required")
     package_dir = args.package_dir.resolve()
-    smoke(package_dir)
+    result = smoke(package_dir, evidence_dir=args.evidence_dir, public_skill=args.public_skill)
+    print(json.dumps({"status": result["status"], "version": result["version"], "binary": result["binary"]}, ensure_ascii=False))
 
 
 if __name__ == "__main__":

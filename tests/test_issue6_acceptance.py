@@ -18,7 +18,7 @@ from wxdf.semantics.lists import analyze_lists
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PYTHON = ROOT / "scripts" / ".venv" / "bin" / "python3"
+PYTHON = Path(sys.executable)
 TEMPLATE = ROOT / "assets" / "wx_template.docx"
 
 

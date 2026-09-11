@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 from zipfile import ZipFile
 from xml.etree import ElementTree
@@ -12,7 +13,7 @@ from docx import Document
 from modular_support import _append_numbering_definition, _set_numbering
 
 ROOT = Path(__file__).resolve().parents[1]
-PYTHON = ROOT / "scripts" / ".venv" / "bin" / "python3"
+PYTHON = Path(sys.executable)
 TEMPLATE = ROOT / "assets" / "wx_template.docx"
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 NS = {"w": W_NS}

@@ -11,7 +11,7 @@ SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from modular_benchmark import run_benchmark
+from wxdf.kernel import ConversionKernel, ConversionRequest
 from wxdf.metrics import percentile, summarize_samples
 
 
@@ -25,13 +25,18 @@ def test_percentile_and_sample_summary_are_deterministic() -> None:
     assert summary["counter_max"]["full_model_copy_count"] == 1
 
 
-def test_fixed_benchmark_smoke_covers_all_sizes_and_policies() -> None:
-    payload = run_benchmark(repetitions=2, warmups=1, sizes=("small",), enforce_minimum=False)
+def test_native_conversion_exposes_stage_metrics_without_document_content(tmp_path: Path) -> None:
+    source = tmp_path / "metrics.md"
+    source.write_text("# Metrics fixture\n\nPrivate fixture content.\n", encoding="utf-8")
+    result = ConversionKernel().convert(ConversionRequest(
+        input_path=source,
+        output_path=tmp_path / "metrics.docx",
+        template_path=ROOT / "assets" / "wx_template.docx",
+    ))
 
-    assert payload["repetitions"] == 2
-    assert set(payload["cases"]) == {"small"}
-    assert payload["default_candidate"]["global_default_changed"] is False
-    for case in payload["cases"].values():
-        assert set(case) == {"legacy", "wx-default-v2"}
-        assert all(case[policy]["sample_count"] == 2 for policy in case)
-        assert all(case[policy]["wall_time_seconds"]["p95"] >= case[policy]["wall_time_seconds"]["p50"] for policy in case)
+    assert result.status == "completed", result.diagnostics
+    assert result.metrics["stage_order"]
+    assert all(value >= 0 for value in result.metrics["stage_seconds"].values())
+    assert result.metrics["counters"]["source_open_count"] == 1
+    assert result.metrics["counters"]["render_count"] == 1
+    assert "Private fixture content" not in str(result.metrics)

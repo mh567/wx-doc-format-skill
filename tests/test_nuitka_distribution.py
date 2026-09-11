@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from test_t09_compiled_acceptance import fixture_source_identity, write_archive_fixture
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -66,7 +67,7 @@ def _write_compilation_manifest(dist: Path) -> None:
         f"{elements}</nuitka-compilation-report>",
         encoding="utf-8",
     )
-    build._write_runtime_module_manifest(dist, report)
+    build._write_runtime_module_manifest(dist, report, source_identity=fixture_source_identity(dist.parent))
 
 
 def _write_posix_runtime(path: Path) -> None:
@@ -191,6 +192,7 @@ def test_skip_compile_cli_uses_existing_standalone_directory(tmp_path, monkeypat
         raise AssertionError("Nuitka compilation must be skipped")
 
     monkeypatch.setattr(build, "compile_standalone", unexpected_compile)
+    monkeypatch.setattr(build, "capture_source_identity", lambda _root: fixture_source_identity(tmp_path))
     package = build.main([
         "--skip-compile",
         "--dist-dir", str(dist),
@@ -214,6 +216,7 @@ def test_compile_only_cli_returns_standalone_runtime_without_public_package(
         return runtime
 
     monkeypatch.setattr(build, "compile_standalone", compile_runtime)
+    monkeypatch.setattr(build, "capture_source_identity", lambda _root: fixture_source_identity(tmp_path))
     output_dir = tmp_path / "public-output"
 
     result = build.main([
@@ -587,8 +590,7 @@ def test_public_skill_assembly_allows_missing_windows_artifact(tmp_path):
     artifacts_dir = tmp_path / "artifacts"
     artifacts_dir.mkdir()
     for platform_id in ("macos-arm64", "kylin-v10-arm64"):
-        name = public_assembler.artifact_name(version, platform_id)
-        (artifacts_dir / name).write_bytes(platform_id.encode("ascii"))
+        write_archive_fixture(artifacts_dir, platform_id)
 
     output = public_assembler.assemble_public_skill(
         artifacts_dir,
@@ -638,7 +640,7 @@ def test_public_posix_bootstrap_reports_unavailable_runtime(tmp_path):
     artifacts_dir = tmp_path / "artifacts"
     artifacts_dir.mkdir()
     linux_name = public_assembler.artifact_name(version, "kylin-v10-arm64")
-    (artifacts_dir / linux_name).write_bytes(b"placeholder")
+    write_archive_fixture(artifacts_dir, "kylin-v10-arm64")
     output = public_assembler.assemble_public_skill(artifacts_dir, tmp_path / "public-skill")
 
     result = subprocess.run(

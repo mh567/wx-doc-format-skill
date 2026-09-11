@@ -22,7 +22,7 @@ except ImportError:
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
-PYTHON = SCRIPTS / ".venv" / "bin" / "python3"
+PYTHON = Path(sys.executable)
 SOURCE = ROOT / "input" / "benchmark_report.md"
 TEMPLATE = ROOT / "assets" / "wx_template.docx"
 

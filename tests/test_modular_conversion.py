@@ -69,7 +69,7 @@ def test_cli_rejects_transitional_modular_legacy_adapter_combination(tmp_path: P
     output = tmp_path / "candidate.docx"
     report = tmp_path / "report.json"
     command = [
-        str(ROOT / "scripts" / ".venv" / "bin" / "python3"),
+        sys.executable,
         str(ROOT / "scripts" / "main.py"),
         "--input", str(ROOT / "input" / "test_baseline.md"),
         "--output", str(output),
@@ -93,7 +93,7 @@ def test_modular_cli_exports_ast2_with_title_headers_and_caption_relations(tmp_p
     source_ast_path = tmp_path / "source.json"
     normalized_ast_path = tmp_path / "normalized.json"
     command = [
-        str(ROOT / "scripts" / ".venv" / "bin" / "python3"),
+        sys.executable,
         str(ROOT / "scripts" / "main.py"),
         "--input", str(ROOT / "input" / "benchmark_report.md"),
         "--output", str(output),
@@ -153,7 +153,7 @@ def test_modular_cli_exports_ast2_with_title_headers_and_caption_relations(tmp_p
 def test_modular_cli_generates_native_file_protocol_requests(tmp_path: Path) -> None:
     request_dir = tmp_path / "requests"
     command = [
-        str(ROOT / "scripts" / ".venv" / "bin" / "python3"),
+        sys.executable,
         str(ROOT / "scripts" / "main.py"),
         "--input", str(ROOT / "input" / "benchmark_report.md"),
         "--template", str(ROOT / "assets" / "wx_template.docx"),
@@ -194,7 +194,7 @@ def test_modular_cli_preserves_real_template_title_toc_and_table_captions(tmp_pa
     output = tmp_path / "benchmark-report.docx"
     report = tmp_path / "report.json"
     command = [
-        str(ROOT / "scripts" / ".venv" / "bin" / "python3"),
+        sys.executable,
         str(ROOT / "scripts" / "main.py"),
         "--input", str(ROOT / "input" / "benchmark_report.md"),
         "--output", str(output),

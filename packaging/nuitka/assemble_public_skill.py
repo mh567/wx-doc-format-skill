@@ -5,7 +5,22 @@ import hashlib
 import json
 import re
 import shutil
-from pathlib import Path
+import sys
+import tarfile
+from pathlib import Path, PurePosixPath
+
+NUITKA_DIR = Path(__file__).resolve().parent
+if str(NUITKA_DIR) not in sys.path:
+    sys.path.insert(0, str(NUITKA_DIR))
+
+from build_distribution import (
+    MODULAR_CONTRACT_VERSIONS,
+    RUNTIME_COMPILATION_REPORT_NAME,
+    capture_source_identity,
+    mode_manifest,
+    release_module_names,
+    validate_source_identity,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -51,11 +66,99 @@ def discover_artifacts(artifacts_dir: Path, version: str) -> dict[str, Path]:
     }
 
 
+def verify_artifact(path: Path, version: str, platform_id: str) -> dict:
+    package = f"wx-doc-format-skill-{version}-{platform_id}"
+    try:
+        with tarfile.open(path, "r:gz") as archive:
+            members = {}
+            names = set()
+            for member in archive.getmembers():
+                parts = PurePosixPath(member.name).parts
+                if (
+                    not parts or parts[0] != package or ".." in parts
+                    or any(character in member.name for character in ("\n", "\r", "\x00"))
+                    or member.name in names or not (member.isfile() or member.isdir())
+                ):
+                    raise ValueError("unsafe or duplicate archive member")
+                names.add(member.name)
+                if member.isfile():
+                    relative = "/".join(parts[1:])
+                    if PurePosixPath(relative).suffix.lower() in {".py", ".pyc", ".pyo"} or parts[-1] == RUNTIME_COMPILATION_REPORT_NAME:
+                        raise ValueError("private build payload is forbidden")
+                    members[relative] = member
+
+            def read(name: str) -> bytes:
+                member = members[name]
+                if member.size > 5 * 1024 * 1024:
+                    raise ValueError(f"metadata exceeds size limit: {name}")
+                stream = archive.extractfile(member)
+                if stream is None:
+                    raise ValueError(f"missing {name}")
+                with stream:
+                    return stream.read()
+
+            if read("VERSION").decode("utf-8").strip() != version:
+                raise ValueError("VERSION mismatch")
+            manifest = json.loads(read("manifest.json"))
+            if not isinstance(manifest, dict):
+                raise ValueError("manifest must be an object")
+            if manifest.get("version") != version or manifest.get("platform") != platform_id:
+                raise ValueError("manifest version or platform mismatch")
+            if read("runtime/VERSION").decode("utf-8").strip() != version:
+                raise ValueError("runtime VERSION mismatch")
+            identity = validate_source_identity(manifest.get("source_identity"), version=version)
+            modular = manifest.get("modular")
+            if not isinstance(modular, dict) or modular.get("source_identity") != identity:
+                raise ValueError("SOURCE_IDENTITY_MISMATCH: package and runtime identities differ")
+            if json.loads(read("runtime/wxdf-module-manifest.json")) != modular:
+                raise ValueError("runtime module manifest differs from package summary")
+            if (
+                modular.get("source_modules") != list(release_module_names())
+                or modular.get("runtime_modules") != modular["source_modules"]
+                or modular.get("module_set_status") != "matched"
+                or modular.get("runtime_evidence") != "compilation_report"
+                or modular.get("open_modes") != mode_manifest()
+                or modular.get("contract_versions") != MODULAR_CONTRACT_VERSIONS
+                or any(modular.get(field) != [] for field in ("forbidden_runtime_modules", "missing_runtime_modules", "unexpected_runtime_modules"))
+            ):
+                raise ValueError("runtime module or capability contract mismatch")
+            compilation = modular.get("compilation_report")
+            if not isinstance(compilation, dict) or compilation.get("name") != RUNTIME_COMPILATION_REPORT_NAME or not re.fullmatch(r"[0-9a-f]{64}", str(compilation.get("sha256"))):
+                raise ValueError("compilation evidence digest is invalid")
+            entries = manifest.get("files")
+            if not isinstance(entries, list) or any(not isinstance(entry, dict) for entry in entries):
+                raise ValueError("manifest file list is invalid")
+            expected = {entry["path"]: entry for entry in entries}
+            if len(expected) != len(entries) or set(members) != set(expected) | {"manifest.json", "SHA256SUMS.txt"}:
+                raise ValueError("archive file set differs from manifest")
+            sums = {}
+            for line in read("SHA256SUMS.txt").decode("utf-8").splitlines():
+                if len(line) < 67 or line[64:66] != "  " or not re.fullmatch(r"[0-9a-f]{64}", line[:64]) or line[66:] in sums:
+                    raise ValueError("checksum file is invalid")
+                sums[line[66:]] = line[:64]
+            if set(sums) != set(expected) | {"manifest.json"}:
+                raise ValueError("checksum file set differs from manifest")
+            for name, expected_hash in sums.items():
+                member = members[name]
+                digest = hashlib.sha256()
+                with archive.extractfile(member) as stream:
+                    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                if digest.hexdigest() != expected_hash:
+                    raise ValueError(f"checksum mismatch: {name}")
+                if name in expected and (expected[name].get("sha256") != expected_hash or expected[name].get("size") != member.size):
+                    raise ValueError(f"manifest content mismatch: {name}")
+            return manifest
+    except (tarfile.TarError, KeyError, OSError, ValueError, UnicodeError, RuntimeError, TypeError) as exc:
+        raise ValueError(f"ARTIFACT_INVALID: {path.name}: {exc}") from exc
+
+
 def assemble_public_skill(
     artifacts_dir: Path,
     output_dir: Path,
     required_platforms: tuple[str, ...] = (),
     macos_min_version: str | None = None,
+    expected_source_identity: dict | None = None,
 ) -> Path:
     version = (PROJECT_ROOT / "VERSION").read_text(encoding="utf-8").strip()
     if not version:
@@ -76,6 +179,22 @@ def assemble_public_skill(
 
     if output_dir.exists() and not (output_dir / GENERATED_MARKER).is_file():
         raise ValueError(f"Output directory is not a generated public Skill: {output_dir}")
+    artifact_manifests = {
+        target: verify_artifact(path, version, target)
+        for target, path in artifacts.items()
+    }
+    source_keys = ("version", "commit", "tree")
+    identities = {
+        tuple(manifest["source_identity"][key] for key in source_keys)
+        for manifest in artifact_manifests.values()
+    }
+    if len(identities) != 1:
+        raise ValueError("SOURCE_IDENTITY_MISMATCH: release platforms must use the same source commit and tree")
+    source_identity = dict(zip(source_keys, next(iter(identities))))
+    if expected_source_identity is not None:
+        expected = validate_source_identity(expected_source_identity, version=version)
+        if source_identity != {key: expected[key] for key in source_keys}:
+            raise ValueError("SOURCE_IDENTITY_MISMATCH: artifacts must match the frozen public Skill checkout")
     if output_dir.exists():
         shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True)
@@ -126,6 +245,8 @@ def assemble_public_skill(
     manifest = {
         "schema_version": 1,
         "version": version,
+        "source_identity": source_identity,
+        "builds": [{"platform": target, "source_identity": item["source_identity"]} for target, item in sorted(artifact_manifests.items())],
         "platforms": platforms,
         "available_platforms": [
             platform_id
@@ -181,6 +302,7 @@ def main(argv: list[str] | None = None) -> Path:
         args.output_dir.resolve(),
         tuple(args.require_platform),
         args.macos_min_version,
+        capture_source_identity(PROJECT_ROOT),
     )
     print(output)
     return output

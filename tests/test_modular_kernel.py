@@ -146,7 +146,7 @@ def test_cli_modular_selection_uses_native_v2_defaults(tmp_path: Path) -> None:
     report = tmp_path / "report.json"
     output = tmp_path / "output.docx"
     command = [
-        str(ROOT / "scripts" / ".venv" / "bin" / "python3"),
+        sys.executable,
         str(ROOT / "scripts" / "main.py"),
         "--input",
         str(ROOT / "input" / "test_baseline.md"),

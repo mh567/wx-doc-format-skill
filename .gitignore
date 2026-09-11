@@ -6,7 +6,9 @@ __pycache__/
 *.pdf
 wx_output/
 outputs/
-input/
+input/*
+!input/test_baseline.md
+!input/benchmark_report.md
 agents/
 .pytest_cache/
 build/nuitka/
@@ -50,6 +52,7 @@ tests/*
 !tests/test_appendix_semantics.py
 !tests/test_nuitka_distribution.py
 !tests/test_modular_*.py
+!tests/test_t09_compiled_acceptance.py
 !tests/modular_support.py
 !tests/fixtures/
 !tests/fixtures/modular_v3/

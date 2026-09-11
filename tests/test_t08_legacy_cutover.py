@@ -12,7 +12,7 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PYTHON = ROOT / "scripts" / ".venv" / "bin" / "python3"
+PYTHON = Path(sys.executable)
 CLI = ROOT / "scripts" / "main.py"
 SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:

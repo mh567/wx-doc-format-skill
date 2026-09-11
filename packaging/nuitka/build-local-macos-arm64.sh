@@ -23,10 +23,17 @@ if [ ! -x "$VENV_DIR/bin/python3" ]; then
     "$BOOTSTRAP_PYTHON" -m venv "$VENV_DIR"
 fi
 PYTHON="$VENV_DIR/bin/python3"
+"$PYTHON" -c 'import sys; assert sys.version_info[:2] == (3, 13), "Python 3.13 is required"'
 "$PYTHON" -m pip install --disable-pip-version-check \
     -r "$PROJECT_DIR/packaging/nuitka/requirements-runtime.txt" \
     -r "$PROJECT_DIR/packaging/nuitka/requirements-build.txt"
-"$PYTHON" -m pytest "$PROJECT_DIR/tests" -q
+"$PYTHON" -m pip freeze > "$BUILD_ROOT/dependency-versions.txt"
+cd "$PROJECT_DIR"
+if ! "$PYTHON" -m pytest "$PROJECT_DIR/tests" -q > "$BUILD_ROOT/tests.log" 2>&1; then
+    cat "$BUILD_ROOT/tests.log"
+    exit 1
+fi
+tail -n 2 "$BUILD_ROOT/tests.log"
 
 env NUITKA_CACHE_DIR="$BUILD_ROOT/cache" "$PYTHON" \
     "$PROJECT_DIR/packaging/nuitka/build_distribution.py" \
@@ -35,12 +42,11 @@ env NUITKA_CACHE_DIR="$BUILD_ROOT/cache" "$PYTHON" \
     --platform-id macos-arm64 \
     --archive
 
-SMOKE_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/wx-doc-format-macos-smoke.XXXXXX")
-cleanup_smoke() {
-    rm -rf "$SMOKE_ROOT"
-}
-trap cleanup_smoke EXIT HUP INT TERM
+SMOKE_ROOT=$(mktemp -d "/tmp/wx-doc-format-macos-smoke.XXXXXX")
 cp -R "$PACKAGE_DIR" "$SMOKE_ROOT/$PACKAGE_NAME"
-"$PYTHON" "$PROJECT_DIR/packaging/nuitka/smoke_distribution.py" "$SMOKE_ROOT/$PACKAGE_NAME"
+"$PYTHON" "$PROJECT_DIR/packaging/nuitka/smoke_distribution.py" \
+    "$SMOKE_ROOT/$PACKAGE_NAME" --evidence-dir "$SMOKE_ROOT/evidence"
+cp "$SMOKE_ROOT/evidence/acceptance.json" "$BUILD_ROOT/acceptance.json"
 
 echo "macOS ARM64 package: $PACKAGE_DIR.tar.gz"
+echo "Private acceptance evidence: $SMOKE_ROOT/evidence"

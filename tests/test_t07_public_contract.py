@@ -11,6 +11,7 @@ import tarfile
 from pathlib import Path
 
 import pytest
+from test_t09_compiled_acceptance import fixture_source_identity
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -53,32 +54,13 @@ def _write_compilation_manifest(runtime: Path) -> None:
         f"{elements}</nuitka-compilation-report>",
         encoding="utf-8",
     )
-    distribution._write_runtime_module_manifest(runtime, report)
+    distribution._write_runtime_module_manifest(runtime, report, source_identity=fixture_source_identity(runtime.parent))
 
 
 def _write_launcher_artifact(artifacts_dir: Path, platform_id: str) -> Path:
-    version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
-    archive = artifacts_dir / public_assembler.artifact_name(version, platform_id)
-    package = f"wx-doc-format-skill-{version}-{platform_id}"
-    install = (
-        "#!/bin/sh\n"
-        "set -eu\n"
-        'mkdir -p "$1/scripts"\n'
-        'cp "$(dirname -- "$0")/run.sh" "$1/scripts/run.sh"\n'
-        'chmod +x "$1/scripts/run.sh"\n'
-    )
-    launcher = "#!/bin/sh\nprintf '%s\\n' 'WXDF-T07-LAUNCHER-OK'\n"
-    with tarfile.open(archive, "w:gz") as tar:
-        for relative, content in (
-            ("scripts/install.sh", install),
-            ("scripts/run.sh", launcher),
-        ):
-            payload = content.encode("utf-8")
-            info = tarfile.TarInfo(f"{package}/{relative}")
-            info.size = len(payload)
-            info.mode = 0o755
-            tar.addfile(info, io.BytesIO(payload))
-    return archive
+    from test_t09_compiled_acceptance import write_archive_fixture
+
+    return write_archive_fixture(artifacts_dir, platform_id, marker="WXDF-T07-LAUNCHER-OK")
 
 
 def _assemble(tmp_path: Path, *, platforms: tuple[str, ...] = PLATFORMS) -> Path:
