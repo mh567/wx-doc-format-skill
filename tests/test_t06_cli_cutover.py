@@ -266,7 +266,7 @@ def test_default_cli_preserves_layout_paragraph_format_and_normalizes_data_table
     assert report["saved_output_audit"]["passed"] is True
 
 
-def test_help_names_native_defaults_and_legacy_diagnostic_mode() -> None:
+def test_help_names_native_defaults_and_development_diagnostic_mode() -> None:
     completed = _run("--help")
 
     assert completed.returncode == 0

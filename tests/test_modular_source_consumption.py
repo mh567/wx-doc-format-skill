@@ -11,7 +11,6 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 from wxdf.parsers import parse
-from wxdf.kernel import ConversionKernel, ConversionRequest, RunResult
 from wxdf.semantics.source_projection import project_source_facts
 from wxdf.semantics.source_projection_bridge import apply_source_projection
 from model_normalization import normalize_document_model_simple
@@ -134,66 +133,3 @@ def test_source_projection_preserves_markdown_inline_marks_and_links(tmp_path: P
         {"text": "与"},
         {"text": "链接", "href": "https://example.com"},
     ]
-
-
-def test_kernel_switches_source_parser_only_after_projection_is_consumed(tmp_path: Path) -> None:
-    source = tmp_path / "source.md"
-    source.write_text("# 文档标题\n\n正文内容\n", encoding="utf-8")
-    output = tmp_path / "output.docx"
-
-    def adapter(request: ConversionRequest) -> RunResult:
-        context = request.options["_native_source_context"]
-        projection = context["projection"]
-        facts = context["source_facts"]
-        ast = ConversionKernel._facts_to_ast(facts)
-        title_id = facts["children"]["root"][0]
-        ast["document"]["blocks"][title_id]["role"] = "title"
-        ast["document"]["blocks"][title_id].pop("level", None)
-        request.options["_adapter_artifacts"]["source_ast"] = ast
-        output.write_bytes(b"adapter-output")
-        return RunResult(
-            status="completed",
-            exit_code=0,
-            report={
-                "source_parser_consumption": {
-                    "paragraph_candidate_count": len(projection["paragraphs"]),
-                    "paragraph_consumed_count": len(projection["paragraphs"]),
-                    "table_candidate_count": len(projection["tables"]),
-                    "table_consumed_count": len(projection["tables"]),
-                    "formula_retyped_count": 0,
-                    "unmatched_count": 0,
-                    "ambiguous_count": 0,
-                },
-                "structure_decision_consumption": {
-                    "candidate_count": 2,
-                    "applied_count": 2,
-                    "unmatched_count": 0,
-                    "ambiguous_count": 0,
-                },
-                "source_region_decision_consumption": {
-                    "excluded_candidate_count": 0,
-                    "removed_count": 0,
-                    "unmatched_count": 0,
-                    "ambiguous_count": 0,
-                },
-            },
-            artifacts={"docx": str(output)},
-        )
-
-    result = ConversionKernel(modular_runner=adapter).convert(
-        ConversionRequest(
-            input_path=source,
-            output_path=output,
-            pipeline="modular",
-            list_policy="wx-default-v2",
-        )
-    )
-
-    assert result.status == "completed", result.diagnostics
-    assert [item["module_id"] for item in result.report["execution_plan"]["modules"]][:4] == [
-        "source-facts-parser",
-        "source-region",
-        "source-projection",
-        "document-structure",
-    ]
-    assert result.report["capability_migration"]["source_parser"] == "native_consumed"

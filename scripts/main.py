@@ -8,14 +8,7 @@ import sys
 from pathlib import Path
 
 def _deferred_legacy_callable(module_name: str, attribute: str):
-    """Resolve one stable legacy helper when its module is unavailable.
-
-    The native v2 chain imports this module while the legacy parser, model
-    normalization, finalizer and renderer are not importable.  The bindings
-    below still prefer the direct import, so a normal run loads the legacy
-    modules at their original position in the import order and keeps the
-    legacy output contract unchanged.
-    """
+    """Resolve a development-only helper when a retained utility calls it."""
 
     def deferred(*args, **kwargs):
         from importlib import import_module
@@ -24,7 +17,7 @@ def _deferred_legacy_callable(module_name: str, attribute: str):
 
     deferred.__name__ = attribute
     deferred.__qualname__ = attribute
-    deferred.__doc__ = f"Deferred access to {module_name}.{attribute} for the legacy path."
+    deferred.__doc__ = f"Deferred development access to {module_name}.{attribute}."
     return deferred
 
 
@@ -44,41 +37,32 @@ from text_utils import (
     set_table_autofit_to_window,
 )
 from document_model import summarize_document_model, validate_document_model, compare_document_models
-try:
-    from docx_pipeline import parse_docx_to_model
-    from md_pipeline import audit_markdown_preservation, parse_md_to_model
-    from model_normalization import normalize_document_model, summarize_source_document_model
-except ImportError:
-    parse_docx_to_model = _deferred_legacy_callable("docx_pipeline", "parse_docx_to_model")
-    parse_md_to_model = _deferred_legacy_callable("md_pipeline", "parse_md_to_model")
-    audit_markdown_preservation = _deferred_legacy_callable(
-        "md_pipeline", "audit_markdown_preservation"
-    )
-    normalize_document_model = _deferred_legacy_callable(
-        "model_normalization", "normalize_document_model"
-    )
-    summarize_source_document_model = _deferred_legacy_callable(
-        "model_normalization", "summarize_source_document_model"
-    )
-from word_model_renderer import (
-    render_document_model,
-    style_from_profile,
+parse_docx_to_model = _deferred_legacy_callable("docx_pipeline", "parse_docx_to_model")
+parse_md_to_model = _deferred_legacy_callable("md_pipeline", "parse_md_to_model")
+audit_markdown_preservation = _deferred_legacy_callable(
+    "md_pipeline", "audit_markdown_preservation"
 )
-try:
-    from docx_render import render_docx_direct
-except ImportError:
-    render_docx_direct = _deferred_legacy_callable("docx_render", "render_docx_direct")
+normalize_document_model = _deferred_legacy_callable(
+    "model_normalization", "normalize_document_model"
+)
+summarize_source_document_model = _deferred_legacy_callable(
+    "model_normalization", "summarize_source_document_model"
+)
+render_document_model = _deferred_legacy_callable(
+    "word_model_renderer", "render_document_model"
+)
+style_from_profile = _deferred_legacy_callable(
+    "word_model_renderer", "style_from_profile"
+)
+render_docx_direct = _deferred_legacy_callable("docx_render", "render_docx_direct")
 from audit import audit_document, collect_content_warnings
 from reporting import new_report, add_risk_warnings, write_markdown_report
-try:
-    from template_finalizer import apply_template_finalizer, extract_template_toc_fragment
-except ImportError:
-    apply_template_finalizer = _deferred_legacy_callable(
-        "template_finalizer", "apply_template_finalizer"
-    )
-    extract_template_toc_fragment = _deferred_legacy_callable(
-        "template_finalizer", "extract_template_toc_fragment"
-    )
+apply_template_finalizer = _deferred_legacy_callable(
+    "template_finalizer", "apply_template_finalizer"
+)
+extract_template_toc_fragment = _deferred_legacy_callable(
+    "template_finalizer", "extract_template_toc_fragment"
+)
 from template_profile import load_template_profile
 from note_semantics import audit_note_preservation
 from appendix_semantics import audit_appendix_preservation
@@ -124,7 +108,7 @@ from llm_file_protocol import (
     ProtocolError,
     verify_source_snapshot,
 )
-from wxdf.kernel import ConversionKernel, ConversionRequest, RunResult
+from wxdf.kernel import ConversionKernel, ConversionRequest
 
 
 SKILL_VERSION = "0.7.0"
@@ -1367,48 +1351,6 @@ def _run_generate_requests(args, report, runtime_context=None) -> None:
     print("Run with --resume <run.json> after processing llm_responses.jsonl.")
 
 
-def _legacy_adapter_argv(args) -> list[str]:
-    """Re-enter the stable CLI path with the already resolved modular arguments."""
-
-    argv: list[str] = ["--pipeline", "legacy", "--list-policy", "legacy"]
-    for flag, value in (
-        ("--input", args.input),
-        ("--output", args.output),
-        ("--template", args.template),
-        ("--report", args.report),
-        ("--report-md", args.report_md),
-        ("--ast", args.ast),
-        ("--source-ast", args.source_ast),
-        ("--llm-hint", args.llm_hint),
-        ("--llm-command", args.llm_command),
-        ("--generate-requests", args.generate_requests),
-        ("--resume", args.resume),
-    ):
-        if value is not None:
-            argv.extend((flag, str(value)))
-    argv.extend((
-        "--llm-enhance", str(args.llm_enhance),
-        "--table-row-height-cm", str(args.table_row_height_cm),
-        "--table-row-height-rule", str(args.table_row_height_rule),
-        "--strict-normalize" if args.strict_normalize else "--no-strict-normalize",
-    ))
-    if args.fail_on_risk:
-        argv.append("--fail-on-risk")
-    return argv
-
-
-def _modular_native_v2_enabled(args) -> bool:
-    """Select the native modular seam from explicit mode and source contracts."""
-
-    if args.llm_enhance != "off" and not args.llm_command and not (args.resume or args.generate_requests):
-        return False
-    if args.input is None:
-        return False
-    if args.modular_profile == "native-v2":
-        return True
-    return False
-
-
 def _native_checkpoint_configuration(args, *, output_path: Path) -> dict:
     """Freeze the effective native CLI configuration used across resume."""
 
@@ -1432,101 +1374,6 @@ def _native_checkpoint_configuration(args, *, output_path: Path) -> dict:
     }
 
 
-def _run_legacy_full_adapter(args, request: ConversionRequest) -> RunResult:
-    """Execute all stable capabilities as one transitional modular module."""
-
-    try:
-        main(
-            _legacy_adapter_argv(args),
-            runtime_context={
-                "native_structure": request.options.get("_native_structure_context"),
-                "native_region": request.options.get("_native_region_context"),
-                "native_source": request.options.get("_native_source_context"),
-                "native_protected": request.options.get("_native_protected_context"),
-                "native_list": request.options.get("_native_list_context"),
-                "native_table": request.options.get("_native_table_context"),
-                "native_caption": request.options.get("_native_caption_context"),
-                "native_appendix": request.options.get("_native_appendix_context"),
-                "adapter_artifacts": request.options.get("_adapter_artifacts"),
-            },
-        )
-    except SystemExit as exc:
-        code = exc.code if isinstance(exc.code, int) else 1
-        return RunResult(
-            status="failed",
-            exit_code=code,
-            diagnostics=[{
-                "code": "LEGACY_FULL_ADAPTER_FAILED",
-                "message": str(exc.code or "stable conversion failed"),
-            }],
-        )
-
-    artifacts = {"docx": str(request.output_path)} if request.output_path.is_file() else {}
-    try:
-        from wxdf.migration import migrate_legacy_model
-        from wxdf.normalization import normalize as normalize_modular_ast
-        from wxdf.template import load_template_bundle
-
-        if args.source_ast is not None and args.source_ast.is_file():
-            legacy_source = json.loads(args.source_ast.read_text(encoding="utf-8"))
-            migrated_source = migrate_legacy_model(legacy_source).ast
-            args.source_ast.write_text(
-                json.dumps(migrated_source, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-            artifacts["source_ast"] = str(args.source_ast)
-        if args.ast is not None and args.ast.is_file():
-            legacy_normalized = json.loads(args.ast.read_text(encoding="utf-8"))
-            migrated_normalized = migrate_legacy_model(legacy_normalized).ast
-            profile = load_template_bundle(args.template) if args.template is not None else {
-                "resolved_styles": {},
-                "numbering_ids": {},
-            }
-            normalized_ast = normalize_modular_ast(
-                migrated_normalized,
-                profile,
-                strategy=request.list_policy,
-            )
-            args.ast.write_text(
-                json.dumps(normalized_ast, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-            artifacts["normalized_ast"] = str(args.ast)
-    except Exception as exc:
-        return RunResult(
-            status="failed",
-            exit_code=1,
-            artifacts=artifacts,
-            diagnostics=[{
-                "code": "LEGACY_FULL_ADAPTER_AST_MIGRATION_FAILED",
-                "message": str(exc),
-                "type": type(exc).__name__,
-            }],
-        )
-
-    report: dict = {}
-    if args.report is not None and args.report.is_file():
-        report = json.loads(args.report.read_text(encoding="utf-8"))
-    if request.options.get("protocol_mode") in {"generate_requests", "resume"} and not request.output_path.is_file():
-        return RunResult(status="waiting_external", exit_code=0, report=report)
-    if not request.output_path.is_file():
-        return RunResult(
-            status="failed",
-            exit_code=1,
-            report=report,
-            diagnostics=[{
-                "code": "LEGACY_FULL_ADAPTER_OUTPUT_MISSING",
-                "message": str(request.output_path),
-            }],
-        )
-    return RunResult(
-        status="completed",
-        exit_code=0,
-        report=report,
-        artifacts=artifacts,
-    )
-
-
 def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) -> None:
     global SKILL_VERSION
     cli_arguments = list(sys.argv[1:] if argv is None else argv)
@@ -1544,25 +1391,19 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
         "--pipeline",
         choices=["legacy", "modular"],
         default="modular",
-        help="Execution pipeline (default: modular). legacy is a diagnostic pipeline only.",
+        help="Execution pipeline (default: modular). legacy is a development diagnostic mode.",
     )
     parser.add_argument(
         "--modular-profile",
         choices=["legacy-full-v1", "native-v2"],
         default=None,
-        help=(
-            "Pipeline profile (default: native-v2). The legacy diagnostic "
-            "pipeline uses legacy-full-v1."
-        ),
+        help="Pipeline profile (default: native-v2; legacy-full-v1 is development-only).",
     )
     parser.add_argument(
         "--list-policy",
         choices=["legacy", "wx-default-v2"],
         default=None,
-        help=(
-            "List policy (default: wx-default-v2). The legacy diagnostic "
-            "pipeline uses legacy."
-        ),
+        help="List policy (default: wx-default-v2; legacy is development-only).",
     )
     parser.add_argument("--strict-normalize", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--report", type=Path, default=None)
@@ -1628,11 +1469,6 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
     )
     args = parser.parse_args(cli_arguments)
 
-    SKILL_VERSION = _load_version()
-    if args.version:
-        print(SKILL_VERSION)
-        return
-
     if args.modular_profile is None:
         args.modular_profile = (
             "legacy-full-v1" if args.pipeline == "legacy" else "native-v2"
@@ -1641,6 +1477,22 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
         args.list_policy = "legacy" if args.pipeline == "legacy" else "wx-default-v2"
 
     import os as _os
+    retired_release_values = [
+        value
+        for value in (args.pipeline, args.modular_profile, args.list_policy)
+        if value in {"legacy", "legacy-full-v1"}
+    ]
+    if _os.environ.get("WX_DOC_FORMAT_RELEASE") == "1" and retired_release_values:
+        parser.error(
+            "LEGACY_MODE_UNAVAILABLE: release packages reject "
+            + ", ".join(retired_release_values)
+        )
+
+    SKILL_VERSION = _load_version()
+    if args.version:
+        print(SKILL_VERSION)
+        return
+
     if _os.environ.get("WX_DOC_FORMAT_RELEASE") == "1" and (args.ast or args.source_ast):
         parser.error("--ast and --source-ast are unavailable in release packages")
 
@@ -1660,12 +1512,10 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
     # Resume mode may pull input/output from run.json so we defer
     # the required check until after the resume handler runs.
 
-    # Backward compatibility applies only outside the explicit native-v2 seam.
-    native_v2_cli = args.pipeline == "modular" and args.modular_profile == "native-v2"
-    if not native_v2_cli and args.llm_enhance == "off" and _os.environ.get("WX_DOC_LLM_ENHANCE") == "1":
+    if args.pipeline == "legacy" and args.llm_enhance == "off" and _os.environ.get("WX_DOC_LLM_ENHANCE") == "1":
         args.llm_enhance = "abc"
 
-    # Normalize new capability names to legacy mode names
+    # Normalize capability names to the compact enhancement phases.
     args.llm_enhance = normalize_mode(args.llm_enhance)
 
     # ── Handle --resume: load run.json and restore original CLI args ──
@@ -1739,13 +1589,6 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
             args.table_row_height_cm = run_args["table_row_height_cm"]
         if "table_row_height_rule" in run_args and restore_native("--table-row-height-rule"):
             args.table_row_height_rule = run_args["table_row_height_rule"]
-        if not native_checkpoint and "pipeline" in run_args:
-            args.pipeline = run_args["pipeline"]
-        if not native_checkpoint and "modular_profile" in run_args:
-            args.modular_profile = run_args["modular_profile"]
-        if not native_checkpoint and "list_policy" in run_args:
-            args.list_policy = run_args["list_policy"]
-
     if _os.environ.get("WX_DOC_FORMAT_RELEASE") == "1" and (args.ast or args.source_ast):
         parser.error("--ast and --source-ast are unavailable in release packages")
 
@@ -1785,9 +1628,8 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
             and modular_protocol_mode is None
         ):
             parser.error("native-v2 enhancement requires an explicit local --llm-command")
-        native_v2 = native_checkpoint or _modular_native_v2_enabled(args)
         enhancement_call = None
-        if native_v2 and args.llm_enhance != "off":
+        if args.llm_enhance != "off":
             local_command = _llm_call_from_command(args.llm_command or "")
             if local_command is not None:
                 def enhancement_call(payload, *, _local_command=local_command):
@@ -1800,12 +1642,12 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
             "report_path": args.report,
             "report_transform": report_for_output,
             "release": _os.environ.get("WX_DOC_FORMAT_RELEASE") == "1",
-            "profile": "native_v2" if native_v2 else None,
+            "profile": "native_v2",
             "enhancement_call": enhancement_call,
             "table_row_height_cm": args.table_row_height_cm,
             "table_row_height_rule": args.table_row_height_rule,
         }
-        if native_v2 and args.generate_requests is not None:
+        if args.generate_requests is not None:
             request_dir = args.generate_requests.resolve()
             kernel_options.update({
                 "checkpoint_path": request_dir / "run.json",
@@ -1817,15 +1659,13 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
                     output_path=modular_output_path,
                 ),
             })
-        elif native_v2 and native_checkpoint:
+        elif native_checkpoint:
             kernel_options["checkpoint_path"] = args.resume.resolve()
             kernel_options["checkpoint_configuration"] = _native_checkpoint_configuration(
                 args,
                 output_path=modular_output_path,
             )
-        result = ConversionKernel(
-            modular_runner=None if native_v2 else lambda request: _run_legacy_full_adapter(args, request),
-        ).convert(
+        result = ConversionKernel().convert(
             ConversionRequest(
                 input_path=args.input,
                 output_path=modular_output_path,
@@ -1836,8 +1676,7 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
             )
         )
         kernel_published_report = (
-            native_v2
-            and result.status != "waiting_external"
+            result.status != "waiting_external"
             and args.report is not None
             and result.artifacts.get("report") == str(args.report)
         )

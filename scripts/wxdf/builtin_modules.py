@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 import json
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Mapping
@@ -12,9 +12,6 @@ from .parsers import digest_source_facts, parse, summarize_source_facts
 from .registry import ModuleDescriptor, PlanError, RegisteredModule
 from .semantics.regions import resolve_source_regions
 from .semantics.structure import collect_structure_candidates
-from .semantics.equivalence import compare_structure_equivalence
-from .semantics.parser_equivalence import compare_parser_equivalence
-from .semantics.source_projection import project_source_facts
 from .semantics.protected import collect_protected_candidates
 from .semantics.lists import analyze_lists
 from .semantics.tables import collect_source_table_semantics, collect_table_candidates
@@ -259,35 +256,6 @@ def document_structure_module(*, protect_semantics: bool = False) -> RegisteredM
     )
 
 
-def source_projection_module() -> RegisteredModule:
-    def execute(context: ModuleExecutionContext) -> dict[str, Any]:
-        projection = project_source_facts(
-            context.require("source_facts"),
-            context.require("source_regions"),
-        )
-        context.provide("source_projection", projection)
-        evidence = {
-            "paragraph_count": len(projection["paragraphs"]),
-            "table_count": len(projection["tables"]),
-            "image_count": projection["image_count"],
-            "list_item_count": projection["list_item_count"],
-        }
-        context.evidence["source-projection"] = evidence
-        context.provide("source_parser", evidence)
-        return evidence
-
-    return RegisteredModule(
-        descriptor=ModuleDescriptor(
-            module_id="source-projection",
-            version="1.0",
-            stages=("role",),
-            requires=("source_facts", "source_regions"),
-            provides=("source_projection", "source_parser"),
-        ),
-        execute=execute,
-    )
-
-
 def protected_content_module() -> RegisteredModule:
     def execute(context: ModuleExecutionContext) -> dict[str, Any]:
         candidates = collect_protected_candidates(context.require("source_facts"))
@@ -526,175 +494,6 @@ def appendix_semantics_module(*, native: bool = False) -> RegisteredModule:
             )
             if native
             else ("appendix_semantics_result", "appendix_semantics"),
-        ),
-        execute=execute,
-    )
-
-
-def legacy_full_adapter_module(
-    runner: Callable[[Any], Any],
-    *,
-    provides: tuple[str, ...],
-) -> RegisteredModule:
-    def execute(context: ModuleExecutionContext) -> Any:
-        options = dict(context.request.options or {})
-        adapter_artifacts: dict[str, Any] = {}
-        options["_adapter_artifacts"] = adapter_artifacts
-        options["_native_structure_context"] = {
-            "source_facts": context.require("source_facts"),
-            "candidates": context.require("document_structure_candidates"),
-        }
-        options["_native_region_context"] = {
-            **context.require("source_region"),
-            "source_facts": context.require("source_facts"),
-        }
-        options["_native_source_context"] = {
-            "source_facts": context.require("source_facts"),
-            "projection": context.require("source_projection"),
-        }
-        options["_native_protected_context"] = {
-            "source_facts": context.require("source_facts"),
-            "candidates": context.require("protected_content_candidates"),
-        }
-        options["_native_list_context"] = {
-            "source_facts": context.require("source_facts"),
-            "semantics": context.require("list_semantics_result"),
-        }
-        options["_native_table_context"] = {
-            "semantics": context.require("table_semantics_result"),
-        }
-        options["_native_caption_context"] = {
-            "semantics": context.require("caption_semantics_result"),
-        }
-        options["_native_appendix_context"] = {
-            "semantics": context.require("appendix_semantics_result"),
-        }
-        adapter_request = replace(context.request, options=options)
-        result = runner(adapter_request)
-        context.provide("legacy_run_result", result)
-        legacy_ast = adapter_artifacts.get("source_ast")
-        legacy_model = adapter_artifacts.get("source_document_model")
-        if legacy_ast is None and legacy_model is not None:
-            from .migration import migrate_legacy_model
-
-            legacy_ast = migrate_legacy_model(legacy_model).ast
-        if legacy_ast is None:
-            source_ast_path = getattr(result, "artifacts", {}).get("source_ast")
-            if source_ast_path and Path(source_ast_path).is_file():
-                legacy_ast = json.loads(Path(source_ast_path).read_text(encoding="utf-8"))
-        context.provide("legacy_source_ast", legacy_ast)
-        for capability in provides:
-            if capability not in context.artifacts:
-                context.provide(capability, _legacy_capability_payload(capability, result, context))
-        return result
-
-    return RegisteredModule(
-        descriptor=ModuleDescriptor(
-            module_id="legacy-full-adapter",
-            version="1.0",
-            stages=("normalize", "render", "audit", "publish"),
-            requires=(
-                "source_facts",
-                "source_region",
-                "source_projection",
-                "document_structure_candidates",
-                "protected_content_candidates",
-                "list_semantics_result",
-                "table_semantics_result",
-                "caption_semantics_result",
-                "appendix_semantics_result",
-            ),
-            provides=(*provides, "legacy_run_result", "legacy_source_ast"),
-            exclusive_group="full-conversion-adapter",
-        ),
-        execute=execute,
-    )
-
-
-def _legacy_capability_payload(
-    capability: str,
-    result: Any,
-    context: ModuleExecutionContext,
-) -> Any:
-    """Expose a declared transitional capability without changing the report."""
-
-    report = getattr(result, "report", {}) or {}
-    if capability == "template_provider":
-        template = getattr(context.request, "template_path", None)
-        return {"template_path": str(template) if template is not None else None}
-    if capability == "renderer":
-        return {"artifacts": dict(getattr(result, "artifacts", {}) or {})}
-    if capability == "publisher":
-        return {"output_path": str(getattr(context.request, "output_path", ""))}
-    return report.get(capability) or {}
-
-
-def semantic_equivalence_module() -> RegisteredModule:
-    def execute(context: ModuleExecutionContext) -> dict[str, Any]:
-        legacy_ast = context.require("legacy_source_ast")
-        if legacy_ast is None:
-            audit = {
-                "schema_version": "1.0",
-                "status": "unobserved",
-                "passed": False,
-                "issues": [{"type": "legacy_source_ast_unavailable"}],
-            }
-        else:
-            audit = compare_structure_equivalence(
-                context.require("source_facts"),
-                context.require("source_regions"),
-                context.require("document_structure_candidates"),
-                legacy_ast,
-            )
-        context.provide("semantic_equivalence_audit", audit)
-        context.evidence["semantic-equivalence-audit"] = audit
-        return audit
-
-    return RegisteredModule(
-        descriptor=ModuleDescriptor(
-            module_id="semantic-equivalence-audit",
-            version="1.0",
-            stages=("audit",),
-            requires=(
-                "source_facts",
-                "source_regions",
-                "document_structure_candidates",
-                "legacy_source_ast",
-            ),
-            provides=("semantic_equivalence_audit",),
-        ),
-        execute=execute,
-    )
-
-
-def source_parser_equivalence_module() -> RegisteredModule:
-    def execute(context: ModuleExecutionContext) -> dict[str, Any]:
-        legacy_ast = context.require("legacy_source_ast")
-        if legacy_ast is None:
-            audit = {
-                "schema_version": "1.0",
-                "status": "unobserved",
-                "passed": False,
-                "domains": {},
-                "issues": [{"type": "legacy_source_ast_unavailable"}],
-            }
-        else:
-            audit = compare_parser_equivalence(
-                context.require("source_facts"),
-                context.require("source_regions"),
-                legacy_ast,
-            )
-        context.provide("source_parser_equivalence_audit", audit)
-        context.evidence["source-parser-equivalence-audit"] = audit
-        return audit
-
-    return RegisteredModule(
-        descriptor=ModuleDescriptor(
-            module_id="source-parser-equivalence-audit",
-            version="1.0",
-            stages=("audit",),
-            requires=("source_facts", "source_regions", "legacy_source_ast"),
-            provides=("source_parser_equivalence_audit",),
         ),
         execute=execute,
     )
@@ -1601,116 +1400,6 @@ def _native_publisher(context: ModuleExecutionContext) -> bool:
     return False
 
 
-def experimental_native_modules() -> tuple[RegisteredModule, ...]:
-    """Small registered chain retained for the staged module replacement path.
-
-    The experimental profile runs the minimal modular chain without candidates,
-    resolution or a transaction: SourceFacts, list semantics, the source AST,
-    normalization, rendering and the two mandatory audits.
-    """
-
-    def execute_list_semantics(context: ModuleExecutionContext) -> dict[str, Any]:
-        with context.stage("scope"):
-            semantics = analyze_lists(context.require("source_facts"))
-        context.provide("list_semantics_result", semantics)
-        context.evidence["list-semantics"] = {
-            "status": semantics["status"],
-            "list_count": len(semantics["lists"]),
-            "item_count": len(semantics["items"]),
-            "continuation_count": len(semantics["continuations"]),
-            "diagnostic_count": len(semantics["diagnostics"]),
-        }
-        return semantics
-
-    def execute_source_ast(context: ModuleExecutionContext) -> dict[str, Any]:
-        with context.stage("role"):
-            ast = build_source_ast(context.require("source_facts"))
-        context.provide("source_ast", ast)
-        return ast
-
-    def execute_normalizer(context: ModuleExecutionContext) -> Mapping[str, Any]:
-        from .normalization import normalize
-        from template_profile import load_template_profile
-
-        request = context.request
-        with context.stage("normalize"):
-            profile = (
-                load_template_profile(request.template_path)
-                if request.template_path
-                else {"resolved_styles": {}, "numbering_ids": {}}
-            )
-            normalized = normalize(
-                context.require("source_ast"),
-                profile,
-                strategy=request.list_policy,
-            )
-        context.provide("normalized", normalized)
-        return normalized
-
-    def execute_renderer(context: ModuleExecutionContext) -> Mapping[str, Any]:
-        from .rendering import render
-
-        request = context.request
-        with context.stage("render"):
-            result = render(
-                context.require("normalized"),
-                request.output_path,
-                template_path=request.template_path,
-            )
-            metrics = context.services.get("metrics")
-            if metrics is not None:
-                metrics.record_render()
-        context.provide("render_result", result)
-        return result
-
-    def execute_auditor(context: ModuleExecutionContext) -> dict[str, Any]:
-        from .auditing import check_model, check_saved_output
-
-        request = context.request
-        normalized = context.require("normalized")
-        render_result = context.require("render_result")
-        with context.stage("audit"):
-            model_findings = check_model(normalized)
-            saved_findings = check_saved_output(
-                request.output_path,
-                normalized,
-                render_result["render_map"],
-            )
-        context.provide("model_audit", model_findings)
-        context.provide("saved_output_audit", saved_findings)
-        return {"model": model_findings, "saved": saved_findings}
-
-    return (
-        source_facts_module(native=True),
-        RegisteredModule(
-            descriptor=ModuleDescriptor("list-semantics", "1.0", ("scope",), ("source_facts",), ("list_semantics_result",)),
-            execute=execute_list_semantics,
-        ),
-        RegisteredModule(
-            descriptor=ModuleDescriptor("native-source-parser", "1.0", ("role",), ("source_facts",), ("source_ast",)),
-            execute=execute_source_ast,
-        ),
-        RegisteredModule(
-            descriptor=ModuleDescriptor("experimental-normalizer", "1.0", ("normalize",), ("source_ast",), ("normalized",)),
-            execute=execute_normalizer,
-        ),
-        RegisteredModule(
-            descriptor=ModuleDescriptor("experimental-renderer", "1.0", ("render",), ("normalized",), ("render_result",)),
-            execute=execute_renderer,
-        ),
-        RegisteredModule(
-            descriptor=ModuleDescriptor(
-                "experimental-auditor",
-                "1.0",
-                ("audit",),
-                ("normalized", "render_result"),
-                ("model_audit", "saved_output_audit"),
-            ),
-            execute=execute_auditor,
-        ),
-    )
-
-
 def native_stage_executors() -> dict[str, Callable[[ModuleExecutionContext], Any]]:
     """Return the production implementation of the native stage chain."""
 
@@ -1737,15 +1426,10 @@ __all__ = [
     "caption_semantics_module",
     "collect_native_candidates",
     "document_structure_module",
-    "experimental_native_modules",
-    "legacy_full_adapter_module",
     "list_semantics_module",
     "build_native_candidate_baseline",
     "native_semantic_modules",
     "native_stage_executors",
-    "semantic_equivalence_module",
-    "source_parser_equivalence_module",
-    "source_projection_module",
     "protected_content_module",
     "source_facts_module",
     "source_region_module",

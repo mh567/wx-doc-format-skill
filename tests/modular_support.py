@@ -20,7 +20,7 @@ TEMPLATE = ROOT / "assets" / "wx_template.docx"
 
 
 @dataclass(frozen=True)
-class LegacyConversionResult:
+class NativeConversionResult:
     returncode: int
     stdout: str
     stderr: str
@@ -122,7 +122,7 @@ def build_docx_fixture(tmp_path: Path) -> Path:
     return output
 
 
-def run_legacy_markdown_conversion(tmp_path: Path) -> LegacyConversionResult:
+def run_native_markdown_conversion(tmp_path: Path) -> NativeConversionResult:
     output = tmp_path / "baseline.docx"
     report = tmp_path / "report.json"
     source_ast = tmp_path / "source.json"
@@ -143,12 +143,6 @@ def run_legacy_markdown_conversion(tmp_path: Path) -> LegacyConversionResult:
             str(output),
             "--template",
             str(TEMPLATE),
-            "--pipeline",
-            "legacy",
-            "--modular-profile",
-            "legacy-full-v1",
-            "--list-policy",
-            "legacy",
             "--llm-enhance",
             "off",
             "--report",
@@ -163,7 +157,7 @@ def run_legacy_markdown_conversion(tmp_path: Path) -> LegacyConversionResult:
         capture_output=True,
         text=True,
     )
-    return LegacyConversionResult(
+    return NativeConversionResult(
         returncode=completed.returncode,
         stdout=completed.stdout,
         stderr=completed.stderr,

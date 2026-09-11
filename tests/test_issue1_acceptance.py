@@ -11,7 +11,6 @@ from docx import Document
 
 from modular_support import _append_numbering_definition, _set_numbering
 
-
 ROOT = Path(__file__).resolve().parents[1]
 PYTHON = ROOT / "scripts" / ".venv" / "bin" / "python3"
 TEMPLATE = ROOT / "assets" / "wx_template.docx"
@@ -234,21 +233,6 @@ def _assert_saved_numbering(output: Path) -> None:
     assert seen_texts == list(paragraph_levels)
 
 
-def _run_explicit_legacy(source: Path, tmp_path: Path) -> tuple[dict, Path]:
-    completed, report_path, output, _, _ = _run_cli(
-        source,
-        tmp_path,
-        "legacy",
-        pipeline="legacy",
-        modular_profile="legacy-full-v1",
-        list_policy="legacy",
-        write_ast=False,
-    )
-    assert completed.returncode == 0, completed.stderr
-    assert output.is_file()
-    return json.loads(report_path.read_text(encoding="utf-8")), output
-
-
 @pytest.mark.parametrize("source_kind", ["markdown", "docx"])
 def test_l01_nested_ordered_unordered_ordered_runs_full_native_acceptance(tmp_path: Path, source_kind: str) -> None:
     if source_kind == "markdown":
@@ -317,17 +301,3 @@ def test_l01_nested_ordered_unordered_ordered_runs_full_native_acceptance(tmp_pa
     assert normalized_ast["source_ast"]["revision"] == source_ast["revision"]
     assert normalized_ast["source_ast"]["document"] == source_ast["document"]
     _assert_saved_numbering(output)
-
-
-def test_explicit_legacy_diagnostic_pipeline_remains_available(tmp_path: Path) -> None:
-    source = tmp_path / "legacy.md"
-    source.write_text(NESTED_MARKDOWN, encoding="utf-8")
-
-    report, output = _run_explicit_legacy(source, tmp_path)
-
-    assert "module_chain" not in report
-    assert report["source_document_model_summary"]["schema_version"] == "1.0"
-    assert report["markdown_source_audit"]["adapter"] == "markdown-it-py"
-    assert report["markdown_source_audit"]["list_items"] == 4
-    with ZipFile(output) as archive:
-        assert archive.testzip() is None

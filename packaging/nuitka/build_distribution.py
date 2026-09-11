@@ -5,13 +5,13 @@ import hashlib
 import json
 import os
 import platform
-import re
 import shutil
 import subprocess
 import sys
 import tarfile
 import zipfile
 from pathlib import Path
+from xml.etree import ElementTree
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -42,10 +42,30 @@ MODULAR_OPEN_MODES = {
     "modular_online": {"status": "enabled", "entrypoint": "EnhancementExecutor", "contract": "T03"},
     "modular_file": {"status": "enabled", "entrypoint": "CheckpointStore", "contract": "T04"},
     "modular_review": {"status": "enabled", "entrypoint": "ReviewEvaluator", "contract": "T05"},
-    "legacy_online": {"status": "enabled", "entrypoint": "legacy CLI", "contract": "legacy"},
-    "legacy_file": {"status": "enabled", "entrypoint": "legacy CLI", "contract": "1.0"},
-    "legacy_review": {"status": "enabled", "entrypoint": "legacy CLI", "contract": "legacy"},
 }
+
+RETIRED_RELEASE_MODULES = frozenset({
+    "wxdf.migration",
+    "wxdf.semantics.appendix_bridge",
+    "wxdf.semantics.caption_bridge",
+    "wxdf.semantics.equivalence",
+    "wxdf.semantics.list_bridge",
+    "wxdf.semantics.parser_equivalence",
+    "wxdf.semantics.protected_bridge",
+    "wxdf.semantics.region_bridge",
+    "wxdf.semantics.source_projection",
+    "wxdf.semantics.source_projection_bridge",
+    "wxdf.semantics.structure_bridge",
+    "wxdf.semantics.table_bridge",
+})
+RETIRED_RUNTIME_IMPORTS = frozenset({
+    "docx_pipeline",
+    "md_pipeline",
+    "model_normalization",
+    "template_finalizer",
+    "docx_render",
+    "word_model_renderer",
+})
 
 PUBLIC_REPORT_SUMMARY_CONTRACT = {
     "schema_version": "1.0",
@@ -78,6 +98,20 @@ def wxdf_module_names() -> tuple[str, ...]:
     return tuple(sorted(names))
 
 
+def _forbidden_release_module(name: str) -> bool:
+    return name in RETIRED_RELEASE_MODULES or name.startswith("wxdf.legacy_")
+
+
+def release_module_names() -> tuple[str, ...]:
+    """Return the explicit wxdf modules required by the native release chain."""
+
+    return tuple(
+        name
+        for name in wxdf_module_names()
+        if name not in RETIRED_RELEASE_MODULES and not _forbidden_release_module(name)
+    )
+
+
 def modular_module_manifest(
     *,
     runtime_modules: tuple[str, ...] | list[str] | None = None,
@@ -85,13 +119,25 @@ def modular_module_manifest(
 ) -> dict:
     """Describe the modular surface carried by a compiled release."""
 
-    source_modules = list(wxdf_module_names())
-    runtime_names = sorted(set(runtime_modules or source_modules))
+    source_modules = list(release_module_names())
+    runtime_names = sorted(set(source_modules if runtime_modules is None else runtime_modules))
+    missing_runtime_modules = sorted(set(source_modules) - set(runtime_names))
+    unexpected_runtime_modules = sorted(set(runtime_names) - set(source_modules))
+    forbidden_runtime_modules = sorted(
+        name for name in runtime_names if _forbidden_release_module(name)
+    )
     return {
         "package": "wxdf",
         "source_modules": source_modules,
         "runtime_modules": runtime_names,
-        "module_set_status": "matched" if source_modules == runtime_names else "mismatch",
+        "module_set_status": (
+            "matched"
+            if source_modules == runtime_names and not forbidden_runtime_modules
+            else "mismatch"
+        ),
+        "missing_runtime_modules": missing_runtime_modules,
+        "unexpected_runtime_modules": unexpected_runtime_modules,
+        "forbidden_runtime_modules": forbidden_runtime_modules,
         "runtime_evidence": runtime_evidence,
         "contract_versions": dict(MODULAR_CONTRACT_VERSIONS),
         "open_modes": json.loads(json.dumps(MODULAR_OPEN_MODES)),
@@ -103,10 +149,17 @@ def _report_wxdf_modules(report_path: Path) -> tuple[str, ...]:
 
     if not report_path.is_file():
         return ()
-    text = report_path.read_text(encoding="utf-8", errors="replace")
-    candidates = set(re.findall(r"\bwxdf(?:\.[A-Za-z_][A-Za-z0-9_]*)*\b", text))
-    known = set(wxdf_module_names())
-    return tuple(sorted(candidate for candidate in candidates if candidate in known))
+    try:
+        root = ElementTree.parse(report_path).getroot()
+    except ElementTree.ParseError as exc:
+        raise RuntimeError(f"Nuitka compilation report is invalid: {exc}") from exc
+    modules = {
+        str(element.get("name"))
+        for element in root.iter()
+        if element.tag.rsplit("}", 1)[-1] == "module"
+        and str(element.get("name") or "").startswith("wxdf")
+    }
+    return tuple(sorted(modules))
 
 
 def _write_runtime_module_manifest(dist_dir: Path, report_path: Path) -> None:
@@ -160,13 +213,20 @@ def sha256_file(path: Path) -> str:
 
 def nuitka_command(build_dir: Path) -> list[str]:
     include_args = [
-        "--include-package=wxdf",
         *[
             f"--include-module={name}"
-            for name in wxdf_module_names()
-            if name not in {"wxdf", "wxdf.semantics"}
+            for name in release_module_names()
         ],
-        "--include-package=wxdf.semantics",
+        "--nofollow-import-to=wxdf.migration",
+        "--nofollow-import-to=wxdf.legacy_*",
+        *[
+            f"--nofollow-import-to={name}"
+            for name in sorted(RETIRED_RELEASE_MODULES - {"wxdf.migration"})
+        ],
+        *[
+            f"--nofollow-import-to={name}"
+            for name in sorted(RETIRED_RUNTIME_IMPORTS)
+        ],
     ]
     return [
         sys.executable,

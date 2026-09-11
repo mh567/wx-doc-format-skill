@@ -19,7 +19,7 @@ from wxdf.kernel import ConversionKernel, ConversionRequest
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_modular_markdown_conversion_requires_complete_adapter(tmp_path: Path) -> None:
+def test_modular_markdown_conversion_runs_complete_native_chain(tmp_path: Path) -> None:
     output = tmp_path / "candidate.docx"
     source_ast = tmp_path / "source.json"
     normalized_ast = tmp_path / "normalized.json"
@@ -35,27 +35,33 @@ def test_modular_markdown_conversion_requires_complete_adapter(tmp_path: Path) -
 
     result = ConversionKernel().convert(request)
 
-    assert result.status == "unsupported"
-    assert result.exit_code == 2
-    assert result.diagnostics[0]["code"] == "MODULAR_PROFILE_INCOMPLETE"
-    assert not output.exists()
+    assert result.status == "completed", result.diagnostics
+    assert result.exit_code == 0
+    assert output.is_file()
+    assert source_ast.is_file()
+    assert normalized_ast.is_file()
+    assert report.is_file()
+    assert all(
+        "legacy" not in item["module_id"]
+        for item in result.report["execution_plan"]["modules"]
+    )
 
 
-def test_modular_preflight_rejects_online_enhancement_without_legacy_fallback(tmp_path: Path) -> None:
+def test_modular_preflight_rejects_online_enhancement_without_adapter(tmp_path: Path) -> None:
     output = tmp_path / "candidate.docx"
     request = ConversionRequest(
         input_path=ROOT / "input" / "test_baseline.md",
         output_path=output,
         pipeline="modular",
-        list_policy="legacy",
+        list_policy="wx-default-v2",
         options={"llm_enhance": "abc"},
     )
 
     result = ConversionKernel().convert(request)
 
-    assert result.status == "unsupported"
-    assert result.exit_code == 2
-    assert result.diagnostics[0]["code"] == "MODULAR_ENHANCEMENT_UNSUPPORTED"
+    assert result.status == "failed"
+    assert result.exit_code == 1
+    assert result.diagnostics[0]["code"] == "NATIVE_ENHANCEMENT_ADAPTER_MISSING"
     assert not output.exists()
 
 
@@ -144,7 +150,7 @@ def test_modular_cli_exports_ast2_with_title_headers_and_caption_relations(tmp_p
     assert normalized["presentation"]["template_contract"]["tables"]["name"] == "Table Grid"
 
 
-def test_modular_cli_preserves_legacy_file_protocol_request_generation(tmp_path: Path) -> None:
+def test_modular_cli_generates_native_file_protocol_requests(tmp_path: Path) -> None:
     request_dir = tmp_path / "requests"
     command = [
         str(ROOT / "scripts" / ".venv" / "bin" / "python3"),
@@ -164,7 +170,7 @@ def test_modular_cli_preserves_legacy_file_protocol_request_generation(tmp_path:
     assert (request_dir / "llm_requests.jsonl").is_file()
 
 
-def test_modular_nested_markdown_lists_require_complete_adapter(tmp_path: Path) -> None:
+def test_modular_nested_markdown_lists_run_complete_native_chain(tmp_path: Path) -> None:
     source = tmp_path / "nested.md"
     source.write_text("1. 父项\n   - 子项\n2. 第二项\n", encoding="utf-8")
     output = tmp_path / "nested.docx"
@@ -178,9 +184,10 @@ def test_modular_nested_markdown_lists_require_complete_adapter(tmp_path: Path) 
 
     result = ConversionKernel().convert(request)
 
-    assert result.status == "unsupported"
-    assert result.diagnostics[0]["code"] == "MODULAR_PROFILE_INCOMPLETE"
-    assert not output.exists()
+    assert result.status == "completed", result.diagnostics
+    assert output.is_file()
+    with ZipFile(output) as archive:
+        assert archive.testzip() is None
 
 
 def test_modular_cli_preserves_real_template_title_toc_and_table_captions(tmp_path: Path) -> None:

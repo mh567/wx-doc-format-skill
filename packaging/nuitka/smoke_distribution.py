@@ -9,6 +9,25 @@ import zipfile
 from pathlib import Path
 
 
+NATIVE_OPEN_MODES = {
+    "modular_pure",
+    "modular_online",
+    "modular_file",
+    "modular_review",
+}
+
+
+def _retired_module_literal(name: object) -> bool:
+    value = str(name)
+    return value == "wxdf.migration" or any(
+        "legacy" in component.lower() for component in value.split(".")
+    )
+
+
+def _retired_mode_literal(name: object) -> bool:
+    return "legacy" in str(name).lower()
+
+
 def runtime_executable(package_dir: Path) -> Path:
     name = "wx-doc-format.exe" if platform.system().lower() == "windows" else "wx-doc-format"
     return package_dir / "runtime" / name
@@ -34,7 +53,12 @@ def validate_modular_manifest(manifest: dict) -> None:
     runtime_modules = modular.get("runtime_modules")
     if not isinstance(source_modules, list) or not source_modules:
         raise RuntimeError("Modular manifest has no source module list")
-    if not isinstance(runtime_modules, list) or source_modules != runtime_modules:
+    if not isinstance(runtime_modules, list):
+        raise RuntimeError("Modular manifest has no runtime module list")
+    for module_name in [*source_modules, *runtime_modules]:
+        if _retired_module_literal(module_name):
+            raise RuntimeError(f"Retired release module is forbidden: {module_name}")
+    if source_modules != runtime_modules:
         raise RuntimeError("Compiled runtime wxdf modules do not match source modules")
     if modular.get("module_set_status") != "matched":
         raise RuntimeError("Modular module set is not marked as matched")
@@ -43,32 +67,21 @@ def validate_modular_manifest(manifest: dict) -> None:
     if not isinstance(contract_versions, dict) or set(contract_versions) != required_contracts:
         raise RuntimeError("Modular contract version manifest is incomplete")
     modes = modular.get("open_modes")
-    required_modes = {
-        "modular_pure", "modular_online", "modular_file", "modular_review",
-        "legacy_online", "legacy_file", "legacy_review",
-    }
-    if not isinstance(modes, dict) or set(modes) != required_modes:
-        raise RuntimeError("Modular mode manifest is incomplete")
-    if modes["modular_pure"].get("status") != "enabled":
-        raise RuntimeError("modular_pure must be enabled in the release manifest")
-    if modes["modular_online"] != {
-        "status": "enabled",
-        "entrypoint": "EnhancementExecutor",
-        "contract": "T03",
-    }:
-        raise RuntimeError("modular_online must expose the T03 EnhancementExecutor contract")
-    if modes["modular_file"] != {
-        "status": "enabled",
-        "entrypoint": "CheckpointStore",
-        "contract": "T04",
-    }:
-        raise RuntimeError("modular_file must expose the T04 CheckpointStore contract")
-    if modes["modular_review"] != {
-        "status": "enabled",
-        "entrypoint": "ReviewEvaluator",
-        "contract": "T05",
-    }:
-        raise RuntimeError("modular_review must expose the T05 ReviewEvaluator contract")
+    if not isinstance(modes, dict):
+        raise RuntimeError("Modular mode manifest is missing")
+    for mode_name in modes:
+        if _retired_mode_literal(mode_name):
+            raise RuntimeError(f"Retired release mode is forbidden: {mode_name}")
+    if set(modes) != NATIVE_OPEN_MODES:
+        unexpected = sorted(set(modes) - NATIVE_OPEN_MODES)
+        missing = sorted(NATIVE_OPEN_MODES - set(modes))
+        raise RuntimeError(
+            f"Native mode manifest mismatch; unexpected={unexpected}, missing={missing}"
+        )
+    for mode_name in sorted(NATIVE_OPEN_MODES):
+        mode = modes[mode_name]
+        if not isinstance(mode, dict) or mode.get("status") != "enabled":
+            raise RuntimeError(f"{mode_name} must be enabled in the release manifest")
 
 
 def smoke(package_dir: Path) -> None:

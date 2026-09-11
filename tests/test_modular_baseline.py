@@ -9,7 +9,7 @@ from modular_support import (
     BASELINE_MANIFEST_PATH,
     build_docx_fixture,
     load_baseline_manifest,
-    run_legacy_markdown_conversion,
+    run_native_markdown_conversion,
     sha256,
 )
 
@@ -51,8 +51,8 @@ def test_docx_fixture_contains_real_numbering_ooxml(tmp_path: Path) -> None:
     assert all(paragraph.find(f"{W_NS}pPr/{W_NS}numPr/{W_NS}numId") is not None for paragraph in numbered)
 
 
-def test_legacy_markdown_baseline_conversion_is_reproducible(tmp_path: Path) -> None:
-    result = run_legacy_markdown_conversion(tmp_path)
+def test_native_markdown_baseline_conversion_is_reproducible(tmp_path: Path) -> None:
+    result = run_native_markdown_conversion(tmp_path)
 
     assert result.returncode == 0, result.stderr or result.stdout
     assert result.output.is_file()
@@ -67,7 +67,9 @@ def test_legacy_markdown_baseline_conversion_is_reproducible(tmp_path: Path) -> 
     source_ast = json.loads(result.source_ast.read_text(encoding="utf-8"))
     normalized_ast = json.loads(result.normalized_ast.read_text(encoding="utf-8"))
 
-    assert report["template_finalizer"]
-    assert "audit" in report
+    assert report["pipeline"] == "modular"
+    assert report["profile"] == "wx-default-v2"
+    assert report["model_audit"]["passed"] is True
+    assert report["saved_output_audit"]["passed"] is True
     assert source_ast["document"]["blocks"]
-    assert normalized_ast["document"]["blocks"]
+    assert normalized_ast["source_ast"]["document"]["blocks"]

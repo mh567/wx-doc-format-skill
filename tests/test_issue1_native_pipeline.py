@@ -15,12 +15,11 @@ if str(SCRIPTS) not in sys.path:
 from test_modular_ast import _ast
 from wxdf.builtin_modules import native_semantic_modules
 from wxdf.kernel import ConversionKernel, ConversionRequest
-from wxdf.legacy_capability import make_view, translate
 from wxdf.parsers import parse
 from wxdf.registry import ModuleDescriptor, PlanError, build_native_v2_registry
 from wxdf.resolver import resolve
 from wxdf.semantics.lists import analyze_lists
-from wxdf.transaction import TransactionConflict, apply_stage_batch, make_snapshot
+from wxdf.transaction import apply_stage_batch, make_snapshot
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -79,98 +78,6 @@ def test_native_modular_path_commits_source_hierarchy_before_flattening(tmp_path
         for item in normalized["presentation"]["nodes"].values()
         if item["marker_kind"] == "ordered"
     )
-
-
-def test_legacy_list_patch_uses_standard_transaction_operations() -> None:
-    ast = _ast(0)
-    ast["document"]["containers"].update({
-        "list0": {"kind": "list", "list_kind": "ordered", "source_start": 1, "source_sequence_id": "seq0"},
-        "item0": {
-            "kind": "list_item",
-            "legacy_id": "old-item",
-            "source_marker": "a)",
-            "source_ordinal": 1,
-            "source_sequence_id": "seq0",
-            "source_ref": {
-                "source_id": "list",
-                "part": "document.md",
-                "content_sha256": "sha256:" + "a" * 64,
-                "span": {"start": 0, "end": 2, "unit": "unicode_code_point"},
-            },
-        },
-    })
-    ast["document"]["blocks"]["li0"] = {
-        "block_type": "paragraph",
-        "role": "body",
-        "inline_content": [{"kind": "text", "text": "列表项", "marks": []}],
-        "source_ref": ast["document"]["containers"]["item0"]["source_ref"],
-    }
-    ast["document"]["children"] = {"root": ["list0"], "list0": ["item0"], "item0": ["li0"]}
-    bundle = make_view(ast)
-    translated = translate(
-        {"schema_version": "1.0", "decisions": [{"block_id": "old-item", "operation": "set_restart", "to": {"restart": True}}]},
-        bundle.target_map,
-        ast,
-    )
-
-    assert translated["candidates"][0]["proposal"]["operation"] == "set_presentation_override"
-    decision_set = resolve(translated["candidates"], {"revision": ast["revision"]})
-    committed = apply_stage_batch(make_snapshot(ast), decision_set["decisions"], expected_revision=ast["revision"])
-
-    assert committed.status == "committed"
-    assert committed.snapshot.presentation_overrides["item0"]["restart"] is True
-    assert committed.snapshot.ast["document"] == ast["document"]
-    assert committed.snapshot.ast["revision"] == ast["revision"] + 1
-
-
-def test_legacy_list_retype_preserves_semantic_intent_in_standard_transaction() -> None:
-    ast = _ast(0)
-    source_ref = {
-        "source_id": "list",
-        "part": "document.md",
-        "content_sha256": "sha256:" + "a" * 64,
-        "span": {"start": 0, "end": 2, "unit": "unicode_code_point"},
-    }
-    ast["document"]["containers"].update({
-        "list0": {"kind": "list", "list_kind": "ordered", "source_start": 1, "source_sequence_id": "seq0"},
-        "item0": {
-            "kind": "list_item",
-            "legacy_id": "old-item",
-            "source_marker": "a)",
-            "source_ordinal": 1,
-            "source_sequence_id": "seq0",
-            "source_ref": source_ref,
-        },
-    })
-    ast["document"]["blocks"]["li0"] = {
-        "block_type": "paragraph",
-        "role": "body",
-        "inline_content": [{"kind": "text", "text": "列表项", "marks": []}],
-        "source_ref": source_ref,
-    }
-    ast["document"]["children"] = {"root": ["list0"], "list0": ["item0"], "item0": ["li0"]}
-
-    bundle = make_view(ast)
-    translated = translate(
-        {"schema_version": "1.0", "decisions": [{"block_id": "old-item", "operation": "retype", "to": {"role": "list_item"}}]},
-        bundle.target_map,
-        ast,
-    )
-    proposal = translated["candidates"][0]["proposal"]
-
-    assert proposal["operation"] == "retype_list_item"
-    assert proposal["value"]["adapter_id"] == "legacy-list-retype-v1"
-    decision_set = resolve(translated["candidates"], {"revision": ast["revision"]})
-    decision = decision_set["decisions"][0]
-
-    assert decision["operation"] == "update_node_semantics"
-    assert decision["value"]["source_operation"] == "retype_list_item"
-    assert decision["value"]["semantic_role"] == "list_item"
-    committed = apply_stage_batch(make_snapshot(ast), decision_set["decisions"], expected_revision=ast["revision"])
-
-    assert committed.status == "committed"
-    assert committed.snapshot.ast["document"]["containers"]["item0"]["semantic_role"] == "list_item"
-    assert committed.snapshot.ast["document"]["containers"]["item0"]["semantic_adapter"] == "legacy-list-retype-v1"
 
 
 def _list_facts(*, continuation: bool = False, empty_item: bool = False) -> dict:
@@ -369,72 +276,6 @@ def test_native_audit_failure_does_not_create_a_published_docx(tmp_path: Path, m
     assert result.exit_code == 1
     assert result.diagnostics[0]["code"] == "model_audit_failed"
     assert not request.output_path.exists()
-
-
-def test_legacy_candidate_source_reference_is_rechecked_at_commit() -> None:
-    ast = _ast(0)
-    source_ref = {
-        "source_id": "list",
-        "part": "document.md",
-        "content_sha256": "sha256:" + "a" * 64,
-        "span": {"start": 0, "end": 2, "unit": "unicode_code_point"},
-    }
-    ast["document"]["containers"].update({
-        "list0": {"kind": "list", "list_kind": "ordered", "source_start": 1, "source_sequence_id": "seq0"},
-        "item0": {
-            "kind": "list_item",
-            "legacy_id": "old-item",
-            "source_marker": "1.",
-            "source_ordinal": 1,
-            "source_sequence_id": "seq0",
-            "source_ref": source_ref,
-        },
-    })
-    ast["document"]["blocks"]["p0"] = {
-        "block_type": "paragraph",
-        "role": "body",
-        "inline_content": [{"kind": "text", "text": "列表项", "marks": []}],
-        "source_ref": source_ref,
-    }
-    ast["document"]["children"] = {"root": ["list0"], "list0": ["item0"], "item0": ["p0"]}
-    bundle = make_view(ast)
-    translated = translate(
-        {"schema_version": "1.0", "decisions": [{"block_id": "old-item", "operation": "set_restart", "to": {"restart": True}}]},
-        bundle.target_map,
-        ast,
-    )
-    decision_set = resolve(translated["candidates"], {"revision": ast["revision"]})
-    changed = json.loads(json.dumps(ast))
-    changed["document"]["blocks"]["p0"]["source_ref"]["span"] = {"start": 10, "end": 11, "unit": "unicode_code_point"}
-
-    with pytest.raises(TransactionConflict, match="source reference precondition"):
-        apply_stage_batch(make_snapshot(changed), decision_set["decisions"], expected_revision=changed["revision"])
-
-
-def test_explicit_legacy_diagnostic_pipeline_cannot_be_overridden_by_list_text(tmp_path: Path) -> None:
-    source = tmp_path / "listed.md"
-    source.write_text("1. 列表项\n", encoding="utf-8")
-    output = tmp_path / "listed.docx"
-    report = tmp_path / "report.json"
-    command = [
-        str(SCRIPTS / ".venv" / "bin" / "python3"),
-        str(SCRIPTS / "main.py"),
-        "--input", str(source),
-        "--output", str(output),
-        "--template", str(ROOT / "assets" / "wx_template.docx"),
-        "--pipeline", "legacy",
-        "--modular-profile", "legacy-full-v1",
-        "--list-policy", "legacy",
-        "--llm-enhance", "off",
-        "--report", str(report),
-    ]
-
-    completed = subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
-
-    assert completed.returncode == 0, completed.stderr
-    saved_report = json.loads(report.read_text(encoding="utf-8"))
-    assert "module_chain" not in saved_report
-    assert saved_report["source_document_model_summary"]["schema_version"] == "1.0"
 
 
 def test_list_materialization_emits_structure_candidates_without_mutating_source_ast(tmp_path: Path) -> None:

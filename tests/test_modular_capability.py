@@ -15,51 +15,6 @@ if str(SCRIPTS) not in sys.path:
 
 from test_modular_ast import _ast
 from wxdf.enhancement import EnhancementExecutor, EnhancementRequest, build_native_request
-from wxdf.legacy_capability import LegacyCapabilityError, make_view, translate
-
-
-def test_legacy_view_and_target_map_are_read_only_and_revision_bound() -> None:
-    ast = _ast()
-    bundle = make_view(ast)
-
-    assert bundle.target_map["revision"] == 1
-    assert bundle.target_map["entries"]["p0"]["node_id"] == "p0"
-    with pytest.raises(TypeError):
-        bundle.view["blocks"]["p0"]["text"] = "changed"
-    with pytest.raises(TypeError):
-        bundle.target_map["entries"]["p0"] = {}
-
-
-def test_retype_patch_translates_to_candidate_without_mutating_ast() -> None:
-    ast = _ast()
-    bundle = make_view(ast)
-    baseline = copy.deepcopy(ast)
-    patch = {
-        "schema_version": "1.0",
-        "phase": "A",
-        "decisions": [{"block_id": "p0", "operation": "retype", "to": {"role": "note"}}],
-    }
-
-    result = translate(patch, bundle.target_map, ast)
-
-    assert ast == baseline
-    assert result["diagnostics"] == []
-    assert result["candidates"][0]["proposal"]["value"]["role"] == "note"
-    assert result["candidates"][0]["target_node_ids"] == ["p0"]
-
-
-def test_stale_target_map_and_ambiguous_level_patch_are_rejected() -> None:
-    ast = _ast()
-    bundle = make_view(ast)
-    stale = copy.deepcopy(bundle.target_map)
-    stale["revision"] = 0
-    patch = {"schema_version": "1.0", "phase": "A", "decisions": [{"block_id": "p0", "operation": "retype", "to": {"role": "note"}}]}
-    with pytest.raises(LegacyCapabilityError, match="revision"):
-        translate(patch, stale, ast)
-
-    ambiguous = {"schema_version": "1.0", "phase": "A", "decisions": [{"block_id": "p0", "operation": "adjust_level", "to": {"level": 2}}]}
-    with pytest.raises(LegacyCapabilityError, match="ambiguous"):
-        translate(ambiguous, bundle.target_map, ast)
 
 
 def test_enhancement_executor_supports_stub_responses_and_budgeted_waiting() -> None:
@@ -72,67 +27,6 @@ def test_enhancement_executor_supports_stub_responses_and_budgeted_waiting() -> 
     assert waiting.status == "waiting_external"
     assert completed.status == "completed"
     assert completed.responses == ({"decision": "keep"},)
-
-
-def _list_ast() -> dict:
-    ast = _ast(0)
-    ast["document"]["containers"].update(
-        {
-            "list0": {"kind": "list", "list_kind": "ordered", "source_start": 1, "source_sequence_id": "seq0"},
-            "item0": {"kind": "list_item", "legacy_id": "old-item", "source_marker": "a)", "source_ordinal": 1, "source_sequence_id": "seq0", "source_ref": {"source_id": "list", "part": "document.md", "content_sha256": "sha256:" + "a" * 64, "span": {"start": 0, "end": 2, "unit": "unicode_code_point"}}},
-        }
-    )
-    ast["document"]["blocks"]["li0"] = {
-        "block_type": "paragraph",
-        "role": "body",
-        "inline_content": [{"kind": "text", "text": "列表项", "marks": []}],
-        "source_ref": {"source_id": "list", "part": "document.md", "content_sha256": "sha256:" + "a" * 64, "span": {"start": 0, "end": 2, "unit": "unicode_code_point"}},
-    }
-    ast["document"]["children"] = {"root": ["list0"], "list0": ["item0"], "item0": ["li0"]}
-    from wxdf.validation import validate_ast
-    validate_ast(ast)
-    return ast
-
-
-def test_legacy_list_operations_keep_parent_and_restart_scope() -> None:
-    ast = _list_ast()
-    bundle = make_view(ast)
-    translated = translate(
-        {"schema_version": "1.0", "decisions": [
-            {"block_id": "old-item", "operation": "adjust_level", "to": {"level": 0}},
-            {"block_id": "old-item", "operation": "set_restart", "to": {"restart": True}},
-        ]},
-        bundle.target_map,
-        ast,
-    )
-    assert [item["proposal"]["operation"] for item in translated["candidates"]] == ["adjust_list_level", "set_presentation_override"]
-    assert translated["candidates"][1]["proposal"]["value"]["source_semantics"] == "preserved"
-
-
-def test_table_and_caption_translation_are_overlay_or_relation_bound() -> None:
-    ast = _ast(2)
-    table = ast["document"]["blocks"]["p0"]
-    table.update({"block_type": "table", "table_type": "data"})
-    caption = ast["document"]["blocks"]["p1"]
-    caption.update({"role": "caption", "caption_type": "table", "target_id": "p0"})
-    ast["document"]["associations"].append({"kind": "caption_target", "source_id": "p1", "target_id": "p0"})
-    from wxdf.validation import validate_ast
-    validate_ast(ast)
-    bundle = make_view(ast)
-    table_patch = translate({"schema_version": "1.0", "decisions": [{"block_id": "p0", "operation": "set_table_type", "to": {"table_type": "layout"}}]}, bundle.target_map, ast)
-    caption_patch = translate({"schema_version": "1.0", "decisions": [{"block_id": "p1", "operation": "caption", "to": {"text": "表说明"}}]}, bundle.target_map, ast)
-    assert table_patch["candidates"][0]["proposal"]["property_scope"] == ["overlay"]
-    assert caption_patch["candidates"][0]["proposal"]["value"]["target_node_id"] == "p0"
-
-
-def test_generated_and_continuation_targets_cannot_be_sent_to_legacy_capability() -> None:
-    ast = _ast(1)
-    ast["document"]["blocks"]["p0"]["generated"] = True
-    from wxdf.validation import validate_ast
-    validate_ast(ast)
-    bundle = make_view(ast)
-    with pytest.raises(LegacyCapabilityError, match="ambiguous"):
-        translate({"schema_version": "1.0", "decisions": [{"block_id": "p0", "operation": "retype", "to": {"role": "note"}}]}, bundle.target_map, ast)
 
 
 def test_enhancement_executor_covers_command_failure_timeout_and_digest_metadata() -> None:
