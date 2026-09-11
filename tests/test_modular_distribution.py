@@ -50,7 +50,8 @@ def _write_compilation_evidence(dist: Path) -> None:
         for module_name in build.release_module_names()
     )
     report.write_text(
-        f"<nuitka-compilation-report>{module_elements}</nuitka-compilation-report>",
+        '<nuitka-compilation-report completion="yes" mode="standalone">'
+        f"{module_elements}</nuitka-compilation-report>",
         encoding="utf-8",
     )
     build._write_runtime_module_manifest(dist, report)
@@ -130,6 +131,16 @@ def test_release_smoke_accepts_explicit_native_online_adapter_mode() -> None:
     smoke.validate_modular_manifest({"modular": modular})
 
 
+def test_release_smoke_consumes_the_authoritative_mode_names(monkeypatch) -> None:
+    modular = build.modular_module_manifest()
+    authoritative_modes = mode_manifest()
+    authoritative_modes.pop("modular_review")
+    monkeypatch.setattr(smoke, "mode_manifest", lambda: authoritative_modes)
+
+    with pytest.raises(RuntimeError, match="authoritative native modes"):
+        smoke.validate_modular_manifest({"modular": modular})
+
+
 def test_assembled_release_manifest_records_modular_runtime_surface(tmp_path: Path) -> None:
     dist = tmp_path / "runtime.dist"
     dist.mkdir()
@@ -202,7 +213,10 @@ def test_public_package_reparses_compilation_report_before_output(
     if damage == "invalid_xml":
         report_text = '<nuitka-compilation-report><module name="wxdf.kernel">'
     elif damage == "empty_wxdf":
-        report_text = '<nuitka-compilation-report><module name="main"/></nuitka-compilation-report>'
+        report_text = (
+            '<nuitka-compilation-report completion="yes" mode="standalone">'
+            '<module name="main"/></nuitka-compilation-report>'
+        )
     else:
         if damage == "forbidden":
             modules.append("wxdf.migration")
@@ -211,7 +225,10 @@ def test_public_package_reparses_compilation_report_before_output(
         else:
             modules.append("wxdf.unexpected")
         elements = "".join(f'<module name="{name}"/>' for name in modules)
-        report_text = f"<nuitka-compilation-report>{elements}</nuitka-compilation-report>"
+        report_text = (
+            '<nuitka-compilation-report completion="yes" mode="standalone">'
+            f"{elements}</nuitka-compilation-report>"
+        )
     report.write_text(report_text, encoding="utf-8")
     manifest_path = dist / "wxdf-module-manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -347,7 +364,7 @@ def test_release_module_set_excludes_development_and_retired_bridges() -> None:
 def test_compilation_report_surfaces_forbidden_wxdf_modules(tmp_path: Path) -> None:
     report = tmp_path / "compilation-report.xml"
     report.write_text(
-        '<nuitka-compilation-report>'
+        '<nuitka-compilation-report completion="yes" mode="standalone">'
         '<module name="wxdf.kernel"/><module name="wxdf.migration"/>'
         '<module name="wxdf.legacy_removed"/>'
         '<module_usage name="wxdf.legacy_reference_only"/>'
@@ -379,7 +396,8 @@ def test_compilation_report_must_exist(tmp_path: Path) -> None:
 def test_compilation_report_must_contain_a_wxdf_module(tmp_path: Path) -> None:
     report = tmp_path / "compilation-report.xml"
     report.write_text(
-        '<nuitka-compilation-report><module name="main"/></nuitka-compilation-report>',
+        '<nuitka-compilation-report completion="yes" mode="standalone">'
+        '<module name="main"/></nuitka-compilation-report>',
         encoding="utf-8",
     )
 
@@ -395,6 +413,74 @@ def test_compilation_report_rejects_truncated_xml(tmp_path: Path) -> None:
         build._report_wxdf_modules(report)
 
 
+@pytest.mark.parametrize(
+    ("root", "completion", "mode", "message"),
+    [
+        ("forged", "yes", "standalone", "root must be nuitka-compilation-report"),
+        ("nuitka-compilation-report", "exception", "standalone", "completion must be yes"),
+        ("nuitka-compilation-report", "yes", "accelerated", "mode must be standalone"),
+    ],
+)
+def test_compilation_report_requires_successful_standalone_identity(
+    tmp_path: Path,
+    root: str,
+    completion: str,
+    mode: str,
+    message: str,
+) -> None:
+    report = tmp_path / "compilation-report.xml"
+    report.write_text(
+        f'<{root} completion="{completion}" mode="{mode}">'
+        '<module name="wxdf.kernel"/>'
+        f'</{root}>',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match=message):
+        build._report_wxdf_modules(report)
+
+
+@pytest.mark.parametrize(
+    ("root", "completion", "mode", "message"),
+    [
+        ("forged", "yes", "standalone", "root must be nuitka-compilation-report"),
+        ("nuitka-compilation-report", "exception", "standalone", "completion must be yes"),
+        ("nuitka-compilation-report", "yes", "accelerated", "mode must be standalone"),
+    ],
+)
+def test_public_package_rechecks_successful_standalone_report_identity(
+    tmp_path: Path,
+    root: str,
+    completion: str,
+    mode: str,
+    message: str,
+) -> None:
+    dist = tmp_path / "runtime.dist"
+    dist.mkdir()
+    _write_runtime(dist / build.executable_name())
+    report = dist / build.RUNTIME_COMPILATION_REPORT_NAME
+    elements = "".join(
+        f'<module name="{module_name}"/>'
+        for module_name in build.release_module_names()
+    )
+    report.write_text(
+        f'<{root} completion="{completion}" mode="{mode}">{elements}</{root}>',
+        encoding="utf-8",
+    )
+    manifest_path = dist / "wxdf-module-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["compilation_report"]["sha256"] = build.sha256_file(report)
+    manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match=message):
+        build.assemble_package(dist, tmp_path / "output", build.platform_id())
+
+    assert not (tmp_path / "output").exists()
+
+
 def test_runtime_manifest_writer_uses_only_compilation_report_evidence(tmp_path: Path) -> None:
     dist = tmp_path / "runtime.dist"
     dist.mkdir()
@@ -404,7 +490,8 @@ def test_runtime_manifest_writer_uses_only_compilation_report_evidence(tmp_path:
         for module_name in build.release_module_names()
     )
     report.write_text(
-        f"<nuitka-compilation-report>{module_elements}</nuitka-compilation-report>",
+        '<nuitka-compilation-report completion="yes" mode="standalone">'
+        f"{module_elements}</nuitka-compilation-report>",
         encoding="utf-8",
     )
 

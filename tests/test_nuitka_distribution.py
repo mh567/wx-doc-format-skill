@@ -62,7 +62,8 @@ def _write_compilation_manifest(dist: Path) -> None:
         for module_name in build.release_module_names()
     )
     report.write_text(
-        f"<nuitka-compilation-report>{elements}</nuitka-compilation-report>",
+        '<nuitka-compilation-report completion="yes" mode="standalone">'
+        f"{elements}</nuitka-compilation-report>",
         encoding="utf-8",
     )
     build._write_runtime_module_manifest(dist, report)

@@ -157,6 +157,14 @@ def _report_wxdf_modules(report_path: Path) -> tuple[str, ...]:
         root = ElementTree.parse(report_path).getroot()
     except ElementTree.ParseError as exc:
         raise RuntimeError(f"Nuitka compilation report is invalid: {exc}") from exc
+    if root.tag != "nuitka-compilation-report":
+        raise RuntimeError(
+            "Nuitka compilation report root must be nuitka-compilation-report"
+        )
+    if root.get("completion") != "yes":
+        raise RuntimeError("Nuitka compilation report completion must be yes")
+    if root.get("mode") != "standalone":
+        raise RuntimeError("Nuitka compilation report mode must be standalone")
     modules = {
         str(element.get("name"))
         for element in root.iter()

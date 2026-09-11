@@ -4,17 +4,18 @@ import argparse
 import json
 import platform
 import subprocess
+import sys
 import tempfile
 import zipfile
 from pathlib import Path
 
 
-NATIVE_OPEN_MODES = {
-    "modular_pure",
-    "modular_online",
-    "modular_file",
-    "modular_review",
-}
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+SCRIPTS_DIR = PROJECT_ROOT / "scripts"
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+from wxdf.review import mode_manifest
 
 
 def _retired_module_literal(name: object) -> bool:
@@ -72,16 +73,23 @@ def validate_modular_manifest(manifest: dict) -> None:
     for mode_name in modes:
         if _retired_mode_literal(mode_name):
             raise RuntimeError(f"Retired release mode is forbidden: {mode_name}")
-    if set(modes) != NATIVE_OPEN_MODES:
-        unexpected = sorted(set(modes) - NATIVE_OPEN_MODES)
-        missing = sorted(NATIVE_OPEN_MODES - set(modes))
+    authoritative_modes = mode_manifest()
+    if set(modes) != set(authoritative_modes):
+        unexpected = sorted(set(modes) - set(authoritative_modes))
+        missing = sorted(set(authoritative_modes) - set(modes))
         raise RuntimeError(
-            f"Native mode manifest mismatch; unexpected={unexpected}, missing={missing}"
+            "Native mode manifest mismatch against authoritative native modes; "
+            f"unexpected={unexpected}, missing={missing}"
         )
-    for mode_name in sorted(NATIVE_OPEN_MODES):
+    for mode_name, authoritative_mode in authoritative_modes.items():
         mode = modes[mode_name]
-        if not isinstance(mode, dict) or mode.get("status") != "enabled":
-            raise RuntimeError(f"{mode_name} must be enabled in the release manifest")
+        if (
+            not isinstance(mode, dict)
+            or mode.get("status") != authoritative_mode.get("status")
+        ):
+            raise RuntimeError(
+                f"{mode_name} status must match the authoritative native mode"
+            )
 
 
 def smoke(package_dir: Path) -> None:
