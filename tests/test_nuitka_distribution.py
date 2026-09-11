@@ -505,17 +505,15 @@ def test_public_skill_assembly_allows_missing_windows_artifact(tmp_path):
 
     manifest = json.loads((output / "artifacts" / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["available_platforms"] == ["kylin-v10-arm64", "macos-arm64"]
-    assert manifest["unavailable_platforms"] == ["windows-x86_64"]
+    assert manifest["unavailable_platforms"] == []
     assert manifest["macos_min_version"] == "26.0"
     assert "windows-x86_64" not in (output / "artifacts" / "SHA256SUMS.txt").read_text(encoding="utf-8")
-    powershell = (output / "scripts" / "run.ps1").read_text(encoding="utf-8")
-    assert "WXDF-E-RUNTIME-UNAVAILABLE" in powershell
-    assert "exit 3" in powershell
+    assert not (output / "scripts" / "run.ps1").exists()
     assert not list(output.rglob("*.py"))
 
 
 def test_public_skill_assembly_can_require_a_platform(tmp_path):
-    with pytest.raises(FileNotFoundError, match="windows-x86_64"):
+    with pytest.raises(ValueError, match="windows-x86_64"):
         public_assembler.assemble_public_skill(
             tmp_path,
             tmp_path / "public-skill",

@@ -684,7 +684,11 @@ def test_native_cli_supplies_release_report_transform_to_kernel(
         ])
 
     assert stopped.value.code == 0
-    assert json.loads(report.read_text(encoding="utf-8")) == {"status": "completed"}
+    published = json.loads(report.read_text(encoding="utf-8"))
+    assert published["status"] == "completed"
+    assert "review_packet" not in published
+    assert published["public_summary"]["schema_version"] == "1.0"
+    assert published["public_summary"]["status"] == "completed"
 
 
 def test_later_request_append_detects_change_immediately_before_replace(

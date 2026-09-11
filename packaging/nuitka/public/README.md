@@ -2,7 +2,7 @@
 
 本发布包用于将 Markdown 或 DOCX 文档转换为 WX 模板格式的 DOCX 文档。运行时无需安装 Python，安装和转换过程不下载文件。
 
-支持 Windows x86_64、macOS ARM64 和 Linux ARM64。Linux ARM64 制品以 Kylin V10 为候选兼容目标。
+当前离线发布目标为 macOS ARM64 和 Kylin V10 ARM64。macOS 制品经最低系统版本校验后进入 accepted 状态。Kylin V10 ARM64 制品保持 candidate 状态，启动时会输出稳定告警并继续执行。
 
 ## 安装
 
@@ -20,14 +20,8 @@ POSIX 系统：
 scripts/install.sh /path/to/agent/skills/wx-doc-format
 ```
 
-Windows PowerShell：
-
-```powershell
-.\scripts\install.ps1 -Destination C:\path\to\agent\skills\wx-doc-format
-```
-
 安装前会验证 SHA256，升级时会在目标目录旁保留上一版备份。
-安装目录的完整路径必须只包含可打印 ASCII 字符。如果用户主目录含有中文等字符，请显式指定类似 `/opt/wx-doc-format` 或 `C:\wx-doc-format` 的目录。安装脚本和启动脚本会在运行前检查该条件。
+安装目录的完整路径必须只包含可打印 ASCII 字符。如果用户主目录含有中文等字符，请显式指定类似 `/opt/wx-doc-format` 的目录。安装脚本和启动脚本会在运行前检查该条件。
 
 ## 使用
 
@@ -48,8 +42,8 @@ scripts/run.sh --version
 scripts/run.sh --input source.docx --output output.docx --template assets/wx_template.docx
 ```
 
-Windows 使用 `.\scripts\run.ps1` 传入相同参数。详细模式、文件协议和验证要求见 `SKILL.md`。
+详细模式、文件协议、公开报告摘要和验证要求见 `SKILL.md`。
 
 ## 完整性和兼容性
 
-`SHA256SUMS.txt` 用于检查包内文件完整性。当前制品未包含签名认证。Kylin V10 制品在 manifest 中标记为 candidate，交付前需要在目标架构真机上完成冒烟测试。
+`SHA256SUMS.txt` 用于检查包内文件完整性。当前制品未包含签名认证。manifest 声明当前平台状态和 `public_summary` 报告合同。Kylin V10 制品在 manifest 中标记为 candidate，交付前需要在目标架构真机上完成冒烟测试。

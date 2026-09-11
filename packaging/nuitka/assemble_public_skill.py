@@ -13,9 +13,22 @@ TEMPLATE_ROOT = Path(__file__).with_name("public-repo")
 SUPPORTED_ARTIFACTS = {
     "macos-arm64": ".tar.gz",
     "kylin-v10-arm64": ".tar.gz",
-    "windows-x86_64": ".zip",
 }
 GENERATED_MARKER = ".wxdf-public-skill-generated"
+PUBLIC_REPORT_SUMMARY_CONTRACT = {
+    "schema_version": "1.0",
+    "field": "public_summary",
+    "required_fields": [
+        "status",
+        "pipeline",
+        "profile",
+        "list_policy",
+        "audits",
+        "unexpected_styles_count",
+        "manual_review_required",
+        "diagnostic_codes",
+    ],
+}
 
 
 def sha256_file(path: Path) -> str:
@@ -58,6 +71,8 @@ def assemble_public_skill(
         raise FileNotFoundError("No supported release artifacts were found")
     if macos_min_version and not re.fullmatch(r"\d+(?:\.\d+){0,2}", macos_min_version):
         raise ValueError("macOS minimum version must contain one to three numeric components")
+    if "macos-arm64" in required_platforms and not macos_min_version:
+        raise ValueError("macOS minimum version is required for an accepted macos-arm64 release")
 
     if output_dir.exists() and not (output_dir / GENERATED_MARKER).is_file():
         raise ValueError(f"Output directory is not a generated public Skill: {output_dir}")
@@ -65,8 +80,8 @@ def assemble_public_skill(
         shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True)
     (output_dir / GENERATED_MARKER).write_text("generated\n", encoding="ascii")
-    for name in ("SKILL.md", "README.md"):
-        shutil.copy2(TEMPLATE_ROOT / name, output_dir / name)
+    shutil.copy2(PROJECT_ROOT / "SKILL.md", output_dir / "SKILL.md")
+    shutil.copy2(TEMPLATE_ROOT / "README.md", output_dir / "README.md")
     shutil.copy2(PROJECT_ROOT / "VERSION", output_dir / "VERSION")
     shutil.copytree(PROJECT_ROOT / "assets", output_dir / "assets")
     shutil.copytree(TEMPLATE_ROOT / "scripts", output_dir / "scripts")
@@ -76,13 +91,32 @@ def assemble_public_skill(
     metadata_dir = output_dir / "artifacts"
     metadata_dir.mkdir()
     sorted_artifacts = sorted(artifacts.items())
+    platforms = {}
+    for platform_id in sorted(SUPPORTED_ARTIFACTS):
+        path = artifacts.get(platform_id)
+        if platform_id == "macos-arm64":
+            status = "accepted" if path is not None and macos_min_version else "unavailable"
+        else:
+            status = "candidate" if path is not None else "unavailable"
+        entry = {"status": status}
+        if path is not None:
+            entry.update({
+                "name": path.name,
+                "sha256": sha256_file(path),
+                "size": path.stat().st_size,
+            })
+        platforms[platform_id] = entry
     sums = "".join(
         f"{sha256_file(path)}  {path.name}\n"
         for _, path in sorted_artifacts
     )
     (metadata_dir / "SHA256SUMS.txt").write_text(sums, encoding="utf-8")
     (metadata_dir / "AVAILABLE_PLATFORMS.txt").write_text(
-        "".join(f"{platform_id}\n" for platform_id, _ in sorted_artifacts),
+        "".join(
+            f"{platform_id}\n"
+            for platform_id, entry in platforms.items()
+            if entry["status"] in {"accepted", "candidate"}
+        ),
         encoding="utf-8",
     )
     (metadata_dir / "MACOS_MIN_VERSION.txt").write_text(
@@ -92,11 +126,19 @@ def assemble_public_skill(
     manifest = {
         "schema_version": 1,
         "version": version,
-        "available_platforms": [platform_id for platform_id, _ in sorted_artifacts],
+        "platforms": platforms,
+        "available_platforms": [
+            platform_id
+            for platform_id, entry in platforms.items()
+            if entry["status"] in {"accepted", "candidate"}
+        ],
         "unavailable_platforms": [
-            platform_id for platform_id in SUPPORTED_ARTIFACTS if platform_id not in artifacts
+            platform_id
+            for platform_id, entry in platforms.items()
+            if entry["status"] == "unavailable"
         ],
         "macos_min_version": macos_min_version,
+        "public_report_summary": PUBLIC_REPORT_SUMMARY_CONTRACT,
         "artifacts": [
             {
                 "platform": platform_id,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from copy import deepcopy
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -525,6 +526,12 @@ _RELEASE_REPORT_OMIT_FRAGMENTS = (
     "stack",
     "traceback",
 )
+_PUBLIC_SUMMARY_AUDITS = (
+    ("audit", "audit"),
+    ("model_audit", "model_audit"),
+    ("saved_output_audit", "saved_output_audit"),
+    ("appendix_preservation_audit", "appendix_preservation_audit"),
+)
 
 
 def _is_full_ast(value) -> bool:
@@ -566,6 +573,99 @@ def sanitize_release_report(report: dict) -> dict:
     return sanitize(report)
 
 
+def _public_summary_scalar(value: object) -> str:
+    if not isinstance(value, str):
+        return "unknown"
+    normalized = value.strip()
+    if not normalized or len(normalized) > 80:
+        return "unknown"
+    if "/" in normalized or "\\" in normalized or "\n" in normalized or "\r" in normalized:
+        return "unknown"
+    return normalized
+
+
+def _public_audit_status(value: object) -> str:
+    if not isinstance(value, dict):
+        return "not_run"
+    if value.get("passed") is True:
+        return "passed"
+    if value.get("passed") is False:
+        return "failed"
+    return "not_run"
+
+
+def _public_unexpected_styles_count(report: dict) -> int:
+    for container in (
+        report,
+        report.get("saved_output_audit"),
+        report.get("audit"),
+    ):
+        if not isinstance(container, dict):
+            continue
+        value = container.get("unexpected_styles")
+        if isinstance(value, list):
+            return len(value)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            return value
+    return 0
+
+
+def _public_diagnostic_codes(report: dict) -> list[str]:
+    codes = set()
+
+    def collect(value: object) -> None:
+        if isinstance(value, dict):
+            code = value.get("code")
+            if isinstance(code, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,120}", code):
+                codes.add(code)
+            for child in value.values():
+                collect(child)
+        elif isinstance(value, list):
+            for child in value:
+                collect(child)
+
+    collect(report.get("diagnostics", []))
+    collect(report.get("risk_warnings", []))
+    for _, source_key in _PUBLIC_SUMMARY_AUDITS:
+        collect(report.get(source_key, {}))
+    return sorted(codes)
+
+
+def public_report_summary(report: dict) -> dict:
+    audits = {
+        public_name: _public_audit_status(report.get(source_key))
+        for public_name, source_key in _PUBLIC_SUMMARY_AUDITS
+    }
+    status = _public_summary_scalar(report.get("status"))
+    unexpected_styles_count = _public_unexpected_styles_count(report)
+    diagnostic_codes = _public_diagnostic_codes(report)
+    explicit_manual_review = report.get("manual_review_required")
+    manual_review_required = (
+        explicit_manual_review
+        if isinstance(explicit_manual_review, bool)
+        else (
+            status != "completed"
+            or unexpected_styles_count > 0
+            or bool(diagnostic_codes)
+            or "failed" in audits.values()
+        )
+    )
+    return {
+        "schema_version": "1.0",
+        "status": status,
+        "pipeline": _public_summary_scalar(report.get("pipeline")),
+        "profile": _public_summary_scalar(
+            report.get("profile")
+            or (report.get("execution_plan") or {}).get("profile")
+        ),
+        "list_policy": _public_summary_scalar(report.get("list_policy")),
+        "audits": audits,
+        "unexpected_styles_count": unexpected_styles_count,
+        "manual_review_required": manual_review_required,
+        "diagnostic_codes": diagnostic_codes,
+    }
+
+
 def report_for_output(report: dict, *, release: bool | None = None) -> dict:
     import os as _os
 
@@ -574,7 +674,11 @@ def report_for_output(report: dict, *, release: bool | None = None) -> dict:
         if release is None
         else release
     )
-    return sanitize_release_report(report) if is_release else report
+    if not is_release:
+        return report
+    public_report = sanitize_release_report(report)
+    public_report["public_summary"] = public_report_summary(report)
+    return public_report
 
 
 def _apply_native_structure_context(

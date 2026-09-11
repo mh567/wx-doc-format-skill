@@ -4,7 +4,7 @@
 
 将 Markdown 或 DOCX 文档转换为 WX 模板格式的 DOCX，自动处理标题、目录、列表、表格、题注和附录，并生成审计报告。
 
-运行时使用本机编译包，目标机无需安装 Python。当前提供 macOS ARM64 和 Linux ARM64 制品，Windows x86_64 运行时待后续补充。
+运行时使用本机编译包，目标机无需安装 Python。当前发布目标为 macOS ARM64 和 Kylin V10 ARM64。macOS 制品经最低系统版本校验后进入 accepted 状态。Kylin V10 ARM64 制品保持 candidate 状态，启动时输出 `WXDF-W-RUNTIME-CANDIDATE` 后继续执行。
 
 ## 安装方法
 
@@ -12,7 +12,7 @@
 
 > 从 GitHub 仓库 mh567/wx-doc-format-skill 安装 wx-doc-format skill
 
-安装完成后可直接通过对话触发。首次转换会自动获取当前平台制品、验证 SHA256 并完成本地安装，无需手工执行命令或配置环境变量。
+安装完成后可直接通过对话触发。首次转换会先读取 manifest 中的平台状态，再获取当前平台制品、验证 SHA256 并完成本地安装，无需手工执行命令或配置环境变量。状态 unavailable、缺失、未知或损坏时以退出码 3 停止，且不会开始下载或执行缓存运行时。
 
 内网离线部署时，从 GitHub Release 或内网介质取得对应平台的完整 Skill 安装包，直接交给 Agent：
 

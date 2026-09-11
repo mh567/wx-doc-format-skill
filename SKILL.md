@@ -1,279 +1,85 @@
 ---
 name: wx-doc-format
-description: 将 Markdown 或 DOCX 转换为模板化技术文档 DOCX。当用户说“技术文档格式”“转换为技术文档格式”“wx文档格式”“WX 格式转换”，或要求按技术文档模板整理标题、目录、列表、表格、题注和附录时使用。
+description: 将 Markdown 或 DOCX 转换为模板化技术文档 DOCX。当用户要求技术文档格式、WX 格式转换，或要求按模板整理标题、目录、列表、表格、题注和附录时使用。
 metadata:
   short-description: 转换为模板化技术文档 DOCX
 ---
 
 # WX 文档格式
 
-将 Markdown 或 DOCX 文档转换为模板格式的 Word (.docx) 文档。DOCX 先识别源封面与源目录，移除封面并提取唯一文档标题，再预分析 Word OOXML 编号，随后进入解析、规范化和模板渲染流水线。输出固定以唯一主目录开头，分页后从文档标题和正文开始。可选 LLM 能力用于模糊目录候选、模糊编号候选、语义列表、表格题注和审计后语义复核。
+将用户提供的 Markdown 或 DOCX 转换为模板化 DOCX，并依据公开审计摘要决定是否交付。
 
-## 使用方式
+## 触发与模式
 
-用户上传 Markdown 或 DOCX 并说“技术文档格式”“转换为技术文档格式”“按技术文档格式排版”“整理成技术文档”“wx文档格式”或“WX 格式转换”时触发本 Skill。用户未指定模式时，Agent 必须先弹出两个选项供用户选择：
+1. 确认输入为可读取的 Markdown 或 DOCX。缺少输入时请用户补充。完成条件：已取得一个明确的输入文件。
+2. 用户已指定普通模式或 LLM 增强模式时直接采用。用户未指定时请其二选一，默认建议普通模式。完成条件：运行模式唯一确定。
+3. 普通模式执行本地确定性转换。LLM 增强模式转到“LLM 文件协议”。完成条件：已进入对应命令分支。
 
-1. **普通模式**（默认）：纯规则转换，不调用 LLM
-2. **LLM 增强模式**：增加模糊目录复核、功能点列表识别、题注生成和审计后受限复核
+## 平台与启动
 
-用户选择后直接执行对应模式，无需额外确认。
+公开发布目标为 macOS ARM64 和 Kylin V10 ARM64。始终通过本 Skill 的启动脚本运行：
 
-## 验证策略
+1. macOS 状态为 `accepted` 时继续。
+2. Kylin 状态为 `candidate` 时，启动脚本输出 `WXDF-W-RUNTIME-CANDIDATE` 后继续。交付时保留真机复核项。
+3. 平台状态为 `unavailable`，平台条目缺失，状态未知或 manifest 损坏时，启动脚本以退出码 3 停止。保留原始文件并向用户报告稳定错误码。
+4. 在线仓库安装首次运行时下载当前版本制品并校验 SHA256。离线安装包直接使用包内运行时，不执行下载。
 
-普通模式和 LLM 增强模式均遵循以下规则：
+完成条件：启动脚本接受当前平台，或已按退出码 3 停止且没有尝试转换。
 
-- 禁止调用 Computer Use，也不得通过 Chrome、内置浏览器、AppleScript 或 Word/WPS 界面自动化验证输出。
-- 默认验证以 CLI 返回码、JSON 报告、内置审计结果和 `unexpected_styles` 等不变量为准。
-- 需要追加检查时，优先使用 ZIP 完整性检查、OOXML 结构查询、内容数量对比和针对性测试。
-- 只有用户明确要求页面级视觉检查时，才可使用已安装的无界面渲染工具生成 PDF 或 PNG，随后直接检查渲染产物。
-- 目录页码、分节和复杂域等依赖 Word/WPS 更新的项目应记录为人工复核项，Agent 不自动打开桌面应用。
-- 结构检查无法证明页面视觉效果时，必须如实说明未执行页面级视觉验证。
+## 普通模式
 
-## 一键安装
-
-对任何支持 skill 的 Agent 说：
-
-> 从 GitHub 仓库 mh567/wx-doc-format-skill 安装 wx-doc-format skill
-
-更新时重复上述指令即可，Agent 会自动比对版本并拉取最新代码。
-
-## 架构概览
-
-```
-输入 (MD / DOCX)
-  │
-  ▼
-DOCX 源目录预处理
-  │  toc_detector.py：确定性检测与候选边界
-  │  toc_region_review：仅复核模糊候选（LLM 增强模式）
-  ▼
-DOCX 首部规范化
-  │  front_matter.py：封面边界、标题提取、统一排除和顺序审计
-  ▼
-DOCX 编号预分析
-  │  list_detector.py：源编号定义、层级、连续组与保护角色
-  │  list_group_detection.py：类别中立的语义列表组发现、置信度与边界
-  │  unordered_lists.py：未知项目符候选、版式证据与章节内无序层级归一化
-  │  list_style_mapping.py：AST 层级到 WX 列表样式的统一映射
-  │  list_detect：复核模糊编号和未知无序项目符候选（LLM 增强模式）
-  ▼
-DOCX 表格语义分类
-  │  table_semantics.py：data、code_sample、callout、layout 与题注准入
-  ▼
-Step 1: 解析为 source AST
-  │  scripts/md_pipeline.py / docx_pipeline.py
-  │  appendix_semantics.py：附录起止范围、编号、分类、专用标题层级与审计合同
-  │
-  ▼
-Step 2: 规范化 + LLM 增强（可选）
-  │  model_normalization.py：清理手工编号、重定型、表格角色修正
-  │  caption_placement.py：题注关联、表上图下位置收口与成品审计
-  │  llm_enhancer.py：Capability 插拔架构：
-  │    • toc_region_review：模糊源目录候选复核
-  │    • list_detect：功能点列表识别
-  │    • caption_gen：无题注表格自动生成题注文字
-  │
-  ▼
-Step 3: 模板驱动渲染
-  │  template_finalizer.py：格式收口、语义表格合同、附录合并
-  │  table_formatting.py：表格五层格式合同与幂等规范化
-  │  audit.py：输出审计
-  │  review_loop.py：AuditFinding、ReviewPacket、候选复审、接受与回滚
-  │  document_review：只处理审计点名的可修复语义问题
-  │
-  ▼
-输出: 样式合规的 .docx + JSON 报告
-```
-
-## CLI 用法
+将 `SKILL_ROOT` 解析为包含本文件的绝对目录。输入、输出、模板和报告均使用绝对路径：
 
 ```bash
-# 基础用法
-python3 scripts/main.py \
-  --input source.docx \
-  --output output.docx \
-  --template template.docx
-
-# LLM 增强（模糊目录复核 + 功能点列表 + 题注生成 + 审计闭环）
---llm-enhance all
-
-# 仅模糊目录复核
---llm-enhance toc_region_review
-
-# 仅列表识别
---llm-enhance list_detect
-
-# 仅题注生成
---llm-enhance caption_gen
-
-# 仅审计后文档复核
---llm-enhance document_review
-
-# 导出 AST 调试
---ast model.json
---source-ast source.json
-
-# 风险检测严格模式
---fail-on-risk
+"$SKILL_ROOT/scripts/run.sh" \
+  --input "$INPUT_FILE" \
+  --output "$OUTPUT_FILE" \
+  --template "$SKILL_ROOT/assets/wx_template.docx" \
+  --report "$REPORT_FILE"
 ```
 
-## LLM 增强能力
+完成条件：命令退出，输出文件与报告文件均已生成；任一文件缺失时停止交付并报告退出码。
 
-| 能力 | CLI | 说明 |
-|------|-----|------|
-| `toc_region_review` | `--llm-enhance toc_region_review` | 从确定性检测器给出的模糊候选中选择完整目录区间 |
-| `list_detect` | `--llm-enhance list_detect` | 复核模糊 Word 编号候选，并识别缺少编号结构的语义列表 |
-| `caption_gen` | `--llm-enhance caption_gen` | 根据上下文为无题注表格生成简短题注 |
-| `document_review` | `--llm-enhance document_review` | 首次完整审计后复核可修复语义问题，复审失败时自动回滚 |
-| `all` | `--llm-enhance all` | 启用全部四项能力 |
-| `off` | 默认 | 纯规则，不调用 LLM |
+## LLM 文件协议
 
-新增能力通过 `CapabilityConfig` 注册即可，无需修改核心调度逻辑。
-
-### 列表处理边界
-
-- 普通模式读取 `numId`、`abstractNumId`、`ilvl`、`numFmt`、`lvlText`、起始值和 `startOverride`。
-- 完整的多级章节号优先识别为标题，单级列表标记不得部分剔除章节号。
-- 有效编号定义还需列表样式、连续编号序列或可见列表标记作为高置信度证据。
-- 有序逻辑序列可跨 `numId` 重建，前提是起始值、编号格式、标记模板、层级、样式和源位置同时连续。
-- 无序逻辑序列可跨 `numId` 重建，使用相邻位置、`bullet` 类别、层级、项目符号族、样式和缩进兼容性判断，不依赖递增起始值。
-- 无效编号定义会抑制残留列表样式，避免孤立正文被样式名强制转为列表。
-- Heading、Title、Caption、TOC、目录、题注、注释、公式和附录专用标题样式属于保护角色。
-- `3.1注-无编号注`、`3.2注-有编号注` 以及 `lvlText=注：`、`lvlText=注%1：` 在编号预分析阶段转为 `note` 或 `numbered_note`，并在通用列表、题注和标题规则之前写入 source AST。
-- 孤立的普通样式编号段落作为模糊候选保留正文，并在报告中记录。
-- 源 `numFmt` 和 `lvlText` 保存在 `source.numbering`，不直接决定 WX 一级、二级样式。
-- AST `level=0` 的有序列表使用 `1.1一级列项-编号`，更深层有序列表使用 `2.1二级列项-有编号`。
-- AST `level=0` 的无序列表使用 `1.2一级列项-无编号`，更深层无序列表使用 `2.2二级列项-无编号`。
-- 原始圆点、方块、菱形、横线和自定义项目符只作为无序列表类别证据；当前章节内的 `ilvl`、缩进、相邻项和父项关系决定最终层级。
-- 章节内无父项的无序列表从 `level=0` 开始，子列表使用 `level>=1`；输出统一重写为一级横线和二级圆点。
-- LLM 增强模式可根据任意 Unicode 前导符号、重复模式、缩进和章节上下文识别无序列表，候选确认后仍由确定性映射生成样式。
-- 缺少列表元数据时，系统使用前置引导关系、连续段落、版式、长度、结尾标点和组前后变化点发现语义列表组；引导词和冒号只作为软证据。
-- 普通模式仅自动转换高组置信度候选。原文没有列表类别证据时默认生成有序列表，中组置信度候选保留正文并进入审计。
-- LLM 按完整候选组复核成员边界、列表类别和层级。高置信度源类别受保护，语义默认有序可以调整，组内条目必须原子转换。
-- LLM 对模糊 OOXML 候选只能确认预分析建议的层级和 WX 目标列表类型，不能改变原文或编号边界。
-- 直接渲染通过稳定 `source_position` 使用规范化 AST 的最终列表角色，避免重复推断。
-- 注语义审计核对源注数量、AST 角色和成品样式，任一层不一致时记录具体段落。
-
-### 附录处理边界
-
-- DOCX 解析阶段先生成通用源块，再结合独立附录标记、样式、正文编号层级、文档位置、分页和后续内容执行全文附录候选裁决。
-- Normal、Heading 1、Heading 2 或其他样式的独立“附录”都可进入候选；分类文字、A.1 编号和四个附录专用样式均为可选增强证据。
-- 位于正文多级编号体系中的“附录”使用负证据抑制，例如 2.2.5 的 Heading 3 不开启附录范围。
-- source AST 使用 `appendix` 块表示附录标题，保存 `appendix_id`、`classification`、`title_lines`、置信度、正负证据和 `layout.page_break_before`。
-- 附录内的块统一标注 `appendix_id` 和 appendix context，`document.appendices` 记录每个附录的起止块与源位置。
-- 附录范围内的普通 Heading 按最浅层级重建附录相对层级；可见 A.1、A.1.1 和 A.1.1.1 优先提供层级并从标题文本中移除。
-- 附录标题根据实际存在的分类行和标题行使用零至两个 Shift+Enter 软换行，编号由模板 `附录标题` 的多级编号产生。
-- 每个已确认附录前都生成且只生成一个显式 Word 分页边界。
-- A.1、A.1.1 和 A.1.1.1 分别渲染为三个附录专用标题样式，字体、字号、行距、段距和编号绑定由附录专项审计验证。
-- 目录域使用 `\\t` 显式映射附录标题与一至三级附录标题，WPS 更新域时可重建完整附录目次。
-- 附录范围内已有的表题和图题保留 A.1 形式的源编号，避免被正文全局 SEQ 编号覆盖。
-
-## LLM 增强配置
-
-用户选择 LLM 增强模式后，Agent 需将自己的 LLM 能力传递给 `main.py`。推荐使用文件协议分阶段流程，Agent 无需设置环境变量即可完成 LLM 调用。
-
-### 方式一（推荐）：文件协议分阶段流程
+1. 生成请求：
 
 ```bash
-# Step 1: 解析文档，生成 LLM 请求文件
-python3 scripts/main.py \
-  --input source.docx \
-  --output output.docx \
-  --template assets/wx_template.docx \
+"$SKILL_ROOT/scripts/run.sh" \
+  --input "$INPUT_FILE" \
+  --output "$OUTPUT_FILE" \
+  --template "$SKILL_ROOT/assets/wx_template.docx" \
+  --report "$REPORT_FILE" \
   --llm-enhance all \
-  --generate-requests .wx-doc-format/
+  --generate-requests "$REQUEST_DIR"
 ```
 
-这将生成：
+完成条件：`run.json` 与 `llm_requests.jsonl` 已生成，或报告状态已进入失败。
 
-- `.wx-doc-format/run.json`：运行配置（源文件路径、CLI 参数等）
-- `.wx-doc-format/llm_requests.jsonl`：LLM 请求列表（每行包含 `request_id`、`phase`、`capability`、`prompt`、`input_hash`）
+2. 逐行处理 `llm_requests.jsonl`。每个响应保留原请求的 `protocol_version`、`request_id` 和 `input_hash`，模型原始 JSON 文本写入 `raw_response`。将响应写入同目录的 `llm_responses.jsonl`。完成条件：每个待处理请求都有唯一响应。
 
-Agent 读取 `llm_requests.jsonl`，逐行生成 `raw_response`（LLM 的 JSON patch 输出），写入 `llm_responses.jsonl` 后：
+3. 恢复运行：
 
 ```bash
-# Step 2: 恢复运行，验证并应用响应
-python3 scripts/main.py --resume .wx-doc-format/run.json
+"$SKILL_ROOT/scripts/run.sh" --resume "$REQUEST_DIR/run.json"
 ```
 
-系统自动执行：
+状态再次为 `waiting_external` 时重复第 2 步和第 3 步。完成条件：状态进入完成或失败。发布运行时不会自行访问互联网模型服务。
 
-1. 核对当前源文件与生成请求时记录的 `source_sha256`
-2. 重算请求哈希，并验证每个响应必填的 `input_hash`
-3. 校验 JSON patch schema，以及每个 operation 的字段、类型、枚举和范围
-4. 校验每个 decision 的 `block_id`、审计 finding、允许操作和原始值快照
-5. 应用高置信度 patch 到候选文档模型
-6. 渲染并复审候选输出
+## 审计与交付
 
-当存在模糊目录候选时，首次恢复会应用 `toc_region_review` 响应，然后追加 AST 阶段请求。完成 AST 阶段后，系统先临时渲染并执行完整审计；若存在可修复语义问题，会追加 `document_review` 请求。Agent 补全新请求并再次恢复后，系统重新渲染和复审，仅接受审计评分严格改善且内容保持完整的结果。
+仅使用 JSON 报告中的 `public_summary` 判断公开交付结果。该摘要的 `schema_version` 必须为 `1.0`，并包含 `status`、`pipeline`、`profile`、`list_policy`、`audits`、`unexpected_styles_count`、`manual_review_required` 和 `diagnostic_codes`。
 
-### 审计闭环边界
+1. `status=completed`、已执行审计均为 `passed`、`unexpected_styles_count=0` 且输出文件存在时，可以交付 DOCX。
+2. `status=waiting_external` 时继续 LLM 文件协议，暂不交付。
+3. `status=failed`、摘要缺失、摘要版本错误、审计失败或意外样式数量大于零时停止交付，并报告 `diagnostic_codes`。
+4. `manual_review_required=true` 时，在交付说明中逐项列出人工复核要求。
 
-- `document_review` 只接收结构化 `ReviewPacket`，其中包含稳定块 ID、局部上下文、审计证据和允许操作。
-- 只有置信度不低于 0.85 且命中可修复审计项的结构修改可以进入候选 AST。
-- 候选 AST 必须重新规范化、渲染并执行全量审计；出现内容变化、新增高风险问题或评分未改善时自动回滚。
-- 每个被修改块对应的目标 finding 必须消失，未命中的块不得发生语义字段变化。
-- 候选规范化、渲染或复审发生异常时保留基线文档，并在报告中记录回滚原因。
-- 原文删除、原文改写、任意块移动、模板修改、样式修改和未授权块修改都会被拒绝。
-- 无法安全修复的问题写入报告中的 `unknown_pattern_packet`，运行期不会自动修改 Skill 代码。
+完成条件：已交付 DOCX、公开摘要结果与人工复核项，或已停止并给出稳定状态及诊断码。
 
-### 方式二（兼容）：API Key
+## 人工复核
 
-设置 `ANTHROPIC_API_KEY` 或 `OPENAI_API_KEY` 环境变量，无需额外配置。
-
-### 方式三（兼容）：外部 LLM 命令
-
-通过 `--llm-command` 或 `LLM_COMMAND` 传入外部 LLM 调用命令。该命令应从标准输入读取 prompt，并将响应写入标准输出：
-
-```bash
-python3 scripts/main.py \
-  --llm-command "your-llm-command" \
-  --llm-enhance all ...
-```
-
-如果外部命令需要读取文件，可在命令中使用 `{prompt_file}` 占位符。
-
-## 样式合规不变量
-
-- 输出文档只使用模板样式，`unexpected_styles` 必须为空
-- 输出只包含一个 WX 主目录域，原目录不在正文重复
-- 正文区域使用 Heading 样式的“目录”或“目次”保留原标题层级，不受源目录标题保护规则影响
-- 主目录标题固定为“目  次”，使用黑体四号、不加粗、居中、无缩进和 1.25 倍行距
-- `TOC 1` 至 `TOC 4` 使用宋体小四、不加粗和 1.25 倍行距，文本之前依次缩进 0、2、4、6 字符
-- 主目录域固定包含 1 至 4 级标题，不显示五级及以后标题
-- 目录专项审计检查标题文字与样式、四级目录样式、目录域最大层级和打开时更新域标记
-- 输出不保留源封面，顶层顺序固定为主目录、分页、唯一文档标题、正文
-- 标题文本不含手工编号
-- 列表每章节重启
-- 高置信度源列表、AST 列表和输出列表数量一致
-- AST 列表层级与最终 WX 列表样式一致
-- 普通语义表格的单元格全部为 `表正文`，该样式的有效行距为最小值 0 磅
-- 普通语义表格行保持 0.69 cm 最小行高和 `atLeast`
-- 普通语义表格使用 `autofit`、自动宽度、表级上下 0 和左右 108 dxa 默认边距
-- 单元格不保留独立 `tcMar`，WPS 中应继承整张表格的默认边距
-- 普通语义表格段落不保留覆盖模板的源间距、行距、缩进或字符直接格式
-- 表格使用模板中的有效表格样式 ID，重复规范化不产生变化
-- 单单元格自然语言说明框使用 `callout`，接口报文使用 `code_sample`，两者均不自动生成题注
-- 多列接口清单根据稳定表头和行列关系使用 `data`，只在 JSON、XML、HTTP 或命令等报文证据主导时使用 `code_sample`
-- 1 行 2 列、左侧含数学对象、右侧含公式编号且无框线的表在 source AST 中识别为 `layout`，保留源表宽度、边距、行高、边框和段落格式
-- 只有 `data` 表允许自动生成题注，源文档已有人工题注继续保留
-- 表题注紧邻对应表格上方，图题注紧邻对应图片下方
-- 题注存在双向歧义、重复关联或孤立情况时保留原位置并输出风险，不执行猜测性移动
-- 正文题注使用 SEQ 域代码（`SEQ Table` / `SEQ Figure`），附录已有题注保留 A.1 形式的源编号
-- 附录标题、一至三级标题的字体、字号、1.25 倍行距、必要段距、多级编号、按内容决定的软换行和唯一分页边界必须通过附录专项审计
-- 目录域必须显式映射四个附录专用标题样式，并保持打开文档时更新域标记
-- 普通语义表格统一添加全框线，`layout` 表保留源边框
-- 审计闭环接受的候选结果必须严格改善审计评分，并保持正文、表格内容和媒体引用完整
-
-## 使用要求
-
-- Python 3.10+
-- python-docx、lxml、markdown-it-py
-
-## 已知边界
-
-- 文本框、形状、SmartArt、批注、修订记录不会完整重建
-- Markdown 路径支持本地图片、ATX 与 Setext 标题、标准嵌套列表、GFM 表格、引用、围栏代码、分隔线、软换行和常用行内格式；强调、行内代码和链接会保留为 Word run 或超链接
-- Markdown 远程图片、HTML 块、任务列表状态和扩展语法会保留风险或未支持 token 记录
-- Markdown token 语义在 source AST 中记录来源、列表层级与容器上下文；代码块和引用不参与正文标题、题注或列表推断
-- 页眉页脚、页码、复杂目录域需要人工复核
+1. 在 Word 或 WPS 中更新目录页码、分节和复杂域。
+2. 复核复杂嵌入对象及无法完整重建的文本框、形状、SmartArt、批注和修订记录。
+3. Kylin V10 ARM64 候选制品需在目标真机完成安装和转换冒烟。
+4. 页面视觉效果仅在用户明确要求时使用无界面渲染产物检查，并如实说明验证范围。

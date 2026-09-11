@@ -1,41 +1,34 @@
 ---
 name: wx-doc-format
-description: 将 Markdown 或 DOCX 转换为模板化技术文档 DOCX。当用户说“技术文档格式”“转换为技术文档格式”“wx文档格式”“WX 格式转换”，或要求按技术文档模板整理标题、目录、列表、表格、题注和附录时使用。
+description: 将 Markdown 或 DOCX 转换为模板化技术文档 DOCX。当用户要求技术文档格式、WX 格式转换，或要求按模板整理标题、目录、列表、表格、题注和附录时使用。
 metadata:
   short-description: 转换为模板化技术文档 DOCX
 ---
 
 # WX 文档格式
 
-当用户上传 Markdown 或 DOCX 并说“技术文档格式”“转换为技术文档格式”“按技术文档格式排版”“整理成技术文档”“wx文档格式”或“WX 格式转换”时使用本 Skill。
+将用户提供的 Markdown 或 DOCX 转换为模板化 DOCX，并依据公开审计摘要决定是否交付。
 
-## 交互
+## 触发与模式
 
-1. 确认用户已提供 Markdown 或 DOCX 输入文件。
-2. 用户未指定运行模式时，请其选择“普通模式”或“LLM 增强模式”。
-3. 用户已选定模式时直接执行，无需再次确认。
-4. 完成后交付 DOCX，同时说明审计是否通过、`unexpected_styles` 是否为空以及人工复核项。
+1. 确认输入为可读取的 Markdown 或 DOCX。缺少输入时请用户补充。完成条件：已取得一个明确的输入文件。
+2. 用户已指定普通模式或 LLM 增强模式时直接采用。用户未指定时请其二选一，默认建议普通模式。完成条件：运行模式唯一确定。
+3. 普通模式执行本地确定性转换。LLM 增强模式转到“LLM 文件协议”。完成条件：已进入对应命令分支。
 
-运行模式：
+## 平台与启动
 
-1. 普通模式：使用本地规则完成转换。
-2. LLM 增强模式：增加模糊目录复核、语义列表识别、符合条件的题注生成和审计后受限复核。
+公开发布目标为 macOS ARM64 和 Kylin V10 ARM64。始终通过本 Skill 的启动脚本运行：
 
-## 运行时准备
+1. macOS 状态为 `accepted` 时继续。
+2. Kylin 状态为 `candidate` 时，启动脚本输出 `WXDF-W-RUNTIME-CANDIDATE` 后继续。交付时保留真机复核项。
+3. 平台状态为 `unavailable`，平台条目缺失，状态未知或 manifest 损坏时，启动脚本以退出码 3 停止。保留原始文件并向用户报告稳定错误码。
+4. 在线仓库安装首次运行时下载当前版本制品并校验 SHA256。离线安装包直接使用包内运行时，不执行下载。
 
-执行前读取 `artifacts/AVAILABLE_PLATFORMS.txt`。当前平台没有发布运行时时，告知用户并保留原始文件。
+完成条件：启动脚本接受当前平台，或已按退出码 3 停止且没有尝试转换。
 
-从 GitHub 仓库安装时，首次运行会从当前版本的 GitHub Release 下载平台运行时，验证 SHA256 后自动安装。
+## 普通模式
 
-使用离线 Skill 安装包时，Agent 将解压后包含 `SKILL.md` 的完整目录放入自身 skills 目录。离线包已包含平台运行时，可直接执行转换。
-
-联网仓库安装和离线安装包均无需配置环境变量。`artifacts/` 只保存薄 Skill 用于校验下载的平台清单、版本信息和 SHA256，不作为用户安装入口。
-
-## 执行
-
-将 `SKILL_ROOT` 解析为包含本 `SKILL.md` 的目录，并对输入、输出、模板和报告使用绝对路径。
-
-POSIX 系统：
+将 `SKILL_ROOT` 解析为包含本文件的绝对目录。输入、输出、模板和报告均使用绝对路径：
 
 ```bash
 "$SKILL_ROOT/scripts/run.sh" \
@@ -45,39 +38,48 @@ POSIX 系统：
   --report "$REPORT_FILE"
 ```
 
-Windows PowerShell：
+完成条件：命令退出，输出文件与报告文件均已生成；任一文件缺失时停止交付并报告退出码。
 
-```powershell
-& "$SkillRoot\scripts\run.ps1" `
-  --input $InputFile `
-  --output $OutputFile `
-  --template "$SkillRoot\assets\wx_template.docx" `
-  --report $ReportFile
+## LLM 文件协议
+
+1. 生成请求：
+
+```bash
+"$SKILL_ROOT/scripts/run.sh" \
+  --input "$INPUT_FILE" \
+  --output "$OUTPUT_FILE" \
+  --template "$SKILL_ROOT/assets/wx_template.docx" \
+  --report "$REPORT_FILE" \
+  --llm-enhance all \
+  --generate-requests "$REQUEST_DIR"
 ```
 
-## LLM 增强模式
+完成条件：`run.json` 与 `llm_requests.jsonl` 已生成，或报告状态已进入失败。
 
-选择 LLM 增强模式时，使用文件协议：
+2. 逐行处理 `llm_requests.jsonl`。每个响应保留原请求的 `protocol_version`、`request_id` 和 `input_hash`，模型原始 JSON 文本写入 `raw_response`。将响应写入同目录的 `llm_responses.jsonl`。完成条件：每个待处理请求都有唯一响应。
 
-1. 在转换命令中增加 `--llm-enhance all --generate-requests "$REQUEST_DIR"`。
-2. 读取 `llm_requests.jsonl`，逐行处理请求，将模型原始 JSON 返回文本写入对应响应的 `raw_response`。
-3. 将响应写入同目录的 `llm_responses.jsonl`。每行保留请求中的 `protocol_version`、`request_id` 和 `input_hash`。
-4. 执行 `scripts/run.sh --resume "$REQUEST_DIR/run.json"`。如果生成新请求，继续处理，直到转换完成或协议验证失败。
+3. 恢复运行：
 
-发布运行时不会自动访问互联网模型服务。
+```bash
+"$SKILL_ROOT/scripts/run.sh" --resume "$REQUEST_DIR/run.json"
+```
 
-## 验证
+状态再次为 `waiting_external` 时重复第 2 步和第 3 步。完成条件：状态进入完成或失败。发布运行时不会自行访问互联网模型服务。
 
-交付前检查 CLI 返回码、JSON 报告和以下不变量：
+## 审计与交付
 
-1. `unexpected_styles` 为空。
-2. 标题文本不含手工编号。
-3. 普通语义表格符合表格样式要求。
-4. 目录只包含规定的标题层级。
-5. 列表在每个章节内按规则重启。
+仅使用 JSON 报告中的 `public_summary` 判断公开交付结果。该摘要的 `schema_version` 必须为 `1.0`，并包含 `status`、`pipeline`、`profile`、`list_policy`、`audits`、`unexpected_styles_count`、`manual_review_required` 和 `diagnostic_codes`。
 
-## 已知边界
+1. `status=completed`、已执行审计均为 `passed`、`unexpected_styles_count=0` 且输出文件存在时，可以交付 DOCX。
+2. `status=waiting_external` 时继续 LLM 文件协议，暂不交付。
+3. `status=failed`、摘要缺失、摘要版本错误、审计失败或意外样式数量大于零时停止交付，并报告 `diagnostic_codes`。
+4. `manual_review_required=true` 时，在交付说明中逐项列出人工复核要求。
 
-1. 目录页码和复杂域可能需要在 Word 或 WPS 中更新。
-2. Kylin V10 ARM64 制品在真机验收前保持候选状态。
-3. macOS ARM64 可用系统版本取决于发布制品的 `minos`。
+完成条件：已交付 DOCX、公开摘要结果与人工复核项，或已停止并给出稳定状态及诊断码。
+
+## 人工复核
+
+1. 在 Word 或 WPS 中更新目录页码、分节和复杂域。
+2. 复核复杂嵌入对象及无法完整重建的文本框、形状、SmartArt、批注和修订记录。
+3. Kylin V10 ARM64 候选制品需在目标真机完成安装和转换冒烟。
+4. 页面视觉效果仅在用户明确要求时使用无界面渲染产物检查，并如实说明验证范围。

@@ -43,6 +43,21 @@ MODULAR_OPEN_MODES = {
     "legacy_review": {"status": "enabled", "entrypoint": "legacy CLI", "contract": "legacy"},
 }
 
+PUBLIC_REPORT_SUMMARY_CONTRACT = {
+    "schema_version": "1.0",
+    "field": "public_summary",
+    "required_fields": [
+        "status",
+        "pipeline",
+        "profile",
+        "list_policy",
+        "audits",
+        "unexpected_styles_count",
+        "manual_review_required",
+        "diagnostic_codes",
+    ],
+}
+
 
 def wxdf_module_names() -> tuple[str, ...]:
     """Return the source wxdf package and every Python module below it."""
@@ -185,14 +200,18 @@ def ensure_runtime_layout(runtime_dir: Path) -> None:
 
 
 def _copy_public_files(package_dir: Path) -> None:
-    for name in ("SKILL.md", "README.md"):
-        shutil.copy2(PUBLIC_DIR / name, package_dir / name)
+    shutil.copy2(PROJECT_ROOT / "SKILL.md", package_dir / "SKILL.md")
+    shutil.copy2(PUBLIC_DIR / "README.md", package_dir / "README.md")
     shutil.copy2(PROJECT_ROOT / "VERSION", package_dir / "VERSION")
     shutil.copytree(PROJECT_ROOT / "assets", package_dir / "assets")
     adapter_dir = package_dir / "scripts"
     adapter_dir.mkdir()
     for name in ("install.sh", "run.sh", "install.ps1", "run.ps1"):
-        source = Path(__file__).with_name(name)
+        source = (
+            PUBLIC_DIR / "scripts" / name
+            if name == "run.sh"
+            else Path(__file__).with_name(name)
+        )
         target = adapter_dir / name
         shutil.copy2(source, target)
         if target.suffix == ".sh":
@@ -227,13 +246,16 @@ def _write_integrity_files(package_dir: Path, target: str, version: str) -> None
         path for path in package_dir.rglob("*")
         if path.is_file() and path.name not in {"manifest.json", "SHA256SUMS.txt"}
     )
+    platform_status = "candidate" if target.startswith("kylin-v10-") else "accepted"
     manifest = {
         "schema_version": 1,
         "product": "wx-doc-format-skill",
         "version": version,
         "platform": target,
-        "compatibility_status": "candidate" if target.startswith("kylin-v10-") else "native",
+        "platforms": {target: {"status": platform_status}},
+        "compatibility_status": "candidate" if platform_status == "candidate" else "native",
         "offline": True,
+        "public_report_summary": PUBLIC_REPORT_SUMMARY_CONTRACT,
         "modular": json.loads(
             (package_dir / "runtime" / "wxdf-module-manifest.json").read_text(encoding="utf-8")
         ) if (package_dir / "runtime" / "wxdf-module-manifest.json").is_file() else modular_module_manifest(),
