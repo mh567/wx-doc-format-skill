@@ -422,7 +422,7 @@ def test_offline_launcher_warns_for_candidate_and_stops_on_unavailable_before_ru
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX manifest validation contract")
 @pytest.mark.parametrize("launcher_kind", ["online", "offline"])
-@pytest.mark.parametrize("damage", ["trailing", "truncated", "corrupt_tail"])
+@pytest.mark.parametrize("damage", ["trailing", "truncated", "corrupt_tail", "nul_trailing"])
 def test_public_launchers_reject_invalid_json_before_cache_download_or_runtime(
     tmp_path: Path,
     launcher_kind: str,
@@ -462,8 +462,11 @@ def test_public_launchers_reject_invalid_json_before_cache_download_or_runtime(
         "trailing": manifest_text + "\ntrailing",
         "truncated": manifest_text[:-1],
         "corrupt_tail": manifest_text[:-1] + ",broken}",
-    }[damage]
-    manifest_path.write_text(damaged, encoding="utf-8")
+    }
+    if damage == "nul_trailing":
+        manifest_path.write_bytes(manifest_text.encode("utf-8") + b"\x00garbage")
+    else:
+        manifest_path.write_text(damaged[damage], encoding="utf-8")
 
     completed = subprocess.run(
         ["/bin/sh", str(package / "scripts" / "run.sh"), "--version"],

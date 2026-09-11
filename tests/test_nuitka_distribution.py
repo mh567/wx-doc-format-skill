@@ -91,7 +91,7 @@ def test_offline_backend_allows_command_and_blocks_cloud_auto_detection(monkeypa
     assert callable(main._resolve_llm_call(SimpleNamespace(llm_command="printf ok")))
 
 
-def test_platform_identifiers_cover_release_matrix():
+def test_platform_identifiers_cover_supported_build_matrix():
     assert build.platform_id("Windows", "AMD64") == "windows-x86_64"
     assert build.platform_id("Darwin", "arm64") == "macos-arm64"
     assert build.platform_id("Linux", "aarch64") == "kylin-v10-arm64"
@@ -178,6 +178,36 @@ def test_skip_compile_cli_uses_existing_standalone_directory(tmp_path, monkeypat
         "--output-dir", str(tmp_path / "output"),
     ])
     assert (package / "runtime" / build.executable_name()).is_file()
+
+
+def test_compile_only_cli_returns_standalone_runtime_without_public_package(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    build_dir = tmp_path / "compile"
+    runtime = build_dir / "release_entrypoint.dist"
+    runtime.mkdir(parents=True)
+    compiled = []
+
+    def compile_runtime(requested_build_dir):
+        compiled.append(requested_build_dir)
+        return runtime
+
+    monkeypatch.setattr(build, "compile_standalone", compile_runtime)
+    output_dir = tmp_path / "public-output"
+
+    result = build.main([
+        "--build-dir", str(build_dir),
+        "--output-dir", str(output_dir),
+        "--platform-id", "windows-x86_64",
+        "--compile-only",
+    ])
+
+    assert result == runtime.resolve()
+    assert capsys.readouterr().out.strip() == str(runtime.resolve())
+    assert compiled == [build_dir]
+    assert not output_dir.exists()
 
 
 def test_release_entrypoint_sets_offline_environment_before_import():
@@ -477,7 +507,7 @@ def test_public_skill_description_does_not_expose_private_implementation_names()
         assert private_name not in public_text
 
 
-def test_local_build_entrypoints_cover_only_supported_release_targets():
+def test_local_build_entrypoints_cover_supported_build_targets():
     nuitka_dir = ROOT / "packaging" / "nuitka"
     entrypoints = {
         "build-local-macos-arm64.sh": "macos-arm64",
@@ -493,6 +523,12 @@ def test_local_build_entrypoints_cover_only_supported_release_targets():
     assert "libjpeg-turbo-devel" in linux_text
     assert "zlib-devel" in linux_text
     assert "static-libs-for-embedding-only.tar.xz" in linux_text
+    windows_text = (nuitka_dir / "build-local-windows-x86_64.ps1").read_text(encoding="utf-8")
+    assert "--compile-only" in windows_text
+    assert "--archive" not in windows_text
+    assert "smoke_distribution.py" not in windows_text
+    assert "release_entrypoint.dist" in windows_text
+    assert "standalone runtime" in windows_text
 
 
 def test_public_adapters_enforce_printable_ascii_install_path():

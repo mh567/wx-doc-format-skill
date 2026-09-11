@@ -70,11 +70,11 @@ GitHub Actions 额度受限期间，发布制品使用本地构建。
 |---|---|---|
 | macOS ARM64 | `packaging/nuitka/build-local-macos-arm64.sh` | 可构建，发布前检查 Mach-O `minos` |
 | Linux ARM64 | `packaging/nuitka/build-local-linux-arm64.sh` | 可构建，Kylin V10 保持真机验收门禁 |
-| Windows x86_64 | `packaging/nuitka/build-local-windows-x86_64.ps1` | 已退出后续打包与验收范围，入口仅作历史兼容保留 |
+| Windows x86_64 | `packaging/nuitka/build-local-windows-x86_64.ps1` | 历史兼容入口，仅编译 standalone runtime |
 
-每个构建入口负责锁定依赖、执行测试、编译 standalone、组装平台包并执行真实转换冒烟。产物位于 `dist/local/`。
+macOS ARM64 与 Linux ARM64 发布入口负责锁定依赖、执行测试、编译 standalone、组装平台包并执行真实转换冒烟，公开包产物位于 `dist/local/`。Windows 历史入口执行测试和 standalone 编译后停止，runtime 位于 `build/nuitka/local-windows-x86_64/compile/release_entrypoint.dist`，不进入公开包组装、归档、package smoke 或发布流程。
 
-版本发布前先更新 `VERSION`，然后从同一私有提交重建所有本次提供的平台制品。制品内 `VERSION`、运行时 `--version`、归档名和发布标签必须一致。
+以下公开包合同仅适用于当前发布目标。版本发布前先更新 `VERSION`，然后从同一私有提交重建所有本次提供的平台制品。制品内 `VERSION`、运行时 `--version`、归档名和发布标签必须一致。
 
 详细命令和平台前置条件见 [`packaging/nuitka/README.md`](../packaging/nuitka/README.md)。
 

@@ -344,7 +344,9 @@ def validate_expected_version(expected: str | None) -> str:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Build an offline Nuitka standalone package.")
+    parser = argparse.ArgumentParser(
+        description="Compile a Nuitka standalone runtime and optionally assemble a public package."
+    )
     parser.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / "dist")
     parser.add_argument("--build-dir", type=Path, default=PROJECT_ROOT / "build" / "nuitka")
     parser.add_argument("--dist-dir", type=Path, help="Existing Nuitka .dist directory")
@@ -355,6 +357,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Override artifact platform identifier",
     )
     parser.add_argument("--skip-compile", action="store_true", help="Assemble an existing --dist-dir")
+    parser.add_argument(
+        "--compile-only",
+        action="store_true",
+        help="Stop after compiling the standalone runtime",
+    )
     parser.add_argument("--archive", action="store_true", help="Create a platform archive after assembly")
     parser.add_argument("--expected-version", default=None, help="Require VERSION to match this tag")
     return parser.parse_args(argv)
@@ -365,7 +372,15 @@ def main(argv: list[str] | None = None) -> Path:
     validate_expected_version(args.expected_version)
     if args.skip_compile and args.dist_dir is None:
         raise SystemExit("--skip-compile requires --dist-dir")
+    if args.compile_only and args.skip_compile:
+        raise SystemExit("--compile-only cannot be combined with --skip-compile")
+    if args.compile_only and args.archive:
+        raise SystemExit("--compile-only cannot be combined with --archive")
     dist_dir = args.dist_dir if args.skip_compile else compile_standalone(args.build_dir)
+    if args.compile_only:
+        runtime_dir = dist_dir.resolve()
+        print(runtime_dir)
+        return runtime_dir
     package_dir = assemble_package(dist_dir.resolve(), args.output_dir.resolve(), args.target)
     print(package_dir)
     if args.archive:

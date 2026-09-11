@@ -1,6 +1,6 @@
 # Nuitka 本地构建
 
-本目录当前交付 macOS ARM64 和 Linux ARM64 两个平台。历史上建立的 Windows x86_64 入口继续保留兼容，不再进入后续打包、验收或发布范围。有效构建入口会安装锁定依赖、运行测试、编译 standalone 运行时、组装离线包并执行真实转换冒烟。
+本目录当前交付 macOS ARM64 和 Linux ARM64 两个平台。这两个发布入口会安装锁定依赖、运行测试、编译 standalone 运行时、组装离线包并执行真实转换冒烟。历史 Windows x86_64 入口只编译 standalone 运行时。
 
 ## macOS ARM64
 
@@ -30,7 +30,7 @@ packaging/nuitka/build-local-linux-arm64.sh
 
 ## Windows x86_64
 
-该入口仅作历史兼容保留，后续不再执行 Windows x86_64 打包和验收。
+该入口仅作历史兼容保留，执行测试并通过 `--compile-only` 编译 standalone 运行时后停止。它不组装离线公开包，不创建归档或 manifest，也不执行公开 package smoke。
 
 需要 Windows x86_64、Python 3.13 和 Nuitka 支持的 C 编译工具链。
 
@@ -44,16 +44,18 @@ packaging/nuitka/build-local-linux-arm64.sh
 .\packaging\nuitka\build-local-windows-x86_64.ps1 -BootstrapPython C:\Python313\python.exe
 ```
 
+完成条件：命令输出 `build\nuitka\local-windows-x86_64\compile\release_entrypoint.dist`，该目录为历史 standalone runtime，不能作为公开 Skill 或 Release 资产发布。
+
 ## 产物和验证
 
-归档统一输出到 `dist/local/`：
+当前发布目标的归档统一输出到 `dist/local/`：
 
 ```text
 wx-doc-format-skill-<version>-macos-arm64.tar.gz
 wx-doc-format-skill-<version>-kylin-v10-arm64.tar.gz
 ```
 
-发布包的安装目录必须只包含可打印 ASCII 字符。安装器会验证 `SHA256SUMS.txt`、完整文件集和运行时版本。调用 `scripts/run.sh` 或 `scripts/run.ps1` 时也会重新检查安装路径。
+上述公开包合同仅适用于 macOS ARM64 与 Kylin V10 ARM64。发布包的安装目录必须只包含可打印 ASCII 字符。安装器会验证 `SHA256SUMS.txt`、完整文件集和运行时版本。调用 `scripts/run.sh` 时也会重新检查安装路径。
 
 ## 组装公开 Skill
 

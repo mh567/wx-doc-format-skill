@@ -20,6 +20,12 @@ if [ ! -r "$MANIFEST_PATH" ]; then
     echo "WXDF-E-MANIFEST-MISSING: public runtime manifest is unavailable" >&2
     exit 3
 fi
+if LC_ALL=C od -An -v -t u1 "$MANIFEST_PATH" |
+    awk '{ for (i = 1; i <= NF; i++) if ($i == 0) found = 1 } END { exit(found ? 0 : 1) }'
+then
+    echo "WXDF-E-MANIFEST-INVALID: public runtime manifest contains a NUL byte" >&2
+    exit 3
+fi
 if ! LC_ALL=C awk -f "$SKILL_DIR/scripts/validate-manifest.awk" "$MANIFEST_PATH"; then
     echo "WXDF-E-MANIFEST-INVALID: public runtime manifest is not valid JSON" >&2
     exit 3
