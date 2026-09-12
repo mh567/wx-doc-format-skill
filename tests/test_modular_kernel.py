@@ -73,6 +73,25 @@ def test_plan_builder_rejects_dependency_scheduled_after_consumer() -> None:
         build_plan({"pipeline": "modular", "list_policy": "wx-default-v2"}, descriptors)
 
 
+def test_registry_builds_selected_child_plan_from_seeded_capabilities() -> None:
+    registry = ModuleRegistry([
+        RegisteredModule(
+            ModuleDescriptor("seed-consumer", "1.0", ("relation",), ("source_ast",), ("decision_set",)),
+            lambda _context: None,
+        ),
+    ])
+
+    plan = registry.build(
+        {"pipeline": "modular", "list_policy": "wx-default-v2"},
+        module_ids=("seed-consumer",),
+        initial_capabilities=("source_ast",),
+        required_capabilities=("source_ast", "decision_set"),
+    )
+
+    assert plan.initial_capabilities == ("source_ast",)
+    assert [module.module_id for module in plan.modules] == ["seed-consumer"]
+
+
 def test_executable_registry_rejects_missing_required_capability_and_runs_plan() -> None:
     calls: list[str] = []
     registry = ModuleRegistry([

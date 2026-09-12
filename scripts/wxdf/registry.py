@@ -64,6 +64,7 @@ class ExecutionPlan:
     list_policy: str
     stages: tuple[str, ...]
     modules: tuple[ModuleDescriptor, ...]
+    initial_capabilities: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -94,13 +95,27 @@ class ModuleRegistry:
         config: dict,
         *,
         required_capabilities: Iterable[str] = (),
+        module_ids: Iterable[str] | None = None,
+        initial_capabilities: Iterable[str] = (),
     ) -> ExecutionPlan:
-        plan = build_plan(config, (module.descriptor for module in self._modules.values()))
+        if module_ids is None:
+            selected = tuple(self._modules.values())
+        else:
+            requested = tuple(str(module_id) for module_id in module_ids)
+            unknown = sorted(set(requested) - set(self._modules))
+            if unknown:
+                raise PlanError(f"module {unknown[0]} is not registered")
+            selected = tuple(self._modules[module_id] for module_id in requested)
+        plan = build_plan(
+            config,
+            (module.descriptor for module in selected),
+            initial_capabilities=initial_capabilities,
+        )
         provided = {
             capability
             for descriptor in plan.modules
             for capability in descriptor.provides
-        }
+        } | set(plan.initial_capabilities)
         missing = sorted(set(required_capabilities) - provided)
         if missing:
             raise PlanError(f"missing required capability {missing[0]}")
@@ -352,6 +367,8 @@ def build_native_v2_registry(
                 "2.0",
                 ("audit",),
                 (
+                    "source_facts",
+                    "source_facts_digest",
                     "transaction_commit",
                     "normalized",
                     "render_result",
@@ -384,7 +401,12 @@ def build_native_v2_registry(
     ])
 
 
-def build_plan(config: dict, module_descriptors: Iterable[ModuleDescriptor]) -> ExecutionPlan:
+def build_plan(
+    config: dict,
+    module_descriptors: Iterable[ModuleDescriptor],
+    *,
+    initial_capabilities: Iterable[str] = (),
+) -> ExecutionPlan:
     pipeline = config.get("pipeline", "modular")
     list_policy = config.get("list_policy", "wx-default-v2")
     if pipeline != "modular":
@@ -394,7 +416,8 @@ def build_plan(config: dict, module_descriptors: Iterable[ModuleDescriptor]) -> 
 
     modules = tuple(module_descriptors)
     module_ids: set[str] = set()
-    providers: set[str] = set()
+    seeded = tuple(sorted({str(capability) for capability in initial_capabilities}))
+    providers: set[str] = set(seeded)
     exclusive_groups: dict[str, str] = {}
     for module in modules:
         if module.module_id in module_ids:
@@ -440,7 +463,7 @@ def build_plan(config: dict, module_descriptors: Iterable[ModuleDescriptor]) -> 
 
     stage_index = {stage: index for index, stage in enumerate(STAGES)}
     ordered_modules = tuple(sorted(modules, key=lambda item: min(stage_index[stage] for stage in item.stages)))
-    available: set[str] = set()
+    available: set[str] = set(seeded)
     for module in ordered_modules:
         unavailable = set(module.requires) - available
         if unavailable:
@@ -454,4 +477,5 @@ def build_plan(config: dict, module_descriptors: Iterable[ModuleDescriptor]) -> 
         list_policy=list_policy,
         stages=STAGES,
         modules=ordered_modules,
+        initial_capabilities=seeded,
     )

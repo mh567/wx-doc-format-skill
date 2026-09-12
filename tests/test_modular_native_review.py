@@ -16,6 +16,7 @@ if str(SCRIPTS) not in sys.path:
 
 from wxdf import auditing, transaction
 from wxdf.kernel import ConversionKernel, ConversionRequest
+from wxdf.registry import ModuleRegistry
 
 
 TEMPLATE = ROOT / "assets" / "wx_template.docx"
@@ -157,6 +158,44 @@ def test_native_review_uses_independent_artifacts_and_publishes_accepted_revisio
     accepted_source = __import__("json").loads((tmp_path / "accepted-source.json").read_text(encoding="utf-8"))
     assert any(node.get("role") == "note" for node in accepted_source["document"]["blocks"].values())
     assert zipfile.is_zipfile(tmp_path / "formal.docx")
+
+
+def test_native_review_reprocesses_candidate_through_registered_child_plan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.md"
+    source.write_text("# 标题\n\n正文。\n", encoding="utf-8")
+    real_check = auditing.check_model
+    monkeypatch.setattr(auditing, "check_model", _reviewable_model_audit(real_check))
+    executed_plans: list[list[str]] = []
+    real_execute = ModuleRegistry.execute
+
+    def record_plan(self, plan, context):
+        executed_plans.append([module.module_id for module in plan.modules])
+        return real_execute(self, plan, context)
+
+    monkeypatch.setattr(ModuleRegistry, "execute", record_plan)
+    result = ConversionKernel().convert(
+        _request(tmp_path, source, lambda payload: _review_patch(payload))
+    )
+
+    assert result.status == "completed", result.diagnostics
+    assert len(executed_plans) == 3
+    assert executed_plans[1] == [
+        "native-review-candidate-set",
+        "native-resolver",
+    ]
+    assert executed_plans[2] == [
+        "native-transaction",
+        "native-normalizer",
+        "native-renderer",
+        "native-auditor",
+    ]
+    assert result.report["native_review"]["reprocess_plan"] == [
+        *executed_plans[1],
+        *executed_plans[2],
+    ]
 
 
 def test_native_review_repairs_real_heading_audit_without_audit_monkeypatch(

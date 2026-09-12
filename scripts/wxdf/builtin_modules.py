@@ -830,7 +830,7 @@ def _plan_blocks_publication(context: ModuleExecutionContext, decision_set: Mapp
 
 
 def _native_transaction(context: ModuleExecutionContext) -> Any:
-    from .transaction import apply_stage_batch, make_snapshot
+    from .transaction import apply_stage_batch, make_snapshot, stage_candidate_revision
 
     source_ast = context.require("source_ast")
     decision_set = context.require("decision_set")
@@ -846,11 +846,19 @@ def _native_transaction(context: ModuleExecutionContext) -> Any:
             json.dumps(restored.get("presentation_overrides") or {}, ensure_ascii=False)
         )
     with context.stage("transaction"):
-        committed = apply_stage_batch(
-            snapshot,
-            decision_set["decisions"],
-            expected_revision=source_ast["revision"],
-        )
+        candidate_baseline = context.services.get("candidate_baseline")
+        if candidate_baseline is not None:
+            committed = stage_candidate_revision(
+                candidate_baseline,
+                decision_set["decisions"],
+                expected_revision=source_ast["revision"],
+            ).candidate
+        else:
+            committed = apply_stage_batch(
+                snapshot,
+                decision_set["decisions"],
+                expected_revision=source_ast["revision"],
+            )
     snapshot = committed.snapshot
     containers = snapshot.ast["document"]["containers"]
     children = snapshot.ast["document"]["children"]
@@ -1004,6 +1012,34 @@ def _json_copy(value: Any) -> Any:
     return json.loads(json.dumps(value, ensure_ascii=False))
 
 
+def native_review_candidate_set_module() -> RegisteredModule:
+    """Adapt validated review candidates into the regular native relation seam."""
+
+    def execute(context: ModuleExecutionContext) -> list[Mapping[str, Any]]:
+        candidates = _json_copy(context.require("review_candidates"))
+        context.provide("candidate_set", candidates)
+        context.provide("ledger_view", None)
+        context.provide("ledger_replay", None)
+        context.evidence["native-review-candidate-set"] = {
+            "candidate_count": len(candidates),
+            "source": "document_review",
+        }
+        return candidates
+
+    return RegisteredModule(
+        descriptor=ModuleDescriptor(
+            "native-review-candidate-set",
+            "2.0",
+            ("relation",),
+            ("review_candidates",),
+            ("candidate_set", "ledger_view", "ledger_replay"),
+            contract_version="2.0",
+            failure_policy="fail",
+        ),
+        execute=execute,
+    )
+
+
 def _baseline_acceptance(audits_passed: bool, reason: str) -> Any:
     from .review import AcceptanceDecision
 
@@ -1021,11 +1057,7 @@ def _native_reviewer(context: ModuleExecutionContext) -> dict[str, Any]:
 
     from llm_enhancer import normalize_mode, should_enhance
 
-    from .auditing import audit_bundle
     from .enhancement import EnhancementExecutor, build_native_request, serialize_native_request
-    from .normalization import normalize
-    from .rendering import render
-    from .resolver import resolve
     from .review import (
         AcceptanceDecision,
         accept_candidate,
@@ -1033,7 +1065,6 @@ def _native_reviewer(context: ModuleExecutionContext) -> dict[str, Any]:
         validate_review_decisions,
     )
     from .run_store import request_digest
-    from .transaction import stage_candidate_revision
 
     request = context.request
     options = request.options or {}
@@ -1067,6 +1098,8 @@ def _native_reviewer(context: ModuleExecutionContext) -> dict[str, Any]:
     context.provide("review_packet", packet)
     mode = normalize_mode(str(options.get("llm_enhance") or "off"))
     enabled = should_enhance({"review_packet": packet}, "C", mode)
+    reprocess_plan_ids: list[str] = []
+    reprocess_evidence: dict[str, dict[str, Any]] = {}
 
     def finish(
         *,
@@ -1098,6 +1131,8 @@ def _native_reviewer(context: ModuleExecutionContext) -> dict[str, Any]:
             "enhancement": dict(enhancement or {}),
             "decision_set": dict(decision_set or {}),
             "audit_exception": dict(audit_exception) if audit_exception is not None else None,
+            "reprocess_plan": list(reprocess_plan_ids),
+            "reprocess_module_evidence": _json_copy(reprocess_evidence),
         }
         context.provide("review_result", result)
         context.provide("acceptance", result["acceptance"])
@@ -1107,6 +1142,7 @@ def _native_reviewer(context: ModuleExecutionContext) -> dict[str, Any]:
             "triggered": result["triggered"],
             "baseline_revision": baseline_commit.snapshot.ast["revision"],
             "selected_revision": selected_commit.snapshot.ast["revision"],
+            "reprocess_plan": list(reprocess_plan_ids),
         }
         return result
 
@@ -1187,11 +1223,50 @@ def _native_reviewer(context: ModuleExecutionContext) -> dict[str, Any]:
             candidate_artifact=candidate_path,
         )
 
-    decision_set = resolve(
-        enhancement_result.candidates,
-        {"revision": baseline_commit.snapshot.ast["revision"]},
-        None,
+    registry = context.services.get("module_registry")
+    if registry is None:
+        raise RuntimeError("native review requires the registered module registry")
+    registry.register(native_review_candidate_set_module())
+    resolution_plan = registry.build(
+        {
+            "pipeline": "modular",
+            "list_policy": request.list_policy,
+            "source_type": "docx" if request.input_path.suffix.lower() == ".docx" else "markdown",
+            "available_audits": ("model_audit", "saved_output_audit"),
+        },
+        module_ids=(
+            "native-review-candidate-set",
+            "native-resolver",
+        ),
+        initial_capabilities=(
+            "source_ast",
+            "review_candidates",
+        ),
     )
+    reprocess_plan_ids.extend(module.module_id for module in resolution_plan.modules)
+    review_context = ModuleExecutionContext(
+        request=request,
+        artifacts={
+            "source_ast": baseline_commit.snapshot.ast,
+            "source_facts": context.require("source_facts"),
+            "source_facts_digest": context.require("source_facts_digest"),
+            "appendix_semantics": context.require("appendix_semantics"),
+            "review_candidates": enhancement_result.candidates,
+        },
+        services={
+            **context.services,
+            "staging_path": candidate_path,
+            "execution_plan": resolution_plan,
+            "candidate_baseline": baseline_commit.snapshot,
+        },
+    )
+    try:
+        registry.execute(resolution_plan, review_context)
+    except UnresolvedDecisionError:
+        decision_set = review_context.require("decision_set")
+    else:
+        decision_set = review_context.require("decision_set")
+    reprocess_evidence.update(review_context.evidence)
     if decision_set.get("unresolved") or not decision_set.get("decisions"):
         acceptance = AcceptanceDecision(
             "rejected",
@@ -1227,22 +1302,47 @@ def _native_reviewer(context: ModuleExecutionContext) -> dict[str, Any]:
             candidate_artifact=candidate_path,
         )
 
+    transaction_plan = registry.build(
+        {
+            "pipeline": "modular",
+            "list_policy": request.list_policy,
+            "source_type": "docx" if request.input_path.suffix.lower() == ".docx" else "markdown",
+            "available_audits": ("model_audit", "saved_output_audit"),
+        },
+        module_ids=(
+            "native-transaction",
+            "native-normalizer",
+            "native-renderer",
+            "native-auditor",
+        ),
+        initial_capabilities=(
+            "source_ast",
+            "source_facts",
+            "source_facts_digest",
+            "appendix_semantics",
+            "decision_set",
+        ),
+    )
+    reprocess_plan_ids.extend(module.module_id for module in transaction_plan.modules)
+    review_context.services["execution_plan"] = transaction_plan
     try:
-        revision = stage_candidate_revision(
-            baseline_commit.snapshot,
-            decision_set["decisions"],
-            expected_revision=baseline_commit.snapshot.ast["revision"],
-        )
+        registry.execute(transaction_plan, review_context)
     except Exception as exc:
+        reprocess_evidence.update(review_context.evidence)
         audit_exception = {"type": type(exc).__name__, "message": str(exc)}
+        transaction_failed = (
+            reprocess_evidence.get("native-transaction", {}).get("status") == "failed"
+        )
         acceptance = AcceptanceDecision(
             "rejected",
-            "candidate_transaction_failed",
+            "candidate_transaction_failed" if transaction_failed else "audit_exception",
             False,
             False,
             False,
             {"audit_exception": audit_exception},
         )
+        if candidate_path.is_file():
+            candidate_path.unlink()
         return finish(
             status="rolled_back",
             acceptance=acceptance,
@@ -1251,7 +1351,8 @@ def _native_reviewer(context: ModuleExecutionContext) -> dict[str, Any]:
             audit_exception=audit_exception,
             candidate_artifact=candidate_path,
         )
-    candidate_commit = revision.candidate
+    reprocess_evidence.update(review_context.evidence)
+    candidate_commit = review_context.require("transaction_commit")
     candidate_bundle: dict[str, Any] = {
         "source_ast": candidate_commit.snapshot.ast,
         "normalized_ast": baseline_normalized,
@@ -1260,50 +1361,17 @@ def _native_reviewer(context: ModuleExecutionContext) -> dict[str, Any]:
         "round": 1,
     }
     try:
-        template = context.require("template_bundle")
-        resources = context.require("resources")
-        candidate_normalized = normalize(
-            candidate_commit.snapshot.ast,
-            template,
-            strategy=request.list_policy,
-            overlay=candidate_commit.snapshot.overlays,
-            presentation_override=candidate_commit.snapshot.presentation_overrides,
-            context={
-                "transaction_id": candidate_commit.transaction_id,
-                "decision_set_version": decision_set["decision_set_version"],
-            },
-        )
-        if hasattr(template, "path"):
-            candidate_render = render(
-                candidate_normalized,
-                candidate_path,
-                template_bundle=template,
-                resources=resources,
-                table_row_height_cm=float(options.get("table_row_height_cm", 0.69)),
-                table_row_height_rule=str(options.get("table_row_height_rule", "at-least")),
-            )
-        else:
-            candidate_render = render(
-                candidate_normalized,
-                candidate_path,
-                resources=resources,
-                table_row_height_cm=float(options.get("table_row_height_cm", 0.69)),
-                table_row_height_rule=str(options.get("table_row_height_rule", "at-least")),
-            )
-        metrics = context.services.get("metrics")
-        if metrics is not None:
-            metrics.record_render()
-        appendix_semantics = context.require("appendix_semantics")
-        appendix_findings = (
-            audit_native_appendix(candidate_normalized["source_ast"], appendix_semantics)
-            if appendix_semantics is not None
-            else {"passed": True, "issues": []}
-        )
-        candidate_audits = audit_bundle(
-            candidate_path,
-            candidate_normalized,
-            candidate_render["render_map"],
-            appendix_audit=appendix_findings,
+        candidate_normalized = review_context.require("normalized")
+        candidate_render = review_context.require("render_result")
+        candidate_audits = {
+            "model": review_context.require("model_audit"),
+            "saved_output": review_context.require("saved_output_audit"),
+            "appendix": review_context.require("appendix_audit"),
+            "findings": list(review_context.require("audit_findings")),
+        }
+        candidate_audits["passed"] = all(
+            candidate_audits[name].get("passed") is True
+            for name in ("model", "saved_output", "appendix")
         )
         candidate_bundle.update(
             {

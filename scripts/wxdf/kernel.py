@@ -457,6 +457,7 @@ class ConversionKernel:
                     "store": store,
                     "staging_path": staging_path,
                     "execution_plan": execution_plan,
+                    "module_registry": registry,
                 },
             )
             registry.execute(execution_plan, context)
@@ -780,6 +781,8 @@ class ConversionKernel:
                 "enhancement",
                 "decision_set",
                 "audit_exception",
+                "reprocess_plan",
+                "reprocess_module_evidence",
             )
             if review_result.get(key) is not None
         }
