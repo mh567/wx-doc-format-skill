@@ -309,13 +309,13 @@ class ConversionKernel:
                 diagnostics=[{"code": "INPUT_NOT_FOUND", "message": str(request.input_path)}],
             )
 
-        from .builtin_modules import (
+        from .native_stages import (
             LedgerReplayBlocked,
-            ModuleExecutionContext,
             NativeEnhancementBlocked,
             NativeFileProtocolPause,
             UnresolvedDecisionError,
         )
+        from .semantic_modules import ModuleExecutionContext
         from .decision_ledger import LedgerError
         from .metrics import MetricsCollector
         from .registry import build_native_v2_registry

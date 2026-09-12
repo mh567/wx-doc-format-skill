@@ -123,6 +123,19 @@ class ModuleRegistry:
             raise PlanError(f"duplicate module {module_id}")
         self._modules[module_id] = module
 
+    def implementation_module(self, module_id: str) -> str:
+        """Return the implementation module for a registered Module.
+
+        This is a small diagnostic seam used by architecture audits.  It keeps
+        ownership checks on the registry interface instead of exposing the
+        registry's private storage to callers.
+        """
+
+        module = self._modules.get(module_id)
+        if module is None:
+            raise PlanError(f"module {module_id} is not registered")
+        return module.execute.__module__
+
     def build(
         self,
         config: dict,
@@ -311,15 +324,15 @@ def build_native_v2_registry(
     implementation.
     """
 
-    from . import builtin_modules as native_implementation
+    from . import native_stages, semantic_modules as semantic_implementation
 
     bindings = dict(bindings or {})
     semantic = (
         tuple(semantic_modules)
         if semantic_modules
-        else native_implementation.native_semantic_modules()
+        else semantic_implementation.native_semantic_modules()
     )
-    stage_executors = native_implementation.native_stage_executors()
+    stage_executors = native_stages.native_stage_executors()
     supported_nodes = tuple(sorted(set(AST_BLOCK_TYPES) | set(AST_CONTAINER_KINDS)))
     common = {
         "contract_version": "2.0",
