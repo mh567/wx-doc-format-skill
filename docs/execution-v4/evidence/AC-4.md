@@ -32,6 +32,19 @@ Markdown 结果为 `completed`，pipeline 为 `modular`，profile 为 `wx-defaul
 
 该结果证明候选 DOCX 内容和页面结构可正常渲染。Word/WPS 实机字体、分页和域更新确认仍属于外部门禁，继续保留未完成状态。
 
+## 真实文件批量转换替代验收
+
+按真实文件替代方案执行 6 次 native-v2 转换：
+
+1. Markdown：`input/test_baseline.md`、`input/benchmark_report.md`。
+2. DOCX：`_build/audit_fix_validation/ordinary.docx`、`enhanced.docx`、`installed.docx`、`protocol-source.docx`。其中 `ordinary.docx` 与 `protocol-source.docx` 内容摘要相同，实际覆盖 3 个不同 DOCX 内容摘要。
+
+6 次转换全部成功。报告状态为 2 个 `completed`、4 个 `completed_with_warnings`，后者均保留 1 类 `invalid_numbering_definition` 输入诊断。6 个输出 DOCX 均通过 ZIP 完整性检查，XML 和 PDF 文本层中文字符均保真。
+
+在 Fontconfig 别名配置下完成全部输出渲染，页数分别为 4、30 和 19 页。对每类样本抽查目录页、正文页、表格页、流程图页和末页，未发现页面越界、文字裁切或图形裁切。批量证据目录为 `/private/tmp/wxdf-real-batch.npo8Au`。
+
+该批量结果作为 Word/WPS 实机检查的本地替代证据。Word/WPS 域更新和特定排版引擎差异仍未覆盖，Kylin V10 真机及远程发布门禁不受本次替代验收影响。
+
 ## 文件协议、恢复、复核和保存后审计
 
 通过发布入口的源码验收工具执行：
