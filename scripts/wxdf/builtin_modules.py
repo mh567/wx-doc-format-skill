@@ -6,8 +6,10 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 import json
 from pathlib import Path
+from collections.abc import MutableMapping
 from typing import Any, Callable, Iterable, Iterator, Mapping
 
+from .contracts import validate_capability_payload
 from .parsers import digest_source_facts, parse, summarize_source_facts
 from .registry import ModuleDescriptor, PlanError, RegisteredModule
 from .semantics.regions import resolve_source_regions
@@ -65,6 +67,48 @@ class NativeEnhancementBlocked(RuntimeError):
         super().__init__("native enhancement response validation failed")
 
 
+class _ObservedMapping(MutableMapping[str, Any]):
+    def __init__(self, values: Mapping[str, Any], observe: Callable[[str], None]) -> None:
+        self._values = dict(values)
+        self._observe = observe
+
+    def __getitem__(self, key: str) -> Any:
+        self._observe(str(key))
+        return self._values[key]
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        self._observe(str(key))
+        self._values[key] = value
+
+    def __delitem__(self, key: str) -> None:
+        self._observe(str(key))
+        del self._values[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._values)
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        self._observe(str(key))
+        return self._values.get(key, default)
+
+    def copy_values(self) -> dict[str, Any]:
+        """Copy service values without treating context propagation as a read."""
+
+        return dict(self._values)
+
+
+class _RequestProxy:
+    def __init__(self, request: Any, options: MutableMapping[str, Any]) -> None:
+        self._request = request
+        self.options = options
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._request, name)
+
+
 @dataclass
 class ModuleExecutionContext:
     """Per-conversion capability bus shared by executable modules.
@@ -81,19 +125,34 @@ class ModuleExecutionContext:
     _active: dict[str, Any] | None = field(default=None, repr=False)
     _reads: list[str] = field(default_factory=list, repr=False)
     _writes: list[str] = field(default_factory=list, repr=False)
+    _service_reads: list[str] = field(default_factory=list, repr=False)
+    _option_reads: list[str] = field(default_factory=list, repr=False)
+
+    def __post_init__(self) -> None:
+        if isinstance(self.request, _RequestProxy) and isinstance(self.request.options, _ObservedMapping):
+            raw_options = self.request.options.copy_values()
+        else:
+            raw_options = getattr(self.request, "options", {}) or {}
+        option_mapping = _ObservedMapping(raw_options, self._option_reads.append)
+        self.request = _RequestProxy(self.request, option_mapping)
+        self.services = _ObservedMapping(self.services, self._service_reads.append)  # type: ignore[assignment]
 
     def begin_module(self, descriptor: ModuleDescriptor, position: int) -> None:
         """Start observing the capabilities of one module execution."""
 
         self._active = {"module_id": descriptor.module_id, "position": position}
-        self._reads = []
-        self._writes = []
+        self._reads.clear()
+        self._writes.clear()
+        self._service_reads.clear()
+        self._option_reads.clear()
 
     def reset_observation(self) -> None:
         """Drop the capability observations of the failing attempt."""
 
-        self._reads = []
-        self._writes = []
+        self._reads.clear()
+        self._writes.clear()
+        self._service_reads.clear()
+        self._option_reads.clear()
 
     def end_module(self, status: str, error: BaseException | None = None) -> dict[str, Any]:
         """Close the active execution and merge its observation into the record."""
@@ -104,6 +163,8 @@ class ModuleExecutionContext:
             "order": int(active.get("position") or 0),
             "produced": list(self._writes),
             "consumed": list(self._reads),
+            "services": list(self._service_reads),
+            "options": list(self._option_reads),
             "status": status,
         }
         if error is not None:
@@ -113,13 +174,19 @@ class ModuleExecutionContext:
         record = {**self.evidence.get(module_id, {}), **observation}
         self.evidence[module_id] = record
         self._active = None
-        self._reads = []
-        self._writes = []
+        self._reads.clear()
+        self._writes.clear()
+        self._service_reads.clear()
+        self._option_reads.clear()
         return record
 
     def provide(self, capability: str, value: Any) -> None:
         if capability in self.artifacts:
             raise PlanError(f"runtime capability {capability} already provided")
+        try:
+            validate_capability_payload(capability, value)
+        except Exception as exc:
+            raise PlanError(f"invalid capability payload for {capability}: {exc}") from exc
         self.artifacts[capability] = value
         if self._active is not None and capability not in self._writes:
             self._writes.append(capability)
@@ -127,6 +194,10 @@ class ModuleExecutionContext:
     def require(self, capability: str) -> Any:
         if capability not in self.artifacts:
             raise PlanError(f"runtime capability {capability} is unavailable")
+        try:
+            validate_capability_payload(capability, self.artifacts[capability])
+        except Exception as exc:
+            raise PlanError(f"invalid capability payload for {capability}: {exc}") from exc
         if self._active is not None and capability not in self._reads:
             self._reads.append(capability)
         return self.artifacts[capability]
@@ -187,6 +258,8 @@ def source_facts_module(*, native: bool = False) -> RegisteredModule:
             provides=("source_facts", "source_facts_summary", "source_facts_digest")
             if native
             else ("source_facts",),
+            runtime_services=("metrics", "store"),
+            option_keys=("restored_source_facts",),
         ),
         execute=execute,
     )
@@ -1254,7 +1327,7 @@ def _native_reviewer(context: ModuleExecutionContext) -> dict[str, Any]:
             "review_candidates": enhancement_result.candidates,
         },
         services={
-            **context.services,
+            **context.services.copy_values(),
             "staging_path": candidate_path,
             "execution_plan": resolution_plan,
             "candidate_baseline": baseline_commit.snapshot,

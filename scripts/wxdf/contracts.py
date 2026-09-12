@@ -72,6 +72,104 @@ SAFE_PROPERTY_SCOPES = (
     "presentation",
 )
 
+
+@dataclass(frozen=True)
+class CapabilityContract:
+    """Version and payload shape for one runtime capability."""
+
+    name: str
+    version: str
+    value_kind: str = "any"
+
+
+_CAPABILITY_CONTRACT_DEFINITIONS = (
+    ("source_facts", "1.0", "mapping"),
+    ("source_facts_summary", "1.0", "mapping"),
+    ("source_facts_digest", "1.0", "string"),
+    ("source_regions", "1.0", "mapping"),
+    ("source_region_candidates", "2.0", "sequence"),
+    ("source_region", "2.0", "mapping"),
+    ("document_structure_candidates", "2.0", "sequence"),
+    ("document_structure", "2.0", "mapping"),
+    ("protected_content_candidates", "2.0", "sequence"),
+    ("protected_content", "2.0", "mapping"),
+    ("source_ast", AST_SCHEMA_VERSION, "mapping"),
+    ("list_semantics_result", "2.0", "mapping"),
+    ("list_semantics_candidates", "2.0", "sequence"),
+    ("list_item_map", "2.0", "mapping"),
+    ("list_semantics", "2.0", "mapping"),
+    ("table_semantics_result", "2.0", "sequence"),
+    ("table_semantics_candidates", "2.0", "sequence"),
+    ("table_semantics", "2.0", "mapping"),
+    ("caption_semantics_result", "2.0", "mapping"),
+    ("caption_semantics_candidates", "2.0", "sequence"),
+    ("caption_semantics", "2.0", "mapping"),
+    ("appendix_semantics_result", "2.0", "mapping"),
+    ("appendix_semantics_candidates", "2.0", "sequence"),
+    ("appendix_semantics", "2.0", "mapping"),
+    ("candidate_set", PATCH_SCHEMA_VERSION, "sequence"),
+    ("review_candidates", PATCH_SCHEMA_VERSION, "sequence"),
+    ("enhancement_result", "2.0", "mapping"),
+    ("ledger_view", "2.0", "optional_mapping"),
+    ("ledger_replay", "2.0", "optional_mapping"),
+    ("decision_set", PATCH_SCHEMA_VERSION, "mapping"),
+    ("transaction_commit", "2.0", "object"),
+    ("source_ast_revision", AST_SCHEMA_VERSION, "integer"),
+    ("source_ast_hierarchy", AST_SCHEMA_VERSION, "mapping"),
+    ("normalized", "1.0", "mapping"),
+    ("template_bundle", "1.0", "object"),
+    ("resources", "1.0", "mapping"),
+    ("render_plan", "1.0", "mapping"),
+    ("render_result", "1.0", "mapping"),
+    ("model_audit", "1.0", "mapping"),
+    ("saved_output_audit", "1.0", "mapping"),
+    ("appendix_audit", "1.0", "mapping"),
+    ("audit_findings", "1.0", "sequence"),
+    ("source_facts_integrity", "1.0", "mapping"),
+    ("review_packet", "2.0", "mapping"),
+    ("review_result", "2.0", "mapping"),
+    ("acceptance", "1.0", "mapping"),
+    ("published_output", "1.0", "optional_string"),
+)
+
+CAPABILITY_CONTRACTS = {
+    name: CapabilityContract(name, version, value_kind)
+    for name, version, value_kind in _CAPABILITY_CONTRACT_DEFINITIONS
+}
+
+
+def capability_contract(name: str) -> CapabilityContract:
+    """Return a declared contract, using an unconstrained 1.0 fallback."""
+
+    return CAPABILITY_CONTRACTS.get(
+        str(name),
+        CapabilityContract(str(name), "1.0", "any"),
+    )
+
+
+def validate_capability_payload(name: str, value: Any) -> None:
+    """Validate the top-level shape carried by a runtime capability."""
+
+    contract = capability_contract(name)
+    kind = contract.value_kind
+    valid = (
+        kind == "any"
+        or kind == "object"
+        or kind == "mapping" and isinstance(value, Mapping)
+        or kind == "optional_mapping" and (value is None or isinstance(value, Mapping))
+        or kind == "sequence" and isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray))
+        or kind == "string" and isinstance(value, str)
+        or kind == "optional_string" and (value is None or isinstance(value, str))
+        or kind == "integer" and isinstance(value, int) and not isinstance(value, bool)
+    )
+    if not valid:
+        raise ContractError(
+            "invalid_capability_payload",
+            str(name),
+            f"expected {kind}, got {type(value).__name__}",
+            contract=f"Capability {contract.name} {contract.version}",
+        )
+
 JSONValue: TypeAlias = None | bool | int | float | str | list["JSONValue"] | dict[str, "JSONValue"]
 JSONObject: TypeAlias = dict[str, JSONValue]
 

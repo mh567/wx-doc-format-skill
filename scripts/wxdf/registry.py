@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Iterable, Mapping
 
-from .contracts import AST_BLOCK_TYPES, AST_CONTAINER_KINDS, SOURCE_TYPES, STAGES
+from .contracts import (
+    AST_BLOCK_TYPES,
+    AST_CONTAINER_KINDS,
+    CAPABILITY_CONTRACTS,
+    SOURCE_TYPES,
+    STAGES,
+    capability_contract,
+)
 
 
 class PlanError(ValueError):
@@ -25,6 +32,10 @@ class ModuleDescriptor:
     supported_node_kinds: tuple[str, ...] = ()
     failure_policy: str = "fail"
     required_audits: tuple[str, ...] = ()
+    requires_versions: Mapping[str, str] = field(default_factory=dict)
+    provides_versions: Mapping[str, str] = field(default_factory=dict)
+    runtime_services: tuple[str, ...] = ()
+    option_keys: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.module_id.strip():
@@ -56,6 +67,27 @@ class ModuleDescriptor:
             raise PlanError(f"module {self.module_id} repeats a supported node kind")
         if len(set(self.required_audits)) != len(self.required_audits):
             raise PlanError(f"module {self.module_id} repeats a required audit")
+        for label, configured, capabilities in (
+            ("requires_versions", self.requires_versions, self.requires),
+            ("provides_versions", self.provides_versions, self.provides),
+        ):
+            unknown = set(configured) - set(capabilities)
+            if unknown:
+                raise PlanError(
+                    f"module {self.module_id} declares a version for undeclared capability {sorted(unknown)[0]}"
+                )
+            if any(not str(version).strip() for version in configured.values()):
+                raise PlanError(f"module {self.module_id} has an empty {label} entry")
+        if len(set(self.runtime_services)) != len(self.runtime_services):
+            raise PlanError(f"module {self.module_id} repeats a runtime service")
+        if len(set(self.option_keys)) != len(self.option_keys):
+            raise PlanError(f"module {self.module_id} repeats an option key")
+
+    def required_version(self, capability: str) -> str:
+        return str(self.requires_versions.get(capability, capability_contract(capability).version))
+
+    def provided_version(self, capability: str) -> str:
+        return str(self.provides_versions.get(capability, capability_contract(capability).version))
 
 
 @dataclass(frozen=True)
@@ -65,6 +97,7 @@ class ExecutionPlan:
     stages: tuple[str, ...]
     modules: tuple[ModuleDescriptor, ...]
     initial_capabilities: tuple[str, ...] = ()
+    capability_contracts: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -97,6 +130,7 @@ class ModuleRegistry:
         required_capabilities: Iterable[str] = (),
         module_ids: Iterable[str] | None = None,
         initial_capabilities: Iterable[str] = (),
+        initial_capability_versions: Mapping[str, str] | None = None,
     ) -> ExecutionPlan:
         if module_ids is None:
             selected = tuple(self._modules.values())
@@ -110,6 +144,7 @@ class ModuleRegistry:
             config,
             (module.descriptor for module in selected),
             initial_capabilities=initial_capabilities,
+            initial_capability_versions=initial_capability_versions,
         )
         provided = {
             capability
@@ -201,6 +236,20 @@ class ModuleRegistry:
             raise PlanError(
                 f"module {descriptor.module_id} did not produce {missing[0]}"
             )
+        services = list(observation.get("services") or ())
+        undeclared_services = [
+            name for name in services if name not in descriptor.runtime_services
+        ]
+        if undeclared_services:
+            raise PlanError(
+                f"module {descriptor.module_id} read undeclared service {undeclared_services[0]}"
+            )
+        options = list(observation.get("options") or ())
+        undeclared_options = [name for name in options if name not in descriptor.option_keys]
+        if undeclared_options:
+            raise PlanError(
+                f"module {descriptor.module_id} read undeclared option {undeclared_options[0]}"
+            )
 
 
 class _Reraised:
@@ -211,54 +260,7 @@ _RERAISED = _Reraised()
 
 
 # Capabilities the native conversion chain exchanges between Modules.
-NATIVE_CHAIN_CAPABILITIES = (
-    "source_facts",
-    "source_facts_summary",
-    "source_facts_digest",
-    "source_regions",
-    "source_region_candidates",
-    "source_region",
-    "document_structure_candidates",
-    "document_structure",
-    "protected_content_candidates",
-    "protected_content",
-    "source_ast",
-    "list_semantics_result",
-    "list_semantics_candidates",
-    "list_item_map",
-    "list_semantics",
-    "table_semantics_result",
-    "table_semantics_candidates",
-    "table_semantics",
-    "caption_semantics_result",
-    "caption_semantics_candidates",
-    "caption_semantics",
-    "appendix_semantics_result",
-    "appendix_semantics_candidates",
-    "appendix_semantics",
-    "candidate_set",
-    "enhancement_result",
-    "ledger_view",
-    "ledger_replay",
-    "decision_set",
-    "transaction_commit",
-    "source_ast_revision",
-    "source_ast_hierarchy",
-    "normalized",
-    "template_bundle",
-    "resources",
-    "render_plan",
-    "render_result",
-    "model_audit",
-    "saved_output_audit",
-    "appendix_audit",
-    "audit_findings",
-    "source_facts_integrity",
-    "review_packet",
-    "review_result",
-    "acceptance",
-    "published_output",
-)
+NATIVE_CHAIN_CAPABILITIES = tuple(CAPABILITY_CONTRACTS)
 
 
 def build_native_v2_registry(
@@ -309,7 +311,16 @@ def build_native_v2_registry(
     return ModuleRegistry(bound(module) for module in [
         *semantic,
         RegisteredModule(
-            ModuleDescriptor("native-source-parser", "2.0", ("source",), ("source_facts",), ("source_ast",), **common),
+            ModuleDescriptor(
+                "native-source-parser",
+                "2.0",
+                ("source",),
+                ("source_facts",),
+                ("source_ast",),
+                runtime_services=("metrics",),
+                option_keys=("restored_source_ast",),
+                **common,
+            ),
             stage_executors["native-source-parser"],
         ),
         RegisteredModule(
@@ -329,24 +340,70 @@ def build_native_v2_registry(
                     "caption_semantics_candidates",
                 ),
                 ("candidate_set", "ledger_view", "ledger_replay", "enhancement_result"),
+                option_keys=(
+                    "decision_ledger",
+                    "checkpoint_resume_stage",
+                    "restored_candidate_baseline_id",
+                    "llm_enhance",
+                    "enhancement_budget",
+                    "enhancement_timeout_seconds",
+                    "enhancement_call",
+                    "enhancement_request_sink",
+                    "protocol_mode",
+                ),
                 **common,
             ),
             stage_executors["native-candidate-set"],
         ),
         RegisteredModule(
-            ModuleDescriptor("native-resolver", "2.0", ("relation",), ("candidate_set", "source_ast", "ledger_view"), ("decision_set",), **common),
+            ModuleDescriptor(
+                "native-resolver",
+                "2.0",
+                ("relation",),
+                ("candidate_set", "source_ast", "ledger_view"),
+                ("decision_set",),
+                runtime_services=("execution_plan",),
+                **common,
+            ),
             stage_executors["native-resolver"],
         ),
         RegisteredModule(
-            ModuleDescriptor("native-transaction", "2.0", ("relation",), ("source_ast", "decision_set"), ("transaction_commit", "source_ast_revision", "source_ast_hierarchy"), **common),
+            ModuleDescriptor(
+                "native-transaction",
+                "2.0",
+                ("relation",),
+                ("source_ast", "decision_set"),
+                ("transaction_commit", "source_ast_revision", "source_ast_hierarchy"),
+                runtime_services=("candidate_baseline", "metrics"),
+                option_keys=("restored_transaction_snapshot",),
+                **common,
+            ),
             stage_executors["native-transaction"],
         ),
         RegisteredModule(
-            ModuleDescriptor("native-normalizer", "2.0", ("normalize",), ("source_facts", "transaction_commit", "decision_set"), ("normalized", "template_bundle", "resources"), **common),
+            ModuleDescriptor(
+                "native-normalizer",
+                "2.0",
+                ("normalize",),
+                ("source_facts", "transaction_commit", "decision_set"),
+                ("normalized", "template_bundle", "resources"),
+                runtime_services=("metrics", "store"),
+                option_keys=("restored_template_bundle", "restored_resource_bytes"),
+                **common,
+            ),
             stage_executors["native-normalizer"],
         ),
         RegisteredModule(
-            ModuleDescriptor("native-renderer", "2.0", ("render",), ("normalized", "template_bundle", "resources"), ("render_plan", "render_result"), **common),
+            ModuleDescriptor(
+                "native-renderer",
+                "2.0",
+                ("render",),
+                ("normalized", "template_bundle", "resources"),
+                ("render_plan", "render_result"),
+                runtime_services=("metrics", "staging_path"),
+                option_keys=("table_row_height_cm", "table_row_height_rule"),
+                **common,
+            ),
             stage_executors["native-renderer"],
         ),
         RegisteredModule(
@@ -357,6 +414,7 @@ def build_native_v2_registry(
                 ("source_facts", "source_facts_digest", "normalized", "render_result", "appendix_semantics"),
                 ("model_audit", "saved_output_audit", "appendix_audit", "audit_findings", "source_facts_integrity"),
                 required_audits=("model_audit", "saved_output_audit"),
+                runtime_services=("metrics", "staging_path"),
                 **common,
             ),
             stage_executors["native-auditor"],
@@ -383,6 +441,17 @@ def build_native_v2_registry(
                 ),
                 ("review_packet", "review_result", "acceptance"),
                 required_audits=("model_audit", "saved_output_audit"),
+                runtime_services=("module_registry", "staging_path"),
+                option_keys=(
+                    "llm_enhance",
+                    "profile",
+                    "enhancement_budget",
+                    "enhancement_timeout_seconds",
+                    "enhancement_call",
+                    "enhancement_request_sink",
+                    "protocol_mode",
+                    "available_response_ids",
+                ),
                 **common,
             ),
             stage_executors["native-reviewer"],
@@ -406,6 +475,7 @@ def build_plan(
     module_descriptors: Iterable[ModuleDescriptor],
     *,
     initial_capabilities: Iterable[str] = (),
+    initial_capability_versions: Mapping[str, str] | None = None,
 ) -> ExecutionPlan:
     pipeline = config.get("pipeline", "modular")
     list_policy = config.get("list_policy", "wx-default-v2")
@@ -417,7 +487,22 @@ def build_plan(
     modules = tuple(module_descriptors)
     module_ids: set[str] = set()
     seeded = tuple(sorted({str(capability) for capability in initial_capabilities}))
-    providers: set[str] = set(seeded)
+    configured_seed_versions = {
+        str(name): str(version)
+        for name, version in (initial_capability_versions or {}).items()
+    }
+    unknown_seed_versions = set(configured_seed_versions) - set(seeded)
+    if unknown_seed_versions:
+        raise PlanError(
+            f"initial capability version declared without capability {sorted(unknown_seed_versions)[0]}"
+        )
+    providers: dict[str, tuple[str | None, str]] = {
+        capability: (
+            None,
+            configured_seed_versions.get(capability, capability_contract(capability).version),
+        )
+        for capability in seeded
+    }
     exclusive_groups: dict[str, str] = {}
     for module in modules:
         if module.module_id in module_ids:
@@ -431,10 +516,11 @@ def build_plan(
                     f"share group {module.exclusive_group}"
                 )
             exclusive_groups[module.exclusive_group] = module.module_id
-        overlap = providers & set(module.provides)
+        overlap = set(providers) & set(module.provides)
         if overlap:
             raise PlanError(f"duplicate capability provider {sorted(overlap)[0]}")
-        providers.update(module.provides)
+        for capability in module.provides:
+            providers[capability] = (module.module_id, module.provided_version(capability))
 
         source_type = config.get("source_type")
         if source_type and module.supported_source_types and source_type not in module.supported_source_types:
@@ -457,25 +543,69 @@ def build_plan(
                 )
 
     for module in modules:
-        missing = set(module.requires) - providers
+        missing = set(module.requires) - set(providers)
         if missing:
             raise PlanError(f"missing dependency {sorted(missing)[0]} for module {module.module_id}")
+        for capability in module.requires:
+            provided_by, provided_version = providers[capability]
+            required_version = module.required_version(capability)
+            if required_version != provided_version:
+                raise PlanError(
+                    f"capability version mismatch for {capability}: "
+                    f"module {module.module_id} requires {required_version}, "
+                    f"provider supplies {provided_version}"
+                )
 
     stage_index = {stage: index for index, stage in enumerate(STAGES)}
-    ordered_modules = tuple(sorted(modules, key=lambda item: min(stage_index[stage] for stage in item.stages)))
-    available: set[str] = set(seeded)
-    for module in ordered_modules:
-        unavailable = set(module.requires) - available
-        if unavailable:
-            capability = sorted(unavailable)[0]
-            raise PlanError(
-                f"dependency {capability} for module {module.module_id} is scheduled after provider"
-            )
-        available.update(module.provides)
+    module_stage = {
+        module.module_id: min(stage_index[stage] for stage in module.stages)
+        for module in modules
+    }
+    providers_by_id = {
+        capability: provider_id
+        for capability, (provider_id, _version) in providers.items()
+        if provider_id is not None
+    }
+    for module in modules:
+        for capability in module.requires:
+            provider_id = providers_by_id.get(capability)
+            if provider_id is not None and module_stage[provider_id] > module_stage[module.module_id]:
+                raise PlanError(
+                    f"dependency {capability} for module {module.module_id} is scheduled after provider"
+                )
+
+    ordered: list[ModuleDescriptor] = []
+    for stage_number, _stage_name in enumerate(STAGES):
+        stage_modules = [module for module in modules if module_stage[module.module_id] == stage_number]
+        if not stage_modules:
+            continue
+        remaining = {module.module_id: module for module in stage_modules}
+        while remaining:
+            ready = [
+                module
+                for module in remaining.values()
+                if all(
+                    providers_by_id.get(capability) not in remaining
+                    for capability in module.requires
+                )
+            ]
+            if not ready:
+                cycle = sorted(remaining)[0]
+                raise PlanError(f"circular dependency involving module {cycle}")
+            for module in sorted(ready, key=lambda item: (item.module_id, item.version)):
+                ordered.append(module)
+                del remaining[module.module_id]
+    ordered_modules = tuple(ordered)
     return ExecutionPlan(
         pipeline=pipeline,
         list_policy=list_policy,
         stages=STAGES,
         modules=ordered_modules,
         initial_capabilities=seeded,
+        capability_contracts=tuple(
+            sorted(
+                (capability, version)
+                for capability, (_provider, version) in providers.items()
+            )
+        ),
     )
