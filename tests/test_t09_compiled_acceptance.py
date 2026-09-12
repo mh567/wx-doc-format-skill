@@ -5,6 +5,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -201,9 +202,145 @@ def test_runtime_acceptance_resumes_file_stages_and_repairs_a_real_audit(tmp_pat
         ROOT / "assets" / "wx_template.docx", tmp_path / "evidence",
     )
     assert result["file_protocol"]["idempotent"] is True
+    assert result["file_protocol"]["skill_document_sha256"] == hashlib.sha256((ROOT / "SKILL.md").read_bytes()).hexdigest()
     assert len(result["file_protocol"]["waiting_stages"]) >= 2
     assert "document_review" in result["file_protocol"]["capabilities"]
     assert result["review"]["heading_level"] == 1
+
+
+def _skill_json_example(name: str, bindings: dict) -> dict:
+    text = (ROOT / "SKILL.md").read_text(encoding="utf-8")
+    examples = re.findall(rf"<!-- wxdf:{re.escape(name)} -->\s*```json\s*\n(.*?)\n```", text, re.DOTALL)
+    assert len(examples) == 1, f"SKILL must publish one executable {name} JSON example"
+
+    def bind(value):
+        if isinstance(value, dict):
+            return {key: bind(child) for key, child in value.items()}
+        if isinstance(value, list):
+            return [bind(child) for child in value]
+        return bindings[value] if isinstance(value, str) and value.startswith("$") else value
+
+    return bind(json.loads(examples[0]))
+
+
+def test_public_skill_json_examples_complete_real_native_file_recovery(tmp_path: Path) -> None:
+    from docx import Document
+
+    source = tmp_path / "source.md"
+    source.write_text("# Protocol acceptance\n\n### Jump\n\nProtocol target.\n", encoding="utf-8")
+    output, report, report_md = (tmp_path / name for name in ("output.docx", "report.json", "report.md"))
+    request_dir = tmp_path / "requests"
+    checkpoint_path = request_dir / "run.json"
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("WX_DOC_")}
+    environment["PYTHONPATH"] = str(ROOT / "scripts")
+
+    def run(*arguments):
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "packaging/nuitka/release_entrypoint.py"), *map(str, arguments)],
+            env=environment, capture_output=True, text=True, timeout=60,
+        )
+        assert result.returncode == 0, result.stderr
+
+    run("--input", source, "--output", output, "--template", ROOT / "assets/wx_template.docx",
+        "--report", report, "--report-md", report_md, "--llm-enhance", "all", "--generate-requests", request_dir)
+    responses, capabilities = {}, set()
+    for _attempt in range(6):
+        checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        if checkpoint["status"] == "completed":
+            break
+        assert checkpoint["status"] == "waiting_external"
+        for line in (request_dir / "llm_requests.jsonl").read_text(encoding="utf-8").splitlines():
+            request = json.loads(line)
+            if request["request_id"] in responses:
+                continue
+            capabilities.add(request["capability"])
+            bindings = {
+                "$request.request_id": request["request_id"], "$request.capability": request["capability"],
+                "$request.model_revision": request["model_revision"], "$request.view_sha256": request["view_sha256"],
+                "$response_id": "doc-response-" + request["request_id"],
+                "$candidate_id": "doc-candidate-" + request["request_id"],
+            }
+            response = _skill_json_example("candidate-set-response", bindings)
+            if request["capability"] in {"list_detect", "document_review"}:
+                if request["capability"] == "document_review":
+                    target = request["review_packet"]["targets"][0]
+                    target_id, source_ref, level = target["block_id"], target["source_ref"], target["evidence"]["expected_level"]
+                else:
+                    target_id, target = next((key, block) for key, block in request["items"][0]["source_ast"]["document"]["blocks"].items() if block.get("role") == "body")
+                    source_ref, level = target["source_ref"], 2
+                bindings.update({"$target.node_id": target_id, "$target.source_ref": source_ref, "$target.expected_level": level})
+                response["candidates"] = [_skill_json_example("role-candidate", bindings)]
+            responses[request["request_id"]] = response
+        (request_dir / "llm_responses.jsonl").write_text(
+            "".join(json.dumps(value) + "\n" for value in responses.values()), encoding="utf-8",
+        )
+        run("--resume", checkpoint_path)
+    else:
+        pytest.fail("Documented file protocol did not complete")
+    assert {"list_detect", "document_review"} <= capabilities
+    assert len({value["response_id"] for value in responses.values()}) == len(responses)
+    paragraphs = {paragraph.text: paragraph.style.name for paragraph in Document(output).paragraphs}
+    assert paragraphs["Protocol target."] == "Heading 2"
+    assert paragraphs["Jump"] == "Heading 1"
+    artifacts = (checkpoint_path, output, report, report_md)
+    before = [path.read_bytes() for path in artifacts]
+    run("--resume", checkpoint_path)
+    assert [path.read_bytes() for path in artifacts] == before
+    summary = json.loads(report.read_text(encoding="utf-8"))["public_summary"]
+    assert summary["status"] == "completed"
+    assert summary["unexpected_styles_count"] == 0
+    assert summary["manual_review_required"] is False
+    assert all(summary["audits"][key] == "passed" for key in ("model_audit", "saved_output_audit", "appendix_preservation_audit"))
+
+
+@pytest.mark.parametrize(("original", "replacement"), [
+    ('"candidate_set_version": "2.0"', '"candidate_set_version": "1.0"'),
+    ('"request_id": "$request.request_id",', ''),
+    ('"view_sha256": "$request.view_sha256"', '"view_sha256": "$request.request_id"'),
+    ('"base_revision": "$request.model_revision"', '"base_revision": "1"'),
+    ('"operation": "update_role"', '"operation": "unsupported_operation"'),
+])
+def test_runtime_acceptance_rejects_a_stale_packaged_skill_response_example(
+    tmp_path: Path, monkeypatch, original: str, replacement: str,
+) -> None:
+    monkeypatch.setenv("PYTHONPATH", str(ROOT / "scripts"))
+    skill = tmp_path / "SKILL.md"
+    skill.write_text(
+        (ROOT / "SKILL.md").read_text(encoding="utf-8").replace(original, replacement),
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeError, match="command: expected exit 0"):
+        smoke.run_runtime_contracts(
+            [sys.executable, str(ROOT / "packaging/nuitka/release_entrypoint.py")],
+            ROOT / "assets/wx_template.docx", tmp_path / "evidence", skill_path=skill,
+        )
+
+
+def test_native_file_protocol_rejects_retired_raw_response_envelopes(tmp_path: Path, monkeypatch) -> None:
+    from wxdf.enhancement import EnhancementExecutor
+
+    monkeypatch.setenv("PYTHONPATH", str(ROOT / "scripts"))
+    evidence = tmp_path / "evidence"
+    smoke.run_runtime_contracts(
+        [sys.executable, str(ROOT / "packaging/nuitka/release_entrypoint.py")],
+        ROOT / "assets/wx_template.docx", evidence,
+    )
+    requests = [json.loads(line) for line in (evidence / "requests/llm_requests.jsonl").read_text().splitlines()]
+    response_lines = (evidence / "requests/llm_responses.jsonl").read_text().splitlines()
+    responses = {value["request_id"]: value for value in map(json.loads, response_lines)}
+    for capability in ("list_detect", "document_review"):
+        request = next(value for value in requests if value["capability"] == capability)
+        response = responses[request["request_id"]]
+        executor = EnhancementExecutor()
+        assert executor.execute(request, call=lambda _payload: response).status == "completed"
+        legacy = {
+            "protocol_version": "1.0", "request_id": request["request_id"],
+            "input_hash": request["view_sha256"], "raw_response": json.dumps(response),
+        }
+        result = executor.execute(request, call=lambda _payload: legacy)
+        assert result.status == "invalid_patch"
+        assert result.diagnostics[0]["code"] == "INVALID_PATCH"
+        assert "response must be Patch 2.0 or CandidateSet 2.0" in result.diagnostics[0]["message"]
 
 
 @pytest.mark.parametrize("report_kind", ["json", "markdown"])

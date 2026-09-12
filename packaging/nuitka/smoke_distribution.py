@@ -148,39 +148,64 @@ def _validate_docx(path: Path, *, text: str) -> dict:
     return {"sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "size": path.stat().st_size}
 
 
-def native_response(request: dict, *, enhance_role: bool = True, reject_review: bool = False) -> dict:
-    """Deterministic local adapter for exercising the external response contract."""
-    candidates = []
+def _documented_json(skill_path: Path, name: str, bindings: dict) -> dict:
+    """Read a labelled JSON example, substituting known values without evaluation."""
+    text = skill_path.read_text(encoding="utf-8")
+    examples = re.findall(rf"<!-- wxdf:{re.escape(name)} -->\s*```json\s*\n(.*?)\n```", text, re.DOTALL)
+    if len(examples) != 1:
+        raise RuntimeError(f"SKILL_EXAMPLE_INVALID: expected one {name} JSON example")
+
+    def bind(value):
+        if isinstance(value, dict):
+            return {key: bind(child) for key, child in value.items()}
+        if isinstance(value, list):
+            return [bind(child) for child in value]
+        if isinstance(value, str) and value.startswith("$"):
+            if value not in bindings:
+                raise RuntimeError(f"SKILL_EXAMPLE_INVALID: unknown binding {value}")
+            return bindings[value]
+        return value
+
+    result = bind(json.loads(examples[0]))
+    if not isinstance(result, dict):
+        raise RuntimeError(f"SKILL_EXAMPLE_INVALID: {name} must be an object")
+    return result
+
+
+def native_response(request: dict, *, enhance_role: bool = True, reject_review: bool = False, skill_path: Path | None = None) -> dict:
+    """Exercise the packaged response examples with deterministic local evidence."""
+    skill_path = skill_path or PROJECT_ROOT / "SKILL.md"
+    bindings = {
+        "$request.request_id": request["request_id"], "$request.capability": request["capability"],
+        "$request.model_revision": request["model_revision"], "$request.view_sha256": request["view_sha256"],
+        "$response_id": "response-" + request["request_id"], "$candidate_id": "acceptance-" + request["request_id"],
+    }
+    response = _documented_json(skill_path, "candidate-set-response", bindings)
+    if (
+        response.get("request_id") != request["request_id"]
+        or type(response.get("base_revision")) is not int
+        or response["base_revision"] != request["model_revision"]
+        or response.get("view_sha256") != request["view_sha256"]
+        or response.get("response_id") != bindings["$response_id"]
+        or not isinstance(response.get("candidates"), list)
+    ):
+        raise RuntimeError("SKILL_EXAMPLE_INVALID: response identity or candidates differ from the request")
     if request["capability"] == "list_detect" and enhance_role:
         blocks = request["items"][0]["source_ast"]["document"]["blocks"]
         target_id, target = next((key, value) for key, value in blocks.items() if value.get("role") == "body")
-        candidates.append({
-            "candidate_id": "acceptance-" + request["request_id"],
-            "module_id": "enhancement-list_detect", "module_version": "2.0",
-            "target_source_refs": [target["source_ref"]], "target_node_ids": [target_id],
-            "proposal": {"operation": "update_role", "property_scope": ["role", "level"], "value": {"role": "heading", "level": 2}},
-            "positive_evidence": [{"kind": "acceptance_fixture"}], "negative_evidence": [],
-            "scope": {"stages": ["role"]}, "constraints": [], "confidence": 0.95,
-            "rationale": "Exercise the explicit local enhancement adapter",
+        bindings.update({
+            "$target.node_id": target_id, "$target.source_ref": target["source_ref"], "$target.expected_level": 2,
         })
+        response["candidates"].append(_documented_json(skill_path, "role-candidate", bindings))
     if request["capability"] == "document_review":
         packet = request.get("review_packet") or request.get("context", {}).get("review_packet")
         target = packet["targets"][0]
-        candidates.append({
-            "candidate_id": "acceptance-review-" + request["request_id"],
-            "module_id": "document_review", "module_version": "2.0",
-            "target_source_refs": [target["source_ref"]], "target_node_ids": [target["block_id"]],
-            "proposal": {"operation": "update_role", "property_scope": ["role", "level"],
-                         "value": {"role": "heading", "level": 6 if reject_review else target["evidence"]["expected_level"]}},
-            "positive_evidence": [{"kind": "post_audit_review"}], "negative_evidence": [],
-            "scope": {"stages": ["role", "normalize", "render", "audit"]},
-            "constraints": [], "rationale": "Repair the real audited heading jump", "confidence": 0.95,
+        bindings.update({
+            "$target.node_id": target["block_id"], "$target.source_ref": target["source_ref"],
+            "$target.expected_level": 6 if reject_review else target["evidence"]["expected_level"],
         })
-    return {
-        "request_id": request["request_id"], "response_id": "response-" + request["request_id"],
-        "candidate_set_version": "2.0", "base_revision": request["model_revision"],
-        "view_sha256": request["view_sha256"], "candidates": candidates,
-    }
+        response["candidates"].append(_documented_json(skill_path, "role-candidate", bindings))
+    return response
 
 
 def _assert_heading(path: Path, text: str, level: int) -> None:
@@ -189,8 +214,9 @@ def _assert_heading(path: Path, text: str, level: int) -> None:
         raise RuntimeError(f"Enhancement was not committed to DOCX: {paragraph.style.name}")
 
 
-def run_runtime_contracts(command: list[str], template: Path, evidence_dir: Path) -> dict:
+def run_runtime_contracts(command: list[str], template: Path, evidence_dir: Path, *, skill_path: Path | None = None) -> dict:
     """Exercise release behavior through a runnable CLI, keeping private evidence."""
+    skill_path = (skill_path or PROJECT_ROOT / "SKILL.md").resolve()
     evidence_dir.mkdir(parents=True, exist_ok=True)
     markdown = evidence_dir / "source.md"
     markdown.write_text("# Acceptance\n\n## Scope\n\nPreserved body.\n\n1. First item\n2. Second item\n\n| Name | Value |\n| --- | --- |\n| A | B |\n", encoding="utf-8")
@@ -221,7 +247,7 @@ def run_runtime_contracts(command: list[str], template: Path, evidence_dir: Path
     source.write_text("# Command acceptance\n\n## Scope\n\nCommand target.\n", encoding="utf-8")
     output = evidence_dir / "command.docx"
     report = evidence_dir / "command.report.json"
-    adapter = shlex.join([sys.executable, str(Path(__file__).resolve()), "--respond"])
+    adapter = shlex.join([sys.executable, str(Path(__file__).resolve()), "--respond", "--skill-document", str(skill_path)])
     _execute([*command, "--input", str(source), "--output", str(output), "--template", str(template),
               "--report", str(report), "--llm-enhance", "force-a", "--llm-command", adapter], evidence_dir, "command")
     _validate_public_report(report)
@@ -255,7 +281,7 @@ def run_runtime_contracts(command: list[str], template: Path, evidence_dir: Path
         for request in checkpoint["requests"]:
             if request["request_id"] not in responses:
                 capabilities.append(request["capability"])
-                responses[request["request_id"]] = native_response(request, enhance_role=False)
+                responses[request["request_id"]] = native_response(request, enhance_role=False, skill_path=skill_path)
         Path(checkpoint["files"]["responses_path"]).write_text(
             "".join(json.dumps(response, ensure_ascii=False) + "\n" for response in responses.values()), encoding="utf-8",
         )
@@ -274,12 +300,15 @@ def run_runtime_contracts(command: list[str], template: Path, evidence_dir: Path
     _validate_public_report(report)
     if any(value in report_md.read_text(encoding="utf-8") for value in ("Traceback", "review_packet", "source_ast", "native_module_evidence")):
         raise RuntimeError("Release Markdown report exposes private details after terminal resume")
-    results["file_protocol"] = {"status": "passed", "idempotent": True, "waiting_stages": stages, "capabilities": capabilities}
+    results["file_protocol"] = {
+        "status": "passed", "idempotent": True, "waiting_stages": stages, "capabilities": capabilities,
+        "skill_document_sha256": hashlib.sha256(skill_path.read_bytes()).hexdigest(),
+    }
     results["review"] = {"status": "passed", "heading_level": 1, "artifact": _validate_docx(output, text="Jump")}
     rejected = evidence_dir / "rejected.docx"
     rejected.write_bytes(previous_formal)
     rejected_report = evidence_dir / "rejected.report.json"
-    rejection_adapter = shlex.join([sys.executable, str(Path(__file__).resolve()), "--respond", "--reject-review"])
+    rejection_adapter = shlex.join([sys.executable, str(Path(__file__).resolve()), "--respond", "--reject-review", "--skill-document", str(skill_path)])
     _execute([*command, "--input", str(source), "--output", str(rejected), "--template", str(template),
               "--report", str(rejected_report), "--llm-enhance", "force-c", "--llm-command", rejection_adapter], evidence_dir, "rejected-review", expected=1)
     _validate_public_report(rejected_report, status="failed")
@@ -421,7 +450,7 @@ def smoke(package_dir: Path, *, evidence_dir: Path | None = None, public_skill: 
     result = {
         "status": "passed", "version": version, "source_identity": manifest["source_identity"],
         "binary": binary,
-        "contracts": run_runtime_contracts([str(executable)], package_dir / "assets" / "wx_template.docx", destination / "runtime"),
+        "contracts": run_runtime_contracts([str(executable)], package_dir / "assets" / "wx_template.docx", destination / "runtime", skill_path=package_dir / "SKILL.md"),
         "installation": run_installation_contracts(package_dir, destination / "installation", public_skill=public_skill),
     }
     _write_json(destination / "acceptance.json", result)
@@ -433,11 +462,12 @@ def main() -> None:
     parser.add_argument("package_dir", type=Path, nargs="?")
     parser.add_argument("--respond", action="store_true", help="Run the local acceptance response adapter")
     parser.add_argument("--reject-review", action="store_true", help="Exercise review rollback with a rejected response")
+    parser.add_argument("--skill-document", type=Path, help="Use response examples from this packaged SKILL.md")
     parser.add_argument("--evidence-dir", type=Path, help="Keep private acceptance logs and artifacts in this directory")
     parser.add_argument("--public-skill", type=Path, help="Exercise the thin Skill against a local HTTP archive server")
     args = parser.parse_args()
     if args.respond:
-        print(json.dumps(native_response(json.load(sys.stdin), reject_review=args.reject_review), ensure_ascii=False))
+        print(json.dumps(native_response(json.load(sys.stdin), reject_review=args.reject_review, skill_path=args.skill_document), ensure_ascii=False))
         return
     if args.package_dir is None:
         parser.error("package_dir is required")
