@@ -24,6 +24,14 @@ Markdown 结果为 `completed`，pipeline 为 `modular`，profile 为 `wx-defaul
 
 使用 `_build/audit_fix_validation/protocol-source.docx` 执行真实 DOCX 输入转换。结果为 `completed_with_warnings`，输出 DOCX ZIP 含 29 个条目，`word/document.xml` 存在。输入携带不可用编号定义，系统记录 5 条 `invalid_numbering_definition` 信息诊断并将对应段落降级为正文，未隐藏该输入事实。
 
+## CLI 页面渲染与字体环境复核
+
+使用文档渲染脚本对上述两份真实输出执行完整页面渲染：Markdown 输出 24 页，DOCX 输出 15 页。初始渲染出现中文方框。只读核验确认中文字符在 DOCX XML 和 PDF 文本层均完整存在，原因定位为当前 LibreOffice 运行时未解析模板使用的 `宋体`、`黑体` 字体别名。
+
+在临时 Fontconfig 配置中将 `宋体` 映射到 macOS `STSong`，将 `黑体` 映射到 macOS `STHeiti` 后重新渲染。Markdown 和 DOCX 页面中的中文、目录、正文、表格、图形、分页和页码均正常显示，未发现页面越界、文字裁切或图形裁切。对照渲染目录为 `/private/tmp/wxdf-ac4-render-markdown-fontfix` 和 `/private/tmp/wxdf-ac4-render-docx-fontfix`。
+
+该结果证明候选 DOCX 内容和页面结构可正常渲染。Word/WPS 实机字体、分页和域更新确认仍属于外部门禁，继续保留未完成状态。
+
 ## 文件协议、恢复、复核和保存后审计
 
 通过发布入口的源码验收工具执行：
