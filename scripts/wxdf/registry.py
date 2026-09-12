@@ -262,6 +262,32 @@ _RERAISED = _Reraised()
 # Capabilities the native conversion chain exchanges between Modules.
 NATIVE_CHAIN_CAPABILITIES = tuple(CAPABILITY_CONTRACTS)
 
+_DETERMINISTIC_MODULE_ORDER = {
+    module_id: position
+    for position, module_id in enumerate(
+        (
+            "source-facts-parser",
+            "native-source-parser",
+            "source-region",
+            "document-structure",
+            "protected-content",
+            "list-semantics",
+            "table-semantics",
+            "caption-semantics",
+            "appendix-semantics",
+            "native-candidate-set",
+            "native-review-candidate-set",
+            "native-resolver",
+            "native-transaction",
+            "native-normalizer",
+            "native-renderer",
+            "native-auditor",
+            "native-reviewer",
+            "native-publisher",
+        )
+    )
+}
+
 
 def build_native_v2_registry(
     bindings: Mapping[str, Callable[[Any], Any]] | None = None,
@@ -592,7 +618,14 @@ def build_plan(
             if not ready:
                 cycle = sorted(remaining)[0]
                 raise PlanError(f"circular dependency involving module {cycle}")
-            for module in sorted(ready, key=lambda item: (item.module_id, item.version)):
+            for module in sorted(
+                ready,
+                key=lambda item: (
+                    _DETERMINISTIC_MODULE_ORDER.get(item.module_id, len(_DETERMINISTIC_MODULE_ORDER)),
+                    item.module_id,
+                    item.version,
+                ),
+            ):
                 ordered.append(module)
                 del remaining[module.module_id]
     ordered_modules = tuple(ordered)

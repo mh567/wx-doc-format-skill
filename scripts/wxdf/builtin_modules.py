@@ -163,10 +163,12 @@ class ModuleExecutionContext:
             "order": int(active.get("position") or 0),
             "produced": list(self._writes),
             "consumed": list(self._reads),
-            "services": list(self._service_reads),
-            "options": list(self._option_reads),
             "status": status,
         }
+        if self._service_reads:
+            observation["services"] = list(self._service_reads)
+        if self._option_reads:
+            observation["options"] = list(self._option_reads)
         if error is not None:
             observation["error"] = {"type": type(error).__name__, "message": str(error)}
         # The record is a fresh mapping so that a Module summary shared with a
