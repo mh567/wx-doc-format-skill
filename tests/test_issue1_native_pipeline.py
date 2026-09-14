@@ -13,7 +13,7 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 from test_modular_ast import _ast
-from wxdf.builtin_modules import native_semantic_modules
+from wxdf.semantic_modules import native_semantic_modules
 from wxdf.kernel import ConversionKernel, ConversionRequest
 from wxdf.parsers import parse
 from wxdf.registry import ModuleDescriptor, PlanError, build_native_v2_registry, native_preflight

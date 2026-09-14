@@ -17,7 +17,6 @@ from .semantics.source_ast import build_source_ast, materialize_list_semantics
 from .semantic_modules import (
     ModuleExecutionContext,
     collect_native_candidates,
-    compatibility_hook,
 )
 
 
@@ -82,7 +81,7 @@ def _native_source_ast(context: ModuleExecutionContext) -> dict[str, Any]:
 
 
 def _native_candidate_set(context: ModuleExecutionContext) -> list[Mapping[str, Any]]:
-    collect_candidates = compatibility_hook("collect_native_candidates", collect_native_candidates)
+    collect_candidates = collect_native_candidates
     candidate_groups = {
         "source_region_candidates": context.require("source_region_candidates"),
         "document_structure_candidates": context.require("document_structure_candidates"),

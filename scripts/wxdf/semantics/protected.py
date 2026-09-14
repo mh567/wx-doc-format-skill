@@ -29,6 +29,48 @@ _FORMULA_RE = re.compile(r"(?:[=＋+−\-*/^]|\\frac|\\sum|\d\s*[A-Za-z])")
 _NOTE_PREFIXES = ("备注：", "编写提示：", "【备注提示】", "【编写样例】")
 
 
+def protected_code_style(style: str) -> bool:
+    """Return whether a style name marks the unit as an opaque code block."""
+
+    return _CODE_STYLE_RE.match(str(style).strip()) is not None
+
+
+def protected_text_reason(text: str, evidence: Mapping[str, Any]) -> str | None:
+    """Single owner of the text and numbering protection policy.
+
+    Consumes the date, version, API and manual-heading rules together with the
+    source numbering evidence and returns the protection reason, or ``None``
+    when the unit carries no protection signal. When a visible marker is
+    present the decision is final: the manual-heading and version fallbacks do
+    not run.
+    """
+
+    normalized = text.strip()
+    if _API_RE.match(normalized) or _HTTP_API_RE.match(normalized) or normalized.rstrip("：:") in _API_LABELS:
+        return "api_label"
+    if _DATE_RE.match(normalized) or _VERSION_CONTEXT_RE.match(normalized):
+        return "date_or_version"
+    visible_marker = evidence.get("visible_marker")
+    if isinstance(visible_marker, Mapping) and evidence.get("marker_kind"):
+        marker_text = str(visible_marker.get("marker_text") or "")
+        marker_match = re.match(r"^[ \t]*" + re.escape(marker_text) + r"[ \t]+", normalized)
+        remainder = normalized[marker_match.end():].strip() if marker_match else ""
+        if _DATE_RE.match(remainder) or _VERSION_CONTEXT_RE.match(remainder):
+            return "date_or_version"
+        if remainder.casefold().startswith(("版本", "version", "release", "build")):
+            return "date_or_version"
+        if evidence.get("source_list_type") == "decimal_chain":
+            segments = re.split(r"[.．-]", marker_text.rstrip(".)"))
+            if len([segment for segment in segments if segment]) < 3:
+                return "manual_heading_marker"
+        return None
+    if _MANUAL_HEADING_RE.match(normalized):
+        return "manual_heading_marker"
+    if _VERSION_RE.match(normalized):
+        return "date_or_version"
+    return None
+
+
 def protected_unit_semantics(unit: Mapping[str, Any], evidence: Mapping[str, Any]) -> dict[str, Any] | None:
     """Return one protected-role and canonical-text contract for a source unit."""
 
@@ -41,7 +83,7 @@ def protected_unit_semantics(unit: Mapping[str, Any], evidence: Mapping[str, Any
             "text": text,
         }
     style = str(unit.get("style") or evidence.get("style") or "").strip()
-    if unit.get("role") in {"code", "code_block"} or evidence.get("semantic_role") in {"code", "code_block"} or _CODE_STYLE_RE.match(style):
+    if unit.get("role") in {"code", "code_block"} or evidence.get("semantic_role") in {"code", "code_block"} or protected_code_style(style):
         return {"reason": "opaque_code", "role": "code_block", "text": text}
     role = source_note_role(
         unit.get("style") or evidence.get("style"),
@@ -54,28 +96,12 @@ def protected_unit_semantics(unit: Mapping[str, Any], evidence: Mapping[str, Any
         canonical = clean_note_prefix(strip_source_note_marker(text, role))
         return {"reason": "note", "role": role, "text": canonical}
     normalized_text = text.strip()
-    if _API_RE.match(normalized_text) or _HTTP_API_RE.match(normalized_text) or normalized_text.rstrip("：:") in _API_LABELS:
-        return {"reason": "api_label", "role": None, "text": text}
-    if _DATE_RE.match(normalized_text) or _VERSION_CONTEXT_RE.match(normalized_text):
-        return {"reason": "date_or_version", "role": None, "text": text}
+    reason = protected_text_reason(normalized_text, evidence)
+    if reason is not None:
+        return {"reason": reason, "role": None, "text": text}
     visible_marker = evidence.get("visible_marker")
     if isinstance(visible_marker, Mapping) and evidence.get("marker_kind"):
-        marker_text = str(visible_marker.get("marker_text") or "")
-        marker_match = re.match(r"^[ \t]*" + re.escape(marker_text) + r"[ \t]+", normalized_text)
-        remainder = normalized_text[marker_match.end():].strip() if marker_match else ""
-        if _DATE_RE.match(remainder) or _VERSION_CONTEXT_RE.match(remainder):
-            return {"reason": "date_or_version", "role": None, "text": text}
-        if remainder.casefold().startswith(("版本", "version", "release", "build")):
-            return {"reason": "date_or_version", "role": None, "text": text}
-        if evidence.get("source_list_type") == "decimal_chain":
-            segments = re.split(r"[.．-]", marker_text.rstrip(".)"))
-            if len([segment for segment in segments if segment]) < 3:
-                return {"reason": "manual_heading_marker", "role": None, "text": text}
         return None
-    if _MANUAL_HEADING_RE.match(normalized_text):
-        return {"reason": "manual_heading_marker", "role": None, "text": text}
-    if _VERSION_RE.match(normalized_text):
-        return {"reason": "date_or_version", "role": None, "text": text}
     if _FORMULA_RE.search(text) and evidence.get("formula"):
         return {"reason": "formula_opaque", "role": "formula", "text": text}
     return None
@@ -142,4 +168,9 @@ def collect_protected_candidates(facts: Mapping[str, Any]) -> list[dict[str, Any
     return sorted(result, key=lambda item: (str(item["module_id"]), str(item["candidate_id"])))
 
 
-__all__ = ["collect_protected_candidates", "protected_unit_semantics"]
+__all__ = [
+    "collect_protected_candidates",
+    "protected_code_style",
+    "protected_text_reason",
+    "protected_unit_semantics",
+]

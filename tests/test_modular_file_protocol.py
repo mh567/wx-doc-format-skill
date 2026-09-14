@@ -29,7 +29,7 @@ TEMPLATE = ROOT / "assets" / "wx_template.docx"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from wxdf.run_store import (
+from wxdf.checkpoint_store import (
     CheckpointError,
     append_native_waiting_requests,
     prepare_native_resume,
@@ -58,7 +58,7 @@ def _run(*arguments: str | Path) -> subprocess.CompletedProcess[str]:
     )
 
 
-def test_run_store_import_survives_without_fcntl_module() -> None:
+def test_checkpoint_store_import_survives_without_fcntl_module() -> None:
     script = """
 import builtins
 real_import = builtins.__import__
@@ -67,7 +67,7 @@ def guarded_import(name, *args, **kwargs):
         raise ImportError('fcntl unavailable')
     return real_import(name, *args, **kwargs)
 builtins.__import__ = guarded_import
-import wxdf.run_store
+import wxdf.checkpoint_store
 """
 
     completed = subprocess.run(
@@ -238,17 +238,17 @@ def _direct_resume_after_prepare(
     monkeypatch: pytest.MonkeyPatch,
     after_prepare,
 ):
-    from wxdf import run_store
+    from wxdf import checkpoint_store
     from wxdf.kernel import ConversionKernel, ConversionRequest
 
-    original = run_store.prepare_native_resume
+    original = checkpoint_store.prepare_native_resume
 
     def prepare_then_change(*args, **kwargs):
         prepared = original(*args, **kwargs)
         after_prepare()
         return prepared
 
-    monkeypatch.setattr(run_store, "prepare_native_resume", prepare_then_change)
+    monkeypatch.setattr(checkpoint_store, "prepare_native_resume", prepare_then_change)
     checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
     configuration = checkpoint["configuration"]
     return ConversionKernel().convert(
@@ -810,7 +810,7 @@ def test_later_request_append_detects_change_immediately_before_replace(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from wxdf import run_store
+    from wxdf import checkpoint_store
 
     checkpoint_path, _output, _source_ast_path = _generate(tmp_path)
     checkpoint_bytes = checkpoint_path.read_bytes()
@@ -824,14 +824,14 @@ def test_later_request_append_detects_change_immediately_before_replace(
     journal_path = checkpoint_path.with_name(
         checkpoint_path.name + ".request-append.journal"
     )
-    real_replace_bytes = run_store._replace_bytes
+    real_replace_bytes = checkpoint_store._replace_bytes
 
     def replace_and_race(path: Path, payload: bytes, suffix: str) -> None:
         real_replace_bytes(path, payload, suffix)
         if path == journal_path:
             request_path.write_bytes(b"external-concurrent-change\n")
 
-    monkeypatch.setattr(run_store, "_replace_bytes", replace_and_race)
+    monkeypatch.setattr(checkpoint_store, "_replace_bytes", replace_and_race)
 
     with pytest.raises(CheckpointError) as caught:
         append_native_waiting_requests(
@@ -851,7 +851,7 @@ def test_later_request_append_holds_exclusive_lock_through_final_replace(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from wxdf import run_store
+    from wxdf import checkpoint_store
 
     checkpoint_path, _output, _source_ast_path = _generate(tmp_path)
     checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
@@ -863,7 +863,7 @@ def test_later_request_append_holds_exclusive_lock_through_final_replace(
     ))
     lock_path = request_path.with_name(request_path.name + ".append.lock")
     observed: list[str] = []
-    real_replace = run_store.os.replace
+    real_replace = checkpoint_store.os.replace
 
     def inspect_lock_before_replace(source: Path | str, target: Path | str) -> None:
         if Path(source).name.endswith(".append.tmp") and Path(target) == request_path:
@@ -877,7 +877,7 @@ def test_later_request_append_holds_exclusive_lock_through_final_replace(
                     fcntl.flock(contender.fileno(), fcntl.LOCK_UN)
         real_replace(source, target)
 
-    monkeypatch.setattr(run_store.os, "replace", inspect_lock_before_replace)
+    monkeypatch.setattr(checkpoint_store.os, "replace", inspect_lock_before_replace)
 
     updated = append_native_waiting_requests(checkpoint_path, checkpoint, [extra_request])
 
@@ -1043,7 +1043,7 @@ def test_native_resume_rejects_response_rebinding_to_another_valid_transaction(
 def test_live_baseline_and_native_chain_share_candidate_collector(monkeypatch: pytest.MonkeyPatch) -> None:
     from types import SimpleNamespace
 
-    from wxdf import builtin_modules
+    from wxdf import native_stages, semantic_modules
 
     candidate_groups = {
         "source_region_candidates": [{"candidate_id": "region"}],
@@ -1060,18 +1060,19 @@ def test_live_baseline_and_native_chain_share_candidate_collector(monkeypatch: p
         collected.append(groups)
         return [{"candidate_id": "shared-order"}]
 
-    monkeypatch.setattr(builtin_modules, "collect_native_candidates", collect)
+    monkeypatch.setattr(semantic_modules, "collect_native_candidates", collect)
+    monkeypatch.setattr(native_stages, "collect_native_candidates", collect)
     monkeypatch.setattr(
-        builtin_modules,
+        semantic_modules,
         "resolve_source_regions",
         lambda source_path, source_facts: {
             "regions": [],
             "candidates": candidate_groups["source_region_candidates"],
         },
     )
-    monkeypatch.setattr(builtin_modules, "analyze_lists", lambda source_facts: {})
+    monkeypatch.setattr(semantic_modules, "analyze_lists", lambda source_facts: {})
     monkeypatch.setattr(
-        builtin_modules,
+        semantic_modules,
         "materialize_list_semantics",
         lambda source_ast, source_facts, result: (
             {},
@@ -1079,44 +1080,44 @@ def test_live_baseline_and_native_chain_share_candidate_collector(monkeypatch: p
             {},
         ),
     )
-    monkeypatch.setattr(builtin_modules, "collect_source_appendix_semantics", lambda source_facts: {})
+    monkeypatch.setattr(semantic_modules, "collect_source_appendix_semantics", lambda source_facts: {})
     monkeypatch.setattr(
-        builtin_modules,
+        semantic_modules,
         "prepare_native_appendix_semantics",
         lambda source_facts, source_ast, semantics, list_result: {},
     )
     monkeypatch.setattr(
-        builtin_modules,
+        semantic_modules,
         "collect_structure_candidates",
         lambda source_facts, regions, protect_semantics: candidate_groups["document_structure_candidates"],
     )
     monkeypatch.setattr(
-        builtin_modules,
+        semantic_modules,
         "collect_protected_candidates",
         lambda source_facts: candidate_groups["protected_content_candidates"],
     )
     monkeypatch.setattr(
-        builtin_modules,
+        semantic_modules,
         "collect_native_appendix_candidates",
         lambda source_facts, source_ast, semantics, list_result: candidate_groups["appendix_semantics_candidates"],
     )
     monkeypatch.setattr(
-        builtin_modules,
+        semantic_modules,
         "collect_table_candidates",
         lambda source_ast: candidate_groups["table_semantics_candidates"],
     )
     monkeypatch.setattr(
-        builtin_modules,
+        semantic_modules,
         "collect_caption_candidates",
         lambda source_ast: candidate_groups["caption_semantics_candidates"],
     )
 
-    rebuilt = builtin_modules.build_native_candidate_baseline("source.docx", {}, {})
-    context = builtin_modules.ModuleExecutionContext(
+    rebuilt = semantic_modules.build_native_candidate_baseline("source.docx", {}, {})
+    context = semantic_modules.ModuleExecutionContext(
         request=SimpleNamespace(options={"llm_enhance": "off"}),
         artifacts={**candidate_groups, "source_ast": {}},
     )
-    runtime = builtin_modules._native_candidate_set(context)
+    runtime = native_stages._native_candidate_set(context)
 
     assert rebuilt == [{"candidate_id": "shared-order"}]
     assert runtime == [{"candidate_id": "shared-order"}]
@@ -1147,14 +1148,14 @@ def test_native_resume_rejects_live_candidate_drift_before_recording(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from wxdf import builtin_modules
+    from wxdf import semantic_modules
 
     checkpoint_path, output, _source_ast_path = _generate(tmp_path)
     request = _read_requests(checkpoint_path)[0]
     _write_responses(checkpoint_path, [_response(request)])
     before = checkpoint_path.read_bytes()
 
-    original_builder = builtin_modules.build_native_candidate_baseline
+    original_builder = semantic_modules.build_native_candidate_baseline
 
     def drifted_candidates(*args, **kwargs):
         return [
@@ -1162,7 +1163,7 @@ def test_native_resume_rejects_live_candidate_drift_before_recording(
             {"candidate_id": "simulated-live-candidate-drift"},
         ]
 
-    monkeypatch.setattr(builtin_modules, "build_native_candidate_baseline", drifted_candidates)
+    monkeypatch.setattr(semantic_modules, "build_native_candidate_baseline", drifted_candidates)
     result = _direct_resume_after_prepare(checkpoint_path, monkeypatch, lambda: None)
 
     assert result.exit_code != 0
@@ -1478,7 +1479,7 @@ def test_native_resume_rejects_resource_disappearance_between_parse_and_binding(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from wxdf import builtin_modules, parsers
+    from wxdf import parsers, semantic_modules
 
     source = tmp_path / "vanishing-resource.md"
     resource = tmp_path / "vanishing-pixel.png"
@@ -1509,11 +1510,11 @@ def test_native_resume_rejects_resource_disappearance_between_parse_and_binding(
         facts = original_parse(*args, **kwargs)
         resource.unlink()
         monkeypatch.setattr(parsers, "parse", original_parse)
-        monkeypatch.setattr(builtin_modules, "parse", original_parse)
+        monkeypatch.setattr(semantic_modules, "parse", original_parse)
         return facts
 
     monkeypatch.setattr(parsers, "parse", parse_then_remove)
-    monkeypatch.setattr(builtin_modules, "parse", parse_then_remove)
+    monkeypatch.setattr(semantic_modules, "parse", parse_then_remove)
     result = _direct_resume_after_prepare(checkpoint_path, monkeypatch, lambda: None)
 
     assert result.exit_code != 0

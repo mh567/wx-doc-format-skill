@@ -21,7 +21,7 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 from wxdf import semantic_modules
-from wxdf.builtin_modules import native_semantic_modules
+from wxdf.semantic_modules import native_semantic_modules
 from wxdf.parsers import parse
 from wxdf.semantics import captions as caption_semantics_module
 from wxdf.semantics import paragraphs as paragraph_semantics_module

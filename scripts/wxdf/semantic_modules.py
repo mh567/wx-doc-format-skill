@@ -5,7 +5,6 @@ from collections.abc import MutableMapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 import json
-import sys
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Mapping
 
@@ -87,8 +86,7 @@ def source_facts_module() -> RegisteredModule:
     def execute(c: ModuleExecutionContext) -> dict[str, Any]:
         with c.stage("source"):
             restored = c.request.options.get("restored_source_facts")
-            parse_source = compatibility_hook("parse", parse)
-            facts = json.loads(json.dumps(restored, ensure_ascii=False)) if isinstance(restored, Mapping) else parse_source(c.request.input_path, {"source_store": c.services.get("store")})
+            facts = json.loads(json.dumps(restored, ensure_ascii=False)) if isinstance(restored, Mapping) else parse(c.request.input_path, {"source_store": c.services.get("store")})
             metrics = c.services.get("metrics"); metrics.record_source_opened() if metrics is not None else None
             summary, digest = summarize_source_facts(dict(facts)), digest_source_facts(dict(facts))
         c.provide("source_facts", facts); c.evidence["source-facts-parser"] = summary
@@ -142,32 +140,24 @@ def appendix_semantics_module() -> RegisteredModule:
 
 def native_semantic_modules() -> tuple[RegisteredModule, ...]: return (source_facts_module(), source_region_module(), document_structure_module(), protected_content_module(), list_semantics_module(), table_semantics_module(), caption_semantics_module(), appendix_semantics_module())
 def collect_native_candidates(*, source_region_candidates: Iterable[Mapping[str, Any]], document_structure_candidates: Iterable[Mapping[str, Any]], protected_content_candidates: Iterable[Mapping[str, Any]], list_semantics_candidates: Iterable[Mapping[str, Any]], appendix_semantics_candidates: Iterable[Mapping[str, Any]], table_semantics_candidates: Iterable[Mapping[str, Any]], caption_semantics_candidates: Iterable[Mapping[str, Any]], paragraph_semantics_candidates: Iterable[Mapping[str, Any]] = ()) -> list[Mapping[str, Any]]: return [*source_region_candidates, *document_structure_candidates, *protected_content_candidates, *list_semantics_candidates, *appendix_semantics_candidates, *table_semantics_candidates, *caption_semantics_candidates, *paragraph_semantics_candidates]
-def _compat(name: str, fallback: Any) -> Any:
-    return getattr(sys.modules.get("wxdf.builtin_modules"), name, fallback)
-
-
-def compatibility_hook(name: str, fallback: Any) -> Any:
-    """Resolve an explicitly supported development compatibility hook."""
-
-    return _compat(name, fallback)
 
 
 def build_native_candidate_baseline(source_path: Path | str, source_facts: Mapping[str, Any], source_ast: Mapping[str, Any]) -> list[Mapping[str, Any]]:
-    regions = _compat("resolve_source_regions", resolve_source_regions)(source_path, source_facts)
-    lists = _compat("analyze_lists", analyze_lists)(source_facts)
-    _model, list_candidates, _native_item_map = _compat("materialize_list_semantics", materialize_list_semantics)(source_ast, source_facts, lists)
+    regions = resolve_source_regions(source_path, source_facts)
+    lists = analyze_lists(source_facts)
+    _model, list_candidates, _native_item_map = materialize_list_semantics(source_ast, source_facts, lists)
     item_map = {
         str(item.get("item_id")): str(item.get("list_id"))
         for item in lists.get("items", [])
         if item.get("item_id") and item.get("list_id")
     }
-    appendix = _compat("prepare_native_appendix_semantics", prepare_native_appendix_semantics)(
+    appendix = prepare_native_appendix_semantics(
         source_facts,
         source_ast,
-        _compat("collect_source_appendix_semantics", collect_source_appendix_semantics)(source_facts),
+        collect_source_appendix_semantics(source_facts),
         item_map,
     )
-    caption_builder = _compat("collect_caption_candidates", collect_caption_candidates)
+    caption_builder = collect_caption_candidates
     try:
         import inspect
 
@@ -177,9 +167,9 @@ def build_native_candidate_baseline(source_path: Path | str, source_facts: Mappi
     accepts_facts = caption_parameters is None or len(caption_parameters) >= 2
     accepts_semantics = caption_parameters is None or "caption_semantics" in caption_parameters
     caption_semantics = (
-        _compat("collect_source_caption_semantics", collect_source_caption_semantics)(
+        collect_source_caption_semantics(
             source_facts,
-            _compat("collect_source_table_semantics", collect_source_table_semantics)(source_facts),
+            collect_source_table_semantics(source_facts),
         )
         if accepts_semantics
         else None
@@ -192,15 +182,15 @@ def build_native_candidate_baseline(source_path: Path | str, source_facts: Mappi
         caption_candidates = caption_builder(source_ast)
     groups: dict[str, Any] = {
         "source_region_candidates": regions["candidates"],
-        "document_structure_candidates": _compat("collect_structure_candidates", collect_structure_candidates)(source_facts, regions["regions"], protect_semantics=True),
-        "protected_content_candidates": _compat("collect_protected_candidates", collect_protected_candidates)(source_facts),
+        "document_structure_candidates": collect_structure_candidates(source_facts, regions["regions"], protect_semantics=True),
+        "protected_content_candidates": collect_protected_candidates(source_facts),
         "list_semantics_candidates": list_candidates,
-        "appendix_semantics_candidates": _compat("collect_native_appendix_candidates", collect_native_appendix_candidates)(source_facts, source_ast, appendix, item_map),
-        "table_semantics_candidates": _compat("collect_table_candidates", collect_table_candidates)(source_ast),
+        "appendix_semantics_candidates": collect_native_appendix_candidates(source_facts, source_ast, appendix, item_map),
+        "table_semantics_candidates": collect_table_candidates(source_ast),
         "caption_semantics_candidates": caption_candidates,
     }
     if source_facts.get("facts_schema_version"):
-        groups["paragraph_semantics_candidates"] = _compat("collect_paragraph_candidates", collect_paragraph_candidates)(source_facts, source_ast, caption_semantics_result=caption_semantics)
-    return _compat("collect_native_candidates", collect_native_candidates)(**groups)
+        groups["paragraph_semantics_candidates"] = collect_paragraph_candidates(source_facts, source_ast, caption_semantics_result=caption_semantics)
+    return collect_native_candidates(**groups)
 
-__all__ = ["ModuleExecutionContext", "appendix_semantics_module", "build_native_candidate_baseline", "caption_semantics_module", "collect_native_candidates", "compatibility_hook", "document_structure_module", "list_semantics_module", "native_semantic_modules", "protected_content_module", "source_facts_module", "source_region_module", "table_semantics_module"]
+__all__ = ["ModuleExecutionContext", "appendix_semantics_module", "build_native_candidate_baseline", "caption_semantics_module", "collect_native_candidates", "document_structure_module", "list_semantics_module", "native_semantic_modules", "protected_content_module", "source_facts_module", "source_region_module", "table_semantics_module"]

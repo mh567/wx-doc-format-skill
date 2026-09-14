@@ -12,7 +12,6 @@ import copy
 import hashlib
 import json
 import os
-import sys
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -373,14 +372,6 @@ def _replace_bytes(path: Path, payload: bytes, suffix: str) -> None:
     os.replace(temporary, path)
 
 
-def _compat_replace_bytes(path: Path, payload: bytes, suffix: str) -> None:
-    """Honor the legacy facade's injectable replacement hook."""
-
-    facade = sys.modules.get("wxdf.run_store")
-    replace = getattr(facade, "_replace_bytes", _replace_bytes)
-    replace(path, payload, suffix)
-
-
 @contextmanager
 def _exclusive_file_lock(lock_path: Path):
     """Hold one cross-process file lock on supported platforms."""
@@ -446,7 +437,7 @@ def _recover_native_request_append(checkpoint_path: Path) -> None:
                 raise ValueError("committed request append does not match its file")
         elif checkpoint_digest == previous_digest:
             if current == replacement:
-                _compat_replace_bytes(request_path, previous, ".append-recovery.tmp")
+                _replace_bytes(request_path, previous, ".append-recovery.tmp")
             elif current != previous:
                 raise ValueError("request file changed during append recovery")
         else:
@@ -555,7 +546,7 @@ def _append_native_waiting_requests_locked(
         "previous_base64": base64.b64encode(previous).decode("ascii"),
         "replacement_base64": base64.b64encode(payload).decode("ascii"),
     }
-    _compat_replace_bytes(
+    _replace_bytes(
         journal_path,
         (_canonical(journal) + "\n").encode("utf-8"),
         ".tmp",
@@ -576,7 +567,7 @@ def _append_native_waiting_requests_locked(
         save_checkpoint(updated, checkpoint_path)
     except Exception:
         if request_path.read_bytes() == payload:
-            _compat_replace_bytes(request_path, previous, ".rollback.tmp")
+            _replace_bytes(request_path, previous, ".rollback.tmp")
         journal_path.unlink(missing_ok=True)
         raise
     journal_path.unlink(missing_ok=True)
@@ -666,13 +657,9 @@ def prepare_native_resume(
         raise CheckpointError("current SourceFacts do not match the checkpoint", code="fingerprint_mismatch")
     if checkpoint["status"] == "waiting_external":
         _validate_relation_resume_snapshot(checkpoint, current_source_facts)
-        from .semantic_modules import build_native_candidate_baseline, compatibility_hook
+        from .semantic_modules import build_native_candidate_baseline
 
-        live_builder = compatibility_hook(
-            "build_native_candidate_baseline",
-            build_native_candidate_baseline,
-        )
-        live_candidates = live_builder(
+        live_candidates = build_native_candidate_baseline(
             source_path,
             current_source_facts,
             checkpoint["source_ast"],

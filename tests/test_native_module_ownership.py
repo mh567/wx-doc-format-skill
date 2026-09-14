@@ -19,7 +19,7 @@ SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from wxdf.builtin_modules import ModuleExecutionContext, native_semantic_modules
+from wxdf.semantic_modules import ModuleExecutionContext, native_semantic_modules
 from wxdf.kernel import ConversionKernel, ConversionRequest
 from wxdf.metrics import MetricsCollector
 from wxdf.registry import (

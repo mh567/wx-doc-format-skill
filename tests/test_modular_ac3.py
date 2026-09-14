@@ -57,15 +57,12 @@ def test_native_registry_assigns_semantic_and_lifecycle_roles_to_deep_modules() 
 def test_checkpoint_and_response_roles_have_separate_implementations() -> None:
     checkpoint_store = importlib.import_module("wxdf.checkpoint_store")
     response_store = importlib.import_module("wxdf.response_store")
-    compatibility = importlib.import_module("wxdf.run_store")
 
     assert checkpoint_store.CheckpointError.__module__ == "wxdf.checkpoint_store"
     assert checkpoint_store.save_checkpoint.__module__ == "wxdf.checkpoint_store"
     assert checkpoint_store.load_checkpoint.__module__ == "wxdf.checkpoint_store"
     assert response_store.content_digest.__module__ == "wxdf.response_store"
     assert response_store.record_response.__module__ == "wxdf.response_store"
-    assert compatibility.CheckpointError is checkpoint_store.CheckpointError
-    assert compatibility.content_digest is response_store.content_digest
 
 
 def test_release_module_surface_contains_role_modules_and_excludes_retired_modules() -> None:

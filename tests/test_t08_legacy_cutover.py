@@ -122,17 +122,12 @@ def test_retired_adapter_seams_are_absent_from_runtime_sources() -> None:
             "def _convert_modular(",
             "legacy-full-v1",
         ),
-        "scripts/wxdf/builtin_modules.py": (
-            "legacy_full_adapter_module",
-            "source_projection_module",
-            "semantic_equivalence_module",
-            "source_parser_equivalence_module",
-            "experimental_native_modules",
-        ),
     }
 
     for relative_path, symbols in retired_symbols.items():
-        source = (ROOT / relative_path).read_text(encoding="utf-8")
+        path = ROOT / relative_path
+        assert path.exists(), f"runtime source is missing: {relative_path}"
+        source = path.read_text(encoding="utf-8")
         for symbol in symbols:
             assert symbol not in source, f"{relative_path} still exposes {symbol}"
 
@@ -141,6 +136,7 @@ def test_retired_runtime_modules_are_deleted() -> None:
     for relative_path in (
         "scripts/wxdf/legacy_pipeline.py",
         "scripts/wxdf/legacy_capability.py",
+        "scripts/wxdf/builtin_modules.py",
     ):
         assert not (ROOT / relative_path).exists(), f"retired module remains: {relative_path}"
 

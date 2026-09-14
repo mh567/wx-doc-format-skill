@@ -85,7 +85,7 @@ class ConversionKernel:
             execution_plan_report,
             native_preflight,
         )
-        from .run_store import (
+        from .checkpoint_store import (
             CheckpointError,
             append_native_waiting_requests,
             complete_native_checkpoint,

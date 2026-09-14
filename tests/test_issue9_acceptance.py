@@ -22,7 +22,7 @@ from wxdf.normalization import normalize
 from wxdf.parsers import parse
 from wxdf.rendering import render
 from wxdf.resolver import resolve
-from wxdf.run_store import CheckpointError, load_checkpoint, save_checkpoint
+from wxdf.checkpoint_store import CheckpointError, load_checkpoint, save_checkpoint
 from wxdf.semantics.lists import analyze_lists
 from wxdf.semantics.source_ast import build_source_ast, materialize_list_semantics
 from wxdf.review import accept_candidate
@@ -357,7 +357,7 @@ def test_heading_to_list_reclassification_survives_full_recompute_and_file_resto
         "import json, sys; "
         "from wxdf.kernel import ConversionKernel, ConversionRequest; "
         "from wxdf.parsers import parse; "
-        "from wxdf.run_store import load_checkpoint; "
+        "from wxdf.checkpoint_store import load_checkpoint; "
         "facts=parse(sys.argv[2]); "
         "checkpoint=load_checkpoint(sys.argv[1], expected_fingerprints={'source': facts['source']['content_sha256']}, expected_contracts={'source_facts':'1.0','ast':'2.0','patch':'2.0','checkpoint':'2.0'}, current_source_facts=facts); "
         "assert all(item['status']=='active' for item in checkpoint['decision_ledger_projection']['revisions']); "
