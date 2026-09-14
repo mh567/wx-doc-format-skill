@@ -65,6 +65,7 @@ tests/*
 !tests/test_t02_semantic_ownership.py
 !tests/test_t03_protection_owner.py
 !tests/test_t04_facade_removal.py
+!tests/test_t05_digest_owner.py
 !tests/test_t09_compiled_acceptance.py
 !tests/modular_support.py
 !tests/fixtures/

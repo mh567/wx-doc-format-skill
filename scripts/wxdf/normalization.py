@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import copy
-import hashlib
-import json
 from typing import Any, Mapping
 
+from .digest import digest
 from .model import build_indexes, inline_text_projection
 from .template import TemplateBundle, materialize_profile, preflight_template, presentation_contract_from
 from .validation import validate_ast
@@ -14,14 +13,6 @@ from .validation import validate_ast
 
 class NormalizationError(ValueError):
     """Raised when normalization inputs or strategy are invalid."""
-
-
-def _canonical(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-
-
-def _digest(value: Any) -> str:
-    return "sha256:" + hashlib.sha256(_canonical(value).encode("utf-8")).hexdigest()
 
 
 def _node_map(ast: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
@@ -254,8 +245,8 @@ def normalize(
         "generated_nodes": generated_nodes,
         "template_preflight": preflight,
         "diagnostics": [],
-        "semantic_digest": _digest(semantic_payload),
-        "presentation_digest": _digest(presentation_payload),
+        "semantic_digest": digest(semantic_payload),
+        "presentation_digest": digest(presentation_payload),
         "context": copy.deepcopy(dict(context or {})),
     }
 

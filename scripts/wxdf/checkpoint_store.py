@@ -27,6 +27,7 @@ except ImportError:
     _msvcrt = None
 
 from .contracts import CHECKPOINT_STATUSES, STAGES, ContractError
+from .digest import canonical_json, digest
 from .validation import validate_checkpoint
 from .response_store import content_digest, request_digest, response_digest
 
@@ -54,14 +55,6 @@ _TRANSITIONS: dict[str, frozenset[str]] = {
 }
 
 
-def _canonical(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-
-
-def _digest(value: Any) -> str:
-    return "sha256:" + hashlib.sha256(_canonical(value).encode("utf-8")).hexdigest()
-
-
 def _response_transaction_binding(
     response: Mapping[str, Any],
     transaction_id: str,
@@ -73,7 +66,7 @@ def _response_transaction_binding(
         "transaction_id": str(transaction_id),
         "transaction_content_sha256": str(transaction_content_sha256),
     }
-    return {**binding, "binding_sha256": _digest(binding)}
+    return {**binding, "binding_sha256": digest(binding)}
 
 
 def file_digest(path: Path | str | None) -> str:
@@ -97,16 +90,16 @@ def checkpoint_target_map(source_ast: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "revision": int(source_ast["revision"]),
         "entries": entries,
-        "view_sha256": _digest(entries),
+        "view_sha256": digest(entries),
     }
 
 
 def candidate_baseline_digest(source_ast: Mapping[str, Any], candidates: list[Any]) -> str:
     """Bind a deterministic pre enhancement candidate set to its Source AST."""
 
-    return _digest({
+    return digest({
         "source_ast": source_ast,
-        "candidates": sorted(candidates, key=_canonical),
+        "candidates": sorted(candidates, key=canonical_json),
     })
 
 
@@ -239,7 +232,7 @@ def write_native_waiting_checkpoint(
     requests_path.parent.mkdir(parents=True, exist_ok=True)
     requests = copy.deepcopy(requests)
     requests_path.write_text(
-        "".join(_canonical(item) + "\n" for item in requests),
+        "".join(canonical_json(item) + "\n" for item in requests),
         encoding="utf-8",
     )
     responses_path.write_text("", encoding="utf-8")
@@ -258,11 +251,11 @@ def write_native_waiting_checkpoint(
     fingerprints = {
         "source": source_sha256,
         "template": file_digest(template_path),
-        "resources": _digest(resources),
-        "configuration": _digest(configuration),
-        "contracts": _digest(contracts),
-        "modules": _digest(modules),
-        "parser": _digest(source_facts.get("parser", {})),
+        "resources": digest(resources),
+        "configuration": digest(configuration),
+        "contracts": digest(contracts),
+        "modules": digest(modules),
+        "parser": digest(source_facts.get("parser", {})),
         "protocol": "2.0",
         "requests": file_digest(requests_path),
     }
@@ -500,7 +493,7 @@ def _append_native_waiting_requests_locked(
         )
     request_path = Path(updated["files"]["requests_path"])
     previous = request_path.read_bytes()
-    expected = "".join(_canonical(item) + "\n" for item in updated.get("requests", [])).encode("utf-8")
+    expected = "".join(canonical_json(item) + "\n" for item in updated.get("requests", [])).encode("utf-8")
     if previous != expected:
         raise CheckpointError(
             "native request file changed before later-stage append",
@@ -534,7 +527,7 @@ def _append_native_waiting_requests_locked(
     if updated["requests"] == checkpoint.get("requests"):
         return updated
 
-    payload = "".join(_canonical(item) + "\n" for item in updated["requests"]).encode("utf-8")
+    payload = "".join(canonical_json(item) + "\n" for item in updated["requests"]).encode("utf-8")
     temporary = request_path.with_name(request_path.name + ".append.tmp")
     journal_path = _request_append_journal_path(checkpoint_path)
     temporary.write_bytes(payload)
@@ -548,7 +541,7 @@ def _append_native_waiting_requests_locked(
     }
     _replace_bytes(
         journal_path,
-        (_canonical(journal) + "\n").encode("utf-8"),
+        (canonical_json(journal) + "\n").encode("utf-8"),
         ".tmp",
     )
     try:
@@ -645,15 +638,15 @@ def prepare_native_resume(
         expected_fingerprints={
             "source": current_source_facts["source"]["content_sha256"],
             "template": template_digest,
-            "configuration": _digest(configuration),
-            "contracts": _digest(contracts),
-            "modules": _digest(modules),
-            "parser": _digest(current_source_facts.get("parser", {})),
-            "resources": _digest(_resource_entries(current_source_facts)),
+            "configuration": digest(configuration),
+            "contracts": digest(contracts),
+            "modules": digest(modules),
+            "parser": digest(current_source_facts.get("parser", {})),
+            "resources": digest(_resource_entries(current_source_facts)),
             "requests": file_digest(request_path),
         },
     )
-    if _digest(current_source_facts) != _digest(checkpoint["source_facts"]):
+    if digest(current_source_facts) != digest(checkpoint["source_facts"]):
         raise CheckpointError("current SourceFacts do not match the checkpoint", code="fingerprint_mismatch")
     if checkpoint["status"] == "waiting_external":
         _validate_relation_resume_snapshot(checkpoint, current_source_facts)
@@ -685,7 +678,7 @@ def prepare_native_resume(
             if (
                 items[0].get("revision") != request_revision
                 or request.get("model_revision") != request_revision
-                or request.get("view_sha256") != _digest(request_ast)
+                or request.get("view_sha256") != digest(request_ast)
             ):
                 raise CheckpointError("native request view identity is inconsistent", code="request_identity_conflict")
             is_review = request.get("capability") == "document_review"
@@ -1186,7 +1179,7 @@ def _validate_embedded_fingerprints(checkpoint: Mapping[str, Any]) -> None:
         ("modules", "modules"),
     ):
         if fingerprint in fingerprints and field in checkpoint:
-            if fingerprints[fingerprint] != _digest(checkpoint[field]):
+            if fingerprints[fingerprint] != digest(checkpoint[field]):
                 raise CheckpointError(
                     f"checkpoint {field} identity does not match its fingerprint",
                     code="fingerprint_mismatch",
@@ -1199,7 +1192,7 @@ def _validate_embedded_fingerprints(checkpoint: Mapping[str, Any]) -> None:
                 "resources": _resource_entries(source_facts),
             }
             for fingerprint, value in embedded.items():
-                if fingerprint in fingerprints and fingerprints[fingerprint] != _digest(value):
+                if fingerprint in fingerprints and fingerprints[fingerprint] != digest(value):
                     raise CheckpointError(
                         f"checkpoint {fingerprint} identity does not match its fingerprint",
                         code="fingerprint_mismatch",
@@ -1233,7 +1226,7 @@ def _validate_embedded_fingerprints(checkpoint: Mapping[str, Any]) -> None:
 def _write_json_atomic(checkpoint: Mapping[str, Any], path: Path, *, crash_at: str | None = None) -> None:
     from .publication import PublicationError, publish_files_atomically
 
-    payload = (_canonical(checkpoint) + "\n").encode("utf-8")
+    payload = (canonical_json(checkpoint) + "\n").encode("utf-8")
     try:
         publish_files_atomically({path: payload}, crash_at=crash_at)
     except PublicationError as exc:
@@ -1384,7 +1377,7 @@ def load_checkpoint(
         try:
             current_digest = current_source_facts.get("source", {}).get("content_sha256")
             stored_digest = checkpoint["source_facts"].get("source", {}).get("content_sha256")
-            source_matches = current_digest == stored_digest and _digest(current_source_facts) == _digest(checkpoint["source_facts"])
+            source_matches = current_digest == stored_digest and digest(current_source_facts) == digest(checkpoint["source_facts"])
             if not source_matches:
                 unbound_ledger = copy.deepcopy(checkpoint["decision_ledger"])
                 unbound_ledger.pop("source_binding", None)
@@ -1398,7 +1391,7 @@ def load_checkpoint(
                 checkpoint["target_map"] = {
                     "revision": checkpoint["source_ast"]["revision"],
                     "entries": {},
-                    "view_sha256": _digest({}),
+                    "view_sha256": digest({}),
                 }
                 checkpoint["applied_transactions"] = []
                 checkpoint["transaction_content_digests"] = {}
@@ -1457,7 +1450,7 @@ def load_checkpoint(
             checkpoint["target_map"] = {
                 "revision": checkpoint["source_ast"]["revision"],
                 "entries": {},
-                "view_sha256": _digest({}),
+                "view_sha256": digest({}),
             }
             _validate_for_store(checkpoint)
         except LedgerError as exc:

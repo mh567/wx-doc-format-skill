@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import copy
-import hashlib
-import json
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
+from .digest import digest_hex
 from .model import build_indexes
 from .validation import validate_ast
 
@@ -53,11 +52,6 @@ def make_snapshot(ast: Mapping[str, Any]) -> StageSnapshot:
     return StageSnapshot(ast=ast if isinstance(ast, dict) else copy.deepcopy(dict(ast)))
 
 
-def _digest(value: Any) -> str:
-    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
-
 def _canonical_decision_content(decision: Mapping[str, Any]) -> dict[str, Any]:
     nested = decision.get("decision")
     operation = nested.get("operation") if isinstance(nested, Mapping) else decision.get("operation")
@@ -80,7 +74,7 @@ def _canonical_decision_content(decision: Mapping[str, Any]) -> dict[str, Any]:
 def transaction_content_digest(decisions: Sequence[Mapping[str, Any]]) -> str:
     """Return the shared transaction proof used by snapshots and ledgers."""
 
-    return "sha256:" + _digest([
+    return "sha256:" + digest_hex([
         _canonical_decision_content(decision)
         for decision in decisions
     ])
@@ -90,7 +84,7 @@ def _transaction_id(decisions: Sequence[Mapping[str, Any]]) -> str:
     explicit = [str(decision.get("transaction_id")) for decision in decisions if decision.get("transaction_id")]
     if explicit and len(set(explicit)) == 1:
         return explicit[0]
-    return "stage-" + _digest(list(decisions))
+    return "stage-" + digest_hex(list(decisions))
 
 
 def _node_map(ast: Mapping[str, Any]) -> dict[str, dict[str, Any]]:

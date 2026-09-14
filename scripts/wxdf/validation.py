@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-import hashlib
-import json
 from typing import Any
 
 from .contracts import (
@@ -26,6 +24,7 @@ from .contracts import (
     STAGES,
     TABLE_TYPES,
 )
+from .digest import digest
 
 
 _HASH_PREFIX = "sha256:"
@@ -79,11 +78,6 @@ def _positive_int(value: Any, path: str, contract: str) -> None:
     _type(value, int, path, contract)
     if value < 1:
         _fail("non_positive_integer", path, "value must be positive", contract)
-
-
-def _canonical_digest(value: Any) -> str:
-    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return _HASH_PREFIX + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _sha256(value: Any, path: str, contract: str) -> None:
@@ -793,14 +787,14 @@ def validate_checkpoint(checkpoint: Mapping[str, Any]) -> None:
                 _list(normalized[field], f"normalized_ast.{field}", contract)
             _sha256(normalized["semantic_digest"], "normalized_ast.semantic_digest", contract)
             _sha256(normalized["presentation_digest"], "normalized_ast.presentation_digest", contract)
-            expected_semantic = _canonical_digest({
+            expected_semantic = digest({
                 "source_revision": normalized["source_revision"],
                 "source_ast": normalized["source_ast"],
                 "overlay": normalized["overlay"],
             })
             if normalized["semantic_digest"] != expected_semantic:
                 _fail("digest_mismatch", "normalized_ast.semantic_digest", "normalized semantic digest does not match its snapshot", contract)
-            expected_presentation = _canonical_digest(normalized["presentation"])
+            expected_presentation = digest(normalized["presentation"])
             if normalized["presentation_digest"] != expected_presentation:
                 _fail("digest_mismatch", "normalized_ast.presentation_digest", "normalized presentation digest does not match its snapshot", contract)
     for field in ("content_overlay", "presentation_override", "modules", "requests"):
@@ -818,9 +812,9 @@ def validate_checkpoint(checkpoint: Mapping[str, Any]) -> None:
             _fail("transaction_state_mismatch", transaction_path, "transaction ID is repeated", contract)
         applied_digests[transaction["transaction_id"]] = transaction["content_sha256"]
     digests = _mapping(checkpoint["transaction_content_digests"], "transaction_content_digests", contract)
-    for transaction_id, digest in digests.items():
+    for transaction_id, stored_digest in digests.items():
         _non_empty_string(transaction_id, "transaction_content_digests key", contract)
-        _sha256(digest, f"transaction_content_digests.{transaction_id}", contract)
+        _sha256(stored_digest, f"transaction_content_digests.{transaction_id}", contract)
     if applied_digests != dict(digests):
         _fail("transaction_state_mismatch", "applied_transactions", "transaction IDs and content digests must match exactly", contract)
     configuration = checkpoint.get("configuration")
@@ -909,7 +903,7 @@ def validate_checkpoint(checkpoint: Mapping[str, Any]) -> None:
                     "saved response transaction proof does not match the response",
                     contract,
                 )
-            if binding.get("binding_sha256") != _canonical_digest(binding_content):
+            if binding.get("binding_sha256") != digest(binding_content):
                 _fail(
                     "response_transaction_binding_mismatch",
                     binding_path,

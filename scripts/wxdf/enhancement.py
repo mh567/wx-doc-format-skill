@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import copy
-import hashlib
 import json
 import shlex
 import subprocess
@@ -19,6 +18,7 @@ from llm_enhancer import (  # noqa: F401  # re-exported compatibility surface
 )
 
 from .contracts import AST_SCHEMA_VERSION, ContractError, PATCH_SCHEMA_VERSION
+from .digest import digest
 from .validation import validate_ast, validate_patch
 
 
@@ -65,11 +65,6 @@ class EnhancementResult:
             "consumed": self.consumed,
             "request_summary": dict(self.request_summary),
         }
-
-
-def _digest(value: Any) -> str:
-    payload = json.dumps(_thaw(value), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 class _FrozenDict(dict):
@@ -124,7 +119,7 @@ def build_native_request(
 
     ast = copy.deepcopy(dict(source_ast))
     validate_ast(ast)
-    view_sha256 = _digest(ast)
+    view_sha256 = digest(ast)
     view = _freeze(
         {
             "view_schema_version": CAPABILITY_INPUT_SCHEMA_VERSION,
@@ -167,7 +162,7 @@ def serialize_native_request(request: EnhancementRequest | Mapping[str, Any]) ->
         "source_refs": [_thaw(item) for item in request.source_refs],
         "contract_versions": dict(request.contract_versions),
     }
-    payload["request_sha256"] = _digest(payload)
+    payload["request_sha256"] = digest(payload)
     return payload
 
 
@@ -395,7 +390,7 @@ class EnhancementExecutor:
             "view_sha256": request.view_sha256 or context.get("view_sha256"),
             "source_refs": [dict(ref) for ref in request.source_refs],
             "contracts": dict(request.contract_versions),
-            "items_sha256": _digest([dict(item) for item in request.items]),
+            "items_sha256": digest([dict(item) for item in request.items]),
         }
         if capability is None or capability not in self.registry:
             status = "missing_capability" if native else "unsupported"

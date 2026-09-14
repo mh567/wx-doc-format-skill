@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import copy
 from collections import defaultdict
 from typing import Any, Mapping, Sequence
+
+from .digest import canonical_json
 
 
 _EVIDENCE_STRENGTH = {
@@ -20,10 +21,6 @@ _EVIDENCE_STRENGTH = {
     "heuristic": 1,
     "llm": 0,
 }
-
-
-def _canonical(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def _candidate_strength(candidate: Mapping[str, Any]) -> int:
@@ -120,7 +117,7 @@ def _decision_from_candidate(candidate: Mapping[str, Any], expected_revision: in
         if isinstance(constraint, Mapping)
     )
     return {
-        "decision_id": "decision-" + hashlib.sha256(_canonical(candidate).encode("utf-8")).hexdigest()[:16],
+        "decision_id": "decision-" + hashlib.sha256(canonical_json(candidate).encode("utf-8")).hexdigest()[:16],
         "candidate_id": str(candidate.get("candidate_id")),
         "candidate_ids": [str(candidate.get("candidate_id"))],
         "operation": operation,
@@ -177,7 +174,7 @@ def resolve(
     grouped: dict[tuple[tuple[str, ...], tuple[str, ...]], list[Mapping[str, Any]]] = defaultdict(list)
     unresolved: list[dict[str, Any]] = []
     claims = [claim for candidate in candidate_set for claim in _expand_overlay_claims(candidate)]
-    for candidate in sorted(claims, key=lambda item: (str(item.get("module_id")), str(item.get("module_version")), str(item.get("candidate_id")), _canonical(item.get("proposal") or {}))):
+    for candidate in sorted(claims, key=lambda item: (str(item.get("module_id")), str(item.get("module_version")), str(item.get("candidate_id")), canonical_json(item.get("proposal") or {}))):
         target_ids = {str(value) for value in candidate.get("target_node_ids") or []}
         if target_ids & protected:
             unresolved.append(
@@ -195,7 +192,7 @@ def resolve(
         candidates = grouped[group_key]
         ledger_matches = [revision for revision in _active_ledger_revisions(ledger_view) if tuple(sorted(str(value) for value in revision.get("target_node_ids") or [])) == group_key[0] and tuple(sorted(str(value) for value in revision.get("property_scope") or [])) == group_key[1]]
         if ledger_matches:
-            if len({_canonical(item.get("decision") or {}) for item in ledger_matches}) > 1:
+            if len({canonical_json(item.get("decision") or {}) for item in ledger_matches}) > 1:
                 unresolved.append({"code": "ledger_conflict", "candidate_ids": [], "revision_ids": sorted(str(item.get("revision_id")) for item in ledger_matches)})
                 continue
             decision = _decision_from_revision(sorted(ledger_matches, key=lambda item: str(item.get("revision_id")))[0], expected_revision)
@@ -206,7 +203,7 @@ def resolve(
 
         by_proposal: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
         for candidate in candidates:
-            by_proposal[_canonical(candidate.get("proposal") or {})].append(candidate)
+            by_proposal[canonical_json(candidate.get("proposal") or {})].append(candidate)
         ranked = sorted(
             ((max(_candidate_strength(item) for item in items), proposal_key, items) for proposal_key, items in by_proposal.items()),
             key=lambda item: (-item[0], item[1]),
@@ -225,7 +222,7 @@ def resolve(
     decisions.sort(key=lambda item: (tuple(item.get("target_node_ids", [])), tuple(item.get("property_scope", [])), str(item.get("decision_id"))))
     unresolved.sort(key=lambda item: (item.get("code", ""), tuple(item.get("candidate_ids", [])), tuple(item.get("revision_ids", []))))
     transaction_payload = {"revision": expected_revision, "decisions": decisions, "unresolved": unresolved}
-    transaction_id = "decision-set-" + hashlib.sha256(_canonical(transaction_payload).encode("utf-8")).hexdigest()[:20]
+    transaction_id = "decision-set-" + hashlib.sha256(canonical_json(transaction_payload).encode("utf-8")).hexdigest()[:20]
     for decision in decisions:
         if not decision.get("transaction_id"):
             decision["transaction_id"] = transaction_id

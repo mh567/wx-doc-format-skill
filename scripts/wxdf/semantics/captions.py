@@ -3,25 +3,19 @@
 from __future__ import annotations
 
 import copy
-import hashlib
-import json
 import re
 from typing import Any, Mapping
 
 from text_utils import caption_parts
 
 from ..contracts import overlay_property_scope
+from ..digest import digest
 from ..model import inline_text_projection
 from ..validation import validate_ast
 from ..validation import validate_source_facts
 
 
 _RAW_NUMBER_RE = re.compile(r"^\s*(?:表|图)\s*(?P<number>(?:[A-Z]\s*[.．-]\s*)?\d+(?:\s*[.．-]\s*\d+)*)")
-
-
-def _digest(value: Any) -> str:
-    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _reading_order(ast: Mapping[str, Any]) -> list[str]:
@@ -41,7 +35,7 @@ def _target_digest(ast: Mapping[str, Any], target_id: str) -> str:
     block = ast["document"]["blocks"].get(target_id)
     if block is None:
         raise ValueError(f"unknown caption target {target_id}")
-    return _digest({"node_id": target_id, "block": block})
+    return digest({"node_id": target_id, "block": block})
 
 
 def _association_digest(ast: Mapping[str, Any], target_id: str) -> str:
@@ -50,7 +44,7 @@ def _association_digest(ast: Mapping[str, Any], target_id: str) -> str:
         for association in ast["document"].get("associations", [])
         if association.get("kind") == "caption_target" and association.get("target_id") == target_id
     ]
-    return _digest(sorted(associations, key=lambda item: (str(item.get("source_id")), str(item.get("target_id")))))
+    return digest(sorted(associations, key=lambda item: (str(item.get("source_id")), str(item.get("target_id")))))
 
 
 def build_caption_overlay(ast: Mapping[str, Any], target_id: str, text: str, *, capability_version: str = "caption_gen@1.0") -> dict[str, Any]:

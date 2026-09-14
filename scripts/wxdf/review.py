@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import copy
-import hashlib
-import json
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping
 
+from .digest import digest
 from .normalization import presentation_equal, semantic_equal
 
 
@@ -117,16 +116,6 @@ def _content_surface(bundle: Mapping[str, Any]) -> dict[str, Any]:
         "blocks": blocks,
         "overlay": copy.deepcopy(normalized.get("overlay") or {}),
     }
-
-
-def _content_digest(bundle: Mapping[str, Any]) -> str:
-    payload = json.dumps(
-        _content_surface(bundle),
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _authorized_hierarchy_repair(
@@ -501,7 +490,7 @@ def evaluate_candidate(
         return AcceptanceDecision("rejected", "review_round_exceeded", False, semantic_changed, presentation_changed, details)
 
     if (
-        _content_digest(baseline_bundle) != _content_digest(candidate_bundle)
+        digest(_content_surface(baseline_bundle)) != digest(_content_surface(candidate_bundle))
         and not _authorized_hierarchy_repair(baseline_bundle, candidate_bundle, decision_list)
     ):
         return AcceptanceDecision("rejected", "content_changed", False, semantic_changed, presentation_changed, details)

@@ -8,6 +8,7 @@ import json
 from typing import Any, Mapping, Sequence
 
 from .contracts import AST_BLOCK_TYPES, AST_CONTAINER_KINDS, AST_ROLES, LIST_KINDS, PATCH_OPERATIONS, TABLE_TYPES
+from .digest import digest
 from .transaction import StageSnapshot, apply_stage_batch, make_snapshot, transaction_content_digest
 from .validation import _validate_inline_content, validate_ast
 
@@ -72,17 +73,12 @@ def _source_ref_identities(facts: Mapping[str, Any]) -> set[str]:
     return identities
 
 
-def _facts_digest(facts: Mapping[str, Any]) -> str:
-    payload = json.dumps(facts, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
-
 def source_binding(facts: Mapping[str, Any]) -> dict[str, Any]:
     """Return the immutable source contract a ledger is allowed to replay against."""
 
     parser = facts.get("parser") if isinstance(facts, Mapping) else None
     return {
-        "source_facts_sha256": _facts_digest(facts),
+        "source_facts_sha256": digest(facts),
         "source_contract": {
             "facts_schema_version": facts.get("facts_schema_version") if isinstance(facts, Mapping) else None,
             "parser": copy.deepcopy(dict(parser)) if isinstance(parser, Mapping) else None,

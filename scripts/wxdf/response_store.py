@@ -5,6 +5,8 @@ import copy
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from .digest import digest
+
 _APPLICATION_FIELDS = frozenset({"response_sha256", "applied", "apply_started", "transaction_id", "transaction_content_sha256"})
 
 def _store() -> Any:
@@ -12,7 +14,7 @@ def _store() -> Any:
     return checkpoint_store
 
 def content_digest(value: Any) -> str:
-    return _store()._digest(value)
+    return digest(value)
 
 def request_digest(request: Mapping[str, Any]) -> str:
     if not isinstance(request, Mapping): raise _store().CheckpointError("request must be an object", code="invalid_request")
