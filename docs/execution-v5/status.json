@@ -17,7 +17,7 @@
     {"id": "T06", "subject": "事务证明收敛", "status": "done", "depends_on": ["T04", "T05"], "commit": "01ea66c"},
     {"id": "T07", "subject": "Checkpoint 拆分与 response_store seam", "status": "done", "depends_on": ["T04", "T05", "T06"], "commit": "a5991b8"},
     {"id": "FU-1", "subject": "executor 编排提取", "status": "deferred", "depends_on": [], "adr": "docs/adr/0003-orchestration-stays-in-executors.md"},
-    {"id": "FU-2", "subject": "T01/T02 审查开放项（build_native_run_result 归属、source_projection 接线、list_item_map 语义声明、registry 职责分离、ledger_replay_report 归属）", "status": "open", "depends_on": ["T01", "T02"]},
+    {"id": "FU-2", "subject": "T01/T02 审查遗留收口（build_native_run_result 归属、source_projection 死参数移除、list_item_map 语义声明、registry 职责分离、ledger_replay_report 显式参数）", "status": "done", "depends_on": ["T01", "T02"], "commit": "4cf0f11"},
     {"id": "FU-3", "subject": "T06/T07 审查发现收口（apply 语义单一来源、证明单一 owner、断开 checkpoint 与 response 运行时环）", "status": "done", "depends_on": ["T06", "T07"], "commit": "7d2bde0"}
   ],
   "external_gates": [
