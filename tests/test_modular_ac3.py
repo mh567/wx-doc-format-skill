@@ -57,8 +57,12 @@ def test_native_registry_assigns_semantic_and_lifecycle_roles_to_deep_modules() 
 def test_checkpoint_and_response_roles_have_separate_implementations() -> None:
     checkpoint_store = importlib.import_module("wxdf.checkpoint_store")
     response_store = importlib.import_module("wxdf.response_store")
+    errors = importlib.import_module("wxdf.errors")
 
-    assert checkpoint_store.CheckpointError.__module__ == "wxdf.checkpoint_store"
+    # FU-3 moved CheckpointError to the low-level errors module; the store
+    # re-exports it so callers keep one shared error type.
+    assert checkpoint_store.CheckpointError is errors.CheckpointError
+    assert errors.CheckpointError.__module__ == "wxdf.errors"
     assert checkpoint_store.save_checkpoint.__module__ == "wxdf.checkpoint_store"
     assert checkpoint_store.load_checkpoint.__module__ == "wxdf.checkpoint_store"
     assert response_store.content_digest.__module__ == "wxdf.response_store"

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from .digest import digest_hex
 from .model import build_indexes
@@ -21,6 +21,20 @@ class StageSnapshot:
     transactions: dict[str, str] = field(default_factory=dict)
     overlays: dict[str, dict[str, Any]] = field(default_factory=dict)
     presentation_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class _StageOperation:
+    """One stage operation: how it mutates a snapshot and how it is detected.
+
+    ``apply`` mutates the isolated snapshot exactly as the ``_apply_*`` helpers
+    always did; ``applied`` is the pure predicate that reports whether a
+    revision already matches the current commit.  Both behaviours live in one
+    registry entry, so adding or changing an operation touches one place.
+    """
+
+    apply: Callable[[StageSnapshot, Mapping[str, Any]], None]
+    applied: Callable[[Mapping[str, Any], Mapping[str, Any], StageSnapshot | None], bool]
 
 
 @dataclass(frozen=True)
@@ -390,6 +404,219 @@ def _apply_presentation_override(snapshot: StageSnapshot, decision: Mapping[str,
         current.update(copy.deepcopy(dict(value)))
 
 
+def _applied_create_node(
+    ast: Mapping[str, Any],
+    revision: Mapping[str, Any],
+    snapshot: StageSnapshot | None = None,
+) -> bool:
+    decision = revision["decision"]
+    document = ast["document"]
+    nodes = {**document["blocks"], **document["containers"]}
+    value = decision.get("value") or {}
+    node_id = value.get("node_id")
+    parent_id = value.get("parent_id")
+    return (
+        isinstance(node_id, str)
+        and isinstance(parent_id, str)
+        and node_id in nodes
+        and nodes[node_id] == value.get("node")
+        and node_id in document["children"].get(parent_id, [])
+    )
+
+
+def _applied_move_node(
+    ast: Mapping[str, Any],
+    revision: Mapping[str, Any],
+    snapshot: StageSnapshot | None = None,
+) -> bool:
+    decision = revision["decision"]
+    document = ast["document"]
+    target_ids = revision.get("target_node_ids") or []
+    value = decision.get("value") or {}
+    if len(target_ids) != 1 or not isinstance(value.get("new_parent_id"), str):
+        return False
+    target_id = target_ids[0]
+    siblings = document["children"].get(value["new_parent_id"], [])
+    if target_id not in siblings:
+        return False
+    index = value.get("index")
+    if isinstance(index, int) and not isinstance(index, bool):
+        expected_index = max(0, min(index, len(siblings) - 1))
+        if siblings.index(target_id) != expected_index:
+            return False
+    metadata = value.get("semantic_metadata")
+    if isinstance(metadata, Mapping):
+        nodes = {**document["blocks"], **document["containers"]}
+        descendants = {target_id}
+        frontier = [target_id]
+        while frontier:
+            current = frontier.pop()
+            for child_id in document["children"].get(current, []):
+                if child_id not in descendants:
+                    descendants.add(child_id)
+                    frontier.append(child_id)
+        for node_id in descendants:
+            node = nodes.get(node_id, {})
+            for field in ("appendix_id", "semantic_scope_id", "source_number_preserved"):
+                if field in metadata and node.get(field) != metadata[field]:
+                    return False
+    return True
+
+
+def _applied_update_role(
+    ast: Mapping[str, Any],
+    revision: Mapping[str, Any],
+    snapshot: StageSnapshot | None = None,
+) -> bool:
+    decision = revision["decision"]
+    document = ast["document"]
+    value = decision.get("value") or {}
+    role = value.get("role")
+    if not isinstance(role, str):
+        return False
+    target_ids = list(revision.get("target_node_ids") or [])
+    if not target_ids:
+        return False
+    return all(
+        target_id in document["blocks"]
+        and document["blocks"][target_id].get("role") == role
+        and ("level" not in value or document["blocks"][target_id].get("level") == value["level"])
+        and (role == "heading" or "level" not in document["blocks"][target_id])
+        and all(
+            field not in value or document["blocks"][target_id].get(field) == value[field]
+            for field in ("caption_type", "target_id")
+        )
+        for target_id in target_ids
+    )
+
+
+def _applied_update_node_semantics(
+    ast: Mapping[str, Any],
+    revision: Mapping[str, Any],
+    snapshot: StageSnapshot | None = None,
+) -> bool:
+    decision = revision["decision"]
+    document = ast["document"]
+    value = decision.get("value") or {}
+    if not isinstance(value, Mapping) or not isinstance(value.get("semantic_role"), str):
+        return False
+    nodes = {**document["blocks"], **document["containers"]}
+    fields = {
+        "semantic_role": "semantic_role",
+        "source_operation": "semantic_source_operation",
+        "adapter_id": "semantic_adapter",
+        "paragraph_id": "semantic_paragraph_id",
+        "list_parent_id": "semantic_list_parent_id",
+        "appendix_id": "appendix_id",
+        "appendix_role": "appendix_role",
+        "appendix_relative_level": "appendix_relative_level",
+        "semantic_scope_id": "semantic_scope_id",
+        "source_heading_level": "source_heading_level",
+        "page_break_before": "page_break_before",
+        "source_number_preserved": "source_number_preserved",
+        "materialization_mode": "materialization_mode",
+    }
+    target_ids = list(revision.get("target_node_ids") or [])
+    if not target_ids:
+        return False
+    return all(
+        target_id in nodes
+        and all(
+            field not in value or nodes[target_id].get(ast_field) == value[field]
+            for field, ast_field in fields.items()
+        )
+        for target_id in target_ids
+    )
+
+
+def _applied_update_node_content(
+    ast: Mapping[str, Any],
+    revision: Mapping[str, Any],
+    snapshot: StageSnapshot | None = None,
+) -> bool:
+    decision = revision["decision"]
+    document = ast["document"]
+    value = decision.get("value") or {}
+    inline_content = value.get("inline_content") if isinstance(value, Mapping) else None
+    if not isinstance(inline_content, list):
+        return False
+    target_ids = list(revision.get("target_node_ids") or [])
+    if not target_ids:
+        return False
+    return all(
+        target_id in document["blocks"]
+        and document["blocks"][target_id].get("inline_content") == inline_content
+        for target_id in target_ids
+    )
+
+
+def _applied_update_association(
+    ast: Mapping[str, Any],
+    revision: Mapping[str, Any],
+    snapshot: StageSnapshot | None = None,
+) -> bool:
+    decision = revision["decision"]
+    document = ast["document"]
+    value = decision.get("value") or {}
+    association = value.get("association", value) if isinstance(value, Mapping) else None
+    return isinstance(association, Mapping) and dict(association) in document["associations"]
+
+
+def _applied_delete_node(
+    ast: Mapping[str, Any],
+    revision: Mapping[str, Any],
+    snapshot: StageSnapshot | None = None,
+) -> bool:
+    document = ast["document"]
+    nodes = {**document["blocks"], **document["containers"]}
+    return all(target_id not in nodes for target_id in revision.get("target_node_ids") or [])
+
+
+def _applied_snapshot_store(
+    ast: Mapping[str, Any],
+    revision: Mapping[str, Any],
+    snapshot: StageSnapshot | None = None,
+) -> bool:
+    """Shared predicate for ``update_overlay`` and ``set_presentation_override``."""
+
+    if snapshot is None:
+        return False
+    decision = revision["decision"]
+    operation = decision.get("operation")
+    document = ast["document"]
+    value = decision.get("value") or {}
+    if not isinstance(value, Mapping):
+        return False
+    target_ids = revision.get("target_node_ids") or []
+    nodes = {**document["blocks"], **document["containers"]}
+    if any(target_id not in nodes for target_id in target_ids):
+        return False
+    store = snapshot.overlays if operation == "update_overlay" else snapshot.presentation_overrides
+    if operation == "update_overlay":
+        target_keys = [str(target_id) for target_id in target_ids]
+    else:
+        list_item_id = value.get("list_item_id")
+        target_keys = [str(list_item_id)] if isinstance(list_item_id, str) and list_item_id else [str(target_id) for target_id in target_ids]
+    return all(
+        isinstance(store.get(target_key), Mapping)
+        and all(store[target_key].get(key) == item for key, item in value.items())
+        for target_key in target_keys
+    )
+
+
+_STAGE_OPERATIONS: dict[str, "_StageOperation"] = {
+    "create_node": _StageOperation(lambda snapshot, decision: _apply_create_node(snapshot.ast, decision), _applied_create_node),
+    "delete_node": _StageOperation(lambda snapshot, decision: _apply_delete_node(snapshot.ast, decision), _applied_delete_node),
+    "move_node": _StageOperation(lambda snapshot, decision: _apply_move_node(snapshot.ast, decision), _applied_move_node),
+    "set_presentation_override": _StageOperation(_apply_presentation_override, _applied_snapshot_store),
+    "update_association": _StageOperation(lambda snapshot, decision: _apply_update_association(snapshot.ast, decision), _applied_update_association),
+    "update_node_content": _StageOperation(lambda snapshot, decision: _apply_update_node_content(snapshot.ast, decision), _applied_update_node_content),
+    "update_node_semantics": _StageOperation(lambda snapshot, decision: _apply_update_node_semantics(snapshot.ast, decision), _applied_update_node_semantics),
+    "update_overlay": _StageOperation(_apply_overlay, _applied_snapshot_store),
+    "update_role": _StageOperation(lambda snapshot, decision: _apply_update_role(snapshot.ast, decision), _applied_update_role),
+}
+
+
 def revision_applied(
     ast: Mapping[str, Any],
     revision: Mapping[str, Any],
@@ -397,175 +624,26 @@ def revision_applied(
 ) -> bool:
     """Return whether one ledger revision already matches the current commit.
 
-    This is the single source of the apply semantics: it mirrors the
-    ``_apply_*`` operations, so an operation change is made once. It is a pure
-    predicate and never mutates ``ast`` or ``snapshot``.
+    The predicate reads the same ``_STAGE_OPERATIONS`` registry as
+    ``_apply_decision``, so an operation change is made once and the mutation
+    and the predicate cannot drift apart. It is a pure predicate and never
+    mutates ``ast`` or ``snapshot``.
     """
 
-    decision = revision["decision"]
-    operation = decision.get("operation")
-    document = ast["document"]
-    nodes = {**document["blocks"], **document["containers"]}
-    if operation == "create_node":
-        value = decision.get("value") or {}
-        node_id = value.get("node_id")
-        parent_id = value.get("parent_id")
-        return (
-            isinstance(node_id, str)
-            and isinstance(parent_id, str)
-            and node_id in nodes
-            and nodes[node_id] == value.get("node")
-            and node_id in document["children"].get(parent_id, [])
-        )
-    if operation == "move_node":
-        target_ids = revision.get("target_node_ids") or []
-        value = decision.get("value") or {}
-        if len(target_ids) != 1 or not isinstance(value.get("new_parent_id"), str):
-            return False
-        target_id = target_ids[0]
-        siblings = document["children"].get(value["new_parent_id"], [])
-        if target_id not in siblings:
-            return False
-        index = value.get("index")
-        if isinstance(index, int) and not isinstance(index, bool):
-            expected_index = max(0, min(index, len(siblings) - 1))
-            if siblings.index(target_id) != expected_index:
-                return False
-        metadata = value.get("semantic_metadata")
-        if isinstance(metadata, Mapping):
-            nodes = {**document["blocks"], **document["containers"]}
-            descendants = {target_id}
-            frontier = [target_id]
-            while frontier:
-                current = frontier.pop()
-                for child_id in document["children"].get(current, []):
-                    if child_id not in descendants:
-                        descendants.add(child_id)
-                        frontier.append(child_id)
-            for node_id in descendants:
-                node = nodes.get(node_id, {})
-                for field in ("appendix_id", "semantic_scope_id", "source_number_preserved"):
-                    if field in metadata and node.get(field) != metadata[field]:
-                        return False
-        return True
-    if operation == "update_role":
-        value = decision.get("value") or {}
-        role = value.get("role")
-        if not isinstance(role, str):
-            return False
-        target_ids = list(revision.get("target_node_ids") or [])
-        if not target_ids:
-            return False
-        return all(
-            target_id in document["blocks"]
-            and document["blocks"][target_id].get("role") == role
-            and ("level" not in value or document["blocks"][target_id].get("level") == value["level"])
-            and (role == "heading" or "level" not in document["blocks"][target_id])
-            and all(
-                field not in value or document["blocks"][target_id].get(field) == value[field]
-                for field in ("caption_type", "target_id")
-            )
-            for target_id in target_ids
-        )
-    if operation == "update_node_semantics":
-        value = decision.get("value") or {}
-        if not isinstance(value, Mapping) or not isinstance(value.get("semantic_role"), str):
-            return False
-        nodes = {**document["blocks"], **document["containers"]}
-        fields = {
-            "semantic_role": "semantic_role",
-            "source_operation": "semantic_source_operation",
-            "adapter_id": "semantic_adapter",
-            "paragraph_id": "semantic_paragraph_id",
-            "list_parent_id": "semantic_list_parent_id",
-            "appendix_id": "appendix_id",
-            "appendix_role": "appendix_role",
-            "appendix_relative_level": "appendix_relative_level",
-            "semantic_scope_id": "semantic_scope_id",
-            "source_heading_level": "source_heading_level",
-            "page_break_before": "page_break_before",
-            "source_number_preserved": "source_number_preserved",
-            "materialization_mode": "materialization_mode",
-        }
-        target_ids = list(revision.get("target_node_ids") or [])
-        if not target_ids:
-            return False
-        return all(
-            target_id in nodes
-            and all(
-                field not in value or nodes[target_id].get(ast_field) == value[field]
-                for field, ast_field in fields.items()
-            )
-            for target_id in target_ids
-        )
-    if operation == "update_node_content":
-        value = decision.get("value") or {}
-        inline_content = value.get("inline_content") if isinstance(value, Mapping) else None
-        if not isinstance(inline_content, list):
-            return False
-        target_ids = list(revision.get("target_node_ids") or [])
-        if not target_ids:
-            return False
-        return all(
-            target_id in document["blocks"]
-            and document["blocks"][target_id].get("inline_content") == inline_content
-            for target_id in target_ids
-        )
-    if operation == "update_association":
-        value = decision.get("value") or {}
-        association = value.get("association", value) if isinstance(value, Mapping) else None
-        return isinstance(association, Mapping) and dict(association) in document["associations"]
-    if operation == "delete_node":
-        nodes = {**document["blocks"], **document["containers"]}
-        return all(target_id not in nodes for target_id in revision.get("target_node_ids") or [])
-    if operation in {"update_overlay", "set_presentation_override"}:
-        if snapshot is None:
-            return False
-        value = decision.get("value") or {}
-        if not isinstance(value, Mapping):
-            return False
-        target_ids = revision.get("target_node_ids") or []
-        nodes = {**document["blocks"], **document["containers"]}
-        if any(target_id not in nodes for target_id in target_ids):
-            return False
-        store = snapshot.overlays if operation == "update_overlay" else snapshot.presentation_overrides
-        if operation == "update_overlay":
-            target_keys = [str(target_id) for target_id in target_ids]
-        else:
-            list_item_id = value.get("list_item_id")
-            target_keys = [str(list_item_id)] if isinstance(list_item_id, str) and list_item_id else [str(target_id) for target_id in target_ids]
-        return all(
-            isinstance(store.get(target_key), Mapping)
-            and all(store[target_key].get(key) == item for key, item in value.items())
-            for target_key in target_keys
-        )
-    return False
+    entry = _STAGE_OPERATIONS.get(revision["decision"].get("operation"))
+    if entry is None:
+        return False
+    return entry.applied(ast, revision, snapshot)
 
 
 def _apply_decision(snapshot: StageSnapshot, decision: Mapping[str, Any]) -> None:
     ast = snapshot.ast
     _validate_source_preconditions(ast, decision)
     operation = decision.get("operation")
-    if operation == "update_role":
-        _apply_update_role(ast, decision)
-    elif operation == "update_node_semantics":
-        _apply_update_node_semantics(ast, decision)
-    elif operation == "update_node_content":
-        _apply_update_node_content(ast, decision)
-    elif operation == "move_node":
-        _apply_move_node(ast, decision)
-    elif operation == "update_association":
-        _apply_update_association(ast, decision)
-    elif operation == "create_node":
-        _apply_create_node(ast, decision)
-    elif operation == "delete_node":
-        _apply_delete_node(ast, decision)
-    elif operation == "update_overlay":
-        _apply_overlay(snapshot, decision)
-    elif operation == "set_presentation_override":
-        _apply_presentation_override(snapshot, decision)
-    else:
+    entry = _STAGE_OPERATIONS.get(operation)
+    if entry is None:
         raise TransactionConflict(f"unsupported stage operation {operation!r}")
+    entry.apply(snapshot, decision)
 
 
 def apply_stage_batch(

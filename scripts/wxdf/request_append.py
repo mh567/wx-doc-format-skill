@@ -5,10 +5,10 @@ checkpoint stays readable.  The append is guarded by a cross-process lock and a
 write-ahead journal so a crash between the request-file replace and the
 checkpoint save is replayable.  The journal schema is version ``1.0``.
 
-The module reaches upward to ``checkpoint_store`` for the public commit
-entrypoint (``save_checkpoint``) and its error type, and to ``response_store``
-for the request identity rule.  Those imports stay inside the functions that
-need them so importing this module never triggers an import cycle.
+The module depends only on ``digest``, ``errors`` and ``response_identity``.
+It reaches the checkpoint commit entrypoint through an injected callback
+(``register_checkpoint_saver``) instead of importing ``checkpoint_store``, so
+the persistence module graph stays acyclic.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ import json
 import os
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 try:
     import fcntl as _fcntl
@@ -33,9 +33,22 @@ except ImportError:
     _msvcrt = None
 
 from .digest import canonical_json
+from .errors import CheckpointError
+from .response_identity import request_digest
 
 
 __all__ = ["append_native_waiting_requests"]
+
+# The checkpoint commit entrypoint is injected by ``checkpoint_store`` so this
+# module never imports it back.
+_checkpoint_saver: Callable[..., Any] | None = None
+
+
+def register_checkpoint_saver(save_checkpoint: Callable[..., Any]) -> None:
+    """Let ``checkpoint_store`` inject its atomic checkpoint commit entrypoint."""
+
+    global _checkpoint_saver
+    _checkpoint_saver = save_checkpoint
 
 
 def _request_append_journal_path(checkpoint_path: Path) -> Path:
@@ -78,8 +91,6 @@ def _exclusive_file_lock(lock_path: Path):
                 lock_file.seek(0)
                 _msvcrt.locking(lock_file.fileno(), _msvcrt.LK_UNLCK, 1)
             return
-        from .checkpoint_store import CheckpointError
-
         raise CheckpointError(
             "no supported request append lock backend",
             code="lock_backend_unavailable",
@@ -87,8 +98,6 @@ def _exclusive_file_lock(lock_path: Path):
 
 
 def _recover_native_request_append(checkpoint_path: Path) -> None:
-    from .checkpoint_store import CheckpointError
-
     journal_path = _request_append_journal_path(checkpoint_path)
     if not journal_path.is_file():
         return
@@ -144,8 +153,6 @@ def append_native_waiting_requests(
 ) -> dict[str, Any]:
     """Serialize cooperative append writers through checkpoint commit."""
 
-    from .checkpoint_store import CheckpointError
-
     checkpoint_path = _path(checkpoint_path)
     try:
         request_path = Path(checkpoint["files"]["requests_path"])
@@ -177,9 +184,11 @@ def _append_native_waiting_requests_locked(
 ) -> dict[str, Any]:
     """Append later-stage requests while preserving the waiting checkpoint."""
 
-    from .checkpoint_store import CheckpointError, save_checkpoint
-    from .response_store import request_digest
-
+    if _checkpoint_saver is None:
+        raise CheckpointError(
+            "request append requires a registered checkpoint store",
+            code="checkpoint_store_not_registered",
+        )
     checkpoint_path = _path(checkpoint_path)
     updated = copy.deepcopy(dict(checkpoint))
     if updated.get("status") != "waiting_external":
@@ -253,7 +262,7 @@ def _append_native_waiting_requests_locked(
         updated["resource_summary"]["fingerprints"]["requests"] = _bytes_digest(payload)
         updated["budget"]["limit"] = len(updated["requests"])
         updated["round"] = int(updated.get("round") or 0) + 1
-        save_checkpoint(updated, checkpoint_path)
+        _checkpoint_saver(updated, checkpoint_path)
     except Exception:
         if request_path.read_bytes() == payload:
             _replace_bytes(request_path, previous, ".rollback.tmp")

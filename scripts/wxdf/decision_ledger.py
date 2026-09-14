@@ -9,6 +9,7 @@ from typing import Any, Mapping, Sequence
 
 from .contracts import AST_BLOCK_TYPES, AST_CONTAINER_KINDS, AST_ROLES, LIST_KINDS, PATCH_OPERATIONS, TABLE_TYPES
 from .digest import digest
+from .response_identity import _APPLICATION_FIELDS as APPLICATION_FIELDS
 from .transaction import (
     StageSnapshot,
     apply_stage_batch,
@@ -580,12 +581,6 @@ def _legacy_transaction_digest(revisions: Sequence[Mapping[str, Any]]) -> str:
     return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-# Response fields that carry the transaction proof instead of response content.
-APPLICATION_FIELDS = frozenset(
-    {"response_sha256", "applied", "apply_started", "transaction_id", "transaction_content_sha256"}
-)
-
-
 def response_transaction_binding(
     response: Mapping[str, Any],
     transaction_id: str,
@@ -660,6 +655,55 @@ def verify_response_transaction_proof(
         raise LedgerError(
             f"transaction {transaction_id} is not present in applied transaction state",
             code="transaction_state_missing",
+        )
+
+
+def verify_rolled_back_response_proof(checkpoint: Mapping[str, Any]) -> None:
+    """Require a rolled-back checkpoint to carry one consistent response proof.
+
+    This is the proof owner's verification of the rolled-back branch: every
+    applied response must match an applied transaction, every rejected response
+    must carry no application metadata, and the binding map must describe exactly
+    the applied responses.
+    """
+
+    bindings = checkpoint.get("response_transaction_bindings") or {}
+    _, applied_digests = stored_transaction_digests(checkpoint)
+    bound_ids: set[str] = set()
+    for response in checkpoint.get("responses", []):
+        request_id = str(response.get("request_id") or "")
+        if response.get("applied") is True:
+            transaction_id = str(response.get("transaction_id") or "")
+            digest = response.get("transaction_content_sha256")
+            expected_binding = response_transaction_binding(
+                response,
+                transaction_id,
+                str(digest or ""),
+            )
+            if (
+                applied_digests.get(transaction_id) != digest
+                or bindings.get(request_id) != expected_binding
+            ):
+                raise LedgerError(
+                    f"rolled-back response proof changed for {request_id}",
+                    code="response_transaction_binding_mismatch",
+                )
+            bound_ids.add(request_id)
+        elif (
+            response.get("applied") is not False
+            or response.get("apply_started", False) is not False
+            or response.get("transaction_id") is not None
+            or response.get("transaction_content_sha256") is not None
+            or request_id in bindings
+        ):
+            raise LedgerError(
+                f"rejected response application state changed for {request_id}",
+                code="response_application_state_mismatch",
+            )
+    if set(bindings) != bound_ids:
+        raise LedgerError(
+            "rolled-back response bindings do not match applied responses",
+            code="response_transaction_binding_mismatch",
         )
 
 

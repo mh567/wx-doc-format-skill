@@ -15,25 +15,26 @@ from typing import Any, Callable, Mapping
 
 from .contracts import CHECKPOINT_STATUSES, STAGES, ContractError
 from .decision_ledger import (
+    LedgerError,
     response_transaction_binding,
     snapshot_transaction_state,
     stored_transaction_digests,
+    verify_rolled_back_response_proof,
 )
 from .digest import canonical_json, digest
+from .errors import CheckpointError
+from .response_identity import (
+    record_response as _record_response,
+    request_digest as _request_digest,
+    response_digest as _response_digest,
+)
 from .validation import validate_checkpoint
 from .request_append import (
     _exclusive_file_lock,
     _recover_native_request_append,
     append_native_waiting_requests,
+    register_checkpoint_saver as _register_checkpoint_saver,
 )
-
-
-class CheckpointError(RuntimeError):
-    """Raised when a checkpoint cannot be safely stored or resumed."""
-
-    def __init__(self, message: str, *, code: str = "checkpoint_error") -> None:
-        self.code = code
-        super().__init__(message)
 
 
 # The native conversion profile stored by a valid native-v2 checkpoint.
@@ -462,11 +463,10 @@ def prepare_native_resume(
                 raise CheckpointError("native review request baseline is inconsistent", code="request_identity_conflict")
     response_path = Path(checkpoint["files"]["responses_path"])
     responses = _read_json_lines(response_path, kind="response") if response_path.is_file() else []
-    from .response_store import record_response
 
     recorded = checkpoint
     for response in responses:
-        recorded, _outcome = record_response(recorded, response)
+        recorded, _outcome = _record_response(recorded, response)
     if recorded != checkpoint and checkpoint["status"] == "waiting_external":
         save_checkpoint(recorded, checkpoint_path)
     response_map = {
@@ -886,49 +886,14 @@ def validate_checkpoint_for_store(checkpoint: Mapping[str, Any]) -> None:
                 code="transaction_state_mismatch",
             )
     if terminal_rollback:
-        bindings = checkpoint.get("response_transaction_bindings") or {}
-        bound_ids: set[str] = set()
-        for response in checkpoint.get("responses", []):
-            request_id = str(response.get("request_id") or "")
-            if response.get("applied") is True:
-                transaction_id = str(response.get("transaction_id") or "")
-                digest = response.get("transaction_content_sha256")
-                expected_binding = response_transaction_binding(
-                    response,
-                    transaction_id,
-                    str(digest or ""),
-                )
-                if (
-                    applied_digests.get(transaction_id) != digest
-                    or bindings.get(request_id) != expected_binding
-                ):
-                    raise CheckpointError(
-                        f"rolled-back response proof changed for {request_id}",
-                        code="response_transaction_binding_mismatch",
-                    )
-                bound_ids.add(request_id)
-            elif (
-                response.get("applied") is not False
-                or response.get("apply_started", False) is not False
-                or response.get("transaction_id") is not None
-                or response.get("transaction_content_sha256") is not None
-                or request_id in bindings
-            ):
-                raise CheckpointError(
-                    f"rejected response application state changed for {request_id}",
-                    code="response_application_state_mismatch",
-                )
-        if set(bindings) != bound_ids:
-            raise CheckpointError(
-                "rolled-back response bindings do not match applied responses",
-                code="response_transaction_binding_mismatch",
-            )
+        try:
+            verify_rolled_back_response_proof(checkpoint)
+        except LedgerError as exc:
+            raise CheckpointError(str(exc), code=exc.code) from exc
 
 
 def validate_embedded_fingerprints(checkpoint: Mapping[str, Any]) -> None:
     """Require embedded identities and request or response digests to match."""
-
-    from .response_store import request_digest, response_digest
 
     resource_summary = checkpoint.get("resource_summary")
     fingerprints = resource_summary.get("fingerprints") if isinstance(resource_summary, Mapping) else None
@@ -967,7 +932,7 @@ def validate_embedded_fingerprints(checkpoint: Mapping[str, Any]) -> None:
             raise CheckpointError("checkpoint request identities are invalid", code="request_identity_conflict")
         seen_requests.add(request_id)
         stored_digest = request.get("request_sha256")
-        if stored_digest is not None and stored_digest != request_digest(request):
+        if stored_digest is not None and stored_digest != _request_digest(request):
             raise CheckpointError(
                 f"request content changed for {request_id}",
                 code="request_identity_conflict",
@@ -977,7 +942,7 @@ def validate_embedded_fingerprints(checkpoint: Mapping[str, Any]) -> None:
             continue
         request_id = response.get("request_id")
         stored_digest = response.get("response_sha256")
-        if stored_digest is None or stored_digest != response_digest(response):
+        if stored_digest is None or stored_digest != _response_digest(response):
             raise CheckpointError(
                 f"stored response content changed for {request_id}",
                 code="response_identity_mismatch",
@@ -1235,6 +1200,12 @@ def transition_status(checkpoint: Mapping[str, Any], status: str, *, resume_stag
     result["resume_stage"] = resume_stage if status == "waiting_external" else None
     validate_checkpoint_for_store(result)
     return result
+
+
+# The request-append journal commits its checkpoint through this store.  Inject
+# the commit entrypoint instead of importing back upward, so ``request_append``
+# never depends on ``checkpoint_store``.
+_register_checkpoint_saver(save_checkpoint)
 
 
 __all__ = [
