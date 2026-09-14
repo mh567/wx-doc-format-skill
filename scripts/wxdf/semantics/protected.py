@@ -6,6 +6,7 @@ import copy
 import re
 from typing import Any, Mapping
 
+from ..contracts import overlay_property_scope
 from note_semantics import source_note_role, strip_source_note_marker
 from text_utils import clean_note_prefix
 
@@ -70,14 +71,18 @@ def _candidate(node_id: str, unit: Mapping[str, Any], reason: str, *, role: str 
     source_ref = unit.get("source_ref")
     value: dict[str, Any] = {"protected": True, "reason": reason}
     if role:
-        value["role"] = role
+        value["protected_role"] = role
     return {
         "candidate_id": f"protected-{reason}-{node_id}",
         "module_id": "protected_content",
         "module_version": "1.0",
         "target_source_refs": [copy.deepcopy(dict(source_ref))] if isinstance(source_ref, Mapping) else [],
         "target_node_ids": [node_id],
-        "proposal": {"operation": "update_overlay", "property_scope": ["overlay"], "value": value},
+        "proposal": {
+            "operation": "update_overlay",
+            "property_scope": overlay_property_scope(value),
+            "value": value,
+        },
         "positive_evidence": [{"kind": "format_contract", "source": "protected_content", "reason": reason}],
         "negative_evidence": [],
         "scope": {"protected": True},

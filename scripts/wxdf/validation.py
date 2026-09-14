@@ -38,6 +38,7 @@ _LIST_EVIDENCE_UNITS = {
     "twips",
     "half_points",
 }
+_SOURCE_EMBEDDINGS = {"drawingml", "vml"}
 
 
 def _fail(code: str, path: str, message: str, contract: str) -> None:
@@ -133,6 +134,19 @@ def _validate_source_ref(ref: Any, path: str, contract: str) -> None:
                 _fail("invalid_node_path", f"{path}.node_path[{index}]", "path components must be strings or integers", contract)
 
 
+def _validate_image_fields(value: Mapping[str, Any], path: str, contract: str) -> None:
+    if "materialization_mode" in value and value["materialization_mode"] not in {"inline_reference", "standalone"}:
+        _fail("invalid_materialization_mode", f"{path}.materialization_mode", "image materialization mode is unsupported", contract)
+    if "source_embedding" in value:
+        if value["source_embedding"] not in _SOURCE_EMBEDDINGS:
+            _fail("invalid_source_embedding", f"{path}.source_embedding", "source embedding is unsupported", contract)
+    if "display_size" in value:
+        display_size = _mapping(value["display_size"], f"{path}.display_size", contract)
+        _require_fields(display_size, ("width_emu", "height_emu"), f"{path}.display_size", contract)
+        _positive_int(display_size["width_emu"], f"{path}.display_size.width_emu", contract)
+        _positive_int(display_size["height_emu"], f"{path}.display_size.height_emu", contract)
+
+
 def _validate_inline_content(value: Any, path: str, contract: str, resources: Mapping[str, Any], *, in_link: bool = False) -> str:
     items = _list(value, path, contract)
     visible: list[str] = []
@@ -162,6 +176,7 @@ def _validate_inline_content(value: Any, path: str, contract: str, resources: Ma
             if resource_id not in resources:
                 _fail("missing_resource", f"{item_path}.resource_id", "resource_id is not declared", contract)
             _type(_require(item, "alt_text", item_path, contract), str, f"{item_path}.alt_text", contract)
+            _validate_image_fields(item, item_path, contract)
         elif kind == "link":
             if in_link:
                 _fail("nested_link", item_path, "link nodes cannot contain links", contract)
@@ -253,6 +268,11 @@ def validate_source_facts(facts: Mapping[str, Any]) -> None:
         _non_empty_string(resource["kind"], f"{resource_path}.kind", contract)
         _validate_source_ref(resource["source_ref"], f"{resource_path}.source_ref", contract)
         _sha256(resource["content_sha256"], f"{resource_path}.content_sha256", contract)
+        if "media_type" in resource:
+            media_type = resource["media_type"]
+            _non_empty_string(media_type, f"{resource_path}.media_type", contract)
+            if not media_type.startswith("image/"):
+                _fail("invalid_media_type", f"{resource_path}.media_type", "image resources require an image media type", contract)
 
 
 def _validate_children_graph(children: Mapping[str, Any], node_ids: set[str], path: str, contract: str) -> dict[str, list[str]]:
@@ -525,6 +545,7 @@ def validate_ast(ast: Mapping[str, Any]) -> None:
             if resource_id not in resources:
                 _fail("missing_resource", f"{path}.resource_id", "image resource is not declared", contract)
             _non_empty_string(_require(block, "alt_text", path, contract), f"{path}.alt_text", contract)
+            _validate_image_fields(block, path, contract)
         elif block_type == "table":
             table_type = _require(block, "table_type", path, contract)
             if "header_rows" in block:
@@ -543,6 +564,11 @@ def validate_ast(ast: Mapping[str, Any]) -> None:
         _non_empty_string(resource["kind"], f"{path}.kind", contract)
         _sha256(resource["content_sha256"], f"{path}.content_sha256", contract)
         _validate_source_ref(resource["source_ref"], f"{path}.source_ref", contract)
+        if "media_type" in resource:
+            media_type = resource["media_type"]
+            _non_empty_string(media_type, f"{path}.media_type", contract)
+            if not media_type.startswith("image/"):
+                _fail("invalid_media_type", f"{path}.media_type", "image resources require an image media type", contract)
     _validate_associations(document, contract)
     _validate_table_spans(document, normalized_children, contract)
 

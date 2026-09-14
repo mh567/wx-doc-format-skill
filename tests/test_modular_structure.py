@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 from docx import Document
+from docx.enum.style import WD_STYLE_TYPE
 from docx.enum.text import WD_BREAK
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
@@ -50,7 +51,10 @@ def test_regions_preserve_source_scope_and_exclude_explicit_front_matter_and_toc
 
     candidates = collect_scope_candidates(facts, regions)
     assert candidates
-    assert all(candidate["proposal"]["value"]["protected"] is True for candidate in candidates)
+    assert all(
+        candidate["proposal"]["value"]["semantic_scope"] == "excluded"
+        for candidate in candidates
+    )
 
 
 def test_docx_region_resolver_uses_real_cover_and_toc_positions(tmp_path: Path) -> None:
@@ -81,6 +85,31 @@ def test_docx_region_resolver_uses_real_cover_and_toc_positions(tmp_path: Path) 
     )
     assert resolution["regions"]["node_scope"][title_node_id] == "canonical_title"
     assert resolution["evidence"]["excluded_node_count"] == 5
+
+
+def test_docx_region_resolver_keeps_body_paragraphs_with_toc_named_styles(tmp_path: Path) -> None:
+    source = tmp_path / "body-toc-style.docx"
+    document = Document()
+    document.styles.add_style("toc 9", WD_STYLE_TYPE.PARAGRAPH)
+    document.add_paragraph("项目概述", style="Heading 1")
+    document.add_paragraph("正文内容需要完整保留。")
+    document.add_paragraph("总体流程", style="Heading 6")
+    document.add_paragraph("总体业务流", style="toc 9")
+    document.add_paragraph("图 1 总体业务流")
+    boundary = document.add_paragraph("总体数据流", style="toc 9")
+    boundary.add_run().add_break(WD_BREAK.PAGE)
+    document.add_paragraph("图 2 总体数据流")
+    document.save(source)
+
+    resolution = resolve_source_regions(source, parse(source))
+
+    assert resolution["toc_context"]["source_context"]["toc_status"] == "no_candidate"
+    candidates = resolution["toc_context"]["document"]["blocks"]
+    assert len(candidates) == 1
+    assert candidates[0]["selection_eligible"] is False
+    assert candidates[0]["negative_evidence"] == ["missing_toc_identity"]
+    assert resolution["front_matter_context"]["status"] == "no_cover"
+    assert resolution["excluded_source_positions"] == []
 
 
 def test_markdown_region_bridge_removes_excluded_source_toc_before_normalization(tmp_path: Path) -> None:

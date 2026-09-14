@@ -9,6 +9,7 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 from wxdf.semantics.lists import analyze_lists
+from wxdf.semantics.source_ast import build_source_ast, materialize_list_semantics
 from wxdf.parsers import parse
 
 
@@ -91,7 +92,109 @@ def test_implicit_docx_depth_jump_is_unresolved_and_container_scope_isolated() -
 
     assert result["status"] == "unresolved"
     assert result["diagnostics"][0]["code"] == "unresolved_list_parent"
+    assert len(result["diagnostics"]) == 1
     assert all(item["scope_id"] == "scope:document" for item in result["items"])
+
+
+def test_implicit_docx_orphan_depth_is_flattened_to_local_list_root() -> None:
+    units = {key: _paragraph(key, index, text) for index, (key, text) in enumerate((
+        ("u1", "孤立深层项一"), ("u2", "孤立深层项二"),
+    ))}
+    children = {"root": ["u1", "u2"]}
+    containers = {"root": {"kind": "document"}}
+    evidence = {
+        "u1": {"marker_kind": "unordered", "marker_text": "", "ordinal": 1, "explicit_depth": 2, "numbering_definition_ref": {"num_id": 25}},
+        "u2": {"marker_kind": "unordered", "marker_text": "", "ordinal": 2, "explicit_depth": 2, "numbering_definition_ref": {"num_id": 25}},
+    }
+
+    result = analyze_lists(_facts(containers, children, units, evidence))
+
+    assert [item["code"] for item in result["diagnostics"]] == ["orphan_list_depth_flattened"]
+    assert result["diagnostics"][0]["severity"] == "info"
+    assert all(item["parent_item_id"] is None for item in result["items"])
+
+
+def test_materialize_list_semantics_normalizes_empty_docx_bullet_marker() -> None:
+    facts = _facts(
+        {"root": {"kind": "document"}},
+        {"root": ["p1"]},
+        {"p1": _paragraph("p1", 0, "项目")},
+        {
+            "p1": {
+                "marker_text": "",
+                "source_list_type": "bullet_dot",
+                "ordinal": 1,
+            }
+        },
+    )
+    source_ast = build_source_ast(facts)
+    list_result = {
+        "lists": [{
+            "list_id": "docx-bullet-list",
+            "list_kind": "unordered",
+            "source_start": 1,
+            "source_sequence_id": "docx-bullet",
+        }],
+        "items": [{
+            "item_id": "p1",
+            "list_id": "docx-bullet-list",
+            "source_marker": "",
+            "source_ordinal": 1,
+            "source_sequence_id": "docx-bullet",
+            "list_kind": "unordered",
+        }],
+        "candidates": [],
+        "continuations": [],
+    }
+
+    _, candidates, _ = materialize_list_semantics(source_ast, facts, list_result)
+
+    list_item = next(
+        candidate["proposal"]["value"]["node"]
+        for candidate in candidates
+        if candidate["candidate_id"] == "list-item-structure-p1"
+    )
+    assert list_item["source_marker"] == "•"
+
+
+def test_materialize_list_semantics_derives_deterministic_list_markers() -> None:
+    item_ids = ("keep", "dash", "letter", "decimal")
+    facts = _facts(
+        {"root": {"kind": "document"}},
+        {"root": list(item_ids)},
+        {item_id: _paragraph(item_id, index, item_id) for index, item_id in enumerate(item_ids)},
+        {
+            "keep": {"marker_text": "源标记", "source_list_type": "bullet_dot", "ordinal": 1},
+            "dash": {"marker_text": "", "source_list_type": "dash", "ordinal": 1},
+            "letter": {"marker_text": "", "source_list_type": "lower_letter_paren", "ordinal": 2},
+            "decimal": {"marker_text": "", "source_list_type": "decimal_paren", "ordinal": 3},
+        },
+    )
+    source_ast = build_source_ast(facts)
+    list_result = {
+        "lists": [
+            {"list_id": "unordered", "list_kind": "unordered", "source_start": 1},
+            {"list_id": "ordered", "list_kind": "ordered", "source_start": 1},
+        ],
+        "items": [
+            {"item_id": "keep", "list_id": "unordered", "source_marker": "源标记", "source_ordinal": 1},
+            {"item_id": "dash", "list_id": "unordered", "source_marker": "", "source_list_type": "dash", "source_ordinal": 1},
+            {"item_id": "letter", "list_id": "ordered", "source_marker": "", "source_list_type": "lower_letter_paren", "source_ordinal": 2},
+            {"item_id": "decimal", "list_id": "ordered", "source_marker": "", "source_list_type": "decimal_paren", "source_ordinal": 3},
+        ],
+        "candidates": [],
+        "continuations": [],
+    }
+
+    _, candidates, _ = materialize_list_semantics(source_ast, facts, list_result)
+
+    markers = {
+        candidate["target_source_refs"][0]["span"]["start"]: candidate["proposal"]["value"]["node"]["source_marker"]
+        for candidate in candidates
+        if candidate["candidate_id"].startswith("list-item-structure-")
+    }
+    assert markers == {0: "源标记", 1: "-", 2: "b)", 3: "3)"}
+    assert facts["evidence"]["dash"]["marker_text"] == ""
 
 
 def test_continuation_and_protected_date_are_distinguished() -> None:

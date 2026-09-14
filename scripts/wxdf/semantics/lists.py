@@ -197,17 +197,10 @@ def _emit_group(
             parent_id = parent_item_id
         else:
             declared_depth = evidence.get("explicit_depth")
-            depth = int(declared_depth) if isinstance(declared_depth, int) and declared_depth >= 0 else 0
+            depth = item.get("effective_depth")
+            if not isinstance(depth, int) or depth < 0:
+                depth = int(declared_depth) if isinstance(declared_depth, int) and declared_depth >= 0 else 0
             parent_id = item.get("parent_item_id")
-            if depth > 0 and parent_id is None:
-                result["diagnostics"].append(
-                    {
-                        "code": "unresolved_list_parent",
-                        "severity": "warning",
-                        "message": f"list item {item_id} has no evidenced parent at depth {depth}",
-                        "node_id": item_id,
-                    }
-                )
             if parent_id is None and depth > 0:
                 parent_id = last_by_depth.get(depth - 1)
         for old_depth in [key for key in last_by_depth if key >= depth]:
@@ -375,19 +368,37 @@ def analyze_lists(facts: Mapping[str, Any], *, context: Mapping[str, Any] | None
             group_specs: list[dict[str, Any]] = []
             active_items: dict[int, str] = {}
             active_groups: dict[int, dict[str, Any]] = {}
+            seen_item_in_run = False
+            flattened_source_depths: set[int] = set()
             for unit_id in run:
                 evidence = facts["evidence"].get(unit_id, {})
-                depth = evidence.get("explicit_depth") if isinstance(evidence.get("explicit_depth"), int) else 0
+                source_depth = evidence.get("explicit_depth") if isinstance(evidence.get("explicit_depth"), int) else 0
+                depth = source_depth
                 parent_item_id = active_items.get(depth - 1) if depth > 0 else None
                 if depth > 0 and parent_item_id is None:
-                    result["diagnostics"].append(
-                        {
+                    if source_depth in flattened_source_depths:
+                        depth = 0
+                        parent_item_id = None
+                    elif seen_item_in_run:
+                        result["diagnostics"].append({
                             "code": "unresolved_list_parent",
                             "severity": "warning",
                             "message": f"list item {unit_id} has no evidenced parent at depth {depth}",
                             "node_id": unit_id,
-                        }
-                    )
+                        })
+                    else:
+                        result["diagnostics"].append({
+                            "code": "orphan_list_depth_flattened",
+                            "severity": "info",
+                            "message": f"list item {unit_id} starts at depth {depth} without an evidenced parent and was flattened to the local list root",
+                            "node_id": unit_id,
+                            "source_depth": depth,
+                            "fallback": {"kind": "local_list_root", "preserve_source_content": True},
+                        })
+                        depth = 0
+                        parent_item_id = None
+                        flattened_source_depths.add(source_depth)
+                seen_item_in_run = True
                 family = _list_family(evidence)
                 if family is None:
                     for old_depth in [key for key in active_items if key >= depth]:
@@ -437,7 +448,12 @@ def analyze_lists(facts: Mapping[str, Any], *, context: Mapping[str, Any] | None
                     }
                     group_specs.append(current)
                     active_groups[depth] = current
-                current["items"].append({"item_id": unit_id, "evidence": evidence, "parent_item_id": parent_item_id})
+                current["items"].append({
+                    "item_id": unit_id,
+                    "evidence": evidence,
+                    "parent_item_id": parent_item_id,
+                    "effective_depth": depth,
+                })
                 active_items[depth] = unit_id
                 for old_depth in [key for key in active_items if key > depth]:
                     active_items.pop(old_depth, None)

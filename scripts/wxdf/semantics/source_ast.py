@@ -27,6 +27,23 @@ def _image_alt_text(
     return name or str(resource_id)
 
 
+def _without_images(inline_content: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Remove image tokens while preserving the visible caption text."""
+
+    result: list[dict[str, Any]] = []
+    for item in inline_content:
+        if item.get("kind") == "image":
+            continue
+        copied = copy.deepcopy(dict(item))
+        if copied.get("kind") == "link":
+            children = _without_images(copied.get("children", []))
+            if not children:
+                continue
+            copied["children"] = children
+        result.append(copied)
+    return result
+
+
 def _inline_image_nodes(
     unit_id: str,
     unit: Mapping[str, Any],
@@ -38,7 +55,8 @@ def _inline_image_nodes(
     images, so the source projection stays intact.  Each image additionally
     becomes an ``image`` node that carries the reference of the image part it
     came from and records the source paragraph it was materialized from.
-    Rendering stays with the paragraph that owns the inline token.
+    Normal inline images remain owned by the paragraph.  A mixed authored
+    figure caption changes that ownership explicitly during AST materialization.
     """
 
     source_ref = copy.deepcopy(dict(unit["source_ref"]))
@@ -52,16 +70,20 @@ def _inline_image_nodes(
         resource = resources.get(item.get("resource_id")) or {}
         resource_ref = resource.get("source_ref")
         resource_ref = resource_ref if isinstance(resource_ref, Mapping) else {}
+        node = {
+            "block_type": "image",
+            "resource_id": item.get("resource_id"),
+            "alt_text": _image_alt_text(item, resource_ref, item.get("resource_id")),
+            "source_ref": copy.deepcopy(dict(resource_ref)) if resource_ref else copy.deepcopy(source_ref),
+            "generated_by": "source_ast.inline_image",
+            "generation_basis": [unit_id, inline_index],
+        }
+        for field in ("source_embedding", "display_size"):
+            if field in item:
+                node[field] = copy.deepcopy(item[field])
         nodes.append((
             node_id,
-            {
-                "block_type": "image",
-                "resource_id": item.get("resource_id"),
-                "alt_text": _image_alt_text(item, resource_ref, item.get("resource_id")),
-                "source_ref": copy.deepcopy(dict(resource_ref)) if resource_ref else copy.deepcopy(source_ref),
-                "generated_by": "source_ast.inline_image",
-                "generation_basis": [unit_id, inline_index],
-            },
+            node,
         ))
     return nodes
 
@@ -69,15 +91,22 @@ def _inline_image_nodes(
 def _expand_children(
     facts: Mapping[str, Any],
     additions: Mapping[str, list[str]],
+    prepend: set[str] | None = None,
 ) -> dict[str, list[str]]:
-    """Place each materialized image node directly after its source paragraph."""
+    """Place materialized nodes around their source paragraph."""
 
+    prepend = prepend or set()
     children: dict[str, list[str]] = {}
     for parent_id, child_ids in facts["children"].items():
         expanded: list[str] = []
         for child_id in child_ids:
-            expanded.append(child_id)
-            expanded.extend(additions.get(str(child_id), []))
+            image_ids = additions.get(str(child_id), [])
+            if any(image_id in prepend for image_id in image_ids):
+                expanded.extend(image_ids)
+                expanded.append(child_id)
+            else:
+                expanded.append(child_id)
+                expanded.extend(image_ids)
         children[parent_id] = expanded
     for node_ids in additions.values():
         for node_id in node_ids:
@@ -191,12 +220,20 @@ def build_source_ast(facts: Mapping[str, Any]) -> dict[str, Any]:
     caption_roles, caption_associations = _authored_caption_materialization(
         facts, image_targets
     )
+    standalone_images: set[str] = set()
     for caption_id, caption_role in caption_roles.items():
         block = blocks.get(caption_id)
         if block is None or block.get("block_type") != "paragraph":
             continue
-        # An authored caption keeps its source reference and its visible
-        # inline content, and gains an explicit caption role.
+        # A mixed authored figure caption is split into a standalone image
+        # node followed by a text-only caption node.  The image ownership is
+        # explicit in the Source AST so later stages do not infer it from
+        # renderer behavior.
+        if caption_role["caption_type"] == "figure" and caption_id in materialized:
+            block["inline_content"] = _without_images(block.get("inline_content", []))
+            for image_id in materialized[caption_id]:
+                blocks[image_id]["materialization_mode"] = "standalone"
+                standalone_images.add(image_id)
         block["role"] = "caption"
         block["caption_type"] = caption_role["caption_type"]
         block["target_id"] = caption_role["target_id"]
@@ -230,7 +267,7 @@ def build_source_ast(facts: Mapping[str, Any]) -> dict[str, Any]:
             "root_id": "root",
             "blocks": blocks,
             "containers": containers,
-            "children": _expand_children(facts, materialized),
+            "children": _expand_children(facts, materialized, standalone_images),
             "associations": copy.deepcopy(caption_associations),
             "resources": copy.deepcopy(facts["resources"]),
         },
@@ -239,6 +276,38 @@ def build_source_ast(facts: Mapping[str, Any]) -> dict[str, Any]:
 
     validate_ast(ast)
     return ast
+
+
+def _normalized_list_marker(
+    relation: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+) -> str:
+    marker = relation.get("source_marker") or evidence.get("marker_text")
+    if isinstance(marker, str) and marker.strip():
+        return marker
+
+    source_list_type = str(
+        relation.get("source_list_type") or evidence.get("source_list_type") or ""
+    ).lower()
+    list_kind = str(relation.get("list_kind") or "").lower()
+    if source_list_type == "dash":
+        return "-"
+    if source_list_type in {"bullet", "bullet_dot"} or list_kind == "unordered":
+        return "•"
+
+    ordinal = relation.get("source_ordinal") or evidence.get("ordinal") or 1
+    try:
+        normalized_ordinal = max(1, int(ordinal))
+    except (TypeError, ValueError):
+        normalized_ordinal = 1
+    if source_list_type.startswith("lower_letter"):
+        letters = ""
+        while normalized_ordinal:
+            normalized_ordinal, remainder = divmod(normalized_ordinal - 1, 26)
+            letters = chr(ord("a") + remainder) + letters
+        return f"{letters})"
+    suffix = ")" if source_list_type.endswith("_paren") else "."
+    return f"{normalized_ordinal}{suffix}"
 
 
 def materialize_list_semantics(
@@ -343,7 +412,7 @@ def materialize_list_semantics(
                 evidence = facts.get("evidence", {}).get(source_item_id, {})
                 item_node: dict[str, Any] = {
                     "kind": "list_item",
-                    "source_marker": relation.get("source_marker") or evidence.get("marker_text"),
+                    "source_marker": _normalized_list_marker(relation, evidence),
                     "source_ordinal": relation.get("source_ordinal") or evidence.get("ordinal"),
                     "source_sequence_id": relation.get("source_sequence_id") or source_item_id,
                 }

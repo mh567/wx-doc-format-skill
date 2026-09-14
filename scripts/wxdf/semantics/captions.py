@@ -10,6 +10,7 @@ from typing import Any, Mapping
 
 from text_utils import caption_parts
 
+from ..contracts import overlay_property_scope
 from ..model import inline_text_projection
 from ..validation import validate_ast
 from ..validation import validate_source_facts
@@ -272,7 +273,8 @@ def collect_caption_candidates(ast: Mapping[str, Any]) -> list[dict[str, Any]]:
     captioned = _captioned_targets(ast)
     for node_id, block in ast["document"]["blocks"].items():
         if block.get("block_type") == "table" and block.get("table_type") == "data":
-            result.append({"candidate_id": f"caption-target-{node_id}", "module_id": "caption_semantics", "module_version": "1.0", "target_source_refs": [copy.deepcopy(dict(block["source_ref"]))] if isinstance(block.get("source_ref"), Mapping) else [], "target_node_ids": [node_id], "proposal": {"operation": "create_overlay", "property_scope": ["overlay"], "value": {"caption_type": "table", "eligible": True}}, "positive_evidence": [{"kind": "format_contract", "source": "data_table_caption_eligibility"}], "negative_evidence": [], "scope": {"stage": "relation"}, "constraints": [{"kind": "caption_above_table"}], "rationale": "data table is caption eligible", "confidence": None})
+            value = {"caption_type": "table", "eligible": True}
+            result.append({"candidate_id": f"caption-target-{node_id}", "module_id": "caption_semantics", "module_version": "1.0", "target_source_refs": [copy.deepcopy(dict(block["source_ref"]))] if isinstance(block.get("source_ref"), Mapping) else [], "target_node_ids": [node_id], "proposal": {"operation": "create_overlay", "property_scope": overlay_property_scope(value), "value": value}, "positive_evidence": [{"kind": "format_contract", "source": "data_table_caption_eligibility"}], "negative_evidence": [], "scope": {"stage": "relation"}, "constraints": [{"kind": "caption_above_table"}], "rationale": "data table is caption eligible", "confidence": None})
             if node_id not in captioned:
                 result.extend(_generated_caption_candidates(
                     ast,
@@ -282,7 +284,8 @@ def collect_caption_candidates(ast: Mapping[str, Any]) -> list[dict[str, Any]]:
                     constraint="caption_above_table",
                 ))
         elif block.get("block_type") == "image":
-            result.append({"candidate_id": f"caption-target-{node_id}", "module_id": "caption_semantics", "module_version": "1.0", "target_source_refs": [copy.deepcopy(dict(block["source_ref"]))] if isinstance(block.get("source_ref"), Mapping) else [], "target_node_ids": [node_id], "proposal": {"operation": "create_overlay", "property_scope": ["overlay"], "value": {"caption_type": "figure", "eligible": True}}, "positive_evidence": [{"kind": "format_contract", "source": "image_caption_eligibility"}], "negative_evidence": [], "scope": {"stage": "relation"}, "constraints": [{"kind": "caption_below_figure"}], "rationale": "image is figure caption eligible", "confidence": None})
+            value = {"caption_type": "figure", "eligible": True}
+            result.append({"candidate_id": f"caption-target-{node_id}", "module_id": "caption_semantics", "module_version": "1.0", "target_source_refs": [copy.deepcopy(dict(block["source_ref"]))] if isinstance(block.get("source_ref"), Mapping) else [], "target_node_ids": [node_id], "proposal": {"operation": "create_overlay", "property_scope": overlay_property_scope(value), "value": value}, "positive_evidence": [{"kind": "format_contract", "source": "image_caption_eligibility"}], "negative_evidence": [], "scope": {"stage": "relation"}, "constraints": [{"kind": "caption_below_figure"}], "rationale": "image is figure caption eligible", "confidence": None})
             if node_id not in captioned:
                 result.extend(_generated_caption_candidates(
                     ast,
@@ -364,7 +367,18 @@ def collect_source_caption_semantics(
             candidates.sort(key=lambda item: item["order"])
             required = "before"
         else:
-            candidates = [item for item in objects if item["kind"] == "figure" and item["order"] < caption["order"]]
+            mixed_figure = next(
+                (
+                    item for item in objects
+                    if item["kind"] == "figure"
+                    and item["node_id"] == caption["node_id"]
+                ),
+                None,
+            )
+            candidates = [mixed_figure] if mixed_figure is not None else [
+                item for item in objects
+                if item["kind"] == "figure" and item["order"] < caption["order"]
+            ]
             candidates.sort(key=lambda item: item["order"], reverse=True)
             required = "after"
         target = next((item for item in candidates if item["node_id"] not in assigned), None)

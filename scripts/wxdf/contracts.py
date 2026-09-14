@@ -61,7 +61,16 @@ SAFE_PROPERTY_SCOPES = (
     "semantics",
     "role",
     "level",
+    "table_type",
+    "caption_eligible",
+    "layout_contract",
     "caption_type",
+    "eligible",
+    "region_kind",
+    "semantic_scope",
+    "protected",
+    "reason",
+    "protected_role",
     "target_id",
     "list_kind",
     "source_marker",
@@ -71,6 +80,16 @@ SAFE_PROPERTY_SCOPES = (
     "overlay",
     "presentation",
 )
+
+
+def overlay_property_scope(value: Mapping[str, Any]) -> list[str]:
+    """Return the exact semantic fields written by an overlay decision."""
+
+    scopes = sorted(str(key) for key in value)
+    unsupported = [scope for scope in scopes if scope not in SAFE_PROPERTY_SCOPES]
+    if unsupported:
+        raise ValueError(f"unsupported overlay property {unsupported[0]!r}")
+    return scopes
 
 
 @dataclass(frozen=True)

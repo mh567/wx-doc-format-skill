@@ -43,6 +43,30 @@ def _group_key(candidate: Mapping[str, Any]) -> tuple[tuple[str, ...], tuple[str
     return target_ids, scopes
 
 
+def _expand_overlay_claims(candidate: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """Split an exact overlay write set into independently resolvable claims."""
+
+    proposal = candidate.get("proposal") or {}
+    if proposal.get("operation") not in {"create_overlay", "update_overlay"}:
+        return [candidate]
+    scopes = [str(value) for value in proposal.get("property_scope") or []]
+    value = proposal.get("value")
+    if scopes == ["overlay"] or not isinstance(value, Mapping):
+        return [candidate]
+    if set(scopes) != {str(key) for key in value}:
+        return [candidate]
+    claims: list[Mapping[str, Any]] = []
+    for property_name in sorted(scopes):
+        claim = copy.deepcopy(dict(candidate))
+        claim["proposal"] = {
+            **copy.deepcopy(dict(proposal)),
+            "property_scope": [property_name],
+            "value": {property_name: copy.deepcopy(value[property_name])},
+        }
+        claims.append(claim)
+    return claims
+
+
 def _active_ledger_revisions(ledger_view: Mapping[str, Any] | None) -> list[Mapping[str, Any]]:
     if not ledger_view:
         return []
@@ -152,7 +176,8 @@ def resolve(
     protected = {str(value) for value in constraints.get("protected_node_ids", [])}
     grouped: dict[tuple[tuple[str, ...], tuple[str, ...]], list[Mapping[str, Any]]] = defaultdict(list)
     unresolved: list[dict[str, Any]] = []
-    for candidate in sorted(candidate_set, key=lambda item: (str(item.get("module_id")), str(item.get("module_version")), str(item.get("candidate_id")))):
+    claims = [claim for candidate in candidate_set for claim in _expand_overlay_claims(candidate)]
+    for candidate in sorted(claims, key=lambda item: (str(item.get("module_id")), str(item.get("module_version")), str(item.get("candidate_id")), _canonical(item.get("proposal") or {}))):
         target_ids = {str(value) for value in candidate.get("target_node_ids") or []}
         if target_ids & protected:
             unresolved.append(
@@ -190,7 +215,7 @@ def resolve(
         best = [item for item in ranked if item[0] == best_strength]
         if len(best) > 1:
             candidate_ids = sorted(str(item.get("candidate_id")) for _, _, items in best for item in items)
-            unresolved.append({"code": "candidate_conflict", "candidate_ids": candidate_ids, "target_node_ids": list(group_key[0])})
+            unresolved.append({"code": "candidate_conflict", "candidate_ids": candidate_ids, "target_node_ids": list(group_key[0]), "property_scope": list(group_key[1])})
             continue
         selected = sorted(best[0][2], key=lambda item: (str(item.get("module_id")), str(item.get("candidate_id"))))
         decision = _decision_from_candidate(selected[0], expected_revision)

@@ -32,6 +32,12 @@ _TOC_TITLES = {"目录", "目次", "目  次", "目  录"}
 _NUMBERED_ENTRY_RE = re.compile(r"^\s*\d+(?:\.\d+)*[\s、.．]+\S+")
 _TRAILING_PAGE_RE = re.compile(r"[\t.·… ]+\d{1,4}\s*$")
 _LEADING_NUMBER_RE = re.compile(r"^\s*\d+(?:\.\d+)*[\s、.．]+")
+_TOC_IDENTITY_EVIDENCE = {
+    "toc_title",
+    "toc_field",
+    "entries_repeat_as_headings",
+    "field_or_hyperlink_entries",
+}
 
 
 def _style_name(paragraph: Paragraph) -> str:
@@ -224,6 +230,9 @@ def _candidate_from_start(
     if score < 0.40:
         return None
 
+    selection_eligible = bool(_TOC_IDENTITY_EVIDENCE.intersection(evidence))
+    negative_evidence = [] if selection_eligible else ["missing_toc_identity"]
+
     end_position = records[provisional_end]["position"]
     preview = [text[:120] for text in entry_texts[:12]]
     return {
@@ -236,6 +245,8 @@ def _candidate_from_start(
         "end_source_position": end_position,
         "confidence": score,
         "evidence": evidence,
+        "negative_evidence": negative_evidence,
+        "selection_eligible": selection_eligible,
         "entry_count": len(entry_texts),
         "entry_preview": preview,
         "repeated_heading_count": len(repeated_entries),
@@ -298,9 +309,10 @@ def detect_toc_regions(doc, report: dict) -> dict:
 
     candidates.sort(key=lambda candidate: candidate.get("confidence", 0), reverse=True)
     status = "no_candidate"
-    if candidates:
-        best = candidates[0]
-        runner_up = candidates[1] if len(candidates) > 1 else None
+    eligible = [candidate for candidate in candidates if candidate["selection_eligible"]]
+    if eligible:
+        best = eligible[0]
+        runner_up = eligible[1] if len(eligible) > 1 else None
         margin = best["confidence"] - runner_up["confidence"] if runner_up else 1.0
         if best["confidence"] >= 0.75 and margin >= 0.15:
             best["selected"] = True

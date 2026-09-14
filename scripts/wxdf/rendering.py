@@ -18,6 +18,7 @@ from table_formatting import normalize_table
 from text_utils import caption_parts
 
 from .render_plan import build_render_plan
+from .media import MediaEmbedder
 from .template import TemplateBundle
 
 
@@ -98,15 +99,9 @@ def _apply_marks(run: Any, item: Mapping[str, Any]) -> None:
         run.italic = True
 
 
-def _write_image(paragraph: Any, resource_id: Any, resources: Mapping[str, Any]) -> Any:
-    resource = resources.get(resource_id)
+def _write_image(paragraph: Any, image_token: Mapping[str, Any], media: MediaEmbedder) -> Any:
     run = paragraph.add_run()
-    if isinstance(resource, (bytes, bytearray)):
-        run.add_picture(io.BytesIO(resource))
-    elif isinstance(resource, (str, Path)):
-        run.add_picture(str(resource))
-    else:
-        raise RenderError(f"resource {resource_id!r} has no renderable bytes or path")
+    media.embed(run, image_token)
     return run
 
 
@@ -115,7 +110,7 @@ def _move_run_to_hyperlink(paragraph: Any, hyperlink: Any, run: Any) -> None:
     hyperlink.append(run._r)
 
 
-def _write_link(paragraph: Any, item: Mapping[str, Any], resources: Mapping[str, Any]) -> None:
+def _write_link(paragraph: Any, item: Mapping[str, Any], media: MediaEmbedder) -> None:
     target = str(item.get("target") or "")
     hyperlink = OxmlElement("w:hyperlink")
     if target.startswith("#"):
@@ -139,11 +134,11 @@ def _write_link(paragraph: Any, item: Mapping[str, Any], resources: Mapping[str,
             run = paragraph.add_run("\t")
             _move_run_to_hyperlink(paragraph, hyperlink, run)
         elif kind == "image":
-            run = _write_image(paragraph, child.get("resource_id"), resources)
+            run = _write_image(paragraph, child, media)
             _move_run_to_hyperlink(paragraph, hyperlink, run)
 
 
-def _write_inline(paragraph: Any, inline_content: list[Mapping[str, Any]], resources: Mapping[str, Any]) -> None:
+def _write_inline(paragraph: Any, inline_content: list[Mapping[str, Any]], media: MediaEmbedder) -> None:
     for item in inline_content:
         kind = item.get("kind")
         if kind == "text":
@@ -154,9 +149,9 @@ def _write_inline(paragraph: Any, inline_content: list[Mapping[str, Any]], resou
         elif kind == "tab":
             paragraph.add_run("\t")
         elif kind == "link":
-            _write_link(paragraph, item, resources)
+            _write_link(paragraph, item, media)
         elif kind == "image":
-            _write_image(paragraph, item.get("resource_id"), resources)
+            _write_image(paragraph, item, media)
 
 
 _CAPTION_SEQUENCE = {"table": ("表 ", "Table"), "figure": ("图 ", "Figure")}
@@ -390,6 +385,7 @@ def render(
     plan = build_render_plan(normalized)
     ast = normalized["source_ast"]
     document = ast["document"]
+    media = MediaEmbedder(document.get("resources", {}), resources, error_type=RenderError)
     styles = _profile_styles(normalized)
     selected_template = template_bundle.path if template_bundle is not None else template_path
     doc = (
@@ -459,7 +455,7 @@ def render(
         if block.get("role") == "caption":
             caption_text = _write_caption(paragraph, block, resources)
         else:
-            _write_inline(paragraph, block.get("inline_content", []), resources)
+            _write_inline(paragraph, block.get("inline_content", []), media)
         if parent is not None and parent._tc in layout_table_cells:
             _apply_layout_paragraph_format(
                 paragraph,
@@ -570,7 +566,10 @@ def render(
         elif block.get("block_type") == "table":
             add_table(block_id, block_id, parent=parent)
         elif block.get("block_type") == "image":
-            if block.get("generated_by") == "source_ast.inline_image":
+            if (
+                block.get("generated_by") == "source_ast.inline_image"
+                and block.get("materialization_mode") != "standalone"
+            ):
                 # The image node materializes an inline token whose pixels are
                 # already rendered by the paragraph that carries the token.
                 return
@@ -588,10 +587,7 @@ def render(
                     initial_cell_paragraphs.add(parent_key)
                 else:
                     paragraph = parent.add_paragraph()
-            if isinstance(resource, (bytes, bytearray)):
-                paragraph.add_run().add_picture(io.BytesIO(resource))
-            else:
-                paragraph.add_run().add_picture(str(resource))
+            media.embed(paragraph.add_run(), block)
             paragraph_counter += 1
             render_map[block_id] = {
                 "kind": "image",

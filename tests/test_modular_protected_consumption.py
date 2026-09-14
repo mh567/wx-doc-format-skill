@@ -125,7 +125,11 @@ def test_markdown_remark_uses_one_note_contract_for_candidate_and_projection(tmp
     candidates = collect_protected_candidates(facts)
     projection = project_source_facts(facts, classify_regions(facts))
 
-    note = next(item for item in candidates if item["proposal"]["value"].get("role") == "note")
+    note = next(
+        item
+        for item in candidates
+        if item["proposal"]["value"].get("protected_role") == "note"
+    )
     paragraph = next(item for item in projection["paragraphs"] if item["location"]["value"] == 3)
     assert note["proposal"]["value"]["reason"] == "note"
     assert paragraph["text"] == "保留说明"

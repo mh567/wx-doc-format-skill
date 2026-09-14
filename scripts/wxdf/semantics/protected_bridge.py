@@ -33,7 +33,7 @@ def _fact_location(facts: Mapping[str, Any], node_id: str) -> tuple[str, int] | 
 def _protect(block: dict[str, Any], value: Mapping[str, Any]) -> bool:
     before = copy.deepcopy(block)
     reason = str(value.get("reason") or "protected_content")
-    role = str(value.get("role") or "")
+    role = str(value.get("protected_role") or value.get("role") or "")
     source = block.setdefault("source", {})
     source["protected"] = True
     source["protected_reason"] = reason

@@ -6,6 +6,7 @@ import copy
 from pathlib import Path
 from typing import Any, Mapping
 
+from ..contracts import overlay_property_scope
 from ..model import inline_text_projection
 from ..validation import validate_source_facts
 
@@ -21,13 +22,18 @@ def _node_text(unit: Mapping[str, Any]) -> str:
 
 def _candidate(node_id: str, unit: Mapping[str, Any], *, reason: str, scope: str = "excluded") -> dict[str, Any]:
     source_ref = _source_ref(unit)
+    value = {"region_kind": reason, "semantic_scope": scope}
     return {
         "candidate_id": f"scope-{reason}-{node_id}",
         "module_id": "source_regions",
         "module_version": "1.0",
         "target_source_refs": [source_ref] if source_ref else [],
         "target_node_ids": [node_id],
-        "proposal": {"operation": "update_overlay", "property_scope": ["overlay"], "value": {"protected": True, "reason": reason}},
+        "proposal": {
+            "operation": "update_overlay",
+            "property_scope": overlay_property_scope(value),
+            "value": value,
+        },
         "positive_evidence": [{"kind": "format_contract", "source": "source_regions", "reason": reason}],
         "negative_evidence": [],
         "scope": {"semantic_scope": scope},

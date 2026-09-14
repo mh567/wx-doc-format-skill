@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 from typing import Any, Mapping
 
-from ..contracts import TABLE_TYPES
+from ..contracts import TABLE_TYPES, overlay_property_scope
 from ..validation import validate_ast, validate_source_facts
 
 
@@ -132,7 +132,11 @@ def collect_table_candidates(ast: Mapping[str, Any]) -> list[dict[str, Any]]:
             "module_version": "1.0",
             "target_source_refs": [copy.deepcopy(dict(source_ref))] if isinstance(source_ref, Mapping) else [],
             "target_node_ids": [node_id],
-            "proposal": {"operation": "update_overlay", "property_scope": ["overlay"], "value": value},
+            "proposal": {
+                "operation": "update_overlay",
+                "property_scope": overlay_property_scope(value),
+                "value": value,
+            },
             "positive_evidence": [{"kind": "structural", "source": "table_semantics", "table_type": table_type}],
             "negative_evidence": [],
             "scope": {"stage": "relation"},

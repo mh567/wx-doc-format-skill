@@ -272,8 +272,16 @@ def check_saved_output(path: Path | str, expected: Mapping[str, Any], render_map
     actual_texts = [
         text
         for paragraph in xml_paragraphs
-        if any(node.text for node in paragraph.findall(".//w:t", ns))
-        and (text := paragraph_text(paragraph))
+        if (text := paragraph_text(paragraph))
+        and (
+            "\t" in text
+            or any(node.text for node in paragraph.findall(".//w:t", ns))
+            or any(
+                node.tag in {f"{{{namespace}}}br", f"{{{namespace}}}cr"}
+                and node.get(f"{{{namespace}}}type") != "page"
+                for node in paragraph.iter()
+            )
+        )
     ]
     expected_texts = [text for text in _expected_paragraph_texts(expected, render_map) if text]
     if actual_texts != expected_texts:
@@ -481,7 +489,7 @@ def check_saved_output(path: Path | str, expected: Mapping[str, Any], render_map
         direct_ilvl = direct.find("w:ilvl", ns) if direct is not None else None
         style = paragraph.find("w:pPr/w:pStyle", ns)
         style_id = style.get(f"{{{namespace}}}val") if style is not None else None
-        text = "".join(node.text or "" for node in paragraph.findall(".//w:t", ns))
+        text = paragraph_text(paragraph)
         direct_numbering = direct_num_id is not None and direct_num_id.get(f"{{{namespace}}}val") not in {None, "0"}
         expected_numbering = style_id in expected_numbered_style_ids or (direct_numbering and text in expected_numbered_texts)
         if expected_numbering:
@@ -503,9 +511,9 @@ def check_saved_output(path: Path | str, expected: Mapping[str, Any], render_map
                 invalid_numbering.append({"text": text, "num_id": num_id, "ilvl": ilvl, "abstract_num_id": abstract_id, "num_fmt": num_fmt})
             actual_numbering.append({"text": text, "num_id": num_id, "ilvl": ilvl, "abstract_num_id": abstract_id, "num_fmt": num_fmt})
     actual_numbered_texts = [
-        "".join(node.text or "" for node in paragraph.findall(".//w:t", ns))
+        paragraph_text(paragraph)
         for paragraph in numbered_paragraphs
-        if "".join(node.text or "" for node in paragraph.findall(".//w:t", ns))
+        if paragraph_text(paragraph)
     ]
     if len(numbered_paragraphs) != len(expected_numbered_items) or actual_numbered_texts != expected_numbered_texts:
         issues.append(

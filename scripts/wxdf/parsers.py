@@ -16,6 +16,10 @@ from .validation import validate_source_facts
 
 
 MARKDOWN_PARSER_VERSION = "1.1.0"
+_EMU_PER_POINT = 12700
+_EMU_PER_INCH = 914400
+_VML_NS = "{urn:schemas-microsoft-com:vml}"
+_WP_NS = "{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing}"
 
 
 def _digest(value: bytes | str) -> str:
@@ -68,6 +72,48 @@ def _source_ref(handle: SourceHandle, part: str, *, start: int | None = None, en
     if parser_version is not None:
         ref["parser_version"] = parser_version
     return ref
+
+
+def _css_length_to_emu(value: str) -> int | None:
+    match = re.fullmatch(r"\s*([0-9]+(?:\.[0-9]+)?)\s*(pt|in)\s*", value, re.IGNORECASE)
+    if match is None:
+        return None
+    amount = float(match.group(1))
+    emu = round(amount * (_EMU_PER_INCH if match.group(2).lower() == "in" else _EMU_PER_POINT))
+    return emu if emu > 0 else None
+
+
+def _vml_display_size(imagedata: Any) -> dict[str, int] | None:
+    shape = next((ancestor for ancestor in imagedata.iterancestors() if ancestor.tag == f"{_VML_NS}shape"), None)
+    if shape is None:
+        return None
+    declarations = {
+        key.strip().lower(): value.strip()
+        for key, value in re.findall(r"([^:;]+):([^;]+)", str(shape.get("style") or ""))
+    }
+    width = _css_length_to_emu(declarations.get("width", ""))
+    height = _css_length_to_emu(declarations.get("height", ""))
+    if width is None or height is None:
+        return None
+    return {"width_emu": width, "height_emu": height}
+
+
+def _drawingml_display_size(blip: Any) -> dict[str, int] | None:
+    container = next(
+        (ancestor for ancestor in blip.iterancestors() if ancestor.tag in {f"{_WP_NS}inline", f"{_WP_NS}anchor"}),
+        None,
+    )
+    extent = container.find(f"{_WP_NS}extent") if container is not None else None
+    if extent is None:
+        return None
+    try:
+        width = int(extent.get("cx"))
+        height = int(extent.get("cy"))
+    except (TypeError, ValueError):
+        return None
+    if width < 1 or height < 1:
+        return None
+    return {"width_emu": width, "height_emu": height}
 
 
 def _line_offsets(text: str) -> list[int]:
@@ -377,17 +423,26 @@ def _docx_inline_content(paragraph: Any, handle: SourceHandle, node_path: list[s
         if not relationship_id:
             return
         resource_id = _stable_id("res", handle.source_id, relationship_id)
+        source_embedding = "vml" if blip.tag == "{urn:schemas-microsoft-com:vml}imagedata" else "drawingml"
+        display_size = _vml_display_size(blip) if source_embedding == "vml" else _drawingml_display_size(blip)
         if resource_id not in resources:
             part = paragraph.part.related_parts.get(relationship_id)
             blob = getattr(part, "blob", b"")
             media_part = str(getattr(part, "partname", "word/media/unknown")).lstrip("/")
-            resources[resource_id] = {
+            resource = {
                 "kind": "image",
                 "source_ref": _source_ref(handle, media_part, node_path=[*path, relationship_id], parser_version=parser_version),
                 "content_sha256": _digest(blob),
                 "dependencies": [],
             }
-        target.append({"kind": "image", "resource_id": resource_id, "alt_text": ""})
+            media_type = getattr(part, "content_type", None)
+            if media_type:
+                resource["media_type"] = str(media_type)
+            resources[resource_id] = resource
+        token = {"kind": "image", "resource_id": resource_id, "alt_text": "", "source_embedding": source_embedding}
+        if display_size is not None:
+            token["display_size"] = display_size
+        target.append(token)
 
     def parse_children(parent: Any, target: list[dict[str, Any]], path: list[str | int]) -> None:
         for index, child in enumerate(list(parent)):
