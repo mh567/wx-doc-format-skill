@@ -18,7 +18,7 @@
     {"id": "T07", "subject": "Checkpoint 拆分与 response_store seam", "status": "done", "depends_on": ["T04", "T05", "T06"], "commit": "a5991b8"},
     {"id": "FU-1", "subject": "executor 编排提取", "status": "deferred", "depends_on": [], "adr": "docs/adr/0003-orchestration-stays-in-executors.md"},
     {"id": "FU-2", "subject": "T01/T02 审查开放项（build_native_run_result 归属、source_projection 接线、list_item_map 语义声明、registry 职责分离、ledger_replay_report 归属）", "status": "open", "depends_on": ["T01", "T02"]},
-    {"id": "FU-3", "subject": "T06/T07 独立两轴审查待执行；checkpoint_store 仍保留对 response_store 的函数内惰性导入", "status": "open", "depends_on": ["T06", "T07"]}
+    {"id": "FU-3", "subject": "T06/T07 两轴审查发现待收口：apply 语义仍有两处实现、证明非单一 owner、checkpoint 与 response 运行时仍有环（函数内惰性导入）、request_append._path 重复", "status": "open", "depends_on": ["T06", "T07"]}
   ],
   "external_gates": [
     "kylin_v10_arm64_real_machine_acceptance",
