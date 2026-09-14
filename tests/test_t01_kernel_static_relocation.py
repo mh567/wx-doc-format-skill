@@ -180,36 +180,21 @@ def test_registry_owns_capability_migration_report() -> None:
     assert all(value == "delivered" for key, value in report.items() if key != "source_parser")
 
 
-def test_registry_owns_native_run_result_translation() -> None:
-    from wxdf import registry
+def test_run_result_owns_the_run_result_translation() -> None:
+    from wxdf import run_result
 
-    assert callable(registry.build_native_run_result)
+    assert callable(run_result.build_native_run_result)
 
 
 def test_decision_ledger_owns_ledger_replay_report() -> None:
     from wxdf.decision_ledger import ledger_replay_report
 
     assert ledger_replay_report(None) is None
-
-    class _Context:
-        artifacts = {
-            "ledger_replay": {"enabled": True},
-            "decision_set": {"decisions": [{"candidate_ids": []}, {"candidate_ids": []}]},
-        }
-
-    record = ledger_replay_report(_Context())
-
-    assert record == {"enabled": True, "decision_count": 2}
-
-    class _NoDecisionSet:
-        artifacts = {"ledger_replay": {"enabled": True}}
-
-    assert ledger_replay_report(_NoDecisionSet()) == {"enabled": True}
-
-    class _NoReplay:
-        artifacts = {}
-
-    assert ledger_replay_report(_NoReplay()) is None
+    assert ledger_replay_report({"enabled": True}, {"decisions": [{}, {}]}) == {
+        "enabled": True,
+        "decision_count": 2,
+    }
+    assert ledger_replay_report({"enabled": True}) == {"enabled": True}
 
 
 def test_checkpoint_store_owns_native_checkpoint_identity_lock(

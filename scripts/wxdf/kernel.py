@@ -79,12 +79,12 @@ class ConversionKernel:
         from .metrics import MetricsCollector
         from .parsers import detect_source_type
         from .registry import (
-            build_native_run_result,
             build_native_v2_registry,
             checkpoint_modules,
             execution_plan_report,
             native_preflight,
         )
+        from .run_result import build_native_run_result
         from .checkpoint_store import (
             CheckpointError,
             append_native_waiting_requests,
@@ -469,7 +469,10 @@ class ConversionKernel:
                 "status": "failed",
                 "source_ast_revision": context.require("source_ast")["revision"] if context is not None else 1,
                 "decision_set": decision_set,
-                "decision_ledger_replay": ledger_replay_report(context),
+                "decision_ledger_replay": ledger_replay_report(
+                    context.require("ledger_replay") if context is not None else None,
+                    decision_set,
+                ),
                 "execution_plan": {
                     "profile": _NATIVE_PROFILE,
                     "modules": execution_plan_report(execution_plan),
@@ -499,7 +502,7 @@ class ConversionKernel:
                 report.update({
                     "status": "failed",
                     "decision_ledger_replay": {
-                        **(ledger_replay_report(context) or {"enabled": True}),
+                        **(ledger_replay_report(context.require("ledger_replay") if context is not None else None) or {"enabled": True}),
                         "error_code": replay_diagnostic["code"],
                         "diagnostics": [replay_diagnostic],
                     },

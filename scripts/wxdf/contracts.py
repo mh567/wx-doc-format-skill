@@ -118,6 +118,7 @@ _CAPABILITY_CONTRACT_DEFINITIONS = (
     ("source_ast", AST_SCHEMA_VERSION, "mapping"),
     ("list_semantics_result", "2.0", "mapping"),
     ("list_semantics_candidates", "2.0", "sequence"),
+    # list_item_map: source item identifier -> owning native list container.
     ("list_item_map", "2.0", "mapping"),
     ("list_semantics", "2.0", "mapping"),
     ("table_semantics_result", "2.0", "sequence"),

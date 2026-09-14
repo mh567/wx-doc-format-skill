@@ -226,38 +226,6 @@ def test_caption_candidates_read_the_published_caption_result(
     assert candidates
 
 
-def test_source_projection_reads_published_caption_semantics(tmp_path: Path) -> None:
-    facts = parse(_write_caption_docx(tmp_path / "projection.docx"))
-    node_id = facts["children"]["root"][1]
-    published = {
-        "captions": [
-            {
-                "node_id": node_id,
-                "caption_type": "table",
-                "label": "表",
-                "text": "已发布题注",
-                "location": {"kind": "source_position", "value": 1},
-                "status": "associated",
-            }
-        ]
-    }
-
-    projection = project_source_facts(
-        facts,
-        {"regions": []},
-        caption_semantics=published,
-    )
-
-    assert projection["captions"] == [
-        {"caption_type": "table", "label": "表", "text": "已发布题注", "source_position": 1}
-    ]
-
-
-# ---------------------------------------------------------------------------
-# The list item map owner has a real consumer: appendix semantics.
-# ---------------------------------------------------------------------------
-
-
 def test_appendix_module_requires_the_list_item_map_capability() -> None:
     described = {
         module.descriptor.module_id: module.descriptor

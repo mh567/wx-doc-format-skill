@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import copy
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from .registry import capability_migration_report, execution_plan_report
 
 
 @dataclass(frozen=True)
@@ -58,3 +62,273 @@ class RunResult:
             "metrics": dict(self.metrics),
         })
         return payload
+
+
+def build_native_run_result(
+    request: Any,
+    options: dict[str, Any],
+    report: dict[str, Any],
+    execution_plan: Any,
+    context: Any,
+    metrics: Any,
+    *,
+    profile: str,
+) -> tuple[Any, dict[Any, bytes] | None]:
+    """Translate committed native artifacts into the lifecycle result contract.
+
+    Returns the translated ``RunResult`` together with the file payloads the
+    kernel publication trigger must write.  ``None`` payloads mark a failed
+    result that must not publish.
+    """
+
+    from .decision_ledger import ledger_replay_report
+
+    candidates = list(context.require("candidate_set"))
+    enhancement = context.require("enhancement_result")
+    decision_set = context.require("decision_set")
+    list_candidates = list(context.require("list_semantics_candidates"))
+    appendix_candidates = list(context.require("appendix_semantics_candidates"))
+    appendix_semantics = context.require("appendix_semantics")
+    list_result = context.require("list_semantics_result")
+    review_result = context.require("review_result")
+    committed = review_result["transaction_commit"]
+    snapshot = committed.snapshot
+    normalized = review_result["normalized"]
+    selected_audits = review_result["audits"]
+    model_findings = selected_audits["model"]
+    saved_findings = selected_audits["saved_output"]
+    appendix_audit = selected_audits["appendix"]
+    published = context.require("published_output")
+    integrity = context.require("source_facts_integrity")
+    source_facts_digest = context.require("source_facts_digest")
+    source_facts_digest_after = str(integrity["digest_after"])
+    source_facts_immutable = bool(integrity["immutable"])
+    ledger_replay = ledger_replay_report(context.require("ledger_replay"), decision_set)
+    review_decision_set = review_result.get("decision_set") or {}
+    transaction_decision_set = (
+        review_decision_set
+        if review_result.get("status") == "accepted"
+        else decision_set
+    )
+    native_review = {
+        key: copy.deepcopy(review_result.get(key))
+        for key in (
+            "status",
+            "enabled",
+            "triggered",
+            "acceptance",
+            "baseline_artifact",
+            "candidate_artifact",
+            "selected_artifact",
+            "enhancement",
+            "decision_set",
+            "audit_exception",
+            "reprocess_plan",
+            "reprocess_module_evidence",
+        )
+        if review_result.get(key) is not None
+    }
+
+    appendix_range_candidate_ids = {
+        str(candidate.get("candidate_id"))
+        for candidate in appendix_candidates
+        if str(candidate.get("candidate_id", "")).startswith("appendix-range-")
+    }
+    appendix_heading_candidate_ids = {
+        str(candidate.get("candidate_id"))
+        for candidate in appendix_candidates
+        if str(candidate.get("candidate_id", "")).startswith("appendix-heading-")
+    }
+    appendix_decision_ids = {
+        str(candidate_id)
+        for decision in decision_set.get("decisions", [])
+        for candidate_id in decision.get("candidate_ids", [])
+    }
+    appendix_consumption = {
+        "candidate_count": len(appendix_candidates),
+        "range_candidate_count": len(appendix_range_candidate_ids),
+        "range_consumed_count": len(appendix_range_candidate_ids & appendix_decision_ids),
+        "heading_candidate_count": len(appendix_heading_candidate_ids),
+        "heading_consumed_count": len(appendix_heading_candidate_ids & appendix_decision_ids),
+        "unmatched_count": len(appendix_range_candidate_ids | appendix_heading_candidate_ids) - len((appendix_range_candidate_ids | appendix_heading_candidate_ids) & appendix_decision_ids),
+        "ambiguous_count": len(decision_set.get("unresolved") or []),
+    }
+
+    diagnostics = list(list_result.get("diagnostics") or [])
+    if not source_facts_immutable:
+        diagnostics.append({
+            "code": "SOURCE_FACTS_MUTATED",
+            "severity": "error",
+            "message": "SourceFacts changed during native pipeline execution",
+        })
+    diagnostics.extend(decision_set.get("unresolved") or [])
+    diagnostics.extend(model_findings.get("issues") or [])
+    diagnostics.extend(saved_findings.get("issues") or [])
+    diagnostics.extend(appendix_audit.get("issues") or [])
+    audits_passed = (
+        model_findings.get("passed") is True
+        and saved_findings.get("passed") is True
+        and appendix_audit.get("passed") is True
+    )
+    blocking_diagnostics = [
+        item
+        for item in diagnostics
+        if item in (decision_set.get("unresolved") or [])
+        or item in (model_findings.get("issues") or [])
+        or item in (saved_findings.get("issues") or [])
+        or item in (appendix_audit.get("issues") or [])
+        or item.get("severity") in {"error", "warning"}
+    ]
+    if published is None or not audits_passed or blocking_diagnostics:
+        report.update({
+            "status": "failed",
+            "source_ast_revision": snapshot.ast["revision"],
+            "source_facts_digest": source_facts_digest,
+            "source_facts_digest_after": source_facts_digest_after,
+            "source_facts_immutable": source_facts_immutable,
+            "decision_set": decision_set,
+            "enhancement": enhancement,
+            "decision_ledger_replay": ledger_replay,
+            "model_audit": model_findings,
+            "saved_output_audit": saved_findings,
+            "review_packet": context.require("review_packet"),
+            "native_review": native_review,
+            "appendix_semantics": appendix_semantics,
+            "appendix_semantics_consumption": appendix_consumption,
+            "appendix_preservation_audit": appendix_audit,
+            "execution_plan": {
+                "profile": profile,
+                "modules": execution_plan_report(execution_plan),
+            },
+        })
+        return RunResult(
+            status="failed",
+            exit_code=1,
+            report=report,
+            diagnostics=diagnostics,
+            metrics=metrics.snapshot(),
+        ), None
+    capability_migration = capability_migration_report(candidates, decision_set, committed, audits_passed)
+    item_candidate_ids = {
+        str(candidate.get("candidate_id"))
+        for candidate in list_candidates
+        if str(candidate.get("candidate_id", "")).startswith("list-relation-")
+    }
+    continuation_candidate_ids = {
+        str(candidate.get("candidate_id"))
+        for candidate in list_candidates
+        if ((candidate.get("proposal") or {}).get("value") or {}).get("association", {}).get("kind") == "sequence_continuation"
+    }
+    anchor_candidate_ids = {
+        str(candidate.get("candidate_id"))
+        for candidate in list_candidates
+        if str(candidate.get("candidate_id", "")).startswith("list-anchor-")
+    }
+    item_consumed_count = sum(
+        1
+        for decision in decision_set.get("decisions", [])
+        if item_candidate_ids.intersection(str(item) for item in decision.get("candidate_ids", []))
+    )
+    continuation_consumed_count = sum(
+        1
+        for decision in decision_set.get("decisions", [])
+        if continuation_candidate_ids.intersection(str(item) for item in decision.get("candidate_ids", []))
+    )
+    anchor_consumed_count = sum(
+        1
+        for decision in decision_set.get("decisions", [])
+        if anchor_candidate_ids.intersection(str(item) for item in decision.get("candidate_ids", []))
+    )
+    status = "completed" if not diagnostics else "completed_with_warnings"
+    report.update({
+        "status": status,
+        "source_facts_summary": context.require("source_facts_summary"),
+        "source_facts_digest": source_facts_digest,
+        "source_facts_digest_after": source_facts_digest_after,
+        "source_facts_immutable": source_facts_immutable,
+        "source_ast_revision": snapshot.ast["revision"],
+        "semantic_digest": normalized["semantic_digest"],
+        "presentation_digest": normalized["presentation_digest"],
+        "source_ast_hierarchy": context.require("source_ast_hierarchy"),
+        "list_semantics": {
+            "list_count": len(list_result["lists"]),
+            "item_count": len(list_result["items"]),
+            "continuation_count": len(list_result["continuations"]),
+            "diagnostics": list(list_result["diagnostics"]),
+            "downgrades": list(list_result.get("downgrades") or []),
+            "groups": list(list_result["lists"]),
+        },
+        "list_semantics_consumption": {
+            "candidate_count": len(list_candidates),
+            "item_candidate_count": len(list_result["items"]),
+            "item_consumed_count": item_consumed_count,
+            "continuation_candidate_count": len(list_result["continuations"]),
+            "continuation_consumed_count": continuation_consumed_count,
+            "anchor_candidate_count": len(anchor_candidate_ids),
+            "anchor_consumed_count": anchor_consumed_count,
+            "unmatched_count": 0,
+            "ambiguous_count": len(decision_set.get("unresolved") or []),
+        },
+        "table_semantics": dict(context.require("table_semantics")),
+        "appendix_semantics": appendix_semantics,
+        "appendix_semantics_consumption": appendix_consumption,
+        "appendix_preservation_audit": appendix_audit,
+        "native_transaction": {
+            "status": committed.status,
+            "transaction_id": committed.transaction_id,
+            "decision_count": len(transaction_decision_set["decisions"]),
+            "unresolved_count": len(transaction_decision_set.get("unresolved") or []),
+            "expected_revision": transaction_decision_set["expected_revision"],
+            "committed_revision": snapshot.ast["revision"],
+            "metrics": committed.metrics,
+            "overlays": snapshot.overlays,
+            "presentation_overrides": snapshot.presentation_overrides,
+        },
+        "decision_set": decision_set,
+        "review_packet": context.require("review_packet"),
+        "native_review": native_review,
+        "enhancement": enhancement,
+        "decision_ledger_replay": ledger_replay,
+        "execution_plan": {
+            "profile": profile,
+            "modules": execution_plan_report(execution_plan),
+        },
+        "native_module_evidence": copy.deepcopy(context.evidence),
+        "model_audit": model_findings,
+        "saved_output_audit": saved_findings,
+        "capability_migration": {
+            **capability_migration,
+        },
+    })
+    artifacts = {"docx": str(request.output_path)}
+    publication_payloads: dict[Any, bytes] = {}
+    for option_key, artifact_key, payload in (
+        ("source_ast_path", "source_ast", snapshot.ast),
+        ("normalized_ast_path", "normalized_ast", normalized),
+    ):
+        path = options.get(option_key)
+        if path is not None and not options.get("release"):
+            path = Path(path)
+            publication_payloads[path] = json.dumps(
+                payload,
+                ensure_ascii=False,
+                indent=2,
+            ).encode("utf-8")
+            artifacts[artifact_key] = str(path)
+    report_path = options.get("report_path")
+    if report_path is not None:
+        report_path = Path(report_path)
+        artifacts["report"] = str(report_path)
+    report["artifacts"] = artifacts
+    result = RunResult(status=status, exit_code=0, report=report, artifacts=artifacts, diagnostics=diagnostics, metrics=metrics.snapshot())
+    if report_path is not None:
+        report_payload = result.as_report()
+        report_transform = options.get("report_transform")
+        if callable(report_transform):
+            report_payload = report_transform(report_payload)
+        publication_payloads[report_path] = json.dumps(
+            report_payload,
+            ensure_ascii=False,
+            indent=2,
+        ).encode("utf-8")
+    return result, publication_payloads

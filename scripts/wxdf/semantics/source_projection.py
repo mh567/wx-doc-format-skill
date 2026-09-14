@@ -118,17 +118,8 @@ def _fact_list_count(facts: Mapping[str, Any], excluded: set[str]) -> int:
 def project_source_facts(
     facts: Mapping[str, Any],
     regions: Mapping[str, Any],
-    *,
-    caption_semantics: Mapping[str, Any] | None = None,
-    appendix_semantics: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Project SourceFacts into stable semantic material without template styles.
-
-    ``caption_semantics`` and ``appendix_semantics`` are the published caption
-    and appendix results.  When the caller supplies them, this projection reads
-    the canonical ownership for those nodes instead of re-parsing captions and
-    appendices.  Nodes the owners do not cover keep the local SourceFacts parse.
-    """
+    """Project SourceFacts into stable semantic material without template styles."""
 
     validate_source_facts(facts)
     excluded = excluded_source_nodes(regions, facts["children"])
@@ -136,17 +127,6 @@ def project_source_facts(
     captions: list[dict[str, Any]] = []
     appendices: list[dict[str, Any]] = []
     table_shapes: list[list[int]] = []
-
-    caption_by_node = {
-        str(item.get("node_id")): item
-        for item in (caption_semantics or {}).get("captions", [])
-        if item.get("node_id")
-    }
-    appendix_by_node = {
-        str(item.get("title_node_id")): item
-        for item in (appendix_semantics or {}).get("ranges", [])
-        if item.get("title_node_id")
-    }
 
     paragraphs: list[dict[str, Any]] = []
     tables: list[dict[str, Any]] = []
@@ -157,28 +137,7 @@ def project_source_facts(
         raw_text = inline_text_projection(inline_content)
         protected = None if inside_cell else protected_unit_semantics(unit, facts["evidence"].get(node_id, {}))
         protected_text = str(protected["text"]) if protected is not None else raw_text
-        if not inside_cell and node_id in caption_by_node:
-            entry = caption_by_node[node_id]
-            text = str(entry.get("text") or protected_text).strip()
-            caption = {
-                "caption_type": entry.get("caption_type"),
-                "label": entry.get("label"),
-                "text": entry.get("text"),
-                "source_position": _source_position(facts, node_id),
-            }
-            appendix = None
-        elif not inside_cell and node_id in appendix_by_node:
-            entry = appendix_by_node[node_id]
-            text = str(entry.get("title") or protected_text).strip()
-            caption = None
-            appendix = {
-                "appendix_id": entry.get("appendix_id"),
-                "classification": entry.get("classification"),
-                "title": entry.get("title"),
-                "source_position": _source_position(facts, node_id),
-            }
-        else:
-            text, caption, appendix = _canonical_paragraph(
+        text, caption, appendix = _canonical_paragraph(
                 protected_text,
                 source_position=_source_position(facts, node_id),
                 appendix_index=len(appendices) + 1,
