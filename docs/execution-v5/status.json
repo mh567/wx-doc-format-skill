@@ -3,20 +3,21 @@
   "objective": "deepen_native_v2_modules",
   "branch": "dev",
   "baseline_head": "a46f9b5dfba01c79b44ce0a2262a1692f0194d17",
-  "implementation_started": false,
-  "current_task": null,
-  "next_task": "T01",
+  "implementation_started": true,
+  "current_task": "T02",
+  "next_task": "T03",
   "release_authorized": false,
   "recommended_order": ["T01", "T02", "T03", "T04", "T05", "T06", "T07"],
   "tasks": [
-    {"id": "T01", "subject": "Kernel 静态方法归位", "status": "pending", "depends_on": []},
-    {"id": "T02", "subject": "语义归属与工厂收敛", "status": "pending", "depends_on": []},
+    {"id": "T01", "subject": "Kernel 静态方法归位", "status": "done", "depends_on": [], "commit": "ac9d773"},
+    {"id": "T02", "subject": "语义归属与工厂收敛", "status": "done", "depends_on": [], "commit": "ac9d773"},
     {"id": "T03", "subject": "保护策略 owner", "status": "pending", "depends_on": ["T02"]},
     {"id": "T04", "subject": "删除 facade 与注入面收敛", "status": "pending", "depends_on": []},
     {"id": "T05", "subject": "Digest owner", "status": "pending", "depends_on": ["T04"]},
     {"id": "T06", "subject": "事务证明收敛", "status": "pending", "depends_on": ["T04", "T05"]},
     {"id": "T07", "subject": "Checkpoint 拆分与 response_store seam", "status": "pending", "depends_on": ["T04", "T05", "T06"]},
-    {"id": "FU-1", "subject": "executor 编排提取", "status": "deferred", "depends_on": [], "adr": "docs/adr/0003-orchestration-stays-in-executors.md"}
+    {"id": "FU-1", "subject": "executor 编排提取", "status": "deferred", "depends_on": [], "adr": "docs/adr/0003-orchestration-stays-in-executors.md"},
+    {"id": "FU-2", "subject": "T01/T02 审查开放项（build_native_run_result 归属、source_projection 接线、list_item_map 语义声明、registry 职责分离、ledger_replay_report 归属）", "status": "open", "depends_on": ["T01", "T02"]}
   ],
   "external_gates": [
     "kylin_v10_arm64_real_machine_acceptance",
