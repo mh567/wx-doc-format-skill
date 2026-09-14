@@ -27,6 +27,11 @@ except ImportError:
     _msvcrt = None
 
 from .contracts import CHECKPOINT_STATUSES, STAGES, ContractError
+from .decision_ledger import (
+    response_transaction_binding,
+    snapshot_transaction_state,
+    stored_transaction_digests,
+)
 from .digest import canonical_json, digest
 from .validation import validate_checkpoint
 from .response_store import content_digest, request_digest, response_digest
@@ -53,20 +58,6 @@ _TRANSITIONS: dict[str, frozenset[str]] = {
     "failed": frozenset({"failed"}),
     "cancelled": frozenset({"cancelled"}),
 }
-
-
-def _response_transaction_binding(
-    response: Mapping[str, Any],
-    transaction_id: str,
-    transaction_content_sha256: str,
-) -> dict[str, str]:
-    binding = {
-        "request_id": str(response["request_id"]),
-        "response_sha256": str(response["response_sha256"]),
-        "transaction_id": str(transaction_id),
-        "transaction_content_sha256": str(transaction_content_sha256),
-    }
-    return {**binding, "binding_sha256": digest(binding)}
 
 
 def file_digest(path: Path | str | None) -> str:
@@ -873,7 +864,7 @@ def complete_native_checkpoint(
             response["apply_started"] = False
             response["transaction_id"] = response_transaction_id
             response["transaction_content_sha256"] = response_transaction_digest
-            response_transaction_bindings[str(response["request_id"])] = _response_transaction_binding(
+            response_transaction_bindings[str(response["request_id"])] = response_transaction_binding(
                 response,
                 response_transaction_id,
                 response_transaction_digest,
@@ -929,19 +920,6 @@ def _path(value: Path | str) -> Path:
     return value if isinstance(value, Path) else Path(value)
 
 
-def _stored_transaction_digests(checkpoint: Mapping[str, Any]) -> tuple[dict[str, str], dict[str, str]]:
-    transaction_digests = {
-        str(transaction_id): str(digest)
-        for transaction_id, digest in checkpoint.get("transaction_content_digests", {}).items()
-    }
-    applied_digests = {
-        str(item.get("transaction_id")): str(item.get("content_sha256"))
-        for item in checkpoint.get("applied_transactions", [])
-        if isinstance(item, Mapping)
-    }
-    return transaction_digests, applied_digests
-
-
 def _validate_legacy_checkpoint_replay(
     checkpoint: Mapping[str, Any],
     canonical_digests: Mapping[str, str],
@@ -994,7 +972,7 @@ def _migrate_transaction_digest_version(checkpoint: dict[str, Any]) -> bool:
     from .decision_ledger import LedgerError, ledger_transaction_digests
 
     ledger = checkpoint.get("decision_ledger", {})
-    transaction_digests, applied_digests = _stored_transaction_digests(checkpoint)
+    transaction_digests, applied_digests = stored_transaction_digests(checkpoint)
     if transaction_digests != applied_digests:
         raise CheckpointError(
             "legacy checkpoint transaction maps disagree",
@@ -1051,7 +1029,7 @@ def _migrate_transaction_digest_version(checkpoint: dict[str, Any]) -> bool:
                 f"legacy response proof changed for {request_id}",
                 code="transaction_state_mismatch",
             )
-        expected_binding = _response_transaction_binding(
+        expected_binding = response_transaction_binding(
             response,
             transaction_id,
             str(stored_digest or ""),
@@ -1077,7 +1055,7 @@ def _migrate_transaction_digest_version(checkpoint: dict[str, Any]) -> bool:
         transaction_id = str(response["transaction_id"])
         digest = canonical_digests[transaction_id]
         response["transaction_content_sha256"] = digest
-        migrated_bindings[str(response["request_id"])] = _response_transaction_binding(
+        migrated_bindings[str(response["request_id"])] = response_transaction_binding(
             response,
             transaction_id,
             digest,
@@ -1122,7 +1100,7 @@ def _validate_for_store(checkpoint: Mapping[str, Any]) -> None:
                 f"completed ledger transaction content changed: {exc}",
                 code="transaction_state_mismatch",
             ) from exc
-        transaction_digests, applied_digests = _stored_transaction_digests(checkpoint)
+        transaction_digests, applied_digests = stored_transaction_digests(checkpoint)
         if ledger_digests != transaction_digests or applied_digests != transaction_digests:
             raise CheckpointError(
                 "completed transaction proofs do not match the decision ledger",
@@ -1136,7 +1114,7 @@ def _validate_for_store(checkpoint: Mapping[str, Any]) -> None:
             if response.get("applied") is True:
                 transaction_id = str(response.get("transaction_id") or "")
                 digest = response.get("transaction_content_sha256")
-                expected_binding = _response_transaction_binding(
+                expected_binding = response_transaction_binding(
                     response,
                     transaction_id,
                     str(digest or ""),
@@ -1312,18 +1290,6 @@ def _overlay_to_entries(overlays: Mapping[str, Mapping[str, Any]]) -> list[dict[
     return result
 
 
-def _snapshot_transaction_state(transactions: Mapping[str, str]) -> tuple[list[dict[str, str]], dict[str, str]]:
-    digests = {
-        str(transaction_id): value if str(value).startswith("sha256:") else f"sha256:{value}"
-        for transaction_id, value in transactions.items()
-    }
-    applied = [
-        {"transaction_id": transaction_id, "content_sha256": digest}
-        for transaction_id, digest in sorted(digests.items())
-    ]
-    return applied, digests
-
-
 def _checkpoint_transactions(checkpoint: Mapping[str, Any]) -> dict[str, str]:
     return {
         str(item["transaction_id"]): str(item["content_sha256"])
@@ -1432,7 +1398,7 @@ def load_checkpoint(
                 checkpoint["source_ast"] = recovered.ast
                 checkpoint["content_overlay"] = _overlay_to_entries(recovered.overlays)
                 checkpoint["presentation_override"] = _overlay_to_entries(recovered.presentation_overrides)
-                applied_transactions, transaction_digests = _snapshot_transaction_state(recovered.transactions)
+                applied_transactions, transaction_digests = snapshot_transaction_state(recovered.transactions)
                 checkpoint["applied_transactions"] = applied_transactions
                 checkpoint["transaction_content_digests"] = transaction_digests
             checkpoint["source_facts"] = copy.deepcopy(dict(current_source_facts))

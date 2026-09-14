@@ -9,7 +9,13 @@ from typing import Any, Mapping, Sequence
 
 from .contracts import AST_BLOCK_TYPES, AST_CONTAINER_KINDS, AST_ROLES, LIST_KINDS, PATCH_OPERATIONS, TABLE_TYPES
 from .digest import digest
-from .transaction import StageSnapshot, apply_stage_batch, make_snapshot, transaction_content_digest
+from .transaction import (
+    StageSnapshot,
+    apply_stage_batch,
+    make_snapshot,
+    revision_applied,
+    transaction_content_digest,
+)
 from .validation import _validate_inline_content, validate_ast
 
 
@@ -438,151 +444,6 @@ def revision_decision(revision: Mapping[str, Any], expected_revision: int) -> di
     return _revision_decision(revision, expected_revision)
 
 
-def _revision_applied(
-    ast: Mapping[str, Any],
-    revision: Mapping[str, Any],
-    snapshot: StageSnapshot | None = None,
-) -> bool:
-    decision = revision["decision"]
-    operation = decision.get("operation")
-    document = ast["document"]
-    nodes = {**document["blocks"], **document["containers"]}
-    if operation == "create_node":
-        value = decision.get("value") or {}
-        node_id = value.get("node_id")
-        parent_id = value.get("parent_id")
-        return (
-            isinstance(node_id, str)
-            and isinstance(parent_id, str)
-            and node_id in nodes
-            and nodes[node_id] == value.get("node")
-            and node_id in document["children"].get(parent_id, [])
-        )
-    if operation == "move_node":
-        target_ids = revision.get("target_node_ids") or []
-        value = decision.get("value") or {}
-        if len(target_ids) != 1 or not isinstance(value.get("new_parent_id"), str):
-            return False
-        target_id = target_ids[0]
-        siblings = document["children"].get(value["new_parent_id"], [])
-        if target_id not in siblings:
-            return False
-        index = value.get("index")
-        if isinstance(index, int) and not isinstance(index, bool):
-            expected_index = max(0, min(index, len(siblings) - 1))
-            if siblings.index(target_id) != expected_index:
-                return False
-        metadata = value.get("semantic_metadata")
-        if isinstance(metadata, Mapping):
-            nodes = {**document["blocks"], **document["containers"]}
-            descendants = {target_id}
-            frontier = [target_id]
-            while frontier:
-                current = frontier.pop()
-                for child_id in document["children"].get(current, []):
-                    if child_id not in descendants:
-                        descendants.add(child_id)
-                        frontier.append(child_id)
-            for node_id in descendants:
-                node = nodes.get(node_id, {})
-                for field in ("appendix_id", "semantic_scope_id", "source_number_preserved"):
-                    if field in metadata and node.get(field) != metadata[field]:
-                        return False
-        return True
-    if operation == "update_role":
-        value = decision.get("value") or {}
-        role = value.get("role")
-        if not isinstance(role, str):
-            return False
-        target_ids = list(revision.get("target_node_ids") or [])
-        if not target_ids:
-            return False
-        return all(
-            target_id in document["blocks"]
-            and document["blocks"][target_id].get("role") == role
-            and ("level" not in value or document["blocks"][target_id].get("level") == value["level"])
-            and (role == "heading" or "level" not in document["blocks"][target_id])
-            and all(
-                field not in value or document["blocks"][target_id].get(field) == value[field]
-                for field in ("caption_type", "target_id")
-            )
-            for target_id in target_ids
-        )
-    if operation == "update_node_semantics":
-        value = decision.get("value") or {}
-        if not isinstance(value, Mapping) or not isinstance(value.get("semantic_role"), str):
-            return False
-        nodes = {**document["blocks"], **document["containers"]}
-        fields = {
-            "semantic_role": "semantic_role",
-            "source_operation": "semantic_source_operation",
-            "adapter_id": "semantic_adapter",
-            "paragraph_id": "semantic_paragraph_id",
-            "list_parent_id": "semantic_list_parent_id",
-            "appendix_id": "appendix_id",
-            "appendix_role": "appendix_role",
-            "appendix_relative_level": "appendix_relative_level",
-            "semantic_scope_id": "semantic_scope_id",
-            "source_heading_level": "source_heading_level",
-            "page_break_before": "page_break_before",
-            "source_number_preserved": "source_number_preserved",
-            "materialization_mode": "materialization_mode",
-        }
-        target_ids = list(revision.get("target_node_ids") or [])
-        if not target_ids:
-            return False
-        return all(
-            target_id in nodes
-            and all(
-                field not in value or nodes[target_id].get(ast_field) == value[field]
-                for field, ast_field in fields.items()
-            )
-            for target_id in target_ids
-        )
-    if operation == "update_node_content":
-        value = decision.get("value") or {}
-        inline_content = value.get("inline_content") if isinstance(value, Mapping) else None
-        if not isinstance(inline_content, list):
-            return False
-        target_ids = list(revision.get("target_node_ids") or [])
-        if not target_ids:
-            return False
-        return all(
-            target_id in document["blocks"]
-            and document["blocks"][target_id].get("inline_content") == inline_content
-            for target_id in target_ids
-        )
-    if operation == "update_association":
-        value = decision.get("value") or {}
-        association = value.get("association", value) if isinstance(value, Mapping) else None
-        return isinstance(association, Mapping) and dict(association) in document["associations"]
-    if operation == "delete_node":
-        nodes = {**document["blocks"], **document["containers"]}
-        return all(target_id not in nodes for target_id in revision.get("target_node_ids") or [])
-    if operation in {"update_overlay", "set_presentation_override"}:
-        if snapshot is None:
-            return False
-        value = decision.get("value") or {}
-        if not isinstance(value, Mapping):
-            return False
-        target_ids = revision.get("target_node_ids") or []
-        nodes = {**document["blocks"], **document["containers"]}
-        if any(target_id not in nodes for target_id in target_ids):
-            return False
-        store = snapshot.overlays if operation == "update_overlay" else snapshot.presentation_overrides
-        if operation == "update_overlay":
-            target_keys = [str(target_id) for target_id in target_ids]
-        else:
-            list_item_id = value.get("list_item_id")
-            target_keys = [str(list_item_id)] if isinstance(list_item_id, str) and list_item_id else [str(target_id) for target_id in target_ids]
-        return all(
-            isinstance(store.get(target_key), Mapping)
-            and all(store[target_key].get(key) == item for key, item in value.items())
-            for target_key in target_keys
-        )
-    return False
-
-
 def _replay_snapshot(facts: Mapping[str, Any], ledger: Mapping[str, Any], plan: Any) -> StageSnapshot:
     """Rebuild a transaction snapshot by applying currently effective revisions."""
 
@@ -605,7 +466,7 @@ def _replay_snapshot(facts: Mapping[str, Any], ledger: Mapping[str, Any], plan: 
     applied_create_ids = {
         str((revision["decision"].get("value") or {}).get("node_id"))
         for revision in active_before_replay
-        if revision["decision"].get("operation") == "create_node" and _revision_applied(snapshot.ast, revision, snapshot)
+        if revision["decision"].get("operation") == "create_node" and revision_applied(snapshot.ast, revision, snapshot)
     }
     existing_node_ids = set(snapshot.ast["document"]["blocks"]) | set(snapshot.ast["document"]["containers"])
     view = project_ledger(facts, ledger, existing_node_ids=existing_node_ids - applied_create_ids)
@@ -619,11 +480,11 @@ def _replay_snapshot(facts: Mapping[str, Any], ledger: Mapping[str, Any], plan: 
         by_transaction.setdefault(str(revision["transaction_id"]), []).append(revision)
     for transaction_id, revisions in by_transaction.items():
         if transaction_id in snapshot.transactions and not all(
-            _revision_applied(snapshot.ast, revision, snapshot) for revision in revisions
+            revision_applied(snapshot.ast, revision, snapshot) for revision in revisions
         ):
             snapshot.transactions.pop(transaction_id, None)
     active = sorted(
-        (revision for revision in active_revisions if not _revision_applied(snapshot.ast, revision, snapshot)),
+        (revision for revision in active_revisions if not revision_applied(snapshot.ast, revision, snapshot)),
         key=lambda item: str(item["revision_id"]),
     )
     if not active:
@@ -717,6 +578,89 @@ def _legacy_transaction_digest(revisions: Sequence[Mapping[str, Any]]) -> str:
         separators=(",", ":"),
     )
     return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+# Response fields that carry the transaction proof instead of response content.
+APPLICATION_FIELDS = frozenset(
+    {"response_sha256", "applied", "apply_started", "transaction_id", "transaction_content_sha256"}
+)
+
+
+def response_transaction_binding(
+    response: Mapping[str, Any],
+    transaction_id: str,
+    transaction_content_sha256: str,
+) -> dict[str, str]:
+    """Bind one response to the transaction proof it committed."""
+
+    binding = {
+        "request_id": str(response["request_id"]),
+        "response_sha256": str(response["response_sha256"]),
+        "transaction_id": str(transaction_id),
+        "transaction_content_sha256": str(transaction_content_sha256),
+    }
+    return {**binding, "binding_sha256": digest(binding)}
+
+
+def stored_transaction_digests(checkpoint: Mapping[str, Any]) -> tuple[dict[str, str], dict[str, str]]:
+    """Return the transaction proof maps one checkpoint stores."""
+
+    transaction_digests = {
+        str(transaction_id): str(value)
+        for transaction_id, value in checkpoint.get("transaction_content_digests", {}).items()
+    }
+    applied_digests = {
+        str(item.get("transaction_id")): str(item.get("content_sha256"))
+        for item in checkpoint.get("applied_transactions", [])
+        if isinstance(item, Mapping)
+    }
+    return transaction_digests, applied_digests
+
+
+def snapshot_transaction_state(transactions: Mapping[str, str]) -> tuple[list[dict[str, str]], dict[str, str]]:
+    """Serialize snapshot transaction digests into checkpoint proof maps."""
+
+    digests = {
+        str(transaction_id): value if str(value).startswith("sha256:") else f"sha256:{value}"
+        for transaction_id, value in transactions.items()
+    }
+    applied = [
+        {"transaction_id": transaction_id, "content_sha256": transaction_digest}
+        for transaction_id, transaction_digest in sorted(digests.items())
+    ]
+    return applied, digests
+
+
+def verify_response_transaction_proof(
+    checkpoint: Mapping[str, Any],
+    request_id: str,
+    *,
+    transaction_id: str,
+    response: Mapping[str, Any],
+) -> None:
+    """Require one applied response and its checkpoint to share one commit proof."""
+
+    if response.get("transaction_id") != transaction_id:
+        raise LedgerError(
+            f"transaction {transaction_id} is not bound to response {request_id}",
+            code="transaction_state_mismatch",
+        )
+    transaction_digests, applied_digests = stored_transaction_digests(checkpoint)
+    if transaction_id not in transaction_digests:
+        raise LedgerError(
+            f"transaction {transaction_id} is not recorded for response {request_id}",
+            code="transaction_state_missing",
+        )
+    if response.get("transaction_content_sha256") != transaction_digests[transaction_id]:
+        raise LedgerError(
+            f"transaction {transaction_id} content does not match response {request_id}",
+            code="transaction_state_mismatch",
+        )
+    if applied_digests.get(transaction_id) != response.get("transaction_content_sha256"):
+        raise LedgerError(
+            f"transaction {transaction_id} is not present in applied transaction state",
+            code="transaction_state_missing",
+        )
 
 
 def ledger_transaction_digests(

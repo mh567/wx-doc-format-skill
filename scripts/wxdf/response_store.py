@@ -5,9 +5,8 @@ import copy
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from .decision_ledger import APPLICATION_FIELDS, LedgerError, verify_response_transaction_proof
 from .digest import digest
-
-_APPLICATION_FIELDS = frozenset({"response_sha256", "applied", "apply_started", "transaction_id", "transaction_content_sha256"})
 
 def _store() -> Any:
     from . import checkpoint_store
@@ -22,7 +21,7 @@ def request_digest(request: Mapping[str, Any]) -> str:
 
 def response_digest(response: Mapping[str, Any]) -> str:
     if not isinstance(response, Mapping): raise _store().CheckpointError("response must be an object", code="invalid_response")
-    return content_digest({key: value for key, value in response.items() if key not in _APPLICATION_FIELDS})
+    return content_digest({key: value for key, value in response.items() if key not in APPLICATION_FIELDS})
 
 def _response_id(response: Mapping[str, Any]) -> str:
     value = response.get("request_id")
@@ -72,29 +71,17 @@ def complete_pending_response(checkpoint: Mapping[str, Any], request_id: str, *,
     for field in ("checkpoint_schema_version", "run_id", "source_facts", "decision_ledger", "contracts", "modules", "requests", "candidate_baseline_id"):
         if content_digest(checkpoint.get(field)) != content_digest(result.get(field)): raise store.CheckpointError(f"completed checkpoint identity does not match response {request_id}", code="checkpoint_identity_mismatch")
     response = matches[0]; previous = pending[0]; digest = previous.get("response_sha256") or response_digest(previous)
-    if response.get("response_sha256") != digest or {k:v for k,v in previous.items() if k not in _APPLICATION_FIELDS} != {k:v for k,v in response.items() if k not in _APPLICATION_FIELDS}: raise store.CheckpointError(f"completed response does not match pending response {request_id}", code="response_identity_mismatch")
+    if response.get("response_sha256") != digest or {k:v for k,v in previous.items() if k not in APPLICATION_FIELDS} != {k:v for k,v in response.items() if k not in APPLICATION_FIELDS}: raise store.CheckpointError(f"completed response does not match pending response {request_id}", code="response_identity_mismatch")
     if not response.get("apply_started") and not response.get("applied"): raise store.CheckpointError(f"response {request_id} was not started", code="response_not_pending")
-    if response.get("transaction_id") != transaction_id:
-        raise store.CheckpointError(
-            f"transaction {transaction_id} is not bound to response {request_id}",
-            code="transaction_state_mismatch",
+    try:
+        verify_response_transaction_proof(
+            completed_checkpoint,
+            request_id,
+            transaction_id=transaction_id,
+            response=response,
         )
-    if transaction_id not in completed_checkpoint.get("transaction_content_digests", {}):
-        raise store.CheckpointError(
-            f"transaction {transaction_id} is not recorded for response {request_id}",
-            code="transaction_state_missing",
-        )
-    if response.get("transaction_content_sha256") != completed_checkpoint["transaction_content_digests"][transaction_id]: raise store.CheckpointError(f"transaction {transaction_id} content does not match response {request_id}", code="transaction_state_mismatch")
-    if not any(
-        item.get("transaction_id") == transaction_id
-        and item.get("content_sha256") == response.get("transaction_content_sha256")
-        for item in completed_checkpoint.get("applied_transactions", [])
-        if isinstance(item, Mapping)
-    ):
-        raise store.CheckpointError(
-            f"transaction {transaction_id} is not present in applied transaction state",
-            code="transaction_state_missing",
-        )
+    except LedgerError as exc:
+        raise store.CheckpointError(str(exc), code=exc.code) from exc
     if response.get("applied"): return result
     response["applied"], response["apply_started"] = True, False; store._validate_for_store(result)
     if path is not None: store.save_checkpoint(result, path)
