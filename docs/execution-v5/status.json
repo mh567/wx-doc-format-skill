@@ -4,8 +4,8 @@
   "branch": "dev",
   "baseline_head": "a46f9b5dfba01c79b44ce0a2262a1692f0194d17",
   "implementation_started": true,
-  "current_task": "T05",
-  "next_task": "T06",
+  "current_task": "T06",
+  "next_task": "T07",
   "release_authorized": false,
   "recommended_order": ["T01", "T02", "T03", "T04", "T05", "T06", "T07"],
   "tasks": [
@@ -14,7 +14,7 @@
     {"id": "T03", "subject": "保护策略 owner", "status": "done", "depends_on": ["T02"], "commit": "a5f5ef8"},
     {"id": "T04", "subject": "删除 facade 与注入面收敛", "status": "done", "depends_on": [], "commit": "a5f5ef8"},
     {"id": "T05", "subject": "Digest owner", "status": "done", "depends_on": ["T04"], "commit": "55d880f"},
-    {"id": "T06", "subject": "事务证明收敛", "status": "pending", "depends_on": ["T04", "T05"]},
+    {"id": "T06", "subject": "事务证明收敛", "status": "done", "depends_on": ["T04", "T05"], "commit": "01ea66c"},
     {"id": "T07", "subject": "Checkpoint 拆分与 response_store seam", "status": "pending", "depends_on": ["T04", "T05", "T06"]},
     {"id": "FU-1", "subject": "executor 编排提取", "status": "deferred", "depends_on": [], "adr": "docs/adr/0003-orchestration-stays-in-executors.md"},
     {"id": "FU-2", "subject": "T01/T02 审查开放项（build_native_run_result 归属、source_projection 接线、list_item_map 语义声明、registry 职责分离、ledger_replay_report 归属）", "status": "open", "depends_on": ["T01", "T02"]}
