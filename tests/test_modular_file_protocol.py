@@ -33,9 +33,8 @@ from wxdf.checkpoint_store import (
     CheckpointError,
     append_native_waiting_requests,
     prepare_native_resume,
-    record_response,
-    request_digest,
 )
+from wxdf.response_store import record_response, request_digest
 from wxdf.enhancement import build_native_request, serialize_native_request
 from wxdf.validation import validate_checkpoint
 from wxdf.source_store import SourceStore
@@ -810,7 +809,7 @@ def test_later_request_append_detects_change_immediately_before_replace(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from wxdf import checkpoint_store
+    from wxdf import request_append
 
     checkpoint_path, _output, _source_ast_path = _generate(tmp_path)
     checkpoint_bytes = checkpoint_path.read_bytes()
@@ -824,14 +823,14 @@ def test_later_request_append_detects_change_immediately_before_replace(
     journal_path = checkpoint_path.with_name(
         checkpoint_path.name + ".request-append.journal"
     )
-    real_replace_bytes = checkpoint_store._replace_bytes
+    real_replace_bytes = request_append._replace_bytes
 
     def replace_and_race(path: Path, payload: bytes, suffix: str) -> None:
         real_replace_bytes(path, payload, suffix)
         if path == journal_path:
             request_path.write_bytes(b"external-concurrent-change\n")
 
-    monkeypatch.setattr(checkpoint_store, "_replace_bytes", replace_and_race)
+    monkeypatch.setattr(request_append, "_replace_bytes", replace_and_race)
 
     with pytest.raises(CheckpointError) as caught:
         append_native_waiting_requests(
@@ -851,7 +850,7 @@ def test_later_request_append_holds_exclusive_lock_through_final_replace(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from wxdf import checkpoint_store
+    from wxdf import request_append
 
     checkpoint_path, _output, _source_ast_path = _generate(tmp_path)
     checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
@@ -863,7 +862,7 @@ def test_later_request_append_holds_exclusive_lock_through_final_replace(
     ))
     lock_path = request_path.with_name(request_path.name + ".append.lock")
     observed: list[str] = []
-    real_replace = checkpoint_store.os.replace
+    real_replace = request_append.os.replace
 
     def inspect_lock_before_replace(source: Path | str, target: Path | str) -> None:
         if Path(source).name.endswith(".append.tmp") and Path(target) == request_path:
@@ -877,7 +876,7 @@ def test_later_request_append_holds_exclusive_lock_through_final_replace(
                     fcntl.flock(contender.fileno(), fcntl.LOCK_UN)
         real_replace(source, target)
 
-    monkeypatch.setattr(checkpoint_store.os, "replace", inspect_lock_before_replace)
+    monkeypatch.setattr(request_append.os, "replace", inspect_lock_before_replace)
 
     updated = append_native_waiting_requests(checkpoint_path, checkpoint, [extra_request])
 

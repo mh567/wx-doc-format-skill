@@ -34,11 +34,11 @@ def test_semantic_modules_has_no_dynamic_lookup_helper() -> None:
     assert "compatibility_hook" not in semantic_modules.__all__
 
 
-def test_checkpoint_store_owns_the_replace_seam() -> None:
-    from wxdf import checkpoint_store
+def test_request_append_owns_the_replace_seam() -> None:
+    from wxdf import request_append
 
-    assert not hasattr(checkpoint_store, "_compat_replace_bytes")
-    assert "_replace_bytes" in vars(checkpoint_store)
+    assert not hasattr(request_append, "_compat_replace_bytes")
+    assert "_replace_bytes" in vars(request_append)
 
 
 def test_production_modules_do_not_look_up_sys_modules() -> None:

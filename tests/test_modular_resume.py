@@ -15,12 +15,14 @@ if str(SCRIPTS) not in sys.path:
 from test_modular_contracts import _valid_checkpoint
 from wxdf.checkpoint_store import (
     CheckpointError,
-    apply_response,
-    complete_pending_response,
     load_checkpoint,
-    record_response,
     save_checkpoint,
     transition_status,
+)
+from wxdf.response_store import (
+    apply_response,
+    complete_pending_response,
+    record_response,
 )
 
 
@@ -190,7 +192,7 @@ def test_checkpoint_load_recovers_previous_generation_after_process_interrupt(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from wxdf import checkpoint_store, publication
+    from wxdf import publication, request_append
 
     path = tmp_path / "run.json"
     checkpoint = _checkpoint()
@@ -212,11 +214,11 @@ def test_checkpoint_load_recovers_previous_generation_after_process_interrupt(
             raise SystemExit("injected checkpoint interruption")
 
     monkeypatch.setattr(publication.os, "replace", interrupt_after_checkpoint_install)
-    monkeypatch.setattr(checkpoint_store.os, "replace", interrupt_after_checkpoint_install)
+    monkeypatch.setattr(request_append.os, "replace", interrupt_after_checkpoint_install)
     with pytest.raises(SystemExit, match="checkpoint interruption"):
         save_checkpoint(changed, path)
     monkeypatch.setattr(publication.os, "replace", real_replace)
-    monkeypatch.setattr(checkpoint_store.os, "replace", real_replace)
+    monkeypatch.setattr(request_append.os, "replace", real_replace)
 
     restored = load_checkpoint(path)
 

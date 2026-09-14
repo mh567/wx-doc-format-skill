@@ -21,7 +21,8 @@ SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from wxdf.checkpoint_store import content_digest, save_checkpoint
+from wxdf.checkpoint_store import save_checkpoint
+from wxdf.response_store import content_digest
 
 
 PYTHON = Path(sys.executable)

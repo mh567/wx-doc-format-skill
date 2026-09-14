@@ -7,24 +7,11 @@ pending response instead of silently losing external work.
 
 from __future__ import annotations
 
-import base64
 import copy
 import hashlib
 import json
-import os
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Mapping
-
-try:
-    import fcntl as _fcntl
-except ImportError:
-    _fcntl = None
-
-try:
-    import msvcrt as _msvcrt
-except ImportError:
-    _msvcrt = None
 
 from .contracts import CHECKPOINT_STATUSES, STAGES, ContractError
 from .decision_ledger import (
@@ -34,7 +21,11 @@ from .decision_ledger import (
 )
 from .digest import canonical_json, digest
 from .validation import validate_checkpoint
-from .response_store import content_digest, request_digest, response_digest
+from .request_append import (
+    _exclusive_file_lock,
+    _recover_native_request_append,
+    append_native_waiting_requests,
+)
 
 
 class CheckpointError(RuntimeError):
@@ -342,222 +333,6 @@ def lock_native_checkpoint_identity(checkpoint_path: Path) -> dict[str, Any]:
     return checkpoint
 
 
-def _request_append_journal_path(checkpoint_path: Path) -> Path:
-    return checkpoint_path.with_name(checkpoint_path.name + ".request-append.journal")
-
-
-def _bytes_digest(payload: bytes) -> str:
-    return "sha256:" + hashlib.sha256(payload).hexdigest()
-
-
-def _replace_bytes(path: Path, payload: bytes, suffix: str) -> None:
-    temporary = path.with_name(path.name + suffix)
-    temporary.write_bytes(payload)
-    os.replace(temporary, path)
-
-
-@contextmanager
-def _exclusive_file_lock(lock_path: Path):
-    """Hold one cross-process file lock on supported platforms."""
-
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a+b") as lock_file:
-        if _fcntl is not None:
-            _fcntl.flock(lock_file.fileno(), _fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                _fcntl.flock(lock_file.fileno(), _fcntl.LOCK_UN)
-            return
-        if _msvcrt is not None:
-            lock_file.seek(0, os.SEEK_END)
-            if lock_file.tell() == 0:
-                lock_file.write(b"\0")
-                lock_file.flush()
-            lock_file.seek(0)
-            _msvcrt.locking(lock_file.fileno(), _msvcrt.LK_LOCK, 1)
-            try:
-                yield
-            finally:
-                lock_file.seek(0)
-                _msvcrt.locking(lock_file.fileno(), _msvcrt.LK_UNLCK, 1)
-            return
-        raise CheckpointError(
-            "no supported request append lock backend",
-            code="lock_backend_unavailable",
-        )
-
-
-def _recover_native_request_append(checkpoint_path: Path) -> None:
-    journal_path = _request_append_journal_path(checkpoint_path)
-    if not journal_path.is_file():
-        return
-    try:
-        journal = json.loads(journal_path.read_text(encoding="utf-8"))
-        checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
-        if journal.get("schema_version") != "1.0":
-            raise ValueError("unsupported journal version")
-        request_path = Path(journal["requests_path"])
-        checkpoint_request_path = Path(checkpoint["files"]["requests_path"])
-        if request_path.resolve() != checkpoint_request_path.resolve():
-            raise ValueError("journal request path does not match checkpoint")
-        previous = base64.b64decode(journal["previous_base64"], validate=True)
-        replacement = base64.b64decode(journal["replacement_base64"], validate=True)
-        previous_digest = _bytes_digest(previous)
-        replacement_digest = _bytes_digest(replacement)
-        if (
-            previous_digest != journal.get("previous_sha256")
-            or replacement_digest != journal.get("replacement_sha256")
-        ):
-            raise ValueError("journal content digest changed")
-        checkpoint_digest = (
-            checkpoint.get("resource_summary", {})
-            .get("fingerprints", {})
-            .get("requests")
-        )
-        current = request_path.read_bytes()
-        if checkpoint_digest == replacement_digest:
-            if current != replacement:
-                raise ValueError("committed request append does not match its file")
-        elif checkpoint_digest == previous_digest:
-            if current == replacement:
-                _replace_bytes(request_path, previous, ".append-recovery.tmp")
-            elif current != previous:
-                raise ValueError("request file changed during append recovery")
-        else:
-            raise ValueError("checkpoint request digest does not match append journal")
-    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
-        raise CheckpointError(
-            f"cannot recover native request append: {exc}",
-            code="request_append_recovery_failed",
-        ) from exc
-    request_path.with_name(request_path.name + ".append.tmp").unlink(missing_ok=True)
-    journal_path.unlink(missing_ok=True)
-
-
-def append_native_waiting_requests(
-    checkpoint_path: Path | str,
-    checkpoint: Mapping[str, Any],
-    requests: list[dict[str, Any]],
-    *,
-    crash_at: str | None = None,
-) -> dict[str, Any]:
-    """Serialize cooperative append writers through checkpoint commit."""
-
-    checkpoint_path = _path(checkpoint_path)
-    try:
-        request_path = Path(checkpoint["files"]["requests_path"])
-    except (KeyError, TypeError) as exc:
-        raise CheckpointError(
-            "native checkpoint has no request path",
-            code="invalid_checkpoint",
-        ) from exc
-    checkpoint_lock_path = checkpoint_path.with_name(
-        checkpoint_path.name + ".request-append.lock"
-    )
-    request_lock_path = request_path.with_name(request_path.name + ".append.lock")
-    with _exclusive_file_lock(checkpoint_lock_path):
-        with _exclusive_file_lock(request_lock_path):
-            return _append_native_waiting_requests_locked(
-                checkpoint_path,
-                checkpoint,
-                requests,
-                crash_at=crash_at,
-            )
-
-
-def _append_native_waiting_requests_locked(
-    checkpoint_path: Path | str,
-    checkpoint: Mapping[str, Any],
-    requests: list[dict[str, Any]],
-    *,
-    crash_at: str | None = None,
-) -> dict[str, Any]:
-    """Append later-stage requests while preserving the waiting checkpoint."""
-
-    checkpoint_path = _path(checkpoint_path)
-    updated = copy.deepcopy(dict(checkpoint))
-    if updated.get("status") != "waiting_external":
-        raise CheckpointError(
-            "native requests can only be appended to a waiting checkpoint",
-            code="invalid_checkpoint_state",
-        )
-    request_path = Path(updated["files"]["requests_path"])
-    previous = request_path.read_bytes()
-    expected = "".join(canonical_json(item) + "\n" for item in updated.get("requests", [])).encode("utf-8")
-    if previous != expected:
-        raise CheckpointError(
-            "native request file changed before later-stage append",
-            code="request_identity_conflict",
-        )
-    existing_by_id = {
-        str(item.get("request_id")): item
-        for item in updated.get("requests", [])
-        if isinstance(item, Mapping) and item.get("request_id")
-    }
-    for raw_request in requests:
-        request = copy.deepcopy(dict(raw_request))
-        request_id = str(request.get("request_id") or "")
-        if not request_id:
-            raise CheckpointError("native request has no request ID", code="invalid_request")
-        existing = existing_by_id.get(request_id)
-        if existing is not None:
-            if existing != request:
-                raise CheckpointError(
-                    f"request identity changed for {request_id}",
-                    code="request_identity_conflict",
-                )
-            continue
-        if request.get("request_sha256") != request_digest(request):
-            raise CheckpointError(
-                f"request content changed for {request_id}",
-                code="request_identity_conflict",
-            )
-        updated["requests"].append(request)
-        existing_by_id[request_id] = request
-    if updated["requests"] == checkpoint.get("requests"):
-        return updated
-
-    payload = "".join(canonical_json(item) + "\n" for item in updated["requests"]).encode("utf-8")
-    temporary = request_path.with_name(request_path.name + ".append.tmp")
-    journal_path = _request_append_journal_path(checkpoint_path)
-    temporary.write_bytes(payload)
-    journal = {
-        "schema_version": "1.0",
-        "requests_path": str(request_path),
-        "previous_sha256": _bytes_digest(previous),
-        "replacement_sha256": _bytes_digest(payload),
-        "previous_base64": base64.b64encode(previous).decode("ascii"),
-        "replacement_base64": base64.b64encode(payload).decode("ascii"),
-    }
-    _replace_bytes(
-        journal_path,
-        (canonical_json(journal) + "\n").encode("utf-8"),
-        ".tmp",
-    )
-    try:
-        if request_path.read_bytes() != previous:
-            journal_path.unlink(missing_ok=True)
-            raise CheckpointError(
-                "native request file changed immediately before later-stage append",
-                code="request_identity_conflict",
-            )
-        os.replace(temporary, request_path)
-        if crash_at == "after_request_replace":
-            raise SystemExit("injected request append crash")
-        updated["resource_summary"]["fingerprints"]["requests"] = _bytes_digest(payload)
-        updated["budget"]["limit"] = len(updated["requests"])
-        updated["round"] = int(updated.get("round") or 0) + 1
-        save_checkpoint(updated, checkpoint_path)
-    except Exception:
-        if request_path.read_bytes() == payload:
-            _replace_bytes(request_path, previous, ".rollback.tmp")
-        journal_path.unlink(missing_ok=True)
-        raise
-    journal_path.unlink(missing_ok=True)
-    return updated
-
-
 def prepare_native_resume(
     checkpoint_path: Path | str,
     *,
@@ -687,6 +462,8 @@ def prepare_native_resume(
                 raise CheckpointError("native review request baseline is inconsistent", code="request_identity_conflict")
     response_path = Path(checkpoint["files"]["responses_path"])
     responses = _read_json_lines(response_path, kind="response") if response_path.is_file() else []
+    from .response_store import record_response
+
     recorded = checkpoint
     for response in responses:
         recorded, _outcome = record_response(recorded, response)
@@ -909,8 +686,8 @@ def complete_native_checkpoint(
     })
     if review_outcome is not None:
         completed["review_outcome"] = copy.deepcopy(dict(review_outcome))
-    _validate_for_store(completed)
-    _validate_embedded_fingerprints(completed)
+    validate_checkpoint_for_store(completed)
+    validate_embedded_fingerprints(completed)
     if persist:
         save_checkpoint(completed, checkpoint_path)
     return completed
@@ -1065,7 +842,9 @@ def _migrate_transaction_digest_version(checkpoint: dict[str, Any]) -> bool:
     return True
 
 
-def _validate_for_store(checkpoint: Mapping[str, Any]) -> None:
+def validate_checkpoint_for_store(checkpoint: Mapping[str, Any]) -> None:
+    """Validate one checkpoint before it is persisted or trusted on load."""
+
     try:
         validate_checkpoint(checkpoint)
     except ContractError as exc:
@@ -1146,7 +925,11 @@ def _validate_for_store(checkpoint: Mapping[str, Any]) -> None:
             )
 
 
-def _validate_embedded_fingerprints(checkpoint: Mapping[str, Any]) -> None:
+def validate_embedded_fingerprints(checkpoint: Mapping[str, Any]) -> None:
+    """Require embedded identities and request or response digests to match."""
+
+    from .response_store import request_digest, response_digest
+
     resource_summary = checkpoint.get("resource_summary")
     fingerprints = resource_summary.get("fingerprints") if isinstance(resource_summary, Mapping) else None
     if not isinstance(fingerprints, Mapping):
@@ -1244,7 +1027,7 @@ def save_checkpoint(
         from .decision_ledger import source_binding
 
         ledger["source_binding"] = source_binding(source_facts)
-    _validate_for_store(payload)
+    validate_checkpoint_for_store(payload)
     destination = _path(path)
     _write_json_atomic(payload, destination, crash_at=crash_at)
     return destination
@@ -1326,8 +1109,8 @@ def load_checkpoint(
     checkpoint.setdefault("applied_transactions", [])
     checkpoint.setdefault("transaction_content_digests", {})
     migrated_transaction_digests = _migrate_transaction_digest_version(checkpoint)
-    _validate_for_store(checkpoint)
-    _validate_embedded_fingerprints(checkpoint)
+    validate_checkpoint_for_store(checkpoint)
+    validate_embedded_fingerprints(checkpoint)
     if expected_fingerprints:
         _compare_fingerprints(checkpoint, expected_fingerprints)
     if expected_contracts:
@@ -1418,7 +1201,7 @@ def load_checkpoint(
                 "entries": {},
                 "view_sha256": digest({}),
             }
-            _validate_for_store(checkpoint)
+            validate_checkpoint_for_store(checkpoint)
         except LedgerError as exc:
             raise CheckpointError(f"decision ledger projection failed: {exc}", code=exc.code) from exc
         except CheckpointError:
@@ -1440,7 +1223,7 @@ def validate_status_transition(current: str, target: str) -> None:
 def transition_status(checkpoint: Mapping[str, Any], status: str, *, resume_stage: str | None = None) -> dict[str, Any]:
     """Return a validated status transition without mutating the input."""
 
-    _validate_for_store(checkpoint)
+    validate_checkpoint_for_store(checkpoint)
     current = str(checkpoint["status"])
     validate_status_transition(current, status)
     if status == "waiting_external" and resume_stage not in STAGES:
@@ -1450,36 +1233,24 @@ def transition_status(checkpoint: Mapping[str, Any], status: str, *, resume_stag
     result = copy.deepcopy(dict(checkpoint))
     result["status"] = status
     result["resume_stage"] = resume_stage if status == "waiting_external" else None
-    _validate_for_store(result)
+    validate_checkpoint_for_store(result)
     return result
 
-
-from .response_store import (
-    apply_response,
-    complete_pending_response,
-    content_digest,
-    record_response,
-    request_digest,
-    response_digest,
-)
 
 __all__ = [
     "CheckpointError",
     "append_native_waiting_requests",
-    "apply_response",
     "checkpoint_target_map",
     "complete_native_checkpoint",
-    "complete_pending_response",
-    "content_digest",
     "file_digest",
     "load_checkpoint",
     "lock_native_checkpoint_identity",
     "overlay_entries",
     "prepare_native_resume",
-    "record_response",
-    "request_digest",
     "save_checkpoint",
     "transition_status",
+    "validate_checkpoint_for_store",
+    "validate_embedded_fingerprints",
     "validate_status_transition",
     "write_native_waiting_checkpoint",
 ]
