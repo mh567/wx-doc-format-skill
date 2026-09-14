@@ -9,7 +9,7 @@ from typing import Any, Mapping, Sequence
 
 from .contracts import AST_BLOCK_TYPES, AST_CONTAINER_KINDS, AST_ROLES, LIST_KINDS, PATCH_OPERATIONS, TABLE_TYPES
 from .transaction import StageSnapshot, apply_stage_batch, make_snapshot, transaction_content_digest
-from .validation import validate_ast
+from .validation import _validate_inline_content, validate_ast
 
 
 class LedgerError(ValueError):
@@ -207,6 +207,8 @@ def validate_revisions(facts: Mapping[str, Any], ledger: Mapping[str, Any]) -> N
         operation = (revision["decision"] or {}).get("operation") if isinstance(revision["decision"], Mapping) else None
         if operation not in PATCH_OPERATIONS:
             raise LedgerError(f"unsupported revision operation {operation!r}", code="unsupported_operation")
+        if not revision["target_node_ids"]:
+            raise LedgerError(f"revision {revision_id} requires target_node_ids", code="invalid_target")
         if operation == "create_node":
             value = (revision["decision"] or {}).get("value")
             if not isinstance(value, Mapping):
@@ -219,8 +221,17 @@ def validate_revisions(facts: Mapping[str, Any], ledger: Mapping[str, Any]) -> N
             if not isinstance(value.get("node"), Mapping):
                 raise LedgerError(f"create_node revision {revision_id} requires value.node to be a mapping", code="invalid_decision_value")
             _validate_created_node(revision_id, value["node"])
-        elif not revision["target_node_ids"]:
-            raise LedgerError(f"revision {revision_id} requires target_node_ids", code="invalid_target")
+        elif operation == "update_node_content":
+            value = (revision["decision"] or {}).get("value")
+            if revision["property_scope"] != ["inline_content"] or not isinstance(value, Mapping):
+                raise LedgerError(f"update_node_content revision {revision_id} has an invalid property scope or value", code="invalid_decision_value")
+            inline_content = value.get("inline_content")
+            if not isinstance(inline_content, list):
+                raise LedgerError(f"update_node_content revision {revision_id} requires value.inline_content", code="invalid_decision_value")
+            try:
+                _validate_inline_content(inline_content, f"revision[{revision_id}].value.inline_content", "Patch 2.0", facts.get("resources", {}))
+            except Exception as exc:
+                raise LedgerError(f"update_node_content revision {revision_id} has invalid inline content", code="invalid_decision_value") from exc
         for superseded_id in revision["supersedes"]:
             if superseded_id not in ids:
                 raise LedgerError(f"revision {revision_id} supersedes unknown {superseded_id}", code="unknown_superseded_revision")
@@ -487,11 +498,19 @@ def _revision_applied(
         role = value.get("role")
         if not isinstance(role, str):
             return False
+        target_ids = list(revision.get("target_node_ids") or [])
+        if not target_ids:
+            return False
         return all(
             target_id in document["blocks"]
             and document["blocks"][target_id].get("role") == role
             and ("level" not in value or document["blocks"][target_id].get("level") == value["level"])
-            for target_id in revision.get("target_node_ids") or []
+            and (role == "heading" or "level" not in document["blocks"][target_id])
+            and all(
+                field not in value or document["blocks"][target_id].get(field) == value[field]
+                for field in ("caption_type", "target_id")
+            )
+            for target_id in target_ids
         )
     if operation == "update_node_semantics":
         value = decision.get("value") or {}
@@ -511,14 +530,31 @@ def _revision_applied(
             "source_heading_level": "source_heading_level",
             "page_break_before": "page_break_before",
             "source_number_preserved": "source_number_preserved",
+            "materialization_mode": "materialization_mode",
         }
+        target_ids = list(revision.get("target_node_ids") or [])
+        if not target_ids:
+            return False
         return all(
             target_id in nodes
             and all(
                 field not in value or nodes[target_id].get(ast_field) == value[field]
                 for field, ast_field in fields.items()
             )
-            for target_id in revision.get("target_node_ids") or []
+            for target_id in target_ids
+        )
+    if operation == "update_node_content":
+        value = decision.get("value") or {}
+        inline_content = value.get("inline_content") if isinstance(value, Mapping) else None
+        if not isinstance(inline_content, list):
+            return False
+        target_ids = list(revision.get("target_node_ids") or [])
+        if not target_ids:
+            return False
+        return all(
+            target_id in document["blocks"]
+            and document["blocks"][target_id].get("inline_content") == inline_content
+            for target_id in target_ids
         )
     if operation == "update_association":
         value = decision.get("value") or {}
@@ -600,6 +636,7 @@ def _replay_snapshot(facts: Mapping[str, Any], ledger: Mapping[str, Any], plan: 
     ast_operations = {
         "create_node",
         "update_node_semantics",
+        "update_node_content",
         "update_role",
         "move_node",
         "update_association",

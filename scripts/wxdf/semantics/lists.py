@@ -60,6 +60,42 @@ def _unit_text(unit: Mapping[str, Any]) -> str:
     return "".join(visible)
 
 
+def strip_visible_list_marker(
+    inline_content: list[Mapping[str, Any]],
+    evidence: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Remove a manually typed list prefix while preserving inline marks."""
+
+    marker = evidence.get("visible_marker", {}).get("marker_text")
+    if not isinstance(marker, str) or not marker:
+        return copy.deepcopy(list(inline_content))
+    prefix = re.compile(r"^[ \t]*" + re.escape(marker) + r"[ \t]+")
+    visible = _unit_text({"inline_content": list(inline_content)})
+    match = prefix.match(visible)
+    if match is None:
+        return copy.deepcopy(list(inline_content))
+
+    remaining = match.end()
+    result: list[dict[str, Any]] = []
+    for item in inline_content:
+        copied = copy.deepcopy(dict(item))
+        kind = copied.get("kind")
+        if remaining <= 0 or kind not in {"text", "tab"}:
+            result.append(copied)
+            continue
+        item_text = str(copied.get("text") or "") if kind == "text" else "\t"
+        consume = min(remaining, len(item_text))
+        remaining -= consume
+        retained = item_text[consume:]
+        if kind == "text":
+            if retained:
+                copied["text"] = retained
+                result.append(copied)
+        elif remaining <= 0 and retained:
+            result.append({"kind": "text", "text": retained, "marks": []})
+    return result
+
+
 def _inline_text(items: list[Mapping[str, Any]]) -> str:
     return _unit_text({"inline_content": items})
 
@@ -76,7 +112,7 @@ def _is_protected(unit: Mapping[str, Any], evidence: Mapping[str, Any]) -> tuple
         return True, "opaque_code"
     if evidence.get("protected") is True:
         return True, "source_protected"
-    if evidence.get("numbering_status") == "detected" and evidence.get("marker_kind"):
+    if evidence.get("numbering_status") == "detected" and evidence.get("marker_kind") and not evidence.get("visible_marker"):
         return False, None
     normalized = style.casefold().replace(" ", "")
     if normalized.startswith(("heading", "toc")) or "目录" in style or "题注" in style or "附录标题" in style:
@@ -85,12 +121,28 @@ def _is_protected(unit: Mapping[str, Any], evidence: Mapping[str, Any]) -> tuple
         return True, "api_label"
     if _DATE_RE.match(text) or _VERSION_CONTEXT_RE.match(text):
         return True, "date_or_version"
+    visible_marker = evidence.get("visible_marker")
+    if isinstance(visible_marker, Mapping) and evidence.get("marker_kind"):
+        marker_text = str(visible_marker.get("marker_text") or "")
+        marker_match = re.match(r"^[ \t]*" + re.escape(marker_text) + r"[ \t]+", text)
+        remainder = text[marker_match.end():].strip() if marker_match else ""
+        if _DATE_RE.match(remainder) or _VERSION_CONTEXT_RE.match(remainder):
+            return True, "date_or_version"
+        if remainder.casefold().startswith(("版本", "version", "release", "build")):
+            return True, "date_or_version"
+        if evidence.get("source_list_type") == "decimal_chain":
+            segments = re.split(r"[.．-]", marker_text.rstrip(".)"))
+            if len([segment for segment in segments if segment]) < 3:
+                return True, "manual_heading_marker"
+        return False, None
     if _MANUAL_HEADING_RE.match(text):
         return True, "manual_heading_marker"
     if _VERSION_RE.match(text):
         return True, "date_or_version"
     if evidence.get("semantic_role") in {"note", "numbered_note"}:
         return True, "note_evidence"
+    if evidence.get("numbering_status") == "detected" and evidence.get("marker_kind"):
+        return False, None
     return False, None
 
 

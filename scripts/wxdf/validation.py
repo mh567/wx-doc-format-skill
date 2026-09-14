@@ -147,7 +147,7 @@ def _validate_image_fields(value: Mapping[str, Any], path: str, contract: str) -
         _positive_int(display_size["height_emu"], f"{path}.display_size.height_emu", contract)
 
 
-def _validate_inline_content(value: Any, path: str, contract: str, resources: Mapping[str, Any], *, in_link: bool = False) -> str:
+def _validate_inline_content(value: Any, path: str, contract: str, resources: Mapping[str, Any] | None, *, in_link: bool = False) -> str:
     items = _list(value, path, contract)
     visible: list[str] = []
     for index, item in enumerate(items):
@@ -173,7 +173,7 @@ def _validate_inline_content(value: Any, path: str, contract: str, resources: Ma
         elif kind == "image":
             resource_id = _require(item, "resource_id", item_path, contract)
             _non_empty_string(resource_id, f"{item_path}.resource_id", contract)
-            if resource_id not in resources:
+            if resources is not None and resource_id not in resources:
                 _fail("missing_resource", f"{item_path}.resource_id", "resource_id is not declared", contract)
             _type(_require(item, "alt_text", item_path, contract), str, f"{item_path}.alt_text", contract)
             _validate_image_fields(item, item_path, contract)
@@ -656,6 +656,14 @@ def validate_patch(patch: Mapping[str, Any]) -> None:
             if scope not in SAFE_PROPERTY_SCOPES:
                 _fail("forbidden_property_scope", f"{path}.property_scope[{scope_index}]", "property is outside the semantic contract", contract)
         _mapping(decision["value"], f"{path}.value", contract)
+        if operation == "update_node_content" and not isinstance(decision["value"].get("inline_content"), list):
+            _fail("missing_inline_content", f"{path}.value.inline_content", "content update requires an inline content list", contract)
+        if operation == "update_node_content":
+            if scopes != ["inline_content"] or set(decision["value"]) != {"inline_content"}:
+                _fail("invalid_content_scope", f"{path}.property_scope", "content update owns only inline_content", contract)
+            _validate_inline_content(decision["value"]["inline_content"], f"{path}.value.inline_content", contract, None)
+        if operation == "update_node_semantics" and "materialization_mode" in decision["value"]:
+            _validate_image_fields(decision["value"], f"{path}.value", contract)
         for precondition_index, precondition in enumerate(_list(decision["preconditions"], f"{path}.preconditions", contract)):
             _mapping(precondition, f"{path}.preconditions[{precondition_index}]", contract)
         _validate_evidence_list(decision["evidence"], f"{path}.evidence", contract)

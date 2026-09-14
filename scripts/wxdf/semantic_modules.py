@@ -15,6 +15,7 @@ from .registry import ModuleDescriptor, PlanError, RegisteredModule
 from .semantics.appendices import collect_native_appendix_candidates, collect_source_appendix_semantics, prepare_native_appendix_semantics
 from .semantics.captions import collect_caption_candidates, collect_source_caption_semantics
 from .semantics.lists import analyze_lists
+from .semantics.paragraphs import collect_paragraph_candidates
 from .semantics.protected import collect_protected_candidates
 from .semantics.regions import resolve_source_regions
 from .semantics.source_ast import materialize_list_semantics
@@ -131,7 +132,7 @@ def table_semantics_module(*, native: bool = False) -> RegisteredModule:
 
 def caption_semantics_module(*, native: bool = False) -> RegisteredModule:
     def execute(c: ModuleExecutionContext) -> dict[str, Any]:
-        result = collect_source_caption_semantics(c.require("source_facts"), c.require("table_semantics_result")); captions = result["captions"]; c.provide("caption_semantics_result", result); candidates = collect_caption_candidates(c.require("source_ast")) if native else []
+        result = collect_source_caption_semantics(c.require("source_facts"), c.require("table_semantics_result")); captions = result["captions"]; c.provide("caption_semantics_result", result); candidates = collect_caption_candidates(c.require("source_ast"), c.require("source_facts")) if native else []
         if native: c.provide("caption_semantics_candidates", candidates)
         generated = sum(1 for x in candidates if isinstance(x.get("proposal"), Mapping) and x["proposal"].get("operation") == "create_node" and isinstance(x["proposal"].get("value"), Mapping) and isinstance(x["proposal"]["value"].get("node"), Mapping) and x["proposal"]["value"]["node"].get("role") == "caption")
         evidence = {"caption_count": len(captions), "table_caption_count": sum(x.get("caption_type") == "table" for x in captions), "figure_caption_count": sum(x.get("caption_type") == "figure" for x in captions), "associated_count": sum(x.get("status") == "associated" for x in captions), "issue_count": len(result["issues"]), "generated_caption_count": generated}; c.provide("caption_semantics", evidence); c.evidence["caption-semantics"] = evidence; return evidence
@@ -146,7 +147,7 @@ def appendix_semantics_module(*, native: bool = False) -> RegisteredModule:
     return _registered("appendix-semantics", ("relation",), ("source_facts", "source_ast", "list_semantics_result") if native else ("source_facts",), ("appendix_semantics_result", "appendix_semantics_candidates", "appendix_semantics") if native else ("appendix_semantics_result", "appendix_semantics"), execute)
 
 def native_semantic_modules() -> tuple[RegisteredModule, ...]: return (source_facts_module(native=True), source_region_module(), document_structure_module(protect_semantics=True), protected_content_module(), list_semantics_module(native=True), table_semantics_module(native=True), caption_semantics_module(native=True), appendix_semantics_module(native=True))
-def collect_native_candidates(*, source_region_candidates: Iterable[Mapping[str, Any]], document_structure_candidates: Iterable[Mapping[str, Any]], protected_content_candidates: Iterable[Mapping[str, Any]], list_semantics_candidates: Iterable[Mapping[str, Any]], appendix_semantics_candidates: Iterable[Mapping[str, Any]], table_semantics_candidates: Iterable[Mapping[str, Any]], caption_semantics_candidates: Iterable[Mapping[str, Any]]) -> list[Mapping[str, Any]]: return [*source_region_candidates, *document_structure_candidates, *protected_content_candidates, *list_semantics_candidates, *appendix_semantics_candidates, *table_semantics_candidates, *caption_semantics_candidates]
+def collect_native_candidates(*, source_region_candidates: Iterable[Mapping[str, Any]], document_structure_candidates: Iterable[Mapping[str, Any]], protected_content_candidates: Iterable[Mapping[str, Any]], list_semantics_candidates: Iterable[Mapping[str, Any]], appendix_semantics_candidates: Iterable[Mapping[str, Any]], table_semantics_candidates: Iterable[Mapping[str, Any]], caption_semantics_candidates: Iterable[Mapping[str, Any]], paragraph_semantics_candidates: Iterable[Mapping[str, Any]] = ()) -> list[Mapping[str, Any]]: return [*source_region_candidates, *document_structure_candidates, *protected_content_candidates, *list_semantics_candidates, *appendix_semantics_candidates, *table_semantics_candidates, *caption_semantics_candidates, *paragraph_semantics_candidates]
 def _compat(name: str, fallback: Any) -> Any:
     return getattr(sys.modules.get("wxdf.builtin_modules"), name, fallback)
 
@@ -158,6 +159,38 @@ def compatibility_hook(name: str, fallback: Any) -> Any:
 
 
 def build_native_candidate_baseline(source_path: Path | str, source_facts: Mapping[str, Any], source_ast: Mapping[str, Any]) -> list[Mapping[str, Any]]:
-    regions = _compat("resolve_source_regions", resolve_source_regions)(source_path, source_facts); lists = _compat("analyze_lists", analyze_lists)(source_facts); _m, candidates, _i = _compat("materialize_list_semantics", materialize_list_semantics)(source_ast, source_facts, lists); appendix = _compat("prepare_native_appendix_semantics", prepare_native_appendix_semantics)(source_facts, source_ast, _compat("collect_source_appendix_semantics", collect_source_appendix_semantics)(source_facts), lists); return _compat("collect_native_candidates", collect_native_candidates)(source_region_candidates=regions["candidates"], document_structure_candidates=_compat("collect_structure_candidates", collect_structure_candidates)(source_facts, regions["regions"], protect_semantics=True), protected_content_candidates=_compat("collect_protected_candidates", collect_protected_candidates)(source_facts), list_semantics_candidates=candidates, appendix_semantics_candidates=_compat("collect_native_appendix_candidates", collect_native_appendix_candidates)(source_facts, source_ast, appendix, lists), table_semantics_candidates=_compat("collect_table_candidates", collect_table_candidates)(source_ast), caption_semantics_candidates=_compat("collect_caption_candidates", collect_caption_candidates)(source_ast))
+    regions = _compat("resolve_source_regions", resolve_source_regions)(source_path, source_facts)
+    lists = _compat("analyze_lists", analyze_lists)(source_facts)
+    _model, list_candidates, _item_map = _compat("materialize_list_semantics", materialize_list_semantics)(source_ast, source_facts, lists)
+    appendix = _compat("prepare_native_appendix_semantics", prepare_native_appendix_semantics)(
+        source_facts,
+        source_ast,
+        _compat("collect_source_appendix_semantics", collect_source_appendix_semantics)(source_facts),
+        lists,
+    )
+    caption_builder = _compat("collect_caption_candidates", collect_caption_candidates)
+    try:
+        import inspect
+
+        accepts_facts = len(inspect.signature(caption_builder).parameters) >= 2
+    except (TypeError, ValueError):
+        accepts_facts = True
+    caption_candidates = (
+        caption_builder(source_ast, source_facts)
+        if accepts_facts
+        else caption_builder(source_ast)
+    )
+    groups: dict[str, Any] = {
+        "source_region_candidates": regions["candidates"],
+        "document_structure_candidates": _compat("collect_structure_candidates", collect_structure_candidates)(source_facts, regions["regions"], protect_semantics=True),
+        "protected_content_candidates": _compat("collect_protected_candidates", collect_protected_candidates)(source_facts),
+        "list_semantics_candidates": list_candidates,
+        "appendix_semantics_candidates": _compat("collect_native_appendix_candidates", collect_native_appendix_candidates)(source_facts, source_ast, appendix, lists),
+        "table_semantics_candidates": _compat("collect_table_candidates", collect_table_candidates)(source_ast),
+        "caption_semantics_candidates": caption_candidates,
+    }
+    if source_facts.get("facts_schema_version"):
+        groups["paragraph_semantics_candidates"] = _compat("collect_paragraph_candidates", collect_paragraph_candidates)(source_facts, source_ast)
+    return _compat("collect_native_candidates", collect_native_candidates)(**groups)
 
 __all__ = ["ModuleExecutionContext", "appendix_semantics_module", "build_native_candidate_baseline", "caption_semantics_module", "collect_native_candidates", "compatibility_hook", "document_structure_module", "list_semantics_module", "native_semantic_modules", "protected_content_module", "source_facts_module", "source_region_module", "table_semantics_module"]

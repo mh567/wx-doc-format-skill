@@ -18,6 +18,7 @@ if str(SCRIPTS) not in sys.path:
 
 from wxdf.parsers import parse
 from wxdf.kernel import ConversionKernel
+from wxdf.model import inline_text_projection
 from wxdf.semantics.equivalence import compare_structure_equivalence
 from wxdf.semantics.parser_equivalence import compare_parser_equivalence
 from wxdf.semantics.protected import collect_protected_candidates
@@ -310,6 +311,26 @@ def test_docx_structure_candidates_use_styles_and_leave_caption_to_its_owner(tmp
     assert by_text["第一章"] == {"role": "heading", "level": 1}
     assert by_text["正文内容"] == {"role": "body"}
     assert "图1 示例" not in by_text
+
+
+def test_docx_structure_candidates_preserve_deep_heading_as_supported_heading(tmp_path: Path) -> None:
+    source = tmp_path / "deep-heading.docx"
+    document = Document()
+    document.add_paragraph("深层标题", style="Heading 7")
+    document.add_paragraph("更深层标题", style="Heading 8")
+    document.save(source)
+
+    facts = parse(source)
+    candidates = collect_structure_candidates(facts, classify_regions(facts))
+    by_text = {
+        inline_text_projection(
+            facts["units"][candidate["target_node_ids"][0]].get("inline_content", [])
+        ): candidate["proposal"]["value"]
+        for candidate in candidates
+    }
+
+    assert by_text["深层标题"] == {"role": "heading", "level": 6}
+    assert by_text["更深层标题"] == {"role": "heading", "level": 6}
 
 
 def test_docx_source_positions_count_only_convertible_body_blocks(tmp_path: Path) -> None:

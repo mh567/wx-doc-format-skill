@@ -58,6 +58,20 @@ def protected_unit_semantics(unit: Mapping[str, Any], evidence: Mapping[str, Any
         return {"reason": "api_label", "role": None, "text": text}
     if _DATE_RE.match(normalized_text) or _VERSION_CONTEXT_RE.match(normalized_text):
         return {"reason": "date_or_version", "role": None, "text": text}
+    visible_marker = evidence.get("visible_marker")
+    if isinstance(visible_marker, Mapping) and evidence.get("marker_kind"):
+        marker_text = str(visible_marker.get("marker_text") or "")
+        marker_match = re.match(r"^[ \t]*" + re.escape(marker_text) + r"[ \t]+", normalized_text)
+        remainder = normalized_text[marker_match.end():].strip() if marker_match else ""
+        if _DATE_RE.match(remainder) or _VERSION_CONTEXT_RE.match(remainder):
+            return {"reason": "date_or_version", "role": None, "text": text}
+        if remainder.casefold().startswith(("版本", "version", "release", "build")):
+            return {"reason": "date_or_version", "role": None, "text": text}
+        if evidence.get("source_list_type") == "decimal_chain":
+            segments = re.split(r"[.．-]", marker_text.rstrip(".)"))
+            if len([segment for segment in segments if segment]) < 3:
+                return {"reason": "manual_heading_marker", "role": None, "text": text}
+        return None
     if _MANUAL_HEADING_RE.match(normalized_text):
         return {"reason": "manual_heading_marker", "role": None, "text": text}
     if _VERSION_RE.match(normalized_text):

@@ -125,3 +125,19 @@ def test_invalid_revision_operation_is_rejected_without_polluting_ledger() -> No
     with pytest.raises(LedgerError, match="unsupported"):
         accept_decisions(ledger, [invalid])
     assert ledger == _ledger()
+
+
+def test_update_node_content_revision_requires_a_non_empty_target() -> None:
+    revision = _revision()
+    revision["target_node_ids"] = []
+    revision["property_scope"] = ["inline_content"]
+    revision["decision"] = {
+        "operation": "update_node_content",
+        "value": {"inline_content": [{"kind": "text", "text": "新内容", "marks": []}]},
+    }
+
+    with pytest.raises(LedgerError, match="target_node_ids"):
+        validate_revisions(
+            {"source": {"content_sha256": "sha256:" + "a" * 64}},
+            _ledger([revision]),
+        )

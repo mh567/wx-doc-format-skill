@@ -83,15 +83,25 @@ def _native_source_ast(context: ModuleExecutionContext) -> dict[str, Any]:
 
 def _native_candidate_set(context: ModuleExecutionContext) -> list[Mapping[str, Any]]:
     collect_candidates = compatibility_hook("collect_native_candidates", collect_native_candidates)
-    candidates = collect_candidates(
-        source_region_candidates=context.require("source_region_candidates"),
-        document_structure_candidates=context.require("document_structure_candidates"),
-        protected_content_candidates=context.require("protected_content_candidates"),
-        list_semantics_candidates=context.require("list_semantics_candidates"),
-        appendix_semantics_candidates=context.require("appendix_semantics_candidates"),
-        table_semantics_candidates=context.require("table_semantics_candidates"),
-        caption_semantics_candidates=context.require("caption_semantics_candidates"),
-    )
+    candidate_groups = {
+        "source_region_candidates": context.require("source_region_candidates"),
+        "document_structure_candidates": context.require("document_structure_candidates"),
+        "protected_content_candidates": context.require("protected_content_candidates"),
+        "list_semantics_candidates": context.require("list_semantics_candidates"),
+        "appendix_semantics_candidates": context.require("appendix_semantics_candidates"),
+        "table_semantics_candidates": context.require("table_semantics_candidates"),
+        "caption_semantics_candidates": context.require("caption_semantics_candidates"),
+    }
+    if "paragraph_semantics_candidates" in context.artifacts:
+        candidate_groups["paragraph_semantics_candidates"] = context.require("paragraph_semantics_candidates")
+    elif "source_facts" in context.artifacts:
+        from .semantics.paragraphs import collect_paragraph_candidates
+
+        candidate_groups["paragraph_semantics_candidates"] = collect_paragraph_candidates(
+            context.require("source_facts"),
+            context.require("source_ast"),
+        )
+    candidates = collect_candidates(**candidate_groups)
     baseline_candidates = list(candidates)
     options = context.request.options or {}
     supplied_ledger = options.get("decision_ledger")

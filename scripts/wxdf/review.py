@@ -46,6 +46,7 @@ _PROPERTY_AST_FIELDS: dict[str, tuple[str, ...]] = {
     "source_heading_level": ("source_heading_level",),
     "page_break_before": ("page_break_before",),
     "source_number_preserved": ("source_number_preserved",),
+    "inline_content": ("inline_content",),
 }
 
 

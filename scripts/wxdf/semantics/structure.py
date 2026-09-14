@@ -33,9 +33,9 @@ def _docx_style_role(style_name: str) -> tuple[str | None, int | None]:
     normalized = style_name.strip().casefold()
     if normalized in {"title", "document title", "documenttitle", "文档标题", "文件标题", "主标题"}:
         return "title", None
-    heading = re.match(r"^(?:heading|标题)\s*([1-6])$", normalized, re.IGNORECASE)
+    heading = re.match(r"^(?:heading|标题)\s*(\d+)$", normalized, re.IGNORECASE)
     if heading:
-        return "heading", int(heading.group(1))
+        return "heading", min(int(heading.group(1)), 6)
     if (
         normalized in {"caption", "题注", "附录标题"}
         or "列项" in style_name

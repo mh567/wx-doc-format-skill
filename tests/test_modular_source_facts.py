@@ -16,9 +16,13 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 from modular_support import build_docx_fixture
+from wxdf.model import inline_text_projection
 from wxdf.parsers import parse, summarize_source_facts
+from wxdf.resolver import resolve
+from wxdf.semantics.paragraphs import collect_paragraph_candidates
 from wxdf.semantics.source_ast import build_source_ast
 from wxdf.source_store import SourceStore
+from wxdf.transaction import apply_stage_batch, make_snapshot
 from wxdf.validation import validate_source_facts
 
 
@@ -60,7 +64,79 @@ def test_docx_parser_emits_numbering_indentation_and_table_scope_facts(tmp_path:
     list_evidence = [item for item in facts["evidence"].values() if item.get("marker_kind")]
     assert list_evidence
     assert all("indent_value" in item and "indent_unit" in item for item in list_evidence)
-    assert all("numbering_definition_ref" in item for item in list_evidence)
+    assert any("numbering_definition_ref" in item for item in list_evidence)
+
+
+def test_docx_parser_promotes_visible_ordered_markers_without_numpr(tmp_path: Path) -> None:
+    source = tmp_path / "visible-markers.docx"
+    document = Document()
+    document.add_paragraph("事件运营需求", style="Heading 3")
+    document.add_paragraph("1. 第一项需求")
+    document.add_paragraph("2. 第二项需求")
+    document.add_paragraph("4.2.1 复合编号需求")
+    document.add_paragraph("a) 事件输入")
+    document.add_paragraph("b) 事件研判")
+    document.save(source)
+
+    facts = parse(source)
+
+    visible = {
+        "1. 第一项需求": {"marker_kind": "ordered", "marker_text": "1.", "source_list_type": "decimal_paren", "ordinal": 1},
+        "2. 第二项需求": {"marker_kind": "ordered", "marker_text": "2.", "source_list_type": "decimal_paren", "ordinal": 2},
+        "4.2.1 复合编号需求": {"marker_kind": "ordered", "marker_text": "4.2.1", "source_list_type": "decimal_chain", "ordinal": 4},
+        "a) 事件输入": {"marker_kind": "ordered", "marker_text": "a)", "source_list_type": "lower_letter_paren", "ordinal": 1},
+        "b) 事件研判": {"marker_kind": "ordered", "marker_text": "b)", "source_list_type": "lower_letter_paren", "ordinal": 2},
+    }
+    for text, expected in visible.items():
+        unit_id = next(
+            unit_id
+            for unit_id, unit in facts["units"].items()
+            if any(item.get("text") == text for item in unit.get("inline_content", []))
+        )
+        evidence = facts["evidence"][unit_id]
+        assert {key: evidence.get(key) for key in expected} == expected
+        assert evidence["numbering_status"] == "detected"
+        assert evidence["numbering_evidence"] == ["visible_list_marker"]
+        assert evidence.get("explicit_depth") is None
+
+
+def test_docx_parser_records_leading_tab_as_presentation_evidence(tmp_path: Path) -> None:
+    source = tmp_path / "leading-tab.docx"
+    document = Document()
+    document.add_paragraph("\t正文首行内容")
+    document.add_paragraph("\t标题内容", style="Heading 1")
+    document.save(source)
+
+    facts = parse(source)
+    unit_id = next(
+        unit_id
+        for unit_id, unit in facts["units"].items()
+        if any(item.get("kind") == "tab" for item in unit.get("inline_content", []))
+    )
+
+    assert facts["evidence"][unit_id]["leading_whitespace"] == {
+        "text": "\t",
+        "tab_count": 1,
+        "space_count": 0,
+        "length": 1,
+    }
+    ast = build_source_ast(facts)
+    assert inline_text_projection(ast["document"]["blocks"][unit_id]["inline_content"]) == "\t正文首行内容"
+    heading_id = next(
+        unit_id
+        for unit_id, unit in facts["units"].items()
+        if unit.get("style") == "Heading 1"
+    )
+    assert inline_text_projection(ast["document"]["blocks"][heading_id]["inline_content"]) == "\t标题内容"
+    candidates = collect_paragraph_candidates(facts, ast)
+    decision_set = resolve(candidates, {"revision": ast["revision"]})
+    committed = apply_stage_batch(
+        make_snapshot(ast),
+        decision_set["decisions"],
+        expected_revision=ast["revision"],
+    ).snapshot.ast
+    assert inline_text_projection(committed["document"]["blocks"][unit_id]["inline_content"]) == "正文首行内容"
+    assert inline_text_projection(committed["document"]["blocks"][heading_id]["inline_content"]) == "\t标题内容"
 
 
 def test_docx_layout_paragraph_format_is_captured_and_propagated_by_whitelist(

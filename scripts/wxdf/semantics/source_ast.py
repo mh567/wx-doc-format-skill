@@ -27,23 +27,6 @@ def _image_alt_text(
     return name or str(resource_id)
 
 
-def _without_images(inline_content: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """Remove image tokens while preserving the visible caption text."""
-
-    result: list[dict[str, Any]] = []
-    for item in inline_content:
-        if item.get("kind") == "image":
-            continue
-        copied = copy.deepcopy(dict(item))
-        if copied.get("kind") == "link":
-            children = _without_images(copied.get("children", []))
-            if not children:
-                continue
-            copied["children"] = children
-        result.append(copied)
-    return result
-
-
 def _inline_image_nodes(
     unit_id: str,
     unit: Mapping[str, Any],
@@ -55,8 +38,9 @@ def _inline_image_nodes(
     images, so the source projection stays intact.  Each image additionally
     becomes an ``image`` node that carries the reference of the image part it
     came from and records the source paragraph it was materialized from.
-    Normal inline images remain owned by the paragraph.  A mixed authored
-    figure caption changes that ownership explicitly during AST materialization.
+    Normal inline images remain owned by the paragraph.  The caption semantics
+    module can later publish a transaction that changes ownership for a mixed
+    authored figure caption.
     """
 
     source_ref = copy.deepcopy(dict(unit["source_ref"]))
@@ -114,71 +98,13 @@ def _expand_children(
     return children
 
 
-def _caption_target(
-    facts: Mapping[str, Any],
-    target_id: str,
-    image_targets: Mapping[str, list[str]],
-) -> tuple[str, str] | None:
-    """Resolve a SourceFacts caption target to its Source AST node kind."""
-
-    if facts["containers"].get(target_id, {}).get("kind") == "table":
-        return target_id, "table"
-    images = image_targets.get(target_id)
-    if images:
-        return images[0], "figure"
-    return None
-
-
-def _authored_caption_materialization(
-    facts: Mapping[str, Any],
-    image_targets: Mapping[str, list[str]],
-) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
-    """Resolve authored caption roles and associations for the Source AST.
-
-    Caption recognition stays in the caption semantics module.  This helper
-    only consumes its public result, so that an authored caption becomes a
-    real ``role == "caption"`` block with a valid target instead of a body
-    paragraph that would later attract a generated caption.
-    """
-
-    from .captions import collect_source_caption_semantics
-    from .tables import collect_source_table_semantics
-
-    semantics = collect_source_caption_semantics(
-        facts, collect_source_table_semantics(facts)
-    )
-    roles: dict[str, dict[str, Any]] = {}
-    associations: list[dict[str, Any]] = []
-    for caption in semantics.get("captions", []):
-        if caption.get("status") != "associated":
-            continue
-        caption_id = str(caption.get("node_id") or "")
-        if not caption_id:
-            continue
-        resolved = _caption_target(
-            facts, str(caption.get("target_node_id") or ""), image_targets
-        )
-        if resolved is None:
-            continue
-        target_id, caption_type = resolved
-        if caption_type != str(caption.get("caption_type") or ""):
-            continue
-        roles[caption_id] = {"caption_type": caption_type, "target_id": target_id}
-        associations.append({
-            "kind": "caption_target",
-            "source_id": caption_id,
-            "target_id": target_id,
-        })
-    return roles, associations
-
-
 def build_source_ast(facts: Mapping[str, Any]) -> dict[str, Any]:
     """Convert public SourceFacts to the first Source AST revision."""
 
     resources = facts["resources"]
     blocks: dict[str, dict[str, Any]] = {}
-    image_targets: dict[str, list[str]] = {}
     materialized: dict[str, list[str]] = {}
+
     for unit_id, unit in facts["units"].items():
         kind = unit.get("kind")
         source_ref = copy.deepcopy(unit["source_ref"])
@@ -199,8 +125,7 @@ def build_source_ast(facts: Mapping[str, Any]) -> dict[str, Any]:
             blocks[unit_id] = block
             image_nodes = _inline_image_nodes(str(unit_id), unit, resources)
             if image_nodes:
-                image_targets[str(unit_id)] = [node_id for node_id, _ in image_nodes]
-                materialized[str(unit_id)] = image_targets[str(unit_id)]
+                materialized[str(unit_id)] = [node_id for node_id, _ in image_nodes]
                 for node_id, node in image_nodes:
                     blocks[node_id] = node
         elif kind in {"code_block", "opaque", "separator"}:
@@ -216,28 +141,6 @@ def build_source_ast(facts: Mapping[str, Any]) -> dict[str, Any]:
                 "diagnostic_ids": [f"unsupported_source_unit:{kind}"],
                 "source_ref": source_ref,
             }
-
-    caption_roles, caption_associations = _authored_caption_materialization(
-        facts, image_targets
-    )
-    standalone_images: set[str] = set()
-    for caption_id, caption_role in caption_roles.items():
-        block = blocks.get(caption_id)
-        if block is None or block.get("block_type") != "paragraph":
-            continue
-        # A mixed authored figure caption is split into a standalone image
-        # node followed by a text-only caption node.  The image ownership is
-        # explicit in the Source AST so later stages do not infer it from
-        # renderer behavior.
-        if caption_role["caption_type"] == "figure" and caption_id in materialized:
-            block["inline_content"] = _without_images(block.get("inline_content", []))
-            for image_id in materialized[caption_id]:
-                blocks[image_id]["materialization_mode"] = "standalone"
-                standalone_images.add(image_id)
-        block["role"] = "caption"
-        block["caption_type"] = caption_role["caption_type"]
-        block["target_id"] = caption_role["target_id"]
-        block.pop("level", None)
 
     containers: dict[str, dict[str, Any]] = {}
     for container_id, container in facts["containers"].items():
@@ -267,8 +170,8 @@ def build_source_ast(facts: Mapping[str, Any]) -> dict[str, Any]:
             "root_id": "root",
             "blocks": blocks,
             "containers": containers,
-            "children": _expand_children(facts, materialized, standalone_images),
-            "associations": copy.deepcopy(caption_associations),
+            "children": _expand_children(facts, materialized),
+            "associations": [],
             "resources": copy.deepcopy(facts["resources"]),
         },
     }
@@ -369,6 +272,37 @@ def materialize_list_semantics(
         return parent_id, original_positions.get((parent_id, first_source_id), len(children.get(parent_id, [])))
 
     candidates: list[dict[str, Any]] = []
+    from .lists import strip_visible_list_marker
+
+    for relation in list_result.get("items", []):
+        source_item_id = str(relation["item_id"])
+        block = blocks.get(source_item_id)
+        if not isinstance(block, Mapping) or block.get("block_type") != "paragraph":
+            continue
+        evidence = facts.get("evidence", {}).get(source_item_id, {})
+        if not evidence.get("visible_marker"):
+            continue
+        cleaned = strip_visible_list_marker(block.get("inline_content", []), evidence)
+        if cleaned == block.get("inline_content", []):
+            continue
+        ref = source_ref(source_item_id)
+        candidates.append({
+            "candidate_id": f"list-content-{source_item_id}",
+            "module_id": "list_semantics",
+            "module_version": "1.0",
+            "target_source_refs": [ref] if ref is not None else [],
+            "target_node_ids": [source_item_id],
+            "proposal": {
+                "operation": "update_node_content",
+                "property_scope": ["inline_content"],
+                "value": {"inline_content": copy.deepcopy(cleaned)},
+            },
+            "positive_evidence": [{"kind": "structural", "source": "source_facts_visible_list_marker"}],
+            "negative_evidence": [],
+            "scope": {"stages": ["relation"]},
+            "constraints": [{"kind": "preserve_source_marker_evidence"}],
+            "rationale": "remove an authored list marker only after list semantics confirms the item",
+        })
     for list_id, spec in list_specs.items():
         records = item_records.get(list_id, [])
         if list_id not in containers:

@@ -483,6 +483,37 @@ def _caption_blocks(ast: dict) -> dict[str, dict]:
     }
 
 
+def _materialized_caption_ast(source: Path) -> dict:
+    from wxdf.parsers import parse
+    from wxdf.resolver import resolve
+    from wxdf.semantics.captions import collect_caption_candidates
+    from wxdf.semantics.source_ast import build_source_ast
+    from wxdf.transaction import apply_stage_batch, make_snapshot
+
+    facts = parse(source)
+    baseline = build_source_ast(facts)
+    candidates = [
+        candidate
+        for candidate in collect_caption_candidates(baseline, facts)
+        if str(candidate.get("candidate_id") or "").startswith(
+            ("caption-role-", "caption-content-", "caption-image-", "caption-association-")
+        )
+        and not str(candidate.get("candidate_id") or "").startswith(
+            "caption-association-native-caption-"
+        )
+    ]
+    decision_set = resolve(
+        candidates,
+        {"revision": baseline["revision"]},
+    )
+    assert decision_set["unresolved"] == []
+    return apply_stage_batch(
+        make_snapshot(baseline),
+        decision_set["decisions"],
+        expected_revision=baseline["revision"],
+    ).snapshot.ast
+
+
 def _data_tables(ast: dict) -> list[str]:
     return [
         block_id
@@ -559,11 +590,8 @@ def test_native_caption_output_matches_the_legacy_sequence_contract(tmp_path: Pa
 def test_source_ast_materializes_an_authored_table_caption(tmp_path: Path) -> None:
     """An authored caption becomes an explicit caption block with a target."""
 
-    from wxdf.parsers import parse
-    from wxdf.semantics.source_ast import build_source_ast
-
     source = _write_authored_caption_markdown(tmp_path / "authored.md")
-    ast = build_source_ast(parse(source))
+    ast = _materialized_caption_ast(source)
     captions = _caption_blocks(ast)
 
     assert len(captions) == 1, sorted(captions)
@@ -608,12 +636,10 @@ def test_caption_association_candidate_carries_the_target_source_refs() -> None:
 def test_an_authored_caption_suppresses_generation_for_its_target(tmp_path: Path) -> None:
     """A captioned target gets no second, generated caption node."""
 
-    from wxdf.parsers import parse
     from wxdf.semantics.captions import collect_caption_candidates
-    from wxdf.semantics.source_ast import build_source_ast
 
     source = _write_authored_caption_markdown(tmp_path / "authored.md")
-    ast = build_source_ast(parse(source))
+    ast = _materialized_caption_ast(source)
     authored = _caption_blocks(ast)
     created = [
         candidate
@@ -696,11 +722,8 @@ def test_inline_images_become_explicit_image_blocks(tmp_path: Path, source_kind:
 def test_authored_figure_caption_is_materialized_after_its_image(tmp_path: Path) -> None:
     """An authored figure caption binds to the image and follows it."""
 
-    from wxdf.parsers import parse
-    from wxdf.semantics.source_ast import build_source_ast
-
     source = _write_authored_figure_markdown(tmp_path / "figure.md")
-    ast = build_source_ast(parse(source))
+    ast = _materialized_caption_ast(source)
     images = _image_block_ids(ast)
     captions = _caption_blocks(ast)
 
@@ -725,12 +748,10 @@ def test_an_authored_figure_caption_suppresses_generation_for_its_image(
 ) -> None:
     """A captioned image gets no second, generated caption node."""
 
-    from wxdf.parsers import parse
     from wxdf.semantics.captions import collect_caption_candidates
-    from wxdf.semantics.source_ast import build_source_ast
 
     source = _write_authored_figure_markdown(tmp_path / "figure.md")
-    ast = build_source_ast(parse(source))
+    ast = _materialized_caption_ast(source)
     images = _image_block_ids(ast)
     created = [
         candidate

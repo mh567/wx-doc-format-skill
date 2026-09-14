@@ -11,6 +11,7 @@ if str(SCRIPTS) not in sys.path:
 from wxdf.semantics.lists import analyze_lists
 from wxdf.semantics.source_ast import build_source_ast, materialize_list_semantics
 from wxdf.parsers import parse
+from wxdf.model import inline_text_projection
 
 
 def _ref(index: int) -> dict:
@@ -232,3 +233,37 @@ def test_real_markdown_parser_facts_use_the_same_list_consumer(tmp_path: Path) -
     assert result["status"] == "completed"
     assert {item["list_kind"] for item in result["lists"]} == {"ordered", "unordered"}
     assert len(result["items"]) == 4
+
+
+def test_docx_visible_list_markers_are_removed_when_list_semantics_materialize(tmp_path: Path) -> None:
+    source = tmp_path / "visible-markers.docx"
+    from docx import Document
+
+    document = Document()
+    document.add_paragraph("事件运营需求", style="Heading 3")
+    document.add_paragraph("1. 第一项需求")
+    document.add_paragraph("2. 第二项需求")
+    document.add_paragraph("4.2.1 复合编号需求")
+    document.add_paragraph("a) 事件输入")
+    document.add_paragraph("b) 事件研判")
+    document.save(source)
+
+    facts = parse(source)
+    source_ast = build_source_ast(facts)
+    source_ast_texts = {
+        inline_text_projection(block.get("inline_content", []))
+        for block in source_ast["document"]["blocks"].values()
+        if block.get("block_type") == "paragraph"
+    }
+    assert "1. 第一项需求" in source_ast_texts
+    list_result = analyze_lists(facts)
+    materialized, candidates, _ = materialize_list_semantics(source_ast, facts, list_result)
+
+    assert materialized["document"]["blocks"]
+    cleaned_texts = {
+        inline_text_projection(candidate["proposal"]["value"]["inline_content"])
+        for candidate in candidates
+        if candidate["proposal"]["operation"] == "update_node_content"
+    }
+    assert {"第一项需求", "第二项需求", "复合编号需求", "事件输入", "事件研判"} <= cleaned_texts
+    assert not {"1. 第一项需求", "2. 第二项需求", "4.2.1 复合编号需求", "a) 事件输入", "b) 事件研判"} & cleaned_texts

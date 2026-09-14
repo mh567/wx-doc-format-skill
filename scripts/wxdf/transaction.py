@@ -190,6 +190,11 @@ def _apply_update_role(ast: dict[str, Any], decision: Mapping[str, Any]) -> None
             node["level"] = value["level"]
         elif role == "heading" and "level" not in node:
             node["level"] = 1
+        elif role != "heading":
+            node.pop("level", None)
+        for field in ("caption_type", "target_id"):
+            if field in value:
+                node[field] = copy.deepcopy(value[field])
 
 
 def _apply_update_node_semantics(ast: dict[str, Any], decision: Mapping[str, Any]) -> None:
@@ -224,9 +229,23 @@ def _apply_update_node_semantics(ast: dict[str, Any], decision: Mapping[str, Any
             "source_heading_level",
             "page_break_before",
             "source_number_preserved",
+            "materialization_mode",
         ):
             if field in value:
                 node[field] = copy.deepcopy(value[field])
+
+
+def _apply_update_node_content(ast: dict[str, Any], decision: Mapping[str, Any]) -> None:
+    value = decision.get("value") or {}
+    inline_content = value.get("inline_content") if isinstance(value, Mapping) else None
+    if not isinstance(inline_content, list):
+        raise TransactionConflict("update_node_content requires value.inline_content")
+    blocks = ast["document"]["blocks"]
+    for target_id in decision.get("target_node_ids", []):
+        block = blocks.get(target_id)
+        if not isinstance(block, Mapping) or block.get("block_type") != "paragraph":
+            raise TransactionConflict(f"update_node_content target {target_id} is not a paragraph")
+        block["inline_content"] = copy.deepcopy(inline_content)
 
 
 def _apply_move_node(ast: dict[str, Any], decision: Mapping[str, Any]) -> None:
@@ -385,6 +404,8 @@ def _apply_decision(snapshot: StageSnapshot, decision: Mapping[str, Any]) -> Non
         _apply_update_role(ast, decision)
     elif operation == "update_node_semantics":
         _apply_update_node_semantics(ast, decision)
+    elif operation == "update_node_content":
+        _apply_update_node_content(ast, decision)
     elif operation == "move_node":
         _apply_move_node(ast, decision)
     elif operation == "update_association":

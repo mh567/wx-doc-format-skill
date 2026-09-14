@@ -20,6 +20,55 @@ _EMU_PER_POINT = 12700
 _EMU_PER_INCH = 914400
 _VML_NS = "{urn:schemas-microsoft-com:vml}"
 _WP_NS = "{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing}"
+_DOCX_VISIBLE_LIST_MARKER_RE = re.compile(
+    r"^(?P<indent>[ \t]*)(?P<marker>(?:\d+(?:[.．-]\d+)+(?:[.)])?|\d+[.)]|[A-Za-z][)]|[-+*•▪◦]))(?=[ \t]+)"
+)
+
+
+def _docx_visible_list_marker(text: str) -> dict[str, Any] | None:
+    """Extract a manually typed DOCX list marker without changing source text."""
+
+    match = _DOCX_VISIBLE_LIST_MARKER_RE.match(text)
+    if match is None:
+        return None
+    marker = match.group("marker")
+    if marker[0].isdigit():
+        source_list_type = "decimal_chain" if re.search(r"\d[.．-]\d", marker) else "decimal_paren"
+        ordinal = int(re.match(r"\d+", marker).group(0))
+        marker_kind = "ordered"
+    elif marker[0].isalpha():
+        source_list_type = "lower_letter_paren"
+        ordinal = ord(marker[0].lower()) - ord("a") + 1
+        marker_kind = "ordered"
+    else:
+        source_list_type = "dash" if marker in {"-", "+", "*"} else "bullet_dot"
+        ordinal = None
+        marker_kind = "unordered"
+    return {
+        "marker_kind": marker_kind,
+        "marker_text": marker,
+        "source_list_type": source_list_type,
+        "ordinal": ordinal,
+        "indent_value": len(match.group("indent")),
+        "indent_unit": "unicode_code_point",
+        "marker_span": {"start": len(match.group("indent")), "end": match.end("marker")},
+        "numbering_evidence": ["visible_list_marker"],
+    }
+
+
+def _docx_leading_whitespace(text: str) -> dict[str, Any] | None:
+    """Record paragraph-leading tabs and spaces as presentation evidence."""
+
+    match = re.match(r"^(?P<whitespace>[ \t]+)", text)
+    if match is None:
+        return None
+    whitespace = match.group("whitespace")
+    return {
+        "text": whitespace,
+        "tab_count": whitespace.count("\t"),
+        "space_count": whitespace.count(" "),
+        "length": len(whitespace),
+    }
 
 
 def _digest(value: bytes | str) -> str:
@@ -600,6 +649,32 @@ def _parse_docx(source: Path | str, *, store: SourceStore) -> dict[str, Any]:
                 evidence.update({
                     "marker_kind": "ordered" if descriptor.get("num_fmt") != "bullet" else "unordered",
                 })
+        elif isinstance(paragraph.text, str):
+            visible_marker = _docx_visible_list_marker(paragraph.text)
+            if visible_marker is not None:
+                evidence.update({
+                    "numbering_status": "detected",
+                    "num_fmt": "bullet" if visible_marker["marker_kind"] == "unordered" else "decimal",
+                    "lvl_text": visible_marker["marker_text"],
+                    "source_list_type": visible_marker["source_list_type"],
+                    "numbering_evidence": list(visible_marker["numbering_evidence"]),
+                    "indent_value": visible_marker["indent_value"],
+                    "indent_unit": visible_marker["indent_unit"],
+                    "marker_text": visible_marker["marker_text"],
+                    "ordinal": visible_marker["ordinal"],
+                    "marker_kind": visible_marker["marker_kind"],
+                    "visible_marker": {
+                        "marker_text": visible_marker["marker_text"],
+                        "source_list_type": visible_marker["source_list_type"],
+                        "ordinal": visible_marker["ordinal"],
+                        "indent_value": visible_marker["indent_value"],
+                        "indent_unit": visible_marker["indent_unit"],
+                        "span": visible_marker["marker_span"],
+                    },
+                })
+        leading_whitespace = _docx_leading_whitespace(paragraph.text)
+        if leading_whitespace is not None:
+            evidence["leading_whitespace"] = leading_whitespace
         facts["evidence"][unit_id] = evidence
 
     def _grid_span(cell: Any) -> int:
