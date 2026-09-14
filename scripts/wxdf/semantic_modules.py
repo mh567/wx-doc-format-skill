@@ -12,15 +12,15 @@ from typing import Any, Callable, Iterable, Iterator, Mapping
 from .contracts import validate_capability_payload
 from .parsers import digest_source_facts, parse, summarize_source_facts
 from .registry import ModuleDescriptor, PlanError, RegisteredModule
-from .semantics.appendices import collect_native_appendix_candidates, collect_source_appendix_semantics, prepare_native_appendix_semantics
-from .semantics.captions import collect_caption_candidates, collect_source_caption_semantics
-from .semantics.lists import analyze_lists
+from .semantics.appendices import collect_native_appendix_candidates, collect_source_appendix_semantics, prepare_native_appendix_semantics, recognize_appendix_semantics
+from .semantics.captions import collect_caption_candidates, collect_source_caption_semantics, recognize_caption_semantics
+from .semantics.lists import analyze_lists, recognize_list_semantics
 from .semantics.paragraphs import collect_paragraph_candidates
 from .semantics.protected import collect_protected_candidates
 from .semantics.regions import resolve_source_regions
 from .semantics.source_ast import materialize_list_semantics
 from .semantics.structure import collect_structure_candidates
-from .semantics.tables import collect_source_table_semantics, collect_table_candidates
+from .semantics.tables import collect_source_table_semantics, collect_table_candidates, recognize_table_semantics
 
 class _ObservedMapping(MutableMapping[str, Any]):
     def __init__(self, values: Mapping[str, Any], observe: Callable[[str], None]) -> None: self.values, self.observe = dict(values), observe
@@ -83,7 +83,7 @@ def _metrics_stage(context: ModuleExecutionContext, name: str) -> Iterator[None]
 def _registered(module_id: str, stages: tuple[str, ...], requires: tuple[str, ...], provides: tuple[str, ...], execute: Callable[[ModuleExecutionContext], Any], **kwargs: Any) -> RegisteredModule:
     return RegisteredModule(ModuleDescriptor(module_id, "1.0", stages, requires, provides, **kwargs), execute)
 
-def source_facts_module(*, native: bool = False) -> RegisteredModule:
+def source_facts_module() -> RegisteredModule:
     def execute(c: ModuleExecutionContext) -> dict[str, Any]:
         with c.stage("source"):
             restored = c.request.options.get("restored_source_facts")
@@ -92,18 +92,18 @@ def source_facts_module(*, native: bool = False) -> RegisteredModule:
             metrics = c.services.get("metrics"); metrics.record_source_opened() if metrics is not None else None
             summary, digest = summarize_source_facts(dict(facts)), digest_source_facts(dict(facts))
         c.provide("source_facts", facts); c.evidence["source-facts-parser"] = summary
-        if native: c.provide("source_facts_summary", summary); c.provide("source_facts_digest", digest)
+        c.provide("source_facts_summary", summary); c.provide("source_facts_digest", digest)
         return summary
-    return _registered("source-facts-parser", ("source",), (), ("source_facts", "source_facts_summary", "source_facts_digest") if native else ("source_facts",), execute, runtime_services=("metrics", "store"), option_keys=("restored_source_facts",))
+    return _registered("source-facts-parser", ("source",), (), ("source_facts", "source_facts_summary", "source_facts_digest"), execute, runtime_services=("metrics", "store"), option_keys=("restored_source_facts",))
 
 def source_region_module() -> RegisteredModule:
     def execute(c: ModuleExecutionContext) -> dict[str, Any]:
         result = resolve_source_regions(c.request.input_path, c.require("source_facts")); c.provide("source_regions", result["regions"]); c.provide("source_region_candidates", result["candidates"]); c.provide("source_region", result); c.evidence["source-region"] = result["evidence"]; return result["evidence"]
     return _registered("source-region", ("scope",), ("source_facts",), ("source_regions", "source_region_candidates", "source_region"), execute)
 
-def document_structure_module(*, protect_semantics: bool = False) -> RegisteredModule:
+def document_structure_module() -> RegisteredModule:
     def execute(c: ModuleExecutionContext) -> dict[str, Any]:
-        items = collect_structure_candidates(c.require("source_facts"), c.require("source_regions"), protect_semantics=protect_semantics); evidence = {"candidate_count": len(items), "title_candidate_count": sum(x.get("proposal", {}).get("value", {}).get("role") == "title" for x in items), "heading_candidate_count": sum(x.get("proposal", {}).get("value", {}).get("role") == "heading" for x in items), "body_candidate_count": sum(x.get("proposal", {}).get("value", {}).get("role") == "body" for x in items)}; c.provide("document_structure_candidates", items); c.provide("document_structure", evidence); c.evidence["document-structure"] = evidence; return evidence
+        items = collect_structure_candidates(c.require("source_facts"), c.require("source_regions"), protect_semantics=True); evidence = {"candidate_count": len(items), "title_candidate_count": sum(x.get("proposal", {}).get("value", {}).get("role") == "title" for x in items), "heading_candidate_count": sum(x.get("proposal", {}).get("value", {}).get("role") == "heading" for x in items), "body_candidate_count": sum(x.get("proposal", {}).get("value", {}).get("role") == "body" for x in items)}; c.provide("document_structure_candidates", items); c.provide("document_structure", evidence); c.evidence["document-structure"] = evidence; return evidence
     return _registered("document-structure", ("role",), ("source_facts", "source_regions"), ("document_structure_candidates", "document_structure"), execute)
 
 def protected_content_module() -> RegisteredModule:
@@ -111,42 +111,36 @@ def protected_content_module() -> RegisteredModule:
         items = collect_protected_candidates(c.require("source_facts")); evidence = {"candidate_count": len(items), "note_count": sum(x.get("proposal", {}).get("value", {}).get("reason") == "note" for x in items), "opaque_count": sum(str(x.get("proposal", {}).get("value", {}).get("reason") or "").startswith("opaque_") for x in items)}; c.provide("protected_content_candidates", items); c.provide("protected_content", evidence); c.evidence["protected-content"] = evidence; return evidence
     return _registered("protected-content", ("role",), ("source_facts",), ("protected_content_candidates", "protected_content"), execute)
 
-def list_semantics_module(*, native: bool = False) -> RegisteredModule:
+def list_semantics_module() -> RegisteredModule:
     def execute(c: ModuleExecutionContext) -> dict[str, Any]:
-        facts = c.require("source_facts")
-        if native: result = analyze_lists(facts); _m, candidates, item_map = materialize_list_semantics(c.require("source_ast"), facts, result)
-        else:
-            protected = {str(n) for x in c.require("protected_content_candidates") for n in x.get("target_node_ids", [])}; headings = {str(n) for x in c.require("document_structure_candidates") if x.get("proposal", {}).get("value", {}).get("role") in {"title", "heading"} for n in x.get("target_node_ids", [])}; result = analyze_lists(facts, context={"protected_node_ids": sorted(protected | headings)})
+        recognition = recognize_list_semantics(c.require("source_facts"), c.require("source_ast")); result, candidates, item_map = recognition["result"], recognition["candidates"], recognition["item_map"]
         evidence = {"status": result["status"], "list_count": len(result["lists"]), "item_count": len(result["items"]), "continuation_count": len(result["continuations"]), "diagnostic_count": len(result["diagnostics"])}; c.provide("list_semantics_result", result)
-        if native: c.provide("list_semantics_candidates", candidates); c.provide("list_item_map", item_map)
+        c.provide("list_semantics_candidates", candidates); c.provide("list_item_map", item_map)
         c.provide("list_semantics", evidence); c.evidence["list-semantics"] = evidence; return evidence
-    return _registered("list-semantics", ("relation",), ("source_facts", "source_ast") if native else ("source_facts", "document_structure_candidates", "protected_content_candidates"), ("list_semantics_result", "list_semantics_candidates", "list_item_map", "list_semantics") if native else ("list_semantics_result", "list_semantics"), execute)
+    return _registered("list-semantics", ("relation",), ("source_facts", "source_ast"), ("list_semantics_result", "list_semantics_candidates", "list_item_map", "list_semantics"), execute)
 
-def table_semantics_module(*, native: bool = False) -> RegisteredModule:
+def table_semantics_module() -> RegisteredModule:
     def execute(c: ModuleExecutionContext) -> dict[str, Any]:
-        result = collect_source_table_semantics(c.require("source_facts")); c.provide("table_semantics_result", result)
-        if native: candidates = collect_table_candidates(c.require("source_ast")); c.provide("table_semantics_candidates", candidates); evidence = {"candidate_count": len(candidates), "source_count": len(result)}
-        else: evidence = {"table_count": len(result), "data_count": sum(x.get("table_type") == "data" for x in result), "layout_count": sum(x.get("table_type") == "layout" for x in result), "code_sample_count": sum(x.get("table_type") == "code_sample" for x in result), "caption_eligible_count": sum(bool(x.get("caption_eligible")) for x in result)}
+        recognition = recognize_table_semantics(c.require("source_facts"), c.require("source_ast")); result, candidates = recognition["result"], recognition["candidates"]
+        c.provide("table_semantics_result", result); c.provide("table_semantics_candidates", candidates); evidence = {"candidate_count": len(candidates), "source_count": len(result)}
         c.provide("table_semantics", evidence); c.evidence["table-semantics"] = evidence; return evidence
-    return _registered("table-semantics", ("relation",), ("source_facts", "source_ast") if native else ("source_facts",), ("table_semantics_result", "table_semantics_candidates", "table_semantics") if native else ("table_semantics_result", "table_semantics"), execute)
+    return _registered("table-semantics", ("relation",), ("source_facts", "source_ast"), ("table_semantics_result", "table_semantics_candidates", "table_semantics"), execute)
 
-def caption_semantics_module(*, native: bool = False) -> RegisteredModule:
+def caption_semantics_module() -> RegisteredModule:
     def execute(c: ModuleExecutionContext) -> dict[str, Any]:
-        result = collect_source_caption_semantics(c.require("source_facts"), c.require("table_semantics_result")); captions = result["captions"]; c.provide("caption_semantics_result", result); candidates = collect_caption_candidates(c.require("source_ast"), c.require("source_facts")) if native else []
-        if native: c.provide("caption_semantics_candidates", candidates)
+        recognition = recognize_caption_semantics(c.require("source_facts"), c.require("source_ast"), c.require("table_semantics_result")); result, candidates = recognition["result"], recognition["candidates"]; captions = result["captions"]
+        c.provide("caption_semantics_result", result); c.provide("caption_semantics_candidates", candidates)
         generated = sum(1 for x in candidates if isinstance(x.get("proposal"), Mapping) and x["proposal"].get("operation") == "create_node" and isinstance(x["proposal"].get("value"), Mapping) and isinstance(x["proposal"]["value"].get("node"), Mapping) and x["proposal"]["value"]["node"].get("role") == "caption")
         evidence = {"caption_count": len(captions), "table_caption_count": sum(x.get("caption_type") == "table" for x in captions), "figure_caption_count": sum(x.get("caption_type") == "figure" for x in captions), "associated_count": sum(x.get("status") == "associated" for x in captions), "issue_count": len(result["issues"]), "generated_caption_count": generated}; c.provide("caption_semantics", evidence); c.evidence["caption-semantics"] = evidence; return evidence
-    return _registered("caption-semantics", ("relation",), ("source_facts", "source_ast", "table_semantics_result") if native else ("source_facts", "table_semantics_result"), ("caption_semantics_result", "caption_semantics_candidates", "caption_semantics") if native else ("caption_semantics_result", "caption_semantics"), execute)
+    return _registered("caption-semantics", ("relation",), ("source_facts", "source_ast", "table_semantics_result"), ("caption_semantics_result", "caption_semantics_candidates", "caption_semantics"), execute)
 
-def appendix_semantics_module(*, native: bool = False) -> RegisteredModule:
+def appendix_semantics_module() -> RegisteredModule:
     def execute(c: ModuleExecutionContext) -> dict[str, Any]:
-        facts = c.require("source_facts"); result = collect_source_appendix_semantics(facts)
-        if native:
-            ast, lists = c.require("source_ast"), c.require("list_semantics_result"); result = prepare_native_appendix_semantics(facts, ast, result, lists); c.provide("appendix_semantics_candidates", collect_native_appendix_candidates(facts, ast, result, lists))
-        evidence = {"candidate_count": len(result["candidates"]), "accepted_count": sum(bool(x.get("accepted")) for x in result["candidates"]), "rejected_count": sum(not bool(x.get("accepted")) for x in result["candidates"]), "range_count": len(result["ranges"]), "heading_count": sum(len(x.get("heading_decisions") or []) for x in result["ranges"]), "issue_count": len(result["issues"])}; c.provide("appendix_semantics_result", result); c.provide("appendix_semantics", result if native else evidence); c.evidence["appendix-semantics"] = evidence; return evidence
-    return _registered("appendix-semantics", ("relation",), ("source_facts", "source_ast", "list_semantics_result") if native else ("source_facts",), ("appendix_semantics_result", "appendix_semantics_candidates", "appendix_semantics") if native else ("appendix_semantics_result", "appendix_semantics"), execute)
+        recognition = recognize_appendix_semantics(c.require("source_facts"), c.require("source_ast"), c.require("list_item_map")); result, candidates = recognition["result"], recognition["candidates"]
+        evidence = {"candidate_count": len(result["candidates"]), "accepted_count": sum(bool(x.get("accepted")) for x in result["candidates"]), "rejected_count": sum(not bool(x.get("accepted")) for x in result["candidates"]), "range_count": len(result["ranges"]), "heading_count": sum(len(x.get("heading_decisions") or []) for x in result["ranges"]), "issue_count": len(result["issues"])}; c.provide("appendix_semantics_candidates", candidates); c.provide("appendix_semantics_result", result); c.provide("appendix_semantics", result); c.evidence["appendix-semantics"] = evidence; return evidence
+    return _registered("appendix-semantics", ("relation",), ("source_facts", "source_ast", "list_item_map"), ("appendix_semantics_result", "appendix_semantics_candidates", "appendix_semantics"), execute)
 
-def native_semantic_modules() -> tuple[RegisteredModule, ...]: return (source_facts_module(native=True), source_region_module(), document_structure_module(protect_semantics=True), protected_content_module(), list_semantics_module(native=True), table_semantics_module(native=True), caption_semantics_module(native=True), appendix_semantics_module(native=True))
+def native_semantic_modules() -> tuple[RegisteredModule, ...]: return (source_facts_module(), source_region_module(), document_structure_module(), protected_content_module(), list_semantics_module(), table_semantics_module(), caption_semantics_module(), appendix_semantics_module())
 def collect_native_candidates(*, source_region_candidates: Iterable[Mapping[str, Any]], document_structure_candidates: Iterable[Mapping[str, Any]], protected_content_candidates: Iterable[Mapping[str, Any]], list_semantics_candidates: Iterable[Mapping[str, Any]], appendix_semantics_candidates: Iterable[Mapping[str, Any]], table_semantics_candidates: Iterable[Mapping[str, Any]], caption_semantics_candidates: Iterable[Mapping[str, Any]], paragraph_semantics_candidates: Iterable[Mapping[str, Any]] = ()) -> list[Mapping[str, Any]]: return [*source_region_candidates, *document_structure_candidates, *protected_content_candidates, *list_semantics_candidates, *appendix_semantics_candidates, *table_semantics_candidates, *caption_semantics_candidates, *paragraph_semantics_candidates]
 def _compat(name: str, fallback: Any) -> Any:
     return getattr(sys.modules.get("wxdf.builtin_modules"), name, fallback)
@@ -161,36 +155,52 @@ def compatibility_hook(name: str, fallback: Any) -> Any:
 def build_native_candidate_baseline(source_path: Path | str, source_facts: Mapping[str, Any], source_ast: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     regions = _compat("resolve_source_regions", resolve_source_regions)(source_path, source_facts)
     lists = _compat("analyze_lists", analyze_lists)(source_facts)
-    _model, list_candidates, _item_map = _compat("materialize_list_semantics", materialize_list_semantics)(source_ast, source_facts, lists)
+    _model, list_candidates, _native_item_map = _compat("materialize_list_semantics", materialize_list_semantics)(source_ast, source_facts, lists)
+    item_map = {
+        str(item.get("item_id")): str(item.get("list_id"))
+        for item in lists.get("items", [])
+        if item.get("item_id") and item.get("list_id")
+    }
     appendix = _compat("prepare_native_appendix_semantics", prepare_native_appendix_semantics)(
         source_facts,
         source_ast,
         _compat("collect_source_appendix_semantics", collect_source_appendix_semantics)(source_facts),
-        lists,
+        item_map,
     )
     caption_builder = _compat("collect_caption_candidates", collect_caption_candidates)
     try:
         import inspect
 
-        accepts_facts = len(inspect.signature(caption_builder).parameters) >= 2
+        caption_parameters = inspect.signature(caption_builder).parameters
     except (TypeError, ValueError):
-        accepts_facts = True
-    caption_candidates = (
-        caption_builder(source_ast, source_facts)
-        if accepts_facts
-        else caption_builder(source_ast)
+        caption_parameters = None
+    accepts_facts = caption_parameters is None or len(caption_parameters) >= 2
+    accepts_semantics = caption_parameters is None or "caption_semantics" in caption_parameters
+    caption_semantics = (
+        _compat("collect_source_caption_semantics", collect_source_caption_semantics)(
+            source_facts,
+            _compat("collect_source_table_semantics", collect_source_table_semantics)(source_facts),
+        )
+        if accepts_semantics
+        else None
     )
+    if accepts_semantics:
+        caption_candidates = caption_builder(source_ast, source_facts, caption_semantics=caption_semantics)
+    elif accepts_facts:
+        caption_candidates = caption_builder(source_ast, source_facts)
+    else:
+        caption_candidates = caption_builder(source_ast)
     groups: dict[str, Any] = {
         "source_region_candidates": regions["candidates"],
         "document_structure_candidates": _compat("collect_structure_candidates", collect_structure_candidates)(source_facts, regions["regions"], protect_semantics=True),
         "protected_content_candidates": _compat("collect_protected_candidates", collect_protected_candidates)(source_facts),
         "list_semantics_candidates": list_candidates,
-        "appendix_semantics_candidates": _compat("collect_native_appendix_candidates", collect_native_appendix_candidates)(source_facts, source_ast, appendix, lists),
+        "appendix_semantics_candidates": _compat("collect_native_appendix_candidates", collect_native_appendix_candidates)(source_facts, source_ast, appendix, item_map),
         "table_semantics_candidates": _compat("collect_table_candidates", collect_table_candidates)(source_ast),
         "caption_semantics_candidates": caption_candidates,
     }
     if source_facts.get("facts_schema_version"):
-        groups["paragraph_semantics_candidates"] = _compat("collect_paragraph_candidates", collect_paragraph_candidates)(source_facts, source_ast)
+        groups["paragraph_semantics_candidates"] = _compat("collect_paragraph_candidates", collect_paragraph_candidates)(source_facts, source_ast, caption_semantics_result=caption_semantics)
     return _compat("collect_native_candidates", collect_native_candidates)(**groups)
 
 __all__ = ["ModuleExecutionContext", "appendix_semantics_module", "build_native_candidate_baseline", "caption_semantics_module", "collect_native_candidates", "compatibility_hook", "document_structure_module", "list_semantics_module", "native_semantic_modules", "protected_content_module", "source_facts_module", "source_region_module", "table_semantics_module"]

@@ -10,10 +10,10 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from wxdf.kernel import ConversionKernel
 from wxdf.model import inline_text_projection
 from wxdf.parsers import parse
 from wxdf.semantics.parser_equivalence import compare_parser_equivalence
+from wxdf.semantics.source_ast import build_source_ast
 from wxdf.semantics.source_projection import project_source_facts
 
 
@@ -70,7 +70,7 @@ def test_parser_equivalence_compares_canonical_semantics_instead_of_storage_shap
     table.cell(0, 0).add_paragraph("第二段")
     document.save(source)
     facts = parse(source)
-    legacy_ast = ConversionKernel._facts_to_ast(facts)
+    legacy_ast = build_source_ast(facts)
 
     root_children = legacy_ast["document"]["children"]["root"]
     caption_id, appendix_id, table_id = root_children
@@ -104,7 +104,7 @@ def test_parser_text_inventory_status_uses_the_same_multiset_contract_as_issues(
     source = tmp_path / "source.md"
     source.write_text("第一段\n\n第二段\n", encoding="utf-8")
     facts = parse(source)
-    legacy_ast = ConversionKernel._facts_to_ast(facts)
+    legacy_ast = build_source_ast(facts)
     legacy_ast["document"]["children"]["root"].reverse()
 
     audit = compare_parser_equivalence(facts, _all_source_regions(), legacy_ast)
@@ -120,7 +120,7 @@ def test_parser_equivalence_approves_legacy_empty_list_created_from_formula_numb
     document.add_paragraph("(3)")
     document.save(source)
     facts = parse(source)
-    legacy_ast = ConversionKernel._facts_to_ast(facts)
+    legacy_ast = build_source_ast(facts)
     paragraph_id = legacy_ast["document"]["children"]["root"][0]
     source_position = facts["evidence"][paragraph_id]["source_position"]
     assert inline_text_projection(legacy_ast["document"]["blocks"][paragraph_id]["inline_content"]) == "(3)"

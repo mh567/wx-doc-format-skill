@@ -24,6 +24,7 @@ from wxdf.rendering import render
 from wxdf.resolver import resolve
 from wxdf.run_store import CheckpointError, load_checkpoint, save_checkpoint
 from wxdf.semantics.lists import analyze_lists
+from wxdf.semantics.source_ast import build_source_ast, materialize_list_semantics
 from wxdf.review import accept_candidate
 from wxdf.transaction import make_snapshot
 from wxdf.validation import validate_ast, validate_checkpoint
@@ -166,10 +167,10 @@ def _reclassification_decisions() -> list[dict]:
 
 def _production_reclassification() -> tuple[dict, dict, list[dict]]:
     facts = _source_facts()
-    source_ast = ConversionKernel._facts_to_ast(facts)
+    source_ast = build_source_ast(facts)
     source_ast["document"]["blocks"]["p0"].update({"role": "heading", "level": 1})
     list_result = analyze_lists(facts)
-    _, candidates, _ = ConversionKernel._materialize_list_semantics(source_ast, facts, list_result)
+    _, candidates, _ = materialize_list_semantics(source_ast, facts, list_result)
     decision_set = resolve(candidates, {"revision": source_ast["revision"]})
     assert decision_set["unresolved"] == []
     operations = [decision["operation"] for decision in decision_set["decisions"]]
@@ -188,7 +189,7 @@ def _production_reclassification() -> tuple[dict, dict, list[dict]]:
 
 def _parsed_heading_reclassification(source: Path) -> tuple[dict, dict, str, list[dict]]:
     facts = parse(source)
-    source_ast = ConversionKernel._facts_to_ast(facts)
+    source_ast = build_source_ast(facts)
     heading_id = next(node_id for node_id, node in source_ast["document"]["blocks"].items() if node.get("role") == "heading")
     heading_ref = source_ast["document"]["blocks"][heading_id]["source_ref"]
     decisions = [

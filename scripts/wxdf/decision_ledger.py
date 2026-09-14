@@ -654,6 +654,21 @@ def replay(facts: Mapping[str, Any], ledger: Mapping[str, Any], plan: Any) -> di
     return _replay_snapshot(facts, ledger, plan).ast
 
 
+def ledger_replay_report(context: Any) -> dict[str, Any] | None:
+    """Complete the ledger replay record with the resolved decision count."""
+
+    if context is None:
+        return None
+    replay = context.artifacts.get("ledger_replay")
+    if replay is None:
+        return None
+    record = dict(replay)
+    decision_set = context.artifacts.get("decision_set")
+    if decision_set is not None:
+        record["decision_count"] = len(decision_set.get("decisions") or [])
+    return record
+
+
 def _decision_as_revision(decision: Mapping[str, Any], parent_revision: int, index: int) -> dict[str, Any]:
     if "revision_id" in decision and all(field in decision for field in _REQUIRED):
         revision = copy.deepcopy(dict(decision))

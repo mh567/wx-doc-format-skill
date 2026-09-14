@@ -790,6 +790,12 @@ def _parse_docx(source: Path | str, *, store: SourceStore) -> dict[str, Any]:
     return facts
 
 
+def detect_source_type(input_path: Path | str) -> str:
+    """Return the source type the native chain preflights against."""
+
+    return "docx" if Path(input_path).suffix.lower() == ".docx" else "markdown"
+
+
 def parse(source: Path | str, context: dict[str, Any] | None = None) -> dict[str, Any]:
     context = context or {}
     store = context.get("source_store") or SourceStore()

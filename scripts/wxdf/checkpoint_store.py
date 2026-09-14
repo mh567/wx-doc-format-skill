@@ -40,6 +40,10 @@ class CheckpointError(RuntimeError):
         super().__init__(message)
 
 
+# The native conversion profile stored by a valid native-v2 checkpoint.
+_NATIVE_PROFILE = "wx-default-v2"
+
+
 _TRANSITIONS: dict[str, frozenset[str]] = {
     "created": frozenset({"created", "running", "failed", "cancelled"}),
     "running": frozenset({"running", "waiting_external", "completed", "completed_with_warnings", "failed", "cancelled"}),
@@ -306,6 +310,52 @@ def write_native_waiting_checkpoint(
         "candidate_baseline_id": candidate_baseline_id,
     }
     save_checkpoint(checkpoint, checkpoint_path)
+    return checkpoint
+
+
+def lock_native_checkpoint_identity(checkpoint_path: Path) -> dict[str, Any]:
+    """Validate and migrate the native identity before responses are read."""
+
+    checkpoint_path = _path(checkpoint_path)
+    checkpoint = load_checkpoint(checkpoint_path)
+    configuration = checkpoint.get("configuration")
+    if not isinstance(configuration, Mapping):
+        raise CheckpointError(
+            "native checkpoint has no configuration identity",
+            code="checkpoint_configuration_missing",
+        )
+    if configuration.get("pipeline") != "modular":
+        raise CheckpointError(
+            "native checkpoint pipeline is not modular",
+            code="checkpoint_pipeline_mismatch",
+        )
+    if configuration.get("modular_profile") != "native-v2":
+        raise CheckpointError(
+            "native checkpoint modular profile is not native-v2",
+            code="checkpoint_profile_mismatch",
+        )
+    if configuration.get("list_policy") != _NATIVE_PROFILE:
+        raise CheckpointError(
+            "native checkpoint configuration list policy is not wx-default-v2",
+            code="checkpoint_list_policy_mismatch",
+        )
+    if checkpoint.get("list_policy") != _NATIVE_PROFILE:
+        raise CheckpointError(
+            "native checkpoint list policy is not wx-default-v2",
+            code="checkpoint_list_policy_mismatch",
+        )
+
+    profile = checkpoint.get("profile")
+    if profile == "wx_full_rules-native-v2":
+        migrated = copy.deepcopy(checkpoint)
+        migrated["profile"] = _NATIVE_PROFILE
+        save_checkpoint(migrated, checkpoint_path)
+        return migrated
+    if profile != _NATIVE_PROFILE:
+        raise CheckpointError(
+            "native checkpoint profile is unsupported",
+            code="checkpoint_profile_mismatch",
+        )
     return checkpoint
 
 
@@ -1341,7 +1391,7 @@ def load_checkpoint(
                 raise CheckpointError(f"contract mismatch for {name}", code="contract_mismatch")
     if current_source_facts is not None:
         from .decision_ledger import LedgerError, _replay_snapshot, project_ledger, source_binding
-        from .kernel import ConversionKernel
+        from .semantics.source_ast import build_source_ast
         from .transaction import make_snapshot
 
         try:
@@ -1356,7 +1406,7 @@ def load_checkpoint(
                 checkpoint["decision_ledger"] = copy.deepcopy(projection)
                 checkpoint["content_overlay"] = []
                 checkpoint["presentation_override"] = []
-                checkpoint["source_ast"] = ConversionKernel._facts_to_ast(current_source_facts)
+                checkpoint["source_ast"] = build_source_ast(current_source_facts)
                 checkpoint["normalized_ast"] = None
                 checkpoint["target_map"] = {
                     "revision": checkpoint["source_ast"]["revision"],
@@ -1386,7 +1436,7 @@ def load_checkpoint(
             projection = project_ledger(current_source_facts, checkpoint["decision_ledger"])
             checkpoint["decision_ledger_projection"] = projection
             checkpoint["decision_ledger"] = copy.deepcopy(projection)
-            source_ast = ConversionKernel._facts_to_ast(current_source_facts)
+            source_ast = build_source_ast(current_source_facts)
             blocking = {
                 "revision_precondition_failed",
                 "revision_conflict",
@@ -1477,6 +1527,7 @@ __all__ = [
     "content_digest",
     "file_digest",
     "load_checkpoint",
+    "lock_native_checkpoint_identity",
     "overlay_entries",
     "prepare_native_resume",
     "record_response",

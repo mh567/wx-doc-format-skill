@@ -100,6 +100,7 @@ def _native_candidate_set(context: ModuleExecutionContext) -> list[Mapping[str, 
         candidate_groups["paragraph_semantics_candidates"] = collect_paragraph_candidates(
             context.require("source_facts"),
             context.require("source_ast"),
+            caption_semantics_result=context.artifacts.get("caption_semantics_result"),
         )
     candidates = collect_candidates(**candidate_groups)
     baseline_candidates = list(candidates)

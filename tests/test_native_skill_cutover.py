@@ -44,6 +44,7 @@ from wxdf.kernel import ConversionKernel, ConversionRequest
 from wxdf.parsers import parse
 from wxdf.publication import PublicationError, publish_bundle
 from wxdf.review import accept_candidate, evaluate_candidate, mode_manifest
+from wxdf.semantics.source_ast import build_source_ast
 from wxdf.validation import validate_checkpoint, validate_patch
 
 TEMPLATE = ROOT / "assets" / "wx_template.docx"
@@ -509,7 +510,7 @@ def _t03_target_node(source: Path) -> tuple[str, int, dict]:
     """Return the deterministic target node, base revision and source ref."""
 
     facts = parse(source)
-    revision = ConversionKernel._facts_to_ast(facts)["revision"]
+    revision = build_source_ast(facts)["revision"]
     root_children = facts["children"]["root"]
     target = next(
         node_id

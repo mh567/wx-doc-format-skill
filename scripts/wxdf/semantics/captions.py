@@ -299,15 +299,15 @@ def _caption_target_block_id(
 def _authored_caption_candidates(
     ast: Mapping[str, Any],
     facts: Mapping[str, Any],
+    semantics: Mapping[str, Any],
 ) -> tuple[list[dict[str, Any]], set[str]]:
-    """Publish authored caption role, content, association and image moves."""
+    """Publish authored caption role, content, association and image moves.
 
-    from .tables import collect_source_table_semantics
+    ``semantics`` is the published caption result owned by
+    ``collect_source_caption_semantics``.  This function reads it instead of
+    recomputing it, so one recognizer owns the canonical caption semantics.
+    """
 
-    semantics = collect_source_caption_semantics(
-        facts,
-        collect_source_table_semantics(facts),
-    )
     blocks = ast["document"]["blocks"]
     root_children = list(ast["document"]["children"].get(ast["document"]["root_id"], []))
     result: list[dict[str, Any]] = []
@@ -472,6 +472,8 @@ def _captioned_targets(ast: Mapping[str, Any]) -> set[str]:
 def collect_caption_candidates(
     ast: Mapping[str, Any],
     facts: Mapping[str, Any] | None = None,
+    *,
+    caption_semantics: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     validate_ast(ast)
     if facts is None:
@@ -479,7 +481,14 @@ def collect_caption_candidates(
         captioned = _captioned_targets(ast)
     else:
         validate_source_facts(facts)
-        result, captioned = _authored_caption_candidates(ast, facts)
+        if caption_semantics is None:
+            from .tables import collect_source_table_semantics
+
+            caption_semantics = collect_source_caption_semantics(
+                facts,
+                collect_source_table_semantics(facts),
+            )
+        result, captioned = _authored_caption_candidates(ast, facts, caption_semantics)
     for node_id, block in ast["document"]["blocks"].items():
         if block.get("block_type") == "table" and block.get("table_type") == "data":
             value = {"caption_type": "table", "eligible": True}
@@ -708,4 +717,20 @@ def collect_source_caption_semantics(
     return {"captions": captions, "issues": issues}
 
 
-__all__ = ["audit_caption_placement", "build_caption_overlay", "collect_caption_candidates", "collect_source_caption_semantics", "invalidate_overlay"]
+def recognize_caption_semantics(
+    facts: Mapping[str, Any],
+    source_ast: Mapping[str, Any],
+    table_semantics_result: list[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Own the whole caption concept: facts result plus AST candidates."""
+
+    result = collect_source_caption_semantics(facts, table_semantics_result)
+    candidates = collect_caption_candidates(
+        source_ast,
+        facts,
+        caption_semantics=result,
+    )
+    return {"result": result, "candidates": candidates}
+
+
+__all__ = ["audit_caption_placement", "build_caption_overlay", "collect_caption_candidates", "collect_source_caption_semantics", "invalidate_overlay", "recognize_caption_semantics"]

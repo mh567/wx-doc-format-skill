@@ -16,9 +16,10 @@ from test_modular_ast import _ast
 from wxdf.builtin_modules import native_semantic_modules
 from wxdf.kernel import ConversionKernel, ConversionRequest
 from wxdf.parsers import parse
-from wxdf.registry import ModuleDescriptor, PlanError, build_native_v2_registry
+from wxdf.registry import ModuleDescriptor, PlanError, build_native_v2_registry, native_preflight
 from wxdf.resolver import resolve
 from wxdf.semantics.lists import analyze_lists
+from wxdf.semantics.source_ast import build_source_ast, materialize_list_semantics
 from wxdf.transaction import apply_stage_batch, make_snapshot
 
 
@@ -118,10 +119,10 @@ def _list_facts(*, continuation: bool = False, empty_item: bool = False) -> dict
 
 def test_list_continuation_is_materialized_as_an_association_transaction() -> None:
     facts = _list_facts(continuation=True)
-    source_ast = ConversionKernel._facts_to_ast(facts)
+    source_ast = build_source_ast(facts)
     list_result = analyze_lists(facts)
 
-    materialized, candidates, _ = ConversionKernel._materialize_list_semantics(source_ast, facts, list_result)
+    materialized, candidates, _ = materialize_list_semantics(source_ast, facts, list_result)
     continuation_candidates = [
         candidate
         for candidate in candidates
@@ -147,10 +148,10 @@ def test_list_continuation_is_materialized_as_an_association_transaction() -> No
 
 def test_generated_list_anchor_is_created_by_the_transaction() -> None:
     facts = _list_facts(empty_item=True)
-    source_ast = ConversionKernel._facts_to_ast(facts)
+    source_ast = build_source_ast(facts)
     list_result = analyze_lists(facts)
 
-    materialized, candidates, _ = ConversionKernel._materialize_list_semantics(source_ast, facts, list_result)
+    materialized, candidates, _ = materialize_list_semantics(source_ast, facts, list_result)
     anchor_candidates = [
         candidate
         for candidate in candidates
@@ -188,12 +189,12 @@ def test_module_descriptor_preflight_declares_contract_and_audits() -> None:
 
 def test_native_preflight_rejects_text_source_type() -> None:
     with pytest.raises(PlanError, match="does not support source type text"):
-        ConversionKernel._native_preflight(_ast(0), "text", "wx-default-v2")
+        native_preflight(_ast(0), "text", "wx-default-v2")
 
 
 def test_native_v2_preflight_builds_plan_from_registered_modules() -> None:
     registry = build_native_v2_registry()
-    plan = ConversionKernel._native_preflight(_ast(0), "markdown", "wx-default-v2")
+    plan = native_preflight(_ast(0), "markdown", "wx-default-v2")
 
     assert [module.module_id for module in plan.modules] == [
         "source-facts-parser",
@@ -241,10 +242,14 @@ def test_native_v2_default_factory_has_a_single_full_chain_shape() -> None:
 
 
 def test_native_fail_policy_blocks_unresolved_decisions_before_publish() -> None:
-    plan = ConversionKernel._native_preflight(_ast(0), "markdown", "wx-default-v2")
+    from wxdf.native_stages import _plan_blocks_publication
+    from wxdf.semantic_modules import ModuleExecutionContext
 
-    assert ConversionKernel._native_should_block_publish(plan, {"unresolved": [{"code": "candidate_conflict"}]}) is True
-    assert ConversionKernel._native_should_block_publish(plan, {"unresolved": []}) is False
+    plan = native_preflight(_ast(0), "markdown", "wx-default-v2")
+    context = ModuleExecutionContext(request=None, services={"execution_plan": plan})
+
+    assert _plan_blocks_publication(context, {"unresolved": [{"code": "candidate_conflict"}]}) is True
+    assert _plan_blocks_publication(context, {"unresolved": []}) is False
 
 
 def test_native_unresolved_decisions_do_not_create_a_published_docx(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -300,10 +305,10 @@ def test_list_materialization_emits_structure_candidates_without_mutating_source
     facts["containers"] = {"root": facts["containers"]["root"]}
     facts["children"] = {"root": unit_ids}
     facts["evidence"] = {unit_id: facts["evidence"][unit_id] for unit_id in unit_ids}
-    source_ast = ConversionKernel._facts_to_ast(facts)
+    source_ast = build_source_ast(facts)
     baseline = json.loads(json.dumps(source_ast, ensure_ascii=False))
 
-    materialized, candidates, _ = ConversionKernel._materialize_list_semantics(
+    materialized, candidates, _ = materialize_list_semantics(
         source_ast,
         facts,
         analyze_lists(facts),

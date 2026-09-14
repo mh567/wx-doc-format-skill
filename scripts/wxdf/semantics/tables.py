@@ -147,6 +147,17 @@ def collect_table_candidates(ast: Mapping[str, Any]) -> list[dict[str, Any]]:
     return result
 
 
+def recognize_table_semantics(
+    facts: Mapping[str, Any],
+    source_ast: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Own the whole table concept: facts result plus AST candidates."""
+
+    result = collect_source_table_semantics(facts)
+    candidates = collect_table_candidates(source_ast)
+    return {"result": result, "candidates": candidates}
+
+
 def _reading_order(ast: Mapping[str, Any]) -> list[str]:
     document = ast["document"]
     order: list[str] = []
@@ -191,5 +202,6 @@ __all__ = [
     "capture_docx_table_layout",
     "collect_source_table_semantics",
     "collect_table_candidates",
+    "recognize_table_semantics",
     "table_caption_eligible",
 ]

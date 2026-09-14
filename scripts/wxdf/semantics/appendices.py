@@ -313,17 +313,23 @@ def prepare_native_appendix_semantics(
     facts: Mapping[str, Any],
     source_ast: Mapping[str, Any],
     semantics: Mapping[str, Any],
-    list_result: Mapping[str, Any] | None = None,
+    item_map: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Map source-root list paragraphs to their native list containers."""
+    """Map source-root list paragraphs to their native list containers.
+
+    ``item_map`` is the published ``list_item_map`` capability owned by list
+    semantics.  It records the native list container that owns each source list
+    item, so this function reads it instead of rebuilding that map from the
+    list result.
+    """
 
     validate_source_facts(facts)
     validate_ast(source_ast)
     prepared = copy.deepcopy(dict(semantics))
     item_to_list = {
-        str(item.get("item_id")): str(item.get("list_id"))
-        for item in (list_result or {}).get("items", [])
-        if item.get("item_id") and item.get("list_id")
+        str(item_id): str(list_id)
+        for item_id, list_id in (item_map or {}).items()
+        if item_id and list_id
     }
     for appendix in prepared.get("ranges", []):
         seen: set[str] = set()
@@ -343,9 +349,14 @@ def collect_native_appendix_candidates(
     facts: Mapping[str, Any],
     source_ast: Mapping[str, Any],
     semantics: Mapping[str, Any] | None = None,
-    list_result: Mapping[str, Any] | None = None,
+    item_map: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Build native AST operations for accepted SourceFacts appendix ranges."""
+    """Build native AST operations for accepted SourceFacts appendix ranges.
+
+    ``item_map`` is the published ``list_item_map`` capability.  The appendix
+    reads it to resolve the source reference of an appendix list container that
+    the list transaction creates.
+    """
 
     validate_source_facts(facts)
     validate_ast(source_ast)
@@ -355,10 +366,8 @@ def collect_native_appendix_candidates(
     candidates: list[dict[str, Any]] = []
     used_container_ids = set(document["containers"])
     list_first_source_id: dict[str, str] = {}
-    for item in (list_result or {}).get("items", []):
-        list_id = item.get("list_id")
-        item_id = item.get("item_id")
-        if list_id and item_id:
+    for item_id, list_id in (item_map or {}).items():
+        if item_id and list_id:
             list_first_source_id.setdefault(str(list_id), str(item_id))
 
     def node_source_ref(node_id: str) -> dict[str, Any] | None:
@@ -564,6 +573,24 @@ def audit_native_appendix(
     return {"passed": not issues, "checked_appendix_count": checked, "issue_count": len(issues), "issues": issues}
 
 
+def recognize_appendix_semantics(
+    facts: Mapping[str, Any],
+    source_ast: Mapping[str, Any],
+    item_map: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Own the whole appendix concept: facts result plus AST candidates.
+
+    ``item_map`` is the published ``list_item_map`` capability owned by list
+    semantics, which the appendix reads to map source list items onto their
+    native list containers.
+    """
+
+    result = collect_source_appendix_semantics(facts)
+    prepared = prepare_native_appendix_semantics(facts, source_ast, result, item_map)
+    candidates = collect_native_appendix_candidates(facts, source_ast, prepared, item_map)
+    return {"result": prepared, "candidates": candidates}
+
+
 __all__ = [
     "annotate_appendix_ranges",
     "audit_native_appendix",
@@ -571,4 +598,5 @@ __all__ = [
     "collect_native_appendix_candidates",
     "collect_source_appendix_semantics",
     "prepare_native_appendix_semantics",
+    "recognize_appendix_semantics",
 ]

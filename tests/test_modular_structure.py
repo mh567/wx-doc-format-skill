@@ -17,13 +17,13 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 from wxdf.parsers import parse
-from wxdf.kernel import ConversionKernel
 from wxdf.model import inline_text_projection
 from wxdf.semantics.equivalence import compare_structure_equivalence
 from wxdf.semantics.parser_equivalence import compare_parser_equivalence
 from wxdf.semantics.protected import collect_protected_candidates
 from wxdf.semantics.region_bridge import apply_region_decisions
 from wxdf.semantics.regions import classify_regions, collect_scope_candidates, resolve_source_regions
+from wxdf.semantics.source_ast import build_source_ast
 from wxdf.semantics.structure import collect_structure_candidates
 from wxdf.semantics.structure_bridge import apply_structure_decisions
 from wxdf.validation import validate_source_facts
@@ -240,7 +240,7 @@ def test_structure_equivalence_reports_role_and_level_differences_per_source_nod
     facts = parse(source)
     regions = classify_regions(facts)
     candidates = collect_structure_candidates(facts, regions)
-    legacy_ast = ConversionKernel._facts_to_ast(facts)
+    legacy_ast = build_source_ast(facts)
     paragraph_ids = [
         node_id
         for node_id in facts["children"]["root"]
@@ -273,7 +273,7 @@ def test_markdown_structure_candidates_match_legacy_title_and_shifted_heading_le
     facts = parse(source)
     regions = classify_regions(facts)
     candidates = collect_structure_candidates(facts, regions)
-    legacy_ast = ConversionKernel._facts_to_ast(facts)
+    legacy_ast = build_source_ast(facts)
     paragraph_ids = facts["children"]["root"]
     legacy_ast["document"]["blocks"][paragraph_ids[0]]["role"] = "title"
     legacy_ast["document"]["blocks"][paragraph_ids[0]].pop("level", None)
@@ -411,7 +411,7 @@ def test_structure_equivalence_matches_docx_headings_after_manual_number_cleanup
     facts = parse(source)
     regions = classify_regions(facts)
     candidates = collect_structure_candidates(facts, regions)
-    legacy_ast = ConversionKernel._facts_to_ast(facts)
+    legacy_ast = build_source_ast(facts)
     title_id, heading_id = facts["children"]["root"][:2]
     legacy_ast["document"]["blocks"][title_id]["role"] = "title"
     legacy_ast["document"]["blocks"][title_id].pop("level", None)
@@ -434,7 +434,7 @@ def test_structure_equivalence_ignores_roles_owned_by_later_semantic_modules(tmp
     facts = parse(source)
     regions = classify_regions(facts)
     candidates = collect_structure_candidates(facts, regions)
-    legacy_ast = ConversionKernel._facts_to_ast(facts)
+    legacy_ast = build_source_ast(facts)
     node_id = facts["children"]["root"][0]
     legacy_ast["document"]["blocks"][node_id]["role"] = "note"
 
@@ -451,7 +451,7 @@ def test_structure_equivalence_ignores_legacy_appendix_subtree(tmp_path: Path) -
     source.write_text("附录示例\n", encoding="utf-8")
     facts = parse(source)
     regions = classify_regions(facts)
-    legacy_ast = ConversionKernel._facts_to_ast(facts)
+    legacy_ast = build_source_ast(facts)
     title_id = facts["children"]["root"][0]
     legacy_ast["document"]["blocks"][title_id]["role"] = "heading"
     legacy_ast["document"]["blocks"][title_id]["level"] = 1
@@ -474,7 +474,7 @@ def test_parser_equivalence_covers_source_text_without_claiming_semantic_roles(t
     source.write_text("# 文档标题\n\n正文内容\n", encoding="utf-8")
     facts = parse(source)
     regions = classify_regions(facts)
-    legacy_ast = ConversionKernel._facts_to_ast(facts)
+    legacy_ast = build_source_ast(facts)
 
     audit = compare_parser_equivalence(facts, regions, legacy_ast)
 
@@ -491,7 +491,7 @@ def test_parser_equivalence_blocks_switch_when_legacy_list_has_no_native_evidenc
     source.write_text("条目内容\n", encoding="utf-8")
     facts = parse(source)
     regions = classify_regions(facts)
-    legacy_ast = ConversionKernel._facts_to_ast(facts)
+    legacy_ast = build_source_ast(facts)
     paragraph_id = facts["children"]["root"][0]
     legacy_ast["document"]["containers"].update({
         "legacy-list": {

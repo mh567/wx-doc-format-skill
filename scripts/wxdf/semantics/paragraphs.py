@@ -77,6 +77,8 @@ def canonicalize_docx_paragraph_inline_content(
 def collect_paragraph_candidates(
     facts: Mapping[str, Any],
     source_ast: Mapping[str, Any],
+    *,
+    caption_semantics_result: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Publish paragraph-only content repairs for the relation transaction.
 
@@ -84,6 +86,11 @@ def collect_paragraph_candidates(
     evidence is presentation noise and emits a bounded inline-content write.
     List markers are deliberately left to ``list_semantics`` so one paragraph
     has one content owner in the candidate set.
+
+    ``caption_semantics_result`` is the published caption result owned by
+    ``collect_source_caption_semantics``.  When the caller supplies it, this
+    module reads the caption ownership instead of recomputing caption and table
+    semantics.
     """
 
     validate_source_facts(facts)
@@ -91,15 +98,18 @@ def collect_paragraph_candidates(
     if str(facts.get("source", {}).get("source_type") or "") != "docx":
         return []
 
-    from .captions import collect_source_caption_semantics
-    from .tables import collect_source_table_semantics
+    if caption_semantics_result is None:
+        from .captions import collect_source_caption_semantics
+        from .tables import collect_source_table_semantics
+
+        caption_semantics_result = collect_source_caption_semantics(
+            facts,
+            collect_source_table_semantics(facts),
+        )
 
     caption_ids = {
         str(item.get("node_id"))
-        for item in collect_source_caption_semantics(
-            facts,
-            collect_source_table_semantics(facts),
-        ).get("captions", [])
+        for item in caption_semantics_result.get("captions", [])
         if item.get("status") == "associated"
     }
 

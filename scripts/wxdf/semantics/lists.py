@@ -561,3 +561,31 @@ def analyze(facts: Mapping[str, Any], *, context: Mapping[str, Any] | None = Non
 
 def build_list_candidates(facts: Mapping[str, Any], *, context: Mapping[str, Any] | None = None) -> dict[str, Any]:
     return analyze_lists(facts, context=context)
+
+
+def recognize_list_semantics(
+    facts: Mapping[str, Any],
+    source_ast: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Own the whole list concept: facts result, AST candidates and item map.
+
+    ``result`` is the canonical list semantics over SourceFacts and
+    ``candidates`` are the AST proposals that materialize it.  ``item_map``
+    records the native list container that owns each source list item, which is
+    the published ``list_item_map`` capability consumed by appendix semantics.
+    """
+
+    from .source_ast import materialize_list_semantics
+
+    result = analyze_lists(facts)
+    _materialized, candidates, _native_item_map = materialize_list_semantics(
+        source_ast,
+        facts,
+        result,
+    )
+    item_map = {
+        str(item["item_id"]): str(item["list_id"])
+        for item in result.get("items", [])
+        if item.get("item_id") and item.get("list_id")
+    }
+    return {"result": result, "candidates": candidates, "item_map": item_map}
