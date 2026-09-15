@@ -82,12 +82,18 @@ def _list_kind_for_num_fmt(num_fmt: str | None) -> str | None:
     return None
 
 
-def _expected_list_items(normalized: Mapping[str, Any]) -> list[tuple[str, int | None, int]]:
-    """Return (list_kind, numId, ilvl) for every list item in reading order.
+def _expected_list_tree(
+    normalized: Mapping[str, Any],
+    formats: Mapping[int, Mapping[int, str]],
+) -> list[dict[str, Any]]:
+    """Return the AST list tree in reading order with clamped render levels.
 
-    The expectation is derived from the semantic list (marker kind and render
-    level) plus the template numbering ids the renderer writes, so it is the
-    same (list_kind, numId, ilvl) the saved artifact must carry.
+    Each entry carries the ``(list_kind, numId, level)`` the renderer must write
+    plus ``parent_index``: the index of the item that owns this item's list
+    container, set only when this item's render level expresses the nesting
+    (``level == owner render level + 1``).  A nesting the render level cannot
+    express (a clamped level) expects no parent, matching what the renderer can
+    actually save.
     """
 
     document = normalized.get("source_ast", {}).get("document", {})
@@ -96,7 +102,8 @@ def _expected_list_items(normalized: Mapping[str, Any]) -> list[tuple[str, int |
     profile = presentation.get("profile", {}) if isinstance(presentation, Mapping) else {}
     numbering_ids = profile.get("numbering_ids", {}) if isinstance(profile, Mapping) else {}
     children = document.get("children", {})
-    items: list[tuple[str, int | None, int]] = []
+    items: list[dict[str, Any]] = []
+    owners: list[tuple[int, int]] = []
 
     def walk(node_id: str) -> None:
         for child_id in children.get(node_id, []):
@@ -104,16 +111,57 @@ def _expected_list_items(normalized: Mapping[str, Any]) -> list[tuple[str, int |
             if isinstance(node, Mapping):
                 kind = str(node.get("marker_kind") or "ordered")
                 try:
-                    level = max(0, int(node.get("target_level") or 0))
+                    raw_level = max(0, int(node.get("target_level") or 0))
                 except (TypeError, ValueError):
-                    level = 0
+                    raw_level = 0
                 style_role = node.get("style_role")
                 num_id = numbering_ids.get(str(style_role)) if isinstance(numbering_ids, Mapping) and style_role else None
-                items.append((kind, num_id, level))
-            walk(child_id)
+                level = _clamp_expected_level(raw_level, num_id, formats)
+                owner_index = owners[-1][0] if owners else None
+                owner_level = owners[-1][1] if owners else None
+                parent_index = (
+                    owner_index
+                    if owner_index is not None and owner_level is not None and level == owner_level + 1
+                    else None
+                )
+                index = len(items)
+                items.append(
+                    {
+                        "index": index,
+                        "kind": kind,
+                        "num_id": num_id,
+                        "level": level,
+                        "parent_index": parent_index,
+                    }
+                )
+                owners.append((index, level))
+                walk(child_id)
+                owners.pop()
+            else:
+                walk(child_id)
 
     walk(document.get("root_id", "root"))
     return items
+
+
+def _level_parent_chain(levels: list[int]) -> list[int | None]:
+    """Return the implicit parent index of each level in reading order.
+
+    The saved DOCX encodes nesting only through ``w:ilvl``, so the parent of an
+    item is the nearest preceding item one level shallower; a level-0 item has
+    no parent.
+    """
+
+    chain: list[int | None] = []
+    last_at_level: dict[int, int] = {}
+    for index, level in enumerate(levels):
+        parent = last_at_level.get(level - 1) if level > 0 else None
+        chain.append(parent)
+        for stale in [key for key in last_at_level if key >= level]:
+            last_at_level.pop(stale, None)
+        last_at_level[level] = index
+    return chain
+
 
 
 def _numbering_format_map(numbering_xml: bytes) -> dict[int, dict[int, str]]:
@@ -229,21 +277,38 @@ def audit_list_readback(
     require.  A tampered level, a tampered or remapped numbering id, or a
     removed ``numPr`` therefore diverges from the expectation and is reported;
     the AST list tree and the saved output cannot drift apart silently.
+
+    The parent chain is compared too: the saved ``ilvl`` values imply a parent
+    for every item (the nearest preceding item one level shallower), and that
+    implied parent must match the item that owns the item's list container in
+    the AST.  A saved document whose parent chain drifted from the AST list tree
+    is reported as ``list_parent_chain_mismatch`` in addition to the flat
+    mismatch.
     """
 
-    expected = _expected_list_items(normalized)
     document_xml, formats, parse_error = _read_saved_list_parts(path)
-    if parse_error is not None or document_xml is None:
-        return {"passed": False, "issues": [parse_error or {"code": "list_readback_missing_parts"}], "expected": expected, "actual": []}
+    expected_tree = _expected_list_tree(normalized, formats)
     expected_effective = [
-        (kind, num_id, _clamp_expected_level(level, num_id, formats))
-        for kind, num_id, level in expected
+        (item["kind"], item["num_id"], item["level"]) for item in expected_tree
     ]
+    if parse_error is not None or document_xml is None:
+        return {"passed": False, "issues": [parse_error or {"code": "list_readback_missing_parts"}], "expected": expected_effective, "actual": []}
     actual = _saved_list_items(document_xml, formats)
     issues: list[dict[str, Any]] = []
     if expected_effective != actual:
         issues.append({"code": "list_readback_mismatch", "expected": expected_effective, "actual": actual})
-    return {"passed": not issues, "issues": issues, "expected": expected_effective, "actual": actual}
+    expected_parents = [item["parent_index"] for item in expected_tree]
+    actual_parents = _level_parent_chain([level for _, _, level in actual])
+    if len(expected_parents) == len(actual_parents) and expected_parents != actual_parents:
+        issues.append({"code": "list_parent_chain_mismatch", "expected": expected_parents, "actual": actual_parents})
+    return {
+        "passed": not issues,
+        "issues": issues,
+        "expected": expected_effective,
+        "actual": actual,
+        "expected_parent_chain": expected_parents,
+        "actual_parent_chain": actual_parents,
+    }
 
 
 def audit_bundle(

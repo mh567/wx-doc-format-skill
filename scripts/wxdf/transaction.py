@@ -136,6 +136,16 @@ def _order_stage_decisions(snapshot: StageSnapshot, decisions: Sequence[Mapping[
     create_decisions = [decision for decision in decisions if decision.get("operation") == "create_node"]
     other_decisions = [decision for decision in decisions if decision.get("operation") != "create_node"]
     available = set(_node_map(snapshot.ast))
+    # Children inserted under a parent that is itself created in this batch fill
+    # an empty child list, so they are applied in ascending index order to keep
+    # source order.  Children inserted under a pre-existing parent are anchored
+    # against existing siblings, so they are applied in descending index order:
+    # each insert shifts the positions after it, so the later anchors must be
+    # placed first to stay attached to their sibling.
+    created_parent_ids = {
+        str((decision.get("value") or {}).get("node_id"))
+        for decision in create_decisions
+    }
     pending = list(enumerate(create_decisions))
     ordered: list[Mapping[str, Any]] = []
     while pending:
@@ -150,7 +160,9 @@ def _order_stage_decisions(snapshot: StageSnapshot, decisions: Sequence[Mapping[
         ready.sort(
             key=lambda item: (
                 str((item[1].get("value") or {}).get("parent_id")),
-                -int((item[1].get("value") or {}).get("index", 10**9)),
+                int((item[1].get("value") or {}).get("index", 10**9))
+                if str((item[1].get("value") or {}).get("parent_id")) in created_parent_ids
+                else -int((item[1].get("value") or {}).get("index", 10**9)),
                 str((item[1].get("value") or {}).get("node_id")),
                 item[0],
             )

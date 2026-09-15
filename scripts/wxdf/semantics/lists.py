@@ -349,7 +349,6 @@ def _state_candidate(
     node_id: str,
     state: str,
     *,
-    score: float,
     list_id: str | None = None,
     list_kind: str | None = None,
     semantic_level: int | None = None,
@@ -357,18 +356,21 @@ def _state_candidate(
     positive_evidence: list[dict[str, Any]] | None = None,
     negative_evidence: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Encode one scored candidate state for a source block.
+    """Encode one candidate state for a source block.
 
     A block may publish more than one candidate state; the Resolver picks the
-    strongest one.  Protected structure and contract downgrades enter as
-    positive evidence for ``OUTSIDE_LIST`` and as negative evidence that keeps a
-    heading from ever being promoted to a list item.
+    strongest one.  The candidate carries no bespoke ``score`` field: the
+    Resolver's own evidence-class ranking is the single arbitration input
+    (``resolver._candidate_strength`` over ``positive_evidence``), so a field
+    cannot drift out of sync with what actually decides a block.  Protected
+    structure and contract downgrades enter as positive evidence for
+    ``OUTSIDE_LIST`` and as negative evidence that keeps a heading from ever
+    being promoted to a list item.
     """
 
     return {
         "node_id": str(node_id),
         "state": state,
-        "score": round(float(score), 4),
         "list_id": list_id,
         "list_kind": list_kind,
         "semantic_level": semantic_level,
@@ -481,7 +483,6 @@ def _state_candidates_for_paragraph(
             _state_candidate(
                 node_id,
                 "OUTSIDE_LIST",
-                score=0.95,
                 semantic_level=level,
                 positive_evidence=[{"kind": "structural", "source": "protected_structure"}],
                 negative_evidence=negative,
@@ -489,7 +490,6 @@ def _state_candidates_for_paragraph(
             _state_candidate(
                 node_id,
                 "LIST_ITEM",
-                score=0.2,
                 semantic_level=level,
                 positive_evidence=[{"kind": "heuristic", "source": "protected_marker"}],
                 negative_evidence=negative,
@@ -511,7 +511,6 @@ def _state_candidates_for_paragraph(
                 _state_candidate(
                     node_id,
                     "OUTSIDE_LIST",
-                    score=0.6,
                     semantic_level=level,
                     positive_evidence=[{"kind": "contextual", "source": "unconfirmed_numbering"}],
                     negative_evidence=[{"kind": "heuristic", "reason": "low_confidence_numbering"}],
@@ -521,7 +520,6 @@ def _state_candidates_for_paragraph(
             _state_candidate(
                 node_id,
                 "OUTSIDE_LIST",
-                score=0.5,
                 positive_evidence=[{"kind": "contextual", "source": "body_paragraph"}],
             )
         ]
@@ -534,7 +532,6 @@ def _state_candidates_for_paragraph(
             _state_candidate(
                 node_id,
                 "OUTSIDE_LIST",
-                score=0.8,
                 semantic_level=level,
                 positive_evidence=[{"kind": "contract", "source": "contract_downgrade"}],
                 negative_evidence=negative,
@@ -542,7 +539,6 @@ def _state_candidates_for_paragraph(
             _state_candidate(
                 node_id,
                 "LIST_ITEM",
-                score=0.3,
                 semantic_level=level,
                 positive_evidence=[{"kind": "heuristic", "source": "marker_without_definition"}],
                 negative_evidence=negative,
@@ -558,7 +554,6 @@ def _state_candidates_for_paragraph(
             _state_candidate(
                 node_id,
                 "OUTSIDE_LIST",
-                score=0.8,
                 semantic_level=level,
                 positive_evidence=[{"kind": "contract", "source": "ignored_numbering"}],
                 negative_evidence=negative,
@@ -566,7 +561,6 @@ def _state_candidates_for_paragraph(
             _state_candidate(
                 node_id,
                 "LIST_ITEM",
-                score=0.3,
                 semantic_level=level,
                 positive_evidence=[{"kind": "heuristic", "source": "marker_without_definition"}],
                 negative_evidence=negative,
@@ -577,14 +571,12 @@ def _state_candidates_for_paragraph(
             _state_candidate(
                 node_id,
                 "LIST_ITEM",
-                score=0.9,
                 semantic_level=level,
                 positive_evidence=[{"kind": "structural", "source": "source_facts_list_item"}],
             ),
             _state_candidate(
                 node_id,
                 "OUTSIDE_LIST",
-                score=0.55,
                 semantic_level=level,
                 positive_evidence=[{"kind": "contextual", "source": "marker_without_confirmation"}],
             ),
@@ -606,7 +598,6 @@ def _state_candidates_for_paragraph(
             _state_candidate(
                 node_id,
                 "AMBIGUOUS",
-                score=0.3,
                 semantic_level=level,
                 positive_evidence=[{"kind": "heuristic", "source": "low_confidence_marker"}],
                 negative_evidence=ambiguous_negative,
@@ -614,7 +605,6 @@ def _state_candidates_for_paragraph(
             _state_candidate(
                 node_id,
                 "OUTSIDE_LIST",
-                score=0.3,
                 semantic_level=level,
                 positive_evidence=[{"kind": "heuristic", "source": "unconfirmed_marker"}],
             ),
@@ -623,14 +613,12 @@ def _state_candidates_for_paragraph(
         _state_candidate(
             node_id,
             "LIST_ITEM",
-            score=0.85,
             semantic_level=level,
             positive_evidence=[{"kind": "structural", "source": "marker_evidence"}],
         ),
         _state_candidate(
             node_id,
             "OUTSIDE_LIST",
-            score=0.55,
             semantic_level=level,
             positive_evidence=[{"kind": "contextual", "source": "marker_without_confirmation"}],
         ),
@@ -675,7 +663,6 @@ def _build_state_candidates(
                     _state_candidate(
                         child_key,
                         "NESTED_LIST_ITEM" if nested else "LIST_ITEM",
-                        score=0.95,
                         list_kind=_list_family(evidence, facts["containers"].get(child_id, {})),
                         semantic_level=0,
                         positive_evidence=[{"kind": "structural", "source": "explicit_list_container"}],
@@ -689,7 +676,6 @@ def _build_state_candidates(
                         _state_candidate(
                             child_key,
                             "ITEM_CONTINUATION",
-                            score=0.8,
                             parent_item_id=owner_item_id,
                             positive_evidence=[{"kind": "structure", "source": "explicit_item_content"}],
                         )
@@ -711,7 +697,6 @@ def _build_state_candidates(
                     _state_candidate(
                         child_key,
                         "ITEM_CHILD_BLOCK",
-                        score=0.8,
                         parent_item_id=owner_item_id,
                         positive_evidence=[{"kind": "structure", "source": "explicit_item_child_block"}],
                     )
@@ -744,6 +729,83 @@ def _implicit_list_runs_for_parent(
     if current:
         runs.append(current)
     return runs
+
+
+def _numbering_sequence(evidence: Mapping[str, Any]) -> str | None:
+    """Return a stable identity for the numbering instance a block belongs to.
+
+    The numId together with its abstractNumId is the DOCX signal that a run of
+    items belongs to one numbering instance.  A block whose definition resolves
+    to no numId falls back to its ``sequence`` evidence, and a block with
+    neither has no instance identity and cannot anchor or join a sub-list.
+    """
+
+    num_id = evidence.get("num_id")
+    abstract_id = evidence.get("abstract_num_id")
+    reference = evidence.get("numbering_definition_ref")
+    if isinstance(reference, Mapping):
+        if num_id is None:
+            num_id = reference.get("num_id")
+        if abstract_id is None:
+            abstract_id = reference.get("abstract_num_id")
+    if num_id is not None:
+        return f"num:{num_id}:abstract:{abstract_id}"
+    sequence = evidence.get("sequence")
+    return f"sequence:{sequence}" if sequence else None
+
+
+def _resolve_sublist(
+    active_groups: Mapping[int, Mapping[str, Any]],
+    active_items: Mapping[int, str],
+    sequence: str | None,
+    family: str | None,
+) -> tuple[int, str | None] | None:
+    """Return the (level, parent item) a new-instance level-0 block nests at.
+
+    A block declared at level 0 whose numbering instance differs from the open
+    level-0 list is not a sibling top-level item: it opens or continues a
+    sub-list under an open item, provided the category matches.  A block whose
+    category differs from the open level-0 list is a same-level category switch
+    instead (README constraint 9 restarts the list rather than nesting it), and
+    a block that shares the open level-0 instance stays a sibling.  When an open
+    sub-list already carries the same instance and category the block continues
+    it at that level; otherwise the block opens a new sub-list one level under
+    the deepest open item.
+    """
+
+    if sequence is None or family is None or not active_items:
+        return None
+    top = active_groups.get(0)
+    if top is None or top.get("sequence_identity") in (None, sequence):
+        return None
+    if top.get("list_kind") != family:
+        return None
+    matching = sorted(
+        level
+        for level, group in active_groups.items()
+        if level > 0 and group.get("sequence_identity") == sequence and group.get("list_kind") == family
+    )
+    if matching:
+        level = matching[0]
+        return level, active_groups[level].get("parent_item_id")
+    deepest = max(active_items)
+    return deepest + 1, active_items[deepest]
+
+
+def _structural_list_level(
+    container_id: str,
+    facts: Mapping[str, Any],
+    parents: Mapping[str, str],
+) -> int:
+    """Return the number of ancestor ``list`` containers of one container."""
+
+    level = 0
+    current = parents.get(container_id)
+    while current is not None:
+        if _node_kind(facts, current) == "list":
+            level += 1
+        current = parents.get(current)
+    return level
 
 
 def _implicit_list_runs(
@@ -784,6 +846,15 @@ def _validate_state_constraints(
     orphan level or refuses publication (``unresolved_list_parent``), so a
     violating document is never silently accepted.  The decisions are not
     rewritten here.
+
+    Explicit ``list`` containers are validated too.  Their nesting lives in the
+    container tree rather than in a declared ``ilvl``: a nested list's
+    structural level is the number of ancestor ``list`` containers.  A list at
+    structural level ``L > 0`` must hang from a ``list_item`` of the level
+    ``L - 1`` list (constraint 3).  Because the structural level increases by
+    exactly one per nesting step, constraint 4 cannot be violated by a
+    well-formed container tree, so a misplaced nested list is reported once, as
+    constraint 3, on each of its decided items.
     """
 
     decided_states: dict[str, str] = {}
@@ -797,6 +868,7 @@ def _validate_state_constraints(
         decided_states[node_id] = str(value.get("state"))
         decided_levels[node_id] = value.get("semantic_level")
 
+    facts_parents = _parent_map(facts)
     findings: list[dict[str, Any]] = []
     for run in _implicit_list_runs(facts, decided_states):
         open_levels: dict[int, str] = {}
@@ -842,6 +914,30 @@ def _validate_state_constraints(
                 open_levels.pop(stale_level, None)
             open_levels[level] = node_id
             previous_level = level
+
+    for container_id, container in facts["containers"].items():
+        if container.get("kind") != "list":
+            continue
+        level = _structural_list_level(str(container_id), facts, facts_parents)
+        if level == 0:
+            continue
+        if _node_kind(facts, str(facts_parents.get(str(container_id)))) == "list_item":
+            continue
+        for item_id in facts["children"].get(container_id, []):
+            if facts["containers"].get(item_id, {}).get("kind") != "list_item":
+                continue
+            if decided_states.get(str(item_id)) not in {"LIST_ITEM", "NESTED_LIST_ITEM"}:
+                continue
+            findings.append(
+                {
+                    "code": "list_constraint_violation",
+                    "severity": "warning",
+                    "constraint": 3,
+                    "node_id": str(item_id),
+                    "message": f"list item {item_id} at level {level} has no parent list item at level {level - 1}",
+                    "declared_level": level,
+                }
+            )
     return findings
 
 
@@ -858,11 +954,12 @@ def _arbitrate_state_candidates(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Reuse the shared Resolver to arbitrate the candidate-state set.
 
-    The per-candidate ``score`` is the ordering input: only the highest-scoring
-    state(s) for a block reach the Resolver, so a materially weaker alternative
-    cannot be picked by the evidence-strength rule.  When two states tie at the
-    top score they both reach the Resolver, which then arbitrates on evidence
-    class and records an ``unresolved`` conflict when the classes also tie.
+    The evidence class each candidate carries is the ordering input: the
+    Resolver ranks a block's competing states by ``resolver._candidate_strength``
+    over their ``positive_evidence`` and picks the strongest.  Two states that
+    carry the same class for the same block are a genuine tie and the Resolver
+    records an ``unresolved`` conflict instead of guessing, which is the only
+    path that reaches the ambiguity report.
 
     Each state candidate is projected onto the existing ``CandidateSet``
     contract so the Resolver applies its global rules: one ownership per block,
@@ -872,17 +969,8 @@ def _arbitrate_state_candidates(
 
     from ..resolver import resolve
 
-    top_score: dict[str, float] = {}
-    for candidate in state_candidates:
-        node_id = str(candidate["node_id"])
-        candidate_score = float(candidate["score"])
-        if node_id not in top_score or candidate_score > top_score[node_id]:
-            top_score[node_id] = candidate_score
-
     resolver_candidates: list[dict[str, Any]] = []
     for index, candidate in enumerate(state_candidates):
-        if float(candidate["score"]) < top_score[str(candidate["node_id"])] - 1e-9:
-            continue
         resolver_candidates.append(
             {
                 "candidate_id": f"list-state-{candidate['node_id']}-{candidate['state']}-{index}",
@@ -1050,15 +1138,27 @@ def analyze_lists(facts: Mapping[str, Any], *, context: Mapping[str, Any] | None
             active_groups: dict[int, dict[str, Any]] = {}
             seen_item_in_run = False
             flattened_source_depths: set[int] = set()
+            pending_orphans: list[tuple[str, int]] = []
             for unit_id in run:
                 evidence = facts["evidence"].get(unit_id, {})
                 source_depth = evidence.get("explicit_depth") if isinstance(evidence.get("explicit_depth"), int) else 0
                 decided_level = decided_levels.get(unit_id)
                 if isinstance(decided_level, int) and decided_level >= 0:
-                    depth = decided_level
+                    declared_depth = decided_level
                 else:
-                    depth = _raw_depth(evidence)
+                    declared_depth = _raw_depth(evidence)
+                depth = declared_depth
+                family = _list_family(evidence)
                 parent_item_id = active_items.get(depth - 1) if depth > 0 else None
+                # A block declared at level 0 whose numbering instance differs
+                # from the open level-0 list opens or continues a sub-list under
+                # an open item instead of starting a sibling top-level list.
+                if depth == 0:
+                    sublist = _resolve_sublist(
+                        active_groups, active_items, _numbering_sequence(evidence), family
+                    )
+                    if sublist is not None:
+                        depth, parent_item_id = sublist
                 if depth > 0 and parent_item_id is None:
                     if source_depth in flattened_source_depths:
                         depth = 0
@@ -1079,11 +1179,26 @@ def analyze_lists(facts: Mapping[str, Any], *, context: Mapping[str, Any] | None
                             "source_depth": depth,
                             "fallback": {"kind": "local_list_root", "preserve_source_content": True},
                         })
+                        pending_orphans.append((unit_id, depth))
                         depth = 0
                         parent_item_id = None
                         flattened_source_depths.add(source_depth)
+                # A shallow item that appears after a run-initial deep item is
+                # that item's late parent: report it instead of leaving the
+                # child silently attached to the nearest item.
+                if declared_depth <= depth:
+                    for pending_id, pending_level in list(pending_orphans):
+                        if depth < pending_level:
+                            result["diagnostics"].append({
+                                "code": "late_list_parent",
+                                "severity": "warning",
+                                "message": f"list item {pending_id} at depth {pending_level} is followed by a shallower item at depth {depth}",
+                                "node_id": pending_id,
+                                "declared_level": pending_level,
+                                "parent_appears_after": True,
+                            })
+                            pending_orphans.remove((pending_id, pending_level))
                 seen_item_in_run = True
-                family = _list_family(evidence)
                 if family is None:
                     for old_depth in [key for key in active_items if key >= depth]:
                         active_items.pop(old_depth, None)
@@ -1102,6 +1217,7 @@ def analyze_lists(facts: Mapping[str, Any], *, context: Mapping[str, Any] | None
                 effective_num_id = evidence.get("num_id") or (evidence.get("numbering_definition_ref") or {}).get("num_id")
                 effective_abstract_id = evidence.get("abstract_num_id") or (evidence.get("numbering_definition_ref") or {}).get("abstract_num_id")
                 effective_sequence = evidence.get("sequence") or json_sequence_id(evidence.get("numbering_definition_ref"), unit_id)
+                sequence_identity = _numbering_sequence(evidence)
                 current = active_groups.get(depth)
                 # Group identity stays ``list_kind`` plus parent.  Sequence merge and
                 # split across numbering instances is decided separately, so a new
@@ -1137,6 +1253,7 @@ def analyze_lists(facts: Mapping[str, Any], *, context: Mapping[str, Any] | None
                         "group_boundary": group_boundary,
                         "effective_num_id": effective_num_id,
                         "effective_abstract_id": effective_abstract_id,
+                        "sequence_identity": sequence_identity,
                     }
                     group_specs.append(current)
                     active_groups[depth] = current
