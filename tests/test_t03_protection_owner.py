@@ -100,7 +100,7 @@ def test_lists_and_protected_agree_on_shared_policy() -> None:
     list_result = analyze_lists(facts)
     list_reasons = {
         item["node_id"]: item["message"]
-        for item in list_result["diagnostics"]
+        for item in list_result["downgrades"]
         if item["code"] == "protected_list_like_text"
     }
     protected_reasons = {

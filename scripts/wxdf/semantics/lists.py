@@ -89,6 +89,9 @@ def _inline_text(items: list[Mapping[str, Any]]) -> str:
     return _unit_text({"inline_content": items})
 
 
+_HEADING_PROTECTION_REASONS = frozenset({"manual_heading_marker", "protected_style"})
+
+
 def _is_protected(unit: Mapping[str, Any], evidence: Mapping[str, Any]) -> tuple[bool, str | None]:
     if unit.get("kind") != "paragraph":
         return True, "non_paragraph_unit"
@@ -101,12 +104,20 @@ def _is_protected(unit: Mapping[str, Any], evidence: Mapping[str, Any]) -> tuple
         return True, "opaque_code"
     if evidence.get("protected") is True:
         return True, "source_protected"
+    normalized = style.casefold().replace(" ", "")
+    if normalized.startswith(("heading", "toc")) or "目录" in style or "题注" in style or "标题" in style:
+        return True, "protected_style"
+    # Heading structure is a stronger signal than a confirmed numbering instance:
+    # a heading (by role, by style, or by a manually typed chapter number) must
+    # never be promoted to a list item, even when the paragraph also carries a
+    # resolved numbering definition.  The confirmed-numbering short-circuit below
+    # therefore applies only to non-heading content, which is the T07
+    # anti-ambiguity rule.
+    reason = protected_text_reason(text, evidence)
+    if reason in _HEADING_PROTECTION_REASONS:
+        return True, reason
     if evidence.get("numbering_status") == "detected" and evidence.get("marker_kind") and not evidence.get("visible_marker"):
         return False, None
-    normalized = style.casefold().replace(" ", "")
-    if normalized.startswith(("heading", "toc")) or "目录" in style or "题注" in style or "附录标题" in style:
-        return True, "protected_style"
-    reason = protected_text_reason(text, evidence)
     if reason is not None:
         return True, reason
     visible_marker = evidence.get("visible_marker")
@@ -519,8 +530,13 @@ def _state_candidates_for_paragraph(
         if role in {"heading", "title", "caption"} or "heading" in style.casefold() or "标题" in style:
             negative.append({"kind": "structure", "role": role or "heading", "style": style})
         level = _raw_depth(evidence)
-        # A protected heading keeps a strong OUTSIDE_LIST state and offers
-        # LIST_ITEM only weakly, carrying the protection as negative evidence.
+        # A protected heading is a decidable case under README constraint 6: a
+        # heading ends the preceding list, so the heading structure carries a
+        # strong OUTSIDE_LIST state while LIST_ITEM is offered only weakly.  The
+        # structural evidence wins outright, the heading is never promoted to a
+        # list item, and no Resolver tie is manufactured.  The decision is still
+        # recorded: the caller emits a ``protected_list_like_text`` info record
+        # for the same block whenever a marker accompanies the protection.
         return [
             _state_candidate(
                 node_id,
@@ -1338,9 +1354,18 @@ def analyze_lists(facts: Mapping[str, Any], *, context: Mapping[str, Any] | None
             evidence = facts["evidence"].get(unit_id, {})
             protected, reason = _is_protected(unit, evidence)
             if evidence.get("marker_kind") and protected:
-                result["diagnostics"].append(
-                    {"code": "protected_list_like_text", "severity": "info", "message": reason or "protected content", "node_id": unit_id}
-                )
+                # A protected block that carries a marker is a decided outcome:
+                # the block stays body text.  It is recorded as a downgrade so
+                # the decision is visible without counting as a problem, which
+                # keeps an ordinary document completed.
+                record = {
+                    "code": "protected_list_like_text",
+                    "severity": "info",
+                    "message": reason or "protected content",
+                    "node_id": unit_id,
+                    "fallback": {"kind": "body_paragraph", "preserve_source_content": True},
+                }
+                result["downgrades"].append(record)
         # Run membership comes from the arbitrated state decision, so the legacy
         # grouping materializes the Resolver verdict instead of deciding list
         # membership a second time.  The constraint validator consumes the same
@@ -1713,7 +1738,15 @@ def analyze_lists(facts: Mapping[str, Any], *, context: Mapping[str, Any] | None
             "conflict_code": entry.get("code"),
         })
     result["diagnostics"].sort(key=lambda item: (item.get("code", ""), item.get("node_id", "")))
-    if result["diagnostics"]:
+    # Only warning/error severity escalates the list status.  An info-severity
+    # record stays visible (in ``diagnostics``, and for a decision that keeps a
+    # block as body text also in ``downgrades``) but must not flip the status, so
+    # a document whose only list record is informational still completes.  A
+    # genuine Resolver tie is an unresolved conflict by definition, so it
+    # escalates regardless of the diagnostic's info severity.
+    if state_unresolved or any(
+        item.get("severity") in {"warning", "error"} for item in result["diagnostics"]
+    ):
         result["status"] = "unresolved"
     return result
 

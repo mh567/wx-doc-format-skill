@@ -16,17 +16,61 @@ from ..validation import validate_source_facts
 
 _API_RE = re.compile(r"^(?:API|接口)(?:\s*[:：]|\s+|$)", re.IGNORECASE)
 _HTTP_API_RE = re.compile(r"^(?:GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\s+/", re.IGNORECASE)
+# An API path or endpoint is a request route, not a numbered list item.  The
+# leading slash or scheme keeps this distinct from a bare word.
+_API_PATH_RE = re.compile(r"^(?:/|https?://|wss?://)\S+", re.IGNORECASE)
+# An IPv4 address (with an optional port) is dotted-decimal content that the
+# DOCX marker scanner reads as a decimal-chain list marker.  It is validated
+# octet by octet in ``_is_ipv4`` so an ordinary dotted number stays unaffected.
+_IPV4_RE = re.compile(r"^(?P<address>\d{1,3}(?:\.\d{1,3}){3})(?::\d{1,5})?(?=$|[\s,，、;；。])")
 _DATE_RE = re.compile(r"^(?:(?:发布日期|日期|时间)\s*[:：]?\s*)?(?:\d{4}[./年-]\d{1,2}(?:[./月-]\d{1,2}日?)?|二〇?二\S+年)")
 _VERSION_RE = re.compile(r"^(?:(?:版本(?:号)?|version|release|build)\s*[:：]?\s*)?(?:v?\d+(?:\.\d+){1,}|版本\s*\d+)", re.IGNORECASE)
 _MANUAL_HEADING_RE = re.compile(r"^(?:第[一二三四五六七八九十百千万0-9]+[章节]|\d+(?:\.\d+)+)[\s、.．:：]")
 _CODE_STYLE_RE = re.compile(r"^(?:code|codeblock|代码|代码块|代码段)$", re.IGNORECASE)
 _VERSION_CONTEXT_RE = re.compile(r"^(?:v?\d+(?:\.\d+){1,})\s*(?:版本|版本号|release|build|发布)", re.IGNORECASE)
+# Legal clauses read as numbered content but are body text, not a list.  Only
+# unambiguous clause forms are matched: ``第N条`` (a clause article), ``第N款`` /
+# ``第N项`` with an Arabic numeral, and ``本条`` / ``本款`` / ``本项``.  The
+# Chinese-numeral ``第N项`` form is deliberately excluded because it collides
+# with ordinary prose enumeration such as "第一项" / "第二项".
+_LEGAL_CLAUSE_RE = re.compile(r"^(?:第[一二三四五六七八九十百千万亿零〇0-9]+条|第\d+(?:款|项)|本(?:条|款|项))")
 _API_LABELS = {
     "请求参数", "请求示例", "返回参数", "返回示例", "接口说明", "请求体",
     "响应体", "成功响应", "失败响应",
 }
 _FORMULA_RE = re.compile(r"(?:[=＋+−\-*/^]|\\frac|\\sum|\d\s*[A-Za-z])")
+# Symbolic or LaTeX formula shapes.  ``_looks_like_formula`` adds a text-only
+# equation heuristic that refuses any text containing CJK, so an ordinary prose
+# sentence with a stray "=" is not misread as a formula.
+_FORMULA_TEXT_RE = re.compile(r"\\(?:frac|sum|sqrt|cdot|times|le|ge|int|prod)|[∑∏∫√±×÷≈≤≥≠∞∈∂∇⊆∪∩]")
+_EQUATION_RE = re.compile(r"[^\s=]\s*=\s*[^\s=]")
+_CJK_RE = re.compile(r"[\u3400-\u9fff\uf900-\ufaff]")
 _NOTE_PREFIXES = ("备注：", "编写提示：", "【备注提示】", "【编写样例】")
+
+
+def _is_ipv4(text: str) -> bool:
+    """Return whether ``text`` starts with a valid IPv4 address.
+
+    The octets are validated (0-255) and at least one octet must be larger than
+    9, so ordinary multi-level numbering such as ``1.2.3.4`` or ``4.2.1.3`` is
+    not mistaken for a network address.
+    """
+
+    match = _IPV4_RE.match(text)
+    if match is None:
+        return False
+    octets = [int(part) for part in match.group("address").split(".")]
+    return all(part <= 255 for part in octets) and any(part > 9 for part in octets)
+
+
+def _looks_like_formula(text: str) -> bool:
+    """Return whether ``text`` is a formula rather than a prose sentence."""
+
+    if _FORMULA_TEXT_RE.search(text):
+        return True
+    if _CJK_RE.search(text):
+        return False
+    return bool(_EQUATION_RE.search(text) and re.search(r"[A-Za-z0-9]", text))
 
 
 def protected_code_style(style: str) -> bool:
@@ -38,18 +82,24 @@ def protected_code_style(style: str) -> bool:
 def protected_text_reason(text: str, evidence: Mapping[str, Any]) -> str | None:
     """Single owner of the text and numbering protection policy.
 
-    Consumes the date, version, API and manual-heading rules together with the
-    source numbering evidence and returns the protection reason, or ``None``
-    when the unit carries no protection signal. When a visible marker is
-    present the decision is final: the manual-heading and version fallbacks do
-    not run.
+    Consumes the date, version, API, API-path, IP, legal-clause and
+    manual-heading rules together with the source numbering evidence and returns
+    the protection reason, or ``None`` when the unit carries no protection
+    signal. When a visible marker is present the decision is final: the
+    manual-heading and version fallbacks do not run.
     """
 
     normalized = text.strip()
     if _API_RE.match(normalized) or _HTTP_API_RE.match(normalized) or normalized.rstrip("：:") in _API_LABELS:
         return "api_label"
+    if _API_PATH_RE.match(normalized):
+        return "api_path"
+    if _is_ipv4(normalized):
+        return "ip_address"
     if _DATE_RE.match(normalized) or _VERSION_CONTEXT_RE.match(normalized):
         return "date_or_version"
+    if _LEGAL_CLAUSE_RE.match(normalized):
+        return "legal_clause"
     visible_marker = evidence.get("visible_marker")
     if isinstance(visible_marker, Mapping) and evidence.get("marker_kind"):
         marker_text = str(visible_marker.get("marker_text") or "")
@@ -64,6 +114,8 @@ def protected_text_reason(text: str, evidence: Mapping[str, Any]) -> str | None:
             if len([segment for segment in segments if segment]) < 3:
                 return "manual_heading_marker"
         return None
+    if _looks_like_formula(normalized):
+        return "formula"
     if _MANUAL_HEADING_RE.match(normalized):
         return "manual_heading_marker"
     if _VERSION_RE.match(normalized):

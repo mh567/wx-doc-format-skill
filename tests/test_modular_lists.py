@@ -235,7 +235,7 @@ def test_continuation_and_protected_date_are_distinguished() -> None:
     result = analyze_lists(_facts(containers, children, units, evidence))
 
     assert result["continuations"] == [{"node_id": "p1b", "owner_item_id": "item", "list_id": "list", "scope_id": "scope:document"}]
-    assert result["diagnostics"][0]["code"] == "protected_list_like_text"
+    assert result["downgrades"][0]["code"] == "protected_list_like_text"
     assert result["items"][0]["generated_anchor_required"] is False
 
 
