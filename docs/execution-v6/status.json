@@ -1,0 +1,125 @@
+{
+  "schema_version": 1,
+  "objective": "list_semantic_compiler_complete_coverage",
+  "branch": "dev",
+  "baseline_head": "fc851e1c0ed1eb68a0c3db9e4cdd9e4f4a3f4e3b",
+  "implementation_started": true,
+  "current_task": "T04",
+  "next_task": "T04",
+  "release_authorized": false,
+  "recommended_order": [
+    "T01",
+    "T02",
+    "T03",
+    "T04",
+    "T05",
+    "T06",
+    "T07",
+    "T08",
+    "T09",
+    "T10"
+  ],
+  "tasks": [
+    {
+      "id": "T01",
+      "subject": "冻结 spec 与失败样例库",
+      "status": "done",
+      "depends_on": []
+    },
+    {
+      "id": "T02",
+      "subject": "原生编号目录 + 列表语义模型扩展",
+      "status": "done",
+      "depends_on": [
+        "T01"
+      ],
+      "residuals": [
+        "body evidence num_fmt/lvl_text/numbering_status still come from the legacy group decision at the declared ilvl; the native effective_ilvl is evidence-only until the group decision is native (T03/T04, converged in T10)",
+        "num_id is written both top-level and inside numbering_definition_ref (latent dual source, T10)",
+        "lvl_restart is catalogued and carried but not consumed; README constraint 10 belongs to T06"
+      ]
+    },
+    {
+      "id": "T03",
+      "subject": "第一刀:单级有序/无序列表端到端",
+      "status": "done",
+      "depends_on": [
+        "T02"
+      ],
+      "residuals": [
+        "pStyle level inheritance still inert end-to-end: body evidence num_fmt/lvl_text/numbering_status still comes from the legacy group decision at the declared ilvl; effective_ilvl only enters evidence and candidate states (T04/T10)",
+        "non-zero multi-level output is blocked on the product path: wx-default-v2 pins ordered target_level to 0 in normalization.normalize, so every ordered item renders with role list_letter (numId 3) and list_decimal (numId 8) is never exercised; the template itself does provide nine-level instances numId 1/2/7/19 (T04/T08)",
+        "num_id remains a dual source (top-level and numbering_definition_ref) (T10)",
+        "lvl_restart is catalogued and carried but not consumed; README constraint 10 belongs to T06",
+        "LIST_END state is enumerated but not emitted yet; boundary termination is expressed via protected blocks and OUTSIDE_LIST (T06/T07)",
+        "audit_list_readback compares a flat (list_kind, numId, ilvl) reading order; the parent chain, tree shape and per-level sequence values are not compared yet (T04/T09)",
+        "candidate score is only a pre-filter: _arbitrate_state_candidates reads score and drops candidates below the per-block top score before resolve(); survivors are still ranked by resolver._candidate_strength on positive_evidence.kind (T04)",
+        "list_render_level_clamped is exposed through module evidence rather than blocking publication; real multi-level rendering belongs to T08",
+        "implicit list runs have no tail continuation: ITEM_CONTINUATION and ITEM_CHILD_BLOCK are only emitted inside explicit list_item containers, so an implicit DOCX [item][body][item] is materialized as two lists (README constraint 5 gap, T05)",
+        "README constraints 3 and 4 are validated only for implicit runs; _implicit_list_runs_for_parent returns [] for list/list_item parents, so explicit list containers are never constraint-checked (T04/T05)",
+        "the genuine-tie ambiguity path is only reachable from synthetic evidence: both adapters write marker_kind only with numbering_status=detected, so state_unresolved stays empty for real input and README constraint 7's literal threshold semantics are not implemented (T04/T05)"
+      ]
+    },
+    {
+      "id": "T04",
+      "subject": "多层嵌套与父项裁决",
+      "status": "pending",
+      "depends_on": [
+        "T03"
+      ]
+    },
+    {
+      "id": "T05",
+      "subject": "列表项混合内容",
+      "status": "pending",
+      "depends_on": [
+        "T04"
+      ]
+    },
+    {
+      "id": "T06",
+      "subject": "编号边界(重启/拆分/复用/缺失)",
+      "status": "pending",
+      "depends_on": [
+        "T03"
+      ]
+    },
+    {
+      "id": "T07",
+      "subject": "标题与正文防歧义",
+      "status": "pending",
+      "depends_on": [
+        "T04"
+      ]
+    },
+    {
+      "id": "T08",
+      "subject": "ListPolicy 提取 + 真实多级 WX 渲染",
+      "status": "pending",
+      "depends_on": [
+        "T04",
+        "T06"
+      ]
+    },
+    {
+      "id": "T09",
+      "subject": "回读审计 + LLM 门控",
+      "status": "pending",
+      "depends_on": [
+        "T08"
+      ]
+    },
+    {
+      "id": "T10",
+      "subject": "收口:移除遗留列表逻辑并全矩阵验证",
+      "status": "pending",
+      "depends_on": [
+        "T09"
+      ]
+    }
+  ],
+  "external_gates": [
+    "kylin_v10_arm64_real_machine_acceptance",
+    "remote_push_and_release_authorization"
+  ]
+}
