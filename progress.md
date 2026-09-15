@@ -1,5 +1,19 @@
 # 当前架构收敛进度
 
+## 2026-09-15 execution-v6 T05 列表项混合内容
+
+- 首轮新增红灯测试文件 `tests/test_t05_mixed_content.py`，实施前 5 项失败：隐式列表段后的正文段没有归属记录、`child_blocks` 为空、`owner_item_id` 查询返回 `None`。首轮实现后 6 项通过。
+- `lists.py` 新增 `_tail_content_owner` 与 `_implicit_tail_content`：隐式列表运行之后的正文段记为 `ITEM_CONTINUATION`、表格/图片/引用/代码为 `ITEM_CHILD_BLOCK`（注记属受保护块，当前不归入列表项，见残留 14），遇新列表段、受保护块或运行结束即停止；`analyze_lists` 结果新增 `child_blocks` 与源序 `owned_content`，续接与子块按同一源序追加，`continuations` / `child_blocks` 保留为同一记录的过滤视图。
+- `source_ast.materialize_list_semantics` 统一隐式与显式列表项的归属模型，DOCX 派生项由 `owned_content` 组装 `content_blocks`，内容移动候选携带 `source_index`。
+- FIX 轮：端到端验证发现测试未覆盖的顺序回归。样例 DOCX（`[num 第一项][num 第二项][续接段][说明段][2x2 表][尾段]`）修复前渲染为 `第二项, tbl, 尾部正文, 续接正文, 表格前的说明, 表 1`，第 2 项 `content_blocks` 把所有正文段排在所有非正文块之前，AST `children` 又按节点 id 排序，三处都不是源序且题注落在表格之后（违反 AGENTS.md 决策 3）。确认机制：归属记录在源序前被拼接，内容移动无排序键；题注在基础 revision 上按目标父节点与槽位锚定，而表在同一批次被移走、创建先于移动落地。证伪题目提示中「拼接也解释了题注落在表格之后」的猜测。
+- FIX 轮修复落在归属方：`owned_content` 保持源序；内容移动按 `source_index` 排序追加，AST children 与源序一致；生成题注候选携带 `anchor_node_id` / `anchor_position`，`transaction._order_stage_decisions` 把锚定创建分流到移动之后、`_apply_create_node` / `_applied_create_node` 在锚点当前父节点下解析槽位，题注紧贴其表格上方。FIX 未改写 T04 的两条创建排序规则（新建父节点升序、既有父节点降序），只叠加移动排序键与锚定创建分流。
+- 护栏测试：`test_t05_docx_item_tail_renders_in_source_order_with_caption_above_table` 等 7 项 FIX 轮测试在修复前工作树 7 failed、修复后 13 passed；源序作为一般不变量覆盖交错尾部 `[段落, 表格, 段落, 图片]` 与以表格开头的尾部两种形态，不针对具体样例特判。首轮 `test_t05_docx_item_owns_table_image_quote_code_content` 的断言由旧拼接顺序更正为源序。
+- Markdown 显式容器尾部归属判定：Markdown 适配器产出显式 `list` / `list_item` 容器，其后的非缩进正文段、引用与表格是真正的文档级块（缩进续写已并入列表项段落文本），证据不支持把根兄弟尾部吸收进末项，故记录为残留交 T10 全矩阵收口，不实现。
+- 真实转换：修复后样例 `status=completed`、`exit_code=0`、`source_ast_revision=2`、`model_audit.passed=true`、`saved_output_audit.passed=true`，`list_semantics` 为 `list_count=1 / item_count=2 / continuation_count=3 / diagnostics=[]`，渲染为 `第一项 / 第二项 / 续接正文 / 说明 / 表 1 / 表格 / 尾部正文`。
+- 全量测试 `1201 passed, 0 failed`（`ca27223` 基线 `1186 passed`，首轮 6 项至 1192，FIX 轮 7 项，复审护栏 2 项）；`tests/test_t01_list_fixtures.py` 保持 11 passed，`tests/test_caption_placement.py` 8 passed，`tests/test_t04_nesting.py` 12 passed，`tests/test_t03_single_level_lists.py` 21 passed。
+- 已记录残留：Markdown 显式容器尾部归属与显式列表项不记录 `content_blocks`（T10）、同 sequence 续接（T06）、`lvlRestart` 与 `LIST_END`（T06/T07）、同类别相邻新 numId 启发式与跨类别 ilvl=0 子表（T06/T08）、歧义报告可达性（T09）、pStyle 层级继承与 `num_id` 双源（T10）、产品路径非零多级输出受阻（T08）、父链比对不含每级序号值（T09）、渲染夹层口径（T08）、`transaction._order_stage_decisions` 的文件归属（T10）。
+- 证据见 `docs/execution-v6/evidence/T05.md`，状态见 `docs/execution-v6/status.json`。未提交、未推送；预存 `_build/` 与 `paseo.json` 未处理。
+
 ## 2026-09-15 execution-v6 T04 多层嵌套与父项裁决
 
 - 新增红灯测试文件 `tests/test_t04_nesting.py`（10 项），实施前 9 项失败：新 numId 在 ilvl=0 未识别为子级、显式列表容器不做约束校验、子项先于父项无显式诊断、回读审计无父链比对、候选带未被消费的 `score`。

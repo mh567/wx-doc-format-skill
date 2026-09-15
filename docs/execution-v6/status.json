@@ -4,8 +4,8 @@
   "branch": "dev",
   "baseline_head": "fc851e1c0ed1eb68a0c3db9e4cdd9e4f4a3f4e3b",
   "implementation_started": true,
-  "current_task": "T05",
-  "next_task": "T05",
+  "current_task": "T06",
+  "next_task": "T06",
   "release_authorized": false,
   "recommended_order": [
     "T01",
@@ -86,9 +86,29 @@
     {
       "id": "T05",
       "subject": "列表项混合内容",
-      "status": "pending",
+      "status": "done",
       "depends_on": [
         "T04"
+      ],
+      "residuals": [
+        "Markdown explicit-container tail is not owned: the tail ownership model only runs for implicit DOCX runs, while the Markdown adapter emits explicit list/list_item containers whose trailing non-indented paragraph, quote and table are genuine document-level siblings (CommonMark keeps a non-indented paragraph after a blank line outside the list, and an indented continuation is already merged into the item text), so absorbing those root siblings into the last item would misattribute document paragraphs; the evidence does not support extending the model and the decision is recorded for T10 full-matrix closure",
+        "explicit list_item containers do not record content_blocks; they keep their own source children and the field stays None, which is inconsistent with the unified ownership record but has no consumer yet (T10)",
+        "same-sequence continuation and sequence merge/split are not implemented; ownership is still carried by _list_family and the existing grouping (README constraint 8, T06)",
+        "lvlRestart is catalogued and carried but not consumed; README constraint 10 belongs to T06 (T06)",
+        "LIST_END is enumerated but not emitted; boundary termination is expressed via protected blocks and OUTSIDE_LIST (T06/T07)",
+        "cross-category ilvl=0 sub-list is treated as a same-level kind switch and is not auto-nested (T06/T08)",
+        "the ambiguity report is still reachable only from synthetic evidence; competing parent candidates produced by nesting or continuation do not reach it yet (T09)",
+        "pStyle level inheritance still inert end-to-end (T10)",
+        "non-zero multi-level output is blocked on the product path: wx-default-v2 pins ordered target_level to 0 (T08)",
+        "num_id remains a dual source (top-level and numbering_definition_ref) (T10)",
+        "list_parent_chain_mismatch compares the implied w:ilvl parent chain, not the per-level sequence values (T09)",
+        "list_render_level_clamped is exposed through module evidence rather than blocking publication (T08)",
+        "transaction._order_stage_decisions gained an additive path in the T05 fix round (anchored creates applied after moves; same-parent moves ordered by source_index) without changing the two T04 create-ordering rules, but the file still has no ticket of its own and should be folded into T10 or get its own ticket (T10)",
+        "the anchored-create applied predicate for a before-anchor was off by one and reported a committed caption as not applied, breaking ledger replay; fixed with guard tests test_t05_anchored_create_applied_predicate_matches_a_before_anchor/_an_after_anchor (latent, no current caller reaches it)",
+        "note / numbered_note are protected roles, so a note after a list run is not attributed to the item and content_blocks does not carry note; 工作项 1's seven-type list is not met for note (T06/T10)",
+        "a non-paragraph unit directly after an implicit run gets both ITEM_CHILD_BLOCK and protected OUTSIDE_LIST with equal structural evidence, resolving to a spurious ambiguous_list_state tie (latent, no current adapter produces it) (T06)",
+        "a table between two list items is not attributed to any item; the tail scan only covers content after the run's last item (T06/T10)",
+        "scripts/wxdf/transaction.py has now been changed by two out-of-scope tickets and carries core idempotency logic; it should get its own ticket with focused ordering and applied-predicate tests (T10)"
       ]
     },
     {
