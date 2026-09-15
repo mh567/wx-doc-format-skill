@@ -17,7 +17,7 @@ import math
 import os
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Literal, Mapping
 
 from document_model import LIST_TYPES, TABLE_TYPES
 from table_semantics import table_caption_eligible
@@ -265,11 +265,14 @@ def _iter_batches(items: list, size: int) -> list[list]:
 def _make_phase_batches(desc: CapabilityConfig, items: list) -> list[list]:
     """Group *items* into batches according to *desc.batching*.
 
-    ``"single"`` → one batch containing all items (wrapped in a list).
+    ``"single"`` → one batch containing all items, or no batch when the
+    collector returned nothing.  Returning ``[[]]`` for an empty single-batch
+    capability would be truthy and make the loop run once with the whole model
+    in the prompt, so the LLM gate would not actually stop the model.
     ``"by_targets"`` / ``"by_sections"`` → split by ``batch_size``.
     """
     if desc.batching == "single":
-        return [items]
+        return [items] if items else []
     if desc.batching in {"by_targets", "by_sections"}:
         if not items:
             return []
@@ -480,19 +483,84 @@ def _collect_caption_targets(model: dict) -> list[dict]:
     return targets
 
 
+def _list_detect_ambiguous_blocks(model: dict) -> list[dict]:
+    """Return the blocks that already carry multiple candidates.
+
+    A block qualifies when the deterministic rules left it with more than one
+    reading instead of a decided one: an ``ambiguous`` OOXML numbering status, a
+    competing unordered-marker candidate, or a list-group candidate the rules
+    flagged for review.  Only those fragments are offered to ``list_detect`` so
+    the capability cannot act on a block the rules already decided.
+    """
+
+    blocks: list[dict] = []
+    for block in model.get("document", {}).get("blocks", []):
+        source = block.get("source", {})
+        numbering = source.get("numbering", {})
+        group = source.get("list_group_candidate", {})
+        ambiguous = (
+            numbering.get("status") == "ambiguous"
+            or source.get("unordered_candidate")
+            or (isinstance(group, Mapping) and group.get("status") == "review")
+            or (isinstance(group, Mapping) and bool(group.get("conflicts")))
+        )
+        if ambiguous:
+            blocks.append(block)
+    return blocks
+
+
 def _collect_list_detect_batches(model: dict, report: dict) -> list[dict]:
     """Collector for the ``list_detect`` capability.
 
-    Returns a single-item list with ``{"blocks_override": ...}`` so the
-    batch system produces exactly one call.  When fewer than 3 blocks
-    are suspicious, ``blocks_override`` is ``None`` (full model shown).
+    The capability is bounded to fragments that already have multiple
+    candidates.  When at least one such fragment exists, a single batch is
+    returned whose ``blocks_override`` is exactly those fragments, so the
+    prompt never shows the whole model and the LLM cannot rewrite a block the
+    rules already decided.  When no fragment is ambiguous the collector returns
+    no batch, so ``list_detect`` makes no call at all.
     """
-    sections = _collect_suspicious_sections(model, report)
-    filtered_blocks = []
-    for sec in sections:
-        filtered_blocks.extend(sec.get("blocks", []))
-    blocks_override = filtered_blocks if len(filtered_blocks) >= 3 else None
-    return [{"blocks_override": blocks_override}]
+
+    ambiguous = _list_detect_ambiguous_blocks(model)
+    if not ambiguous:
+        return []
+    return [{"blocks_override": ambiguous}]
+
+
+def _validate_list_detect_patch(patch: dict, model: dict, report: dict) -> list[dict]:
+    """Reject a ``list_detect`` patch that leaves the ambiguous fragment set.
+
+    The capability may act only on fragments that already have multiple
+    candidates, and it never rewrites the whole list structure.  Any decision
+    whose ``block_id`` is not one of those fragments is therefore a validation
+    error; the structural constraints (one ownership per block, ordering, deep
+    items need a parent) stay owned by the Resolver.
+    """
+
+    errors: list[dict] = []
+    decisions = patch.get("decisions")
+    if not isinstance(decisions, list):
+        return errors
+    ambiguous_ids = {str(block.get("id")) for block in _list_detect_ambiguous_blocks(model) if block.get("id")}
+    outside: list[str] = []
+    for index, decision in enumerate(decisions):
+        if not isinstance(decision, Mapping):
+            continue
+        block_id = decision.get("block_id")
+        if block_id is None:
+            continue
+        if str(block_id) not in ambiguous_ids:
+            outside.append(str(block_id))
+            errors.append({
+                "decision_index": index,
+                "block_id": str(block_id),
+                "message": "list_detect may act only on a fragment that already has multiple candidates",
+            })
+    if len(set(outside)) > len(ambiguous_ids):
+        errors.append({
+            "field": "decisions",
+            "message": "list_detect must not rewrite the whole list structure",
+        })
+    return errors
 
 
 def _collect_caption_gen_batches(model: dict, report: dict) -> list[dict]:
@@ -1741,6 +1809,7 @@ register_capability(CapabilityConfig(
     prevalidate=True,
     after_phase=_record_phase_a_applied_rate,
     prompt_args_builder=_prompt_args_for_list_detect,
+    validator=_validate_list_detect_patch,
 ))
 
 register_capability(CapabilityConfig(

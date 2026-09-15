@@ -79,6 +79,7 @@ tests/*
 !tests/test_t06_numbering_boundary.py
 !tests/test_t07_heading_body_anti_ambiguity.py
 !tests/test_t08_multilevel_rendering.py
+!tests/test_t09_readback_audit.py
 !tests/test_fu3_convergence.py
 !tests/test_t09_compiled_acceptance.py
 !tests/modular_support.py

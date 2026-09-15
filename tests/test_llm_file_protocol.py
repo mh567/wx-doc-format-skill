@@ -48,6 +48,16 @@ def _block(bid: str, block_type: str = "body", **kwargs):
     return b
 
 
+def _ambiguous_block(bid: str, block_type: str = "body", **kwargs):
+    """Build a block that already carries multiple candidates for list_detect.
+
+    ``list_detect`` only acts on fragments with multiple candidates, so a test
+    that needs it to emit a request must provide one of these.
+    """
+    kwargs.setdefault("source", {"unordered_candidate": {"marker": "◆", "content_text": kwargs.get("text", "test content")}})
+    return _block(bid, block_type, **kwargs)
+
+
 def make_minimal_model(blocks=None):
     """Return a minimal document model, optionally with *blocks*."""
     model = new_document_model("test.md", "md", "test")
@@ -168,9 +178,9 @@ class TestBuildRunInfo:
 
 class TestCollectPhaseRequests:
     def test_phase_a_returns_one_request(self):
-        """Phase A (list_detect) with suspicious blocks should produce one request."""
+        """Phase A (list_detect) with an ambiguous fragment produces one request."""
         blocks = [
-            _block("b0001", "body", text="Short para"),
+            _ambiguous_block("b0001", "body", text="Short para"),
             _block("b0002", "body", text="Another short"),
         ]
         model = make_minimal_model(blocks)
@@ -185,13 +195,13 @@ class TestCollectPhaseRequests:
         assert reqs[0]["capability"] == "list_detect"
         assert "prompt" in reqs[0]
 
-    def test_phase_a_clean_document_returns_one_request(self):
-        """Even a clean document produces one batch for list_detect."""
+    def test_phase_a_clean_document_returns_no_request(self):
+        """A clean model has no ambiguous fragment, so list_detect makes no call."""
         blocks = [_block("b0001", "heading", text="Clean doc")]
         model = make_minimal_model(blocks)
         report = {"parse_report": {}}
         reqs = collect_phase_requests(model, report, phase="A")
-        assert len(reqs) == 1
+        assert reqs == []
 
     def test_caption_gen_no_targets_returns_empty(self):
         """Phase B with no auto-generated captions returns empty."""
@@ -224,7 +234,7 @@ class TestCollectPhaseRequests:
             pass
 
     def test_request_id_format(self):
-        blocks = [_block("b0001", "body", text="Short")]
+        blocks = [_ambiguous_block("b0001", "body", text="Short")]
         model = make_minimal_model(blocks)
         report = {"parse_report": {"ambiguous_short_paragraphs": 1}}
         reqs = collect_phase_requests(model, report, phase="A")
@@ -304,7 +314,7 @@ class TestFileIO:
             run_id = generate_run_id()
 
             blocks = [
-                _block("b0001", "body", text="Short para"),
+                _ambiguous_block("b0001", "body", text="Short para"),
                 _block("b0002", "body", text="Another short"),
             ]
             model = make_minimal_model(blocks)
@@ -501,7 +511,9 @@ class TestReplayPhaseResponses:
     def test_replay_applies_valid_patch(self):
         """Resume mode should validate and apply patches from saved responses."""
         blocks = [
-            _block("b0001", "body", text="First item"),
+            _block("b0001", "body", text="First item",
+                   source={"numbering": {"status": "ambiguous", "ilvl": 0,
+                                         "list_type": "lower_letter_paren"}}),
             _block("b0002", "body", text="Second item"),
         ]
         model = make_minimal_model(blocks)
@@ -544,7 +556,7 @@ class TestReplayPhaseResponses:
 
     def test_replay_missing_response_is_error(self):
         """When a response is missing, an error should be recorded."""
-        blocks = [_block("b0001", "body")]
+        blocks = [_ambiguous_block("b0001", "body")]
         model = make_minimal_model(blocks)
         report: dict = {}
 
@@ -562,7 +574,7 @@ class TestReplayPhaseResponses:
 
     def test_replay_input_hash_tampered_is_error(self):
         """Tampered input_hash should cause verification error."""
-        blocks = [_block("b0001", "body")]
+        blocks = [_ambiguous_block("b0001", "body")]
         model = make_minimal_model(blocks)
         report: dict = {}
 
@@ -587,7 +599,7 @@ class TestReplayPhaseResponses:
 
     def test_replay_bad_json_is_error(self):
         """Invalid raw_response JSON should be an error."""
-        blocks = [_block("b0001", "body")]
+        blocks = [_ambiguous_block("b0001", "body")]
         model = make_minimal_model(blocks)
         report: dict = {}
 
@@ -612,7 +624,7 @@ class TestReplayPhaseResponses:
 
     def test_replay_still_validates_patch_against_model(self):
         """Even from a response, the patch is validated against the model."""
-        blocks = [_block("b0001", "body")]
+        blocks = [_ambiguous_block("b0001", "body")]
         model = make_minimal_model(blocks)
         report: dict = {}
         patch = {
@@ -710,7 +722,7 @@ class TestEndToEnd:
 
             # ── Collect Phase A request ────────────────────────────
             blocks = [
-                _block("b0001", "body", text="Short ambiguous"),
+                _ambiguous_block("b0001", "body", text="Short ambiguous"),
                 _block("b0002", "body", text="Another short"),
             ]
             model = make_minimal_model(blocks)
