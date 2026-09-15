@@ -1,11 +1,15 @@
-"""T08 end-to-end tests for real multi-level WX list rendering.
+"""T08 end-to-end tests for two-level WX list rendering.
 
-These tests pin the T08 acceptance: under the product default policy
-(``wx-default-v2``) a genuine multi-level ordered list must render REAL
-multi-level numbering.  The first level keeps the first-level letter style and
-the deeper levels keep the second-level style, and the emitted ``w:ilvl`` follows
-the true semantic level through a numbering instance that actually defines those
-levels, instead of pinning every ordered item to ``w:ilvl=0``.
+These tests pin the T08 acceptance under the product default policy
+(``wx-default-v2``).  ``AGENTS.md`` decision 1 recognises at most two list
+levels: semantic level 0 uses the kind's first-level style (``a)`` for ordered,
+the first-level unordered style for unordered) and semantic level 1 uses the
+kind's second-level style from the template's own instance (``1)`` for ordered,
+the second-level bullet for unordered).  A semantic level deeper than 1 clamps
+to the second level and reports ``list_render_level_clamped``.  The template's
+second-level instances are single-level, so a second-level item emits
+``w:ilvl 0`` and the two levels are told apart by the style and the instance,
+not by the level attribute.
 
 Fixture naming follows the T01 convention ``t08_<scenario>_<variant>``.
 """
@@ -290,11 +294,11 @@ def _normalize_with_bundle(ast: dict, strategy="wx-default-v2") -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Work item 3: real multi-level ordered output end to end
+# Work item 3: two-level ordered output end to end
 # ---------------------------------------------------------------------------
 
-def test_t08_two_level_ordered_renders_real_multi_level(tmp_path: Path) -> None:
-    """A two-level ordered list emits level 0 for parents and level 1 for children."""
+def test_t08_two_level_ordered_renders_the_two_level_styles(tmp_path: Path) -> None:
+    """A two-level ordered list renders ``a)`` then the template's ``1)`` form."""
 
     from wxdf.auditing import audit_list_readback
 
@@ -312,19 +316,22 @@ def test_t08_two_level_ordered_renders_real_multi_level(tmp_path: Path) -> None:
 
     rows = _direct_numbering(output)
     assert [row[0] for row in rows] == ["一级一", "二级一", "二级二", "一级二"], rows
-    assert [row[2] for row in rows] == ["0", "1", "1", "0"], rows
+    # Both levels emit w:ilvl 0: the template's second-level ordered style sits
+    # on its own single-level instance, so the levels are distinguished by the
+    # instance (and the style) rather than by a deeper w:ilvl.
+    assert [row[2] for row in rows] == ["0", "0", "0", "0"], rows
     num_ids = [row[1] for row in rows]
-    # T08 FIX round: level 0 and the deeper levels share ONE list-only instance.
-    # The pre-fix binding used the template's heading instance for the child and
-    # the template's letter instance for the parent, so the list numbering
-    # tracked the heading counters.
-    assert set(num_ids) == {num_ids[0]}, rows
+    # Level 0 binds the template's first-level letter instance; level 1 binds the
+    # template's own second-level decimal instance, so the visible marker is the
+    # designed ``1)`` instead of an outline ``a.1``.
+    assert num_ids == ["3", "8", "8", "3"], rows
     heading_instances, heading_abstracts = _heading_numbering_instances()
-    assert num_ids[0] not in heading_instances, (num_ids, heading_instances)
-    assert _abstract_of(output, num_ids[0]) not in heading_abstracts, (num_ids, heading_abstracts)
+    assert not (set(num_ids) & heading_instances), (num_ids, heading_instances)
+    assert _abstract_of(output, "3") not in heading_abstracts, heading_abstracts
 
     levels = _numbering_levels(output)
-    assert {0, 1} <= levels[int(num_ids[0])], (num_ids, levels)
+    assert levels[3] == {0}, levels[3]
+    assert levels[8] == {0}, levels[8]
 
     styles = _paragraph_styles(output)
     assert styles["一级一"] == "1.1一级列项-编号", styles
@@ -332,11 +339,11 @@ def test_t08_two_level_ordered_renders_real_multi_level(tmp_path: Path) -> None:
     assert styles["二级一"] == "2.1二级列项-有编号", styles
     assert styles["二级二"] == "2.1二级列项-有编号", styles
 
-    # The simulated visible numbering is the real multi-level output: the parent
-    # keeps the first-level letter form and the children carry that parent's
-    # letter with their own level-1 counter.
+    # The simulated visible numbering is the designed two-level output: the
+    # parent keeps the first-level letter form and the child carries the
+    # second-level style's own independent ``1)``/``2)`` sequence.
     markers = _visible_markers(output)
-    assert [markers[text] for text in ("一级一", "二级一", "二级二", "一级二")] == ["a)", "a.1", "a.2", "b)"], markers
+    assert [markers[text] for text in ("一级一", "二级一", "二级二", "一级二")] == ["a)", "1)", "2)", "b)"], markers
 
     comparison = audit_list_readback(output, normalized)
     assert comparison["passed"] is True, comparison["issues"]
@@ -349,8 +356,8 @@ def test_t08_two_level_ordered_renders_real_multi_level(tmp_path: Path) -> None:
     assert clamps == [], clamps
 
 
-def test_t08_three_level_ordered_renders_real_multi_level(tmp_path: Path) -> None:
-    """A three-level ordered list emits level 0, 1 and 2 through a multi-level instance."""
+def test_t08_three_level_ordered_clamps_the_third_level(tmp_path: Path) -> None:
+    """A three-level ordered list clamps the third level to the second."""
 
     from wxdf.auditing import audit_list_readback
 
@@ -362,13 +369,12 @@ def test_t08_three_level_ordered_renders_real_multi_level(tmp_path: Path) -> Non
 
     rows = _direct_numbering(output)
     assert [row[0] for row in rows] == ["一级", "二级", "三级", "二级二", "一级二"], rows
-    assert [row[2] for row in rows] == ["0", "1", "2", "1", "0"], rows
+    # The third semantic level is clamped to the second, so it too emits ilvl 0.
+    assert [row[2] for row in rows] == ["0", "0", "0", "0", "0"], rows
+    assert [row[1] for row in rows] == ["3", "8", "8", "8", "3"], rows
 
     levels = _numbering_levels(output)
-    deeper_ids = {row[1] for row in rows if row[2] != "0"}
-    assert deeper_ids, rows
-    for num_id in deeper_ids:
-        assert {1, 2} <= levels[int(num_id)], (num_id, levels[num_id])
+    assert levels[8] == {0}, levels[8]
 
     heading_instances, heading_abstracts = _heading_numbering_instances()
     assert not ({row[1] for row in rows} & heading_instances), (rows, heading_instances)
@@ -376,15 +382,28 @@ def test_t08_three_level_ordered_renders_real_multi_level(tmp_path: Path) -> Non
 
     markers = _visible_markers(output)
     assert [markers[text] for text in ("一级", "二级", "三级", "二级二", "一级二")] == [
-        "a)", "a.1", "a.1.1", "a.2", "b)",
+        "a)", "1)", "2)", "3)", "b)",
     ], markers
 
     comparison = audit_list_readback(output, normalized)
     assert comparison["passed"] is True, comparison["issues"]
 
+    # The third semantic level is deeper than the two-level model, so it clamps
+    # to the second level and the clamp is observable instead of silent.
+    clamps = [
+        item
+        for item in result.report["native_module_evidence"]["native-auditor"]["downstream"]["render_diagnostics"]
+        if item.get("code") == "list_render_level_clamped"
+    ]
+    assert len(clamps) == 1, clamps
+    assert clamps[0]["semantic_level"] == 2, clamps[0]
+    assert clamps[0]["render_level"] == 1, clamps[0]
+    assert clamps[0]["emitted_level"] == 0, clamps[0]
+    assert clamps[0]["num_id"] == 8, clamps[0]
 
-def test_t08_second_level_does_not_collapse_to_zero(tmp_path: Path) -> None:
-    """The pre-fix symptom (every ordered item at numId 3 ilvl 0) is gone."""
+
+def test_t08_second_level_uses_its_own_ordered_instance(tmp_path: Path) -> None:
+    """The pre-fix symptom (every ordered item on one letter instance) is gone."""
 
     _normalized, output, result = _convert_markdown(
         tmp_path,
@@ -392,15 +411,17 @@ def test_t08_second_level_does_not_collapse_to_zero(tmp_path: Path) -> None:
     )
     assert result.status == "completed", result.diagnostics
     rows = _direct_numbering(output)
-    assert [(row[1], row[2]) for row in rows] != [("3", "0"), ("3", "0"), ("3", "0")], rows
-    assert rows[1][2] == "1", rows
+    # The second level binds the template's second-level ordered instance instead
+    # of collapsing onto the first-level letter instance.
+    assert [row[1] for row in rows] == ["3", "8", "3"], rows
+    assert [row[2] for row in rows] == ["0", "0", "0"], rows
 
 
 # ---------------------------------------------------------------------------
 # Work item 1: the ListPolicy owns the semantic -> render projection
 # ---------------------------------------------------------------------------
 
-def test_t08_default_policy_preserves_true_level_and_second_style_projection() -> None:
+def test_t08_default_policy_caps_at_two_levels_and_picks_second_style() -> None:
     normalized = _normalize_with_bundle(_three_level_ordered_ast(), strategy="wx-default-v2")
     nodes = normalized["presentation"]["nodes"]
 
@@ -408,88 +429,71 @@ def test_t08_default_policy_preserves_true_level_and_second_style_projection() -
     assert nodes["i1"]["style_role"] == "list_letter", nodes["i1"]
     assert nodes["i2"]["target_level"] == 1, nodes["i2"]
     assert nodes["i2"]["style_role"] == "list_decimal", nodes["i2"]
-    assert nodes["i4"]["target_level"] == 2, nodes["i4"]
+    assert nodes["i2"]["render_level_clamped"] is False, nodes["i2"]
+    # The third semantic level is deeper than the two-level model, so it clamps
+    # to render level 1 and carries the clamp flag.
+    assert nodes["i4"]["semantic_level"] == 2, nodes["i4"]
+    assert nodes["i4"]["target_level"] == 1, nodes["i4"]
     assert nodes["i4"]["style_role"] == "list_decimal", nodes["i4"]
+    assert nodes["i4"]["render_level_clamped"] is True, nodes["i4"]
     assert nodes["i3"]["target_level"] == 0, nodes["i3"]
 
     # The policy is a first-class object with a stable, documented interface.
     from wxdf.normalization import list_policy
 
     policy = list_policy("wx-default-v2")
+    assert policy.max_level == 1
     assert policy.project("ordered", 0).render_level == 0
     assert policy.project("ordered", 0).style_role == "list_letter"
-    assert policy.project("ordered", 3).render_level == 3
+    assert policy.project("ordered", 3).render_level == 1
     assert policy.project("ordered", 3).style_role == "list_decimal"
+    assert policy.project("ordered", 3).clamped is True
     assert policy.project("unordered", 0).style_role == "list_dash"
+    assert policy.project("unordered", 4).render_level == 1
     assert policy.project("unordered", 4).style_role == "list_bullet"
+    assert policy.project("unordered", 4).clamped is True
 
 
-def _numbering_num_to_abstract(path: Path) -> dict[int, int]:
-    with ZipFile(path) as archive:
-        numbering = ElementTree.fromstring(archive.read("word/numbering.xml"))
-    result: dict[int, int] = {}
-    for num in numbering.findall("w:num", _NS):
-        reference = num.find("w:abstractNumId", _NS)
-        if reference is None:
-            continue
-        result[int(num.get(f"{{{WORD_NS}}}numId"))] = int(reference.get(f"{{{WORD_NS}}}val"))
-    return result
-
-
-def test_t08_default_policy_binds_ordered_roles_to_one_list_only_instance() -> None:
+def test_t08_default_policy_binds_roles_to_the_template_instances() -> None:
     from template_profile import load_template_profile
 
     template_ids = load_template_profile(TEMPLATE)["numbering_ids"]
-    # The template's own ordered roles bind single-level instances, and its only
-    # multi-level ordered instance is the heading outline (heading 1 to 6 are
-    # bound to it in the styles part).
+    # The template binds each list role to the instance designed for its level:
+    # the first-level letter instance (numId 3) and the second-level ordered
+    # instance (numId 8, ``%1)`` decimal), which is what makes the second level
+    # show ``1)``.
     assert template_ids["list_decimal"] == 8, template_ids
     assert template_ids["list_letter"] == 3, template_ids
+    assert template_ids["list_bullet"] == 4, template_ids
     levels = _numbering_levels(TEMPLATE)
     assert levels[8] == {0}, levels[8]
 
     normalized = _normalize_with_bundle(_three_level_ordered_ast(), strategy="wx-default-v2")
-    effective = normalized["presentation"]["profile"]["numbering_ids"]
-    synthesized = normalized["presentation"]["profile"]["synthesized_numbering"]
-    # The policy binds every ordered role to ONE list-only instance that defines
-    # the deeper levels, so the emitted w:ilvl can be a real level AND level 0
-    # shares the instance with the deeper levels.
-    assert effective["list_decimal"] != template_ids["list_decimal"], effective
-    assert effective["list_letter"] == effective["list_decimal"], effective
-    assert [item["num_id"] for item in synthesized] == [effective["list_decimal"]], synthesized
-    # The abstract it clones defines the deeper levels, its level 0 comes from
-    # the template's own first-level letter definition, and neither is a heading
-    # definition.
-    template_levels = _numbering_levels(TEMPLATE)
-    abstract_by_num = _numbering_num_to_abstract(TEMPLATE)
+    profile = normalized["presentation"]["profile"]
+    effective = profile["numbering_ids"]
+    # The default policy synthesizes no numbering instance: every role keeps the
+    # template's own binding, so the two levels are distinguished by style and
+    # instance rather than by a shared multi-level outline.
+    assert "synthesized_numbering" not in profile, profile
+    assert effective["list_letter"] == template_ids["list_letter"], effective
+    assert effective["list_decimal"] == template_ids["list_decimal"], effective
+    assert effective["list_bullet"] == template_ids["list_bullet"], effective
     heading_instances, heading_abstracts = _heading_numbering_instances()
     assert str(effective["list_decimal"]) not in heading_instances, (effective, heading_instances)
-    # The deeper levels are cloned from the template's multi-level outline, which
-    # is also what the heading styles number with, so the clone is what keeps the
-    # counters apart.
-    deeper_num_id = next(
-        num_id
-        for num_id, abstract_id in abstract_by_num.items()
-        if abstract_id == synthesized[0]["deeper_abstract_num_id"]
-    )
-    assert deeper_num_id in {int(item) for item in heading_instances}, (deeper_num_id, heading_instances)
-    assert len(template_levels[deeper_num_id]) > 1, template_levels[deeper_num_id]
-    assert str(synthesized[0]["abstract_num_id"]) not in heading_abstracts, (synthesized, heading_abstracts)
-    assert synthesized[0]["level_zero_abstract_num_id"] == abstract_by_num[template_ids["list_letter"]], synthesized
-    # The template's own letter definition is the one the level-0 source comes
-    # from, so the level-0 format stays the first-level letter form.
-    assert template_ids["list_letter_abstract"] == synthesized[0]["level_zero_abstract_num_id"], synthesized
-    # The abstract companion stays consistent with the bound instance.
-    assert effective["list_decimal_abstract"] == synthesized[0]["abstract_num_id"], effective
-    assert effective["list_letter_abstract"] == synthesized[0]["abstract_num_id"], effective
-    # ``legacy`` keeps the template's own bindings: it never synthesizes.
+    assert str(effective["list_letter"]) not in heading_instances, (effective, heading_instances)
+    assert effective["list_decimal_abstract"] == template_ids["list_decimal_abstract"], effective
+    assert effective["list_letter_abstract"] == template_ids["list_letter_abstract"], effective
+    assert str(effective["list_decimal_abstract"]) not in heading_abstracts, (effective, heading_abstracts)
+    # ``legacy`` keeps the same template bindings and never synthesizes either.
     legacy = _normalize_with_bundle(_three_level_ordered_ast(), strategy="legacy")
-    assert legacy["presentation"]["profile"]["numbering_ids"]["list_letter"] == template_ids["list_letter"]
-    assert legacy["presentation"]["profile"]["synthesized_numbering"] == []
+    legacy_profile = legacy["presentation"]["profile"]
+    assert "synthesized_numbering" not in legacy_profile, legacy_profile
+    assert legacy_profile["numbering_ids"]["list_letter"] == template_ids["list_letter"]
+    assert legacy_profile["numbering_ids"]["list_decimal"] == template_ids["list_decimal"]
 
 
-def test_t08_list_only_instance_is_synthesized_in_the_produced_part(tmp_path: Path) -> None:
-    """The list instance is written into the document, and the template stays untouched."""
+def test_t08_second_level_binds_the_template_second_level_instance(tmp_path: Path) -> None:
+    """The second level uses the template's ``%1)`` instance; the template stays untouched."""
 
     import hashlib
 
@@ -501,42 +505,30 @@ def test_t08_list_only_instance_is_synthesized_in_the_produced_part(tmp_path: Pa
     assert result.status == "completed", result.diagnostics
     assert hashlib.sha256(TEMPLATE.read_bytes()).hexdigest() == template_before
 
-    synthesized = normalized["presentation"]["profile"]["synthesized_numbering"]
-    assert len(synthesized) == 1, synthesized
-    spec = synthesized[0]
-    num_id = str(spec["num_id"])
+    profile = normalized["presentation"]["profile"]
+    assert "synthesized_numbering" not in profile, profile
+    assert profile["numbering_ids"]["list_letter"] == 3, profile
+    assert profile["numbering_ids"]["list_decimal"] == 8, profile
+    assert profile["numbering_ids"]["list_letter_abstract"] == 4, profile
+    assert profile["numbering_ids"]["list_decimal_abstract"] == 7, profile
+
     with ZipFile(output) as archive:
         numbering = ElementTree.fromstring(archive.read("word/numbering.xml"))
-        names = archive.namelist()
     abstracts = {
         abstract.get(f"{{{WORD_NS}}}abstractNumId"): abstract
         for abstract in numbering.findall("w:abstractNum", _NS)
     }
-    assert "word/numbering.xml" in names
-    assert str(spec["abstract_num_id"]) in abstracts
-    # The definition is list-only: it carries no paragraph style link, so no
-    # heading (or list) style borrows the instance.
-    abstract = abstracts[str(spec["abstract_num_id"])]
-    assert abstract.findall(".//w:pStyle", _NS) == []
-    # Level 0 is the template's first-level letter definition and the deeper
-    # levels are the template's outline levels.
-    level_zero = abstract.find("w:lvl[@w:ilvl='0']", _NS)
-    assert level_zero.find("w:numFmt", _NS).get(f"{{{WORD_NS}}}val") == "lowerLetter"
-    assert level_zero.find("w:lvlText", _NS).get(f"{{{WORD_NS}}}val") == "%1)"
-    level_one = abstract.find("w:lvl[@w:ilvl='1']", _NS)
-    assert level_one.find("w:numFmt", _NS).get(f"{{{WORD_NS}}}val") == "decimal"
-    assert level_one.find("w:lvlText", _NS).get(f"{{{WORD_NS}}}val") == "%1.%2 "
-    # Level 0 never restarts; every deeper level restarts when the level above it
-    # is used, which is what restarts a parent's children.
-    assert level_zero.find("w:lvlRestart", _NS).get(f"{{{WORD_NS}}}val") == "0"
-    assert level_one.find("w:lvlRestart", _NS).get(f"{{{WORD_NS}}}val") == "1"
-    # The new instance is a real ``w:num`` entry that the list items reference.
-    references = {
-        num.get(f"{{{WORD_NS}}}numId"): num.find("w:abstractNumId", _NS).get(f"{{{WORD_NS}}}val")
-        for num in numbering.findall("w:num", _NS)
-    }
-    assert references[num_id] == str(spec["abstract_num_id"]), references
-    assert {row[1] for row in _direct_numbering(output)} == {num_id}
+    # The second-level ordered style's own instance is a single-level decimal
+    # ``%1)`` definition, which is what makes the visible marker ``1)``.
+    second_level_zero = abstracts["7"].find("w:lvl[@w:ilvl='0']", _NS)
+    assert second_level_zero.find("w:numFmt", _NS).get(f"{{{WORD_NS}}}val") == "decimal"
+    assert second_level_zero.find("w:lvlText", _NS).get(f"{{{WORD_NS}}}val") == "%1)"
+    # The first-level letter instance keeps the ``a)`` form.
+    first_level_zero = abstracts["4"].find("w:lvl[@w:ilvl='0']", _NS)
+    assert first_level_zero.find("w:numFmt", _NS).get(f"{{{WORD_NS}}}val") == "lowerLetter"
+    assert first_level_zero.find("w:lvlText", _NS).get(f"{{{WORD_NS}}}val") == "%1)"
+    # The produced document references exactly those two instances.
+    assert {row[1] for row in _direct_numbering(output)} == {"3", "8"}
 
 
 def test_t08_nested_list_does_not_renumber_a_following_heading(tmp_path: Path) -> None:
@@ -554,15 +546,15 @@ def test_t08_nested_list_does_not_renumber_a_following_heading(tmp_path: Path) -
     assert rows["一节"]["num_id"] in heading_instances, rows["一节"]
     assert rows["二节"]["num_id"] in heading_instances, rows["二节"]
     assert rows["二级一"]["num_id"] not in heading_instances, rows["二级一"]
-    # The list child shares the list's own instance, so it advances no heading
-    # counter: the following second-level heading is 1.2, not 1.3.
+    # The list child uses the list's own second-level instance, so it advances no
+    # heading counter: the following second-level heading is 1.2, not 1.3.
     assert rows["一节"]["marker"] == "1.1", rows["一节"]
-    assert rows["二级一"]["marker"] == "a.1", rows["二级一"]
+    assert rows["二级一"]["marker"] == "1)", rows["二级一"]
     assert rows["二节"]["marker"] == "1.2", rows["二节"]
 
 
-def test_t08_children_restart_under_each_top_level_item(tmp_path: Path) -> None:
-    """Two top-level items each restart their own children."""
+def test_t08_second_level_uses_the_independent_ordered_instance(tmp_path: Path) -> None:
+    """Second-level items share one independent ``1)`` instance, not the outline."""
 
     _normalized, output, result = _convert_markdown(
         tmp_path,
@@ -572,11 +564,12 @@ def test_t08_children_restart_under_each_top_level_item(tmp_path: Path) -> None:
 
     markers = _visible_markers(output)
     assert markers["一级一"] == "a)", markers
-    assert markers["二级一"] == "a.1", markers
     assert markers["一级二"] == "b)", markers
-    # The second top-level item restarts its children instead of continuing the
-    # first parent's child counter (the pre-fix symptom was 1.2 here).
-    assert markers["二级二"] == "b.1", markers
+    # The second level is the template's own single-level ``1)`` instance, so the
+    # two children continue its sequence (1), 2)) instead of the outline
+    # a.1 / b.1 the synthesized multi-level instance produced.
+    assert markers["二级一"] == "1)", markers
+    assert markers["二级二"] == "2)", markers
 
 
 def test_t08_normalization_consumes_the_stored_semantic_level() -> None:
@@ -589,11 +582,15 @@ def test_t08_normalization_consumes_the_stored_semantic_level() -> None:
     ast = _three_level_ordered_ast()
 
     walked = normalize(ast, bundle, strategy="wx-default-v2")
-    assert walked["presentation"]["nodes"]["i4"]["target_level"] == 2, walked["presentation"]["nodes"]["i4"]
+    walked_node = walked["presentation"]["nodes"]["i4"]
+    assert walked_node["semantic_level"] == 2, walked_node
+    assert walked_node["target_level"] == 1, walked_node
+    assert walked_node["render_level_clamped"] is True, walked_node
 
     # A stored semantic level that disagrees with the container tree wins: the
     # normalizer reads the list semantics layer's level instead of re-deriving
-    # the depth from the tree, and projects that level with the run policy.
+    # the depth from the tree, and projects that level with the run policy.  Both
+    # levels are deeper than the two-level model, so both clamp to level 1.
     stored = normalize(
         ast,
         bundle,
@@ -601,8 +598,10 @@ def test_t08_normalization_consumes_the_stored_semantic_level() -> None:
         context={"list_container_levels": [{"list_id": "l3", "semantic_level": 4}]},
     )
     node = stored["presentation"]["nodes"]["i4"]
-    assert node["target_level"] == 4, node
+    assert node["semantic_level"] == 4, node
+    assert node["target_level"] == 1, node
     assert node["style_role"] == "list_decimal", node
+    assert node["render_level_clamped"] is True, node
 
 
 def test_t08_list_policy_is_swappable_for_a_third_template_level() -> None:

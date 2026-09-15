@@ -166,9 +166,10 @@ def _assert_render_plan(report: dict, source_ast: dict) -> None:
         "ordered",
         "ordered",
     ]
-    # T08: the ListPolicy keeps the true semantic level instead of pinning every
-    # ordered item to level 0, so the nested ordered grandchild renders at level 2.
-    assert [item["target_level"] for item in presentations] == [0, 1, 2, 0]
+    # T08: the ListPolicy caps the projection at two levels (AGENTS.md decision
+    # 1), so the nested ordered grandchild clamps to render level 1 instead of a
+    # real level 2 and the second level keeps its own style.
+    assert [item["target_level"] for item in presentations] == [0, 1, 1, 0]
     assert [item["target_ordinal"] for item in presentations] == [1, None, 2, 3]
     assert [item["restart"] for item in presentations] == [True, True, False, False]
 
@@ -196,18 +197,16 @@ def _assert_saved_numbering(output: Path) -> None:
         if style_id is not None and num_pr is not None:
             style_num_pr[style_id] = num_pr
     assert numbers
-    # T08: ordered items keep their real render level through ONE list-only
-    # numbering instance the produced document synthesizes.  Level 0 keeps the
-    # first-level letter form, the level-2 ordered grandchild is a real decimal
-    # level 2, and no item shares the heading outline (the pre-fix binding put
-    # the deeper items on the heading instance, so a following heading was
-    # renumbered and children never restarted).  The level-1 unordered middle
-    # item has no multi-level bullet instance, so it still clamps to ilvl 0
-    # (bullet).
+    # T08: at most two list levels are recognised (AGENTS.md decision 1).  Level 0
+    # ordered items bind the first-level letter instance, level-1 ordered items
+    # bind the template's own second-level decimal instance, and the third
+    # semantic level clamps to the second.  Every template list instance is
+    # single-level, so every item emits ilvl 0 and the levels are told apart by
+    # the style and the instance, not by the level attribute.
     paragraph_levels = {
         "一级有序": "0",
         "二级无序": "0",
-        "三级有序": "2",
+        "三级有序": "0",
         "第二个一级": "0",
     }
     paragraph_formats = {
@@ -249,23 +248,24 @@ def _assert_saved_numbering(output: Path) -> None:
             assert abstract_id not in heading_abstracts, (text, abstract_id, heading_abstracts)
             ordered_num_ids.add(num_id_value)
     assert seen_texts == list(paragraph_levels)
-    # Level 0 and the deeper ordered levels share one instance, so ``%1`` is the
-    # list's own first-level counter and a new top-level item restarts its
-    # children.
-    assert len(ordered_num_ids) == 1, ordered_num_ids
+    # The two ordered levels bind the two template instances designed for them
+    # (the first-level letter instance and the second-level decimal instance),
+    # and neither is a heading instance.
+    assert ordered_num_ids == {"3", "8"}, ordered_num_ids
     assert not (ordered_num_ids & heading_instances), (ordered_num_ids, heading_instances)
-    assert _abstract_of(output, next(iter(ordered_num_ids))) not in heading_abstracts, ordered_num_ids
+    for num_id in ordered_num_ids:
+        assert _abstract_of(output, num_id) not in heading_abstracts, (num_id, ordered_num_ids)
 
-    # The visible numbering the saved XML produces: the nested unordered item
-    # clamped to its single-level bullet instance, the nested ordered item
-    # carries the list's own level-0 letter with its deeper counters, and the
-    # second top-level item keeps its own letter.
+    # The visible numbering the saved XML produces: the ordered items show the
+    # first-level ``a)``/``b)`` form, the second-level unordered item shows the
+    # second-level bullet, and the clamped third-level ordered item shows the
+    # template's own ``1)`` form.
     markers = {
         row["text"]: row["marker"]
         for row in simulate_saved_numbering(output)
         if row.get("marker") is not None and row.get("text")
     }
-    assert [markers[text] for text in paragraph_levels] == ["a)", "•", "a.1.1", "b)"], markers
+    assert [markers[text] for text in paragraph_levels] == ["a)", "•", "1)", "b)"], markers
 
 
 @pytest.mark.parametrize("source_kind", ["markdown", "docx"])

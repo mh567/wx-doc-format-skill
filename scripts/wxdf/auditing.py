@@ -796,7 +796,11 @@ def check_saved_output(path: Path | str, expected: Mapping[str, Any], render_map
         if expected_kind == "unordered":
             expected_fmt = "none" if numbering.get("style_role") == "list_dash" else "bullet"
         elif expected_kind == "ordered":
-            expected_fmt = "lowerLetter" if expected_level in {None, 0} else "decimal"
+            # The ordered style role owns the number format: under the two-level
+            # model the first-level letter instance and the second-level decimal
+            # instance both emit ``w:ilvl 0``, so the emitted level cannot select
+            # the format and the role does.
+            expected_fmt = "lowerLetter" if numbering.get("style_role") == "list_letter" else "decimal"
         if isinstance(direct_num_id, int):
             expected_num_id = direct_num_id
         else:

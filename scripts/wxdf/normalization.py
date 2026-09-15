@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass
 from typing import Any, Mapping
 
 from .digest import digest
@@ -44,179 +43,6 @@ def _policy_for_strategy(strategy: str) -> ListPolicy:
     if strategy not in LIST_POLICIES:
         raise NormalizationError(f"unknown normalization strategy {strategy!r}")
     return LIST_POLICIES[strategy]
-
-
-_ORDERED_NUMBER_FORMATS = frozenset(
-    {"decimal", "decimalZero", "lowerLetter", "upperLetter", "lowerRoman", "upperRoman"}
-)
-_UNORDERED_NUMBER_FORMATS = frozenset({"bullet"})
-
-
-def _template_numbering_catalog(
-    template_profile: Mapping[str, Any],
-) -> tuple[dict[int, dict[int, dict[str, str]]], dict[int, int]]:
-    """Return ``({numId: {ilvl: level}}, {numId: abstractNumId})`` from the profile.
-
-    A level carries the ``numFmt`` / ``lvlText`` / ``pStyle`` the template
-    declares, which is what the synthesized list-only instance is built from.
-    """
-
-    numbering = template_profile.get("numbering")
-    if not isinstance(numbering, Mapping):
-        return {}, {}
-    num_to_abstract = numbering.get("num_to_abstract") or {}
-    abstract_levels = numbering.get("abstract_levels") or {}
-    catalog: dict[int, dict[int, dict[str, str]]] = {}
-    abstract_by_num: dict[int, int] = {}
-    for num_key, abstract_key in num_to_abstract.items():
-        try:
-            num_id = int(num_key)
-        except (TypeError, ValueError):
-            continue
-        try:
-            abstract_by_num[num_id] = int(abstract_key)
-        except (TypeError, ValueError):
-            pass
-        levels: dict[int, dict[str, str]] = {}
-        for level in abstract_levels.get(str(abstract_key)) or []:
-            if not isinstance(level, Mapping):
-                continue
-            try:
-                ilvl = int(level.get("ilvl") or 0)
-            except (TypeError, ValueError):
-                ilvl = 0
-            levels[ilvl] = {
-                "numFmt": str(level.get("numFmt") or ""),
-                "lvlText": str(level.get("lvlText") or ""),
-                "pStyle": str(level.get("pStyle") or ""),
-            }
-        catalog[num_id] = levels
-    return catalog, abstract_by_num
-
-
-def _template_abstract_ids(template_profile: Mapping[str, Any]) -> list[int]:
-    """Return every ``abstractNumId`` the template numbering part declares."""
-
-    numbering = template_profile.get("numbering")
-    if not isinstance(numbering, Mapping):
-        return []
-    abstract_ids: list[int] = []
-    for key in (numbering.get("abstract_levels") or {}):
-        try:
-            abstract_ids.append(int(key))
-        except (TypeError, ValueError):
-            continue
-    return abstract_ids
-
-
-@dataclass(frozen=True)
-class SynthesizedNumbering:
-    """A list-only numbering instance the produced document materializes.
-
-    The instance is never written into the template: normalization names the
-    ids and the source definitions, and the renderer clones them into the
-    ``w:numbering`` part of the produced document.
-    """
-
-    num_id: int
-    abstract_num_id: int
-    deeper_abstract_num_id: int
-    level_zero_abstract_num_id: int | None = None
-    level_zero_num_fmt: str | None = None
-    level_zero_lvl_text: str | None = None
-
-    def as_payload(self) -> dict[str, Any]:
-        return {
-            "num_id": self.num_id,
-            "abstract_num_id": self.abstract_num_id,
-            "deeper_abstract_num_id": self.deeper_abstract_num_id,
-            "level_zero_abstract_num_id": self.level_zero_abstract_num_id,
-            "level_zero_num_fmt": self.level_zero_num_fmt,
-            "level_zero_lvl_text": self.level_zero_lvl_text,
-        }
-
-
-def _numbering_plan(
-    template_profile: Mapping[str, Any],
-    policy: ListPolicy,
-) -> tuple[dict[str, Any], list[SynthesizedNumbering]]:
-    """Resolve the numbering instance each style role is bound to.
-
-    The template binds ``list_letter`` to the first-level letter instance and
-    ``list_decimal`` to a single-level second-level instance, and its only
-    multi-level ordered instance is the heading outline (``w:styles`` binds
-    heading 1 to 6 to it), so a plain rebind would make a nested list item share
-    the heading counters.  When the policy asks for multi-level numbering this
-    plan therefore names ONE list-only instance: a copy of the template's
-    multi-level outline for the deeper levels, whose level 0 is the template's
-    own first-level letter definition.  Every ordered role binds to that
-    instance, so level-0 and deeper ordered items share one counter set, ``%1``
-    tracks the list instead of the chapter, and a level-0 item restarts the
-    levels below it.
-
-    The ``<role>_abstract`` companion is updated too, so the saved-output audit
-    reads a consistent abstract id.  A template without a multi-level ordered
-    instance keeps the original bindings, and the renderer reports the clamp
-    instead of hiding it.
-    """
-
-    numbering_ids: dict[str, Any] = dict(template_profile.get("numbering_ids") or {})
-    if not policy.bind_multilevel_numbering:
-        return numbering_ids, []
-    deeper_ordered_roles = [
-        role for role in policy.deeper_roles() if role not in policy.unordered_roles
-    ]
-    if not deeper_ordered_roles:
-        return numbering_ids, []
-    catalog, abstract_by_num = _template_numbering_catalog(template_profile)
-    if not catalog:
-        return numbering_ids, []
-    candidates = [
-        (len(levels), num_id)
-        for num_id, levels in catalog.items()
-        if len(levels) > 1 and (levels.get(0) or {}).get("numFmt") in _ORDERED_NUMBER_FORMATS
-    ]
-    if not candidates:
-        return numbering_ids, []
-    deeper_num_id = max(candidates, key=lambda item: (item[0], -item[1]))[1]
-    deeper_abstract_id = abstract_by_num.get(deeper_num_id)
-    if deeper_abstract_id is None:
-        return numbering_ids, []
-    abstract_ids = _template_abstract_ids(template_profile)
-    abstract_num_id = max(abstract_ids) + 1 if abstract_ids else 0
-    num_id = max(max(catalog), max(abstract_by_num, default=0)) + 1
-    level_zero_abstract_id: int | None = None
-    level_zero_num_fmt: str | None = None
-    level_zero_lvl_text: str | None = None
-    letter_num_id = numbering_ids.get(policy.ordered_roles[0])
-    try:
-        letter_num_id = int(letter_num_id) if letter_num_id is not None else None
-    except (TypeError, ValueError):
-        letter_num_id = None
-    if letter_num_id is not None:
-        letter_abstract_id = abstract_by_num.get(letter_num_id)
-        letter_level = (catalog.get(letter_num_id) or {}).get(0)
-        if (
-            letter_abstract_id is not None
-            and letter_abstract_id != deeper_abstract_id
-            and letter_level
-        ):
-            level_zero_abstract_id = letter_abstract_id
-            level_zero_num_fmt = letter_level.get("numFmt") or None
-            level_zero_lvl_text = letter_level.get("lvlText") or None
-    for role in policy.ordered_roles:
-        numbering_ids[role] = num_id
-        numbering_ids[f"{role}_abstract"] = abstract_num_id
-    return numbering_ids, [
-        SynthesizedNumbering(
-            num_id=num_id,
-            abstract_num_id=abstract_num_id,
-            deeper_abstract_num_id=deeper_abstract_id,
-            level_zero_abstract_num_id=level_zero_abstract_id,
-            level_zero_num_fmt=level_zero_num_fmt,
-            level_zero_lvl_text=level_zero_lvl_text,
-        )
-    ]
 
 
 def _node_map(ast: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
@@ -396,7 +222,14 @@ def normalize(
     policy = strategy if isinstance(strategy, ListPolicy) else _policy_for_strategy(strategy)
     validate_ast(source_ast)
     template_profile = materialize_profile(profile)
-    numbering_ids, synthesized_numbering = _numbering_plan(template_profile, policy)
+    # The policy binds each style role to the numbering instance the template
+    # already provides for that role (``list_letter`` to the first-level letter
+    # instance, ``list_decimal`` / ``list_bullet`` to the second-level instances).
+    # ``wx-default-v2`` no longer synthesizes a multi-level instance: at most two
+    # levels are recognised (AGENTS.md decision 1), so the second level shows the
+    # template's own ``1)`` form and the two levels are distinguished by style,
+    # instance and visible marker rather than by a deeper ``w:ilvl``.
+    numbering_ids: dict[str, Any] = dict(template_profile.get("numbering_ids") or {})
     ast = copy.deepcopy(dict(source_ast))
     indexes = build_indexes(ast, validate=False)
     list_contexts = _list_contexts(ast, indexes, _stored_list_levels(context))
@@ -420,6 +253,8 @@ def normalize(
             "marker_anchor": marker_anchor,
             "target_sequence": list_info["numbering_scope_id"] if policy.chapter_scoped_sequence else list_info["source_sequence_id"],
             "target_level": projection.render_level,
+            "semantic_level": list_info["depth"],
+            "render_level_clamped": projection.clamped,
             "marker_kind": list_info["list_kind"],
             "source_marker": container.get("source_marker"),
             "source_ordinal": container.get("source_ordinal"),
@@ -478,7 +313,6 @@ def normalize(
         "profile": {
             "resolved_styles": dict(template_profile.get("resolved_styles") or {}),
             "numbering_ids": numbering_ids,
-            "synthesized_numbering": [instance.as_payload() for instance in synthesized_numbering],
             "table_style": dict(template_profile.get("table_style") or {}),
         },
         "template_contract": presentation_contract_from(profile),

@@ -532,12 +532,16 @@ def test_t03_ordered_numbering_is_level_aware_against_real_template(tmp_path: Pa
     assert comparison["passed"] is True, comparison["issues"]
 
 
-def test_t03_ordered_level_clamp_is_reported_not_hidden(tmp_path: Path) -> None:
+def test_t03_single_level_instance_emits_ilvl_zero_without_a_clamp_diagnostic(tmp_path: Path) -> None:
     from wxdf.normalization import normalize
     from wxdf.rendering import render
 
-    # ``list_decimal`` points at numbering instance 8 of the real template,
-    # which defines only level 0, so the level-1 request cannot be rendered.
+    # ``list_decimal`` points at numbering instance 8 of the real template, which
+    # defines only level 0.  Under the two-level model (AGENTS.md decision 1) a
+    # second-level item bound to that single-level instance legitimately emits
+    # ``w:ilvl 0`` and is told apart from the first level by the style and the
+    # instance, so no clamp diagnostic is produced.  The pre-ruling code reported
+    # a clamp here because it read the emitted level as a real level.
     profile = {
         "resolved_styles": dict(_profile()["resolved_styles"]),
         "numbering_ids": {"list_letter": 3, "list_decimal": 8, "list_dash": 5, "list_bullet": 4},
@@ -548,10 +552,9 @@ def test_t03_ordered_level_clamp_is_reported_not_hidden(tmp_path: Path) -> None:
     result = render(normalized, output, template_path=TEMPLATE)
 
     clamps = [item for item in result["diagnostics"] if item.get("code") == "list_render_level_clamped"]
-    assert clamps, f"a level that cannot be rendered must be reported; diagnostics={result['diagnostics']!r}"
-    assert clamps[0]["requested_level"] == 1
-    assert clamps[0]["emitted_level"] == 0
-    assert clamps[0]["num_id"] == 8
+    assert clamps == [], (
+        f"a single-level instance is the designed second level, not a clamp; diagnostics={result['diagnostics']!r}"
+    )
     assert [ilvl for _, _, ilvl in _direct_numbering(output)] == ["0", "0", "0"]
 
 
@@ -648,7 +651,7 @@ def test_t03_readback_failure_is_a_visible_audit_finding(tmp_path: Path) -> None
 # Report observability of the readback audit and the renderer clamp
 # ---------------------------------------------------------------------------
 
-def test_t03_real_conversion_surfaces_readback_and_render_clamp(tmp_path: Path) -> None:
+def test_t03_real_conversion_surfaces_readback_and_second_level_instance(tmp_path: Path) -> None:
     _normalized, _output, result = _convert_markdown_result(
         tmp_path,
         "# 测试文档\n\n## 功能列表\n\n1. 第一项功能\n2. 第二项功能\n\n- 一级无序\n  - 嵌套无序\n",
@@ -659,10 +662,11 @@ def test_t03_real_conversion_surfaces_readback_and_render_clamp(tmp_path: Path) 
     downstream = report["native_module_evidence"]["native-auditor"]["downstream"]
     assert downstream["list_readback"]["passed"] is True
     assert downstream["list_readback"]["expected"] == downstream["list_readback"]["actual"]
-    # The nested unordered item asked for level 1, which the template cannot
-    # render, so the clamp is recorded instead of hidden.
+    # The nested unordered item asked for level 1, which the template renders with
+    # its own second-level unordered instance under the two-level model, so there
+    # is no clamp to report.
     clamps = [item for item in downstream["render_diagnostics"] if item.get("code") == "list_render_level_clamped"]
-    assert clamps, downstream["render_diagnostics"]
+    assert clamps == [], downstream["render_diagnostics"]
 
     # The two repository baseline inputs stay completed and clean: the
     # low-confidence gate must not downgrade an ordinary document.

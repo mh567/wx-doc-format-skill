@@ -520,7 +520,7 @@ def _native_auditor(context: ModuleExecutionContext) -> dict[str, Any]:
     # keeping its own ``list_readback_mismatch`` code.  Renderer clamp
     # diagnostics stay non-blocking; they are carried on ``render_result`` and
     # surfaced under ``native_module_evidence`` rather than failing a document
-    # that the single-level template cannot express at a deeper level.
+    # whose list nests deeper than the two-level WX model.
     downstream_issues = [dict(item) for item in (list_readback_audit.get("issues") or [])]
     render_diagnostics = [dict(item) for item in (render_result.get("diagnostics") or [])]
     if downstream_issues:
