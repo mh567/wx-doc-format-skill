@@ -4,8 +4,8 @@
   "branch": "dev",
   "baseline_head": "fc851e1c0ed1eb68a0c3db9e4cdd9e4f4a3f4e3b",
   "implementation_started": true,
-  "current_task": "T08",
-  "next_task": "T08",
+  "current_task": "T09",
+  "next_task": "T09",
   "release_authorized": false,
   "recommended_order": [
     "T01",
@@ -154,10 +154,24 @@
     {
       "id": "T08",
       "subject": "ListPolicy 提取 + 真实多级 WX 渲染",
-      "status": "pending",
+      "status": "done",
       "depends_on": [
         "T04",
         "T06"
+      ],
+      "residuals": [
+        "BLOCKING, needs user authorization: the default wx-default-v2 now keeps nested ordered items at their true level (a.1), which contradicts AGENTS.md 关键决策记录 decision 1 (all numbered items use the first-level a) style, restarting after each heading). Decision 1 was not amended and no non-default CLI value is reachable because run_result.py is off limits and rejects any value other than wx-default-v2 (T10/user)",
+        "deep unordered items still clamp to ilvl 0 because the template has no multi-level bullet instance; list_render_level_clamped records it (T10/template)",
+        "the level-2 visible marker is the list instance's own outline number (a.1) rather than the independent 1) the second-level style was designed around (T10/template)",
+        "top-level ordered numbering is document-continuous; the saved output writes no w:startOverride, so decision 1's per-chapter restart is not implemented (T10)",
+        "list_render_level_clamped stays module-evidence only and non-blocking; it now fires only for levels the template genuinely cannot express (T09/T10)",
+        "cross-category ilvl=0 sub-list is treated as a same-level kind switch and is not auto-nested (T10)",
+        "the ilvl=0 restart variant is indistinguishable from a sub-list (T10)",
+        "restart_scope boundary reset is not implemented; confirmed no policy-layer boundary is needed (T10)",
+        "ordered items share one list-only numbering instance per document; no per-container w:num or w:startOverride is generated (T10)",
+        "the numbering simulator in tests/modular_support.py does not model w:lvlOverride/w:startOverride (T09)",
+        "docs/execution-v6/README.md:56 still describes render_level as capped by a policy max_level; no shipping policy implements a cap and the field is currently unread outside the semantics layer (spec note, T10)",
+        "scripts/wxdf/normalization._UNORDERED_NUMBER_FORMATS is dead (T10)"
       ]
     },
     {

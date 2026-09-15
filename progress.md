@@ -1,5 +1,17 @@
 # 当前架构收敛进度
 
+## 2026-09-15 execution-v6 T08 ListPolicy 提取 + 真实多级 WX 渲染
+
+- 新增红灯测试文件 `tests/test_t08_multilevel_rendering.py`，首轮 6 项失败（两层/三层有序全被钉在 level 0、默认策略不保留真实层级、策略不可替换）。
+- 抽出 `scripts/wxdf/list_policy.py`（叶子模块，`normalization` 原样再导出）：`ListProjection` / `ListPolicy`（`ordered_roles` / `unordered_roles` / `chapter_scoped_sequence` / `bind_multilevel_numbering`）与 `LIST_POLICIES`；默认策略零级有序用一级字母样式、深层用二级样式。新增三级样式只需改策略，已由 `test_t08_list_policy_is_swappable_for_a_third_template_level` 证明。
+- `normalization.normalize` 改为消费存下来的 `semantic_level`（不再自行按容器深度重算），`render_level` 改由策略投影产生。
+- **FIX 轮修复 BLOCKER**：首轮把深层有序项绑到模板的标题大纲实例 `numId 1`，导致后续标题编号被污染（`H2` 变 `1.2`→`1.3`）且子项不按顶层项重启。现改为在产出文档内合成列表专用编号实例：`numId 22 / abstractNum 10`，第 0 级 `lowerLetter %1)`、第 1 级起 `decimal %1.%2`，并写入 `w:lvlRestart`（第 0 级 0、第 1 级起逐级）。标题实例与列表实例彻底分离。
+- 复验（保存 XML + 独立计数模拟）：标题、嵌套有序列表、后续标题的文档中后续标题编号为 `1.2`（未污染）；同一章内第二个顶层项的子项重启为 `b.1`；模板文件 sha256 未变；合成实例 OOXML 合规、无 id 冲突、不会被重复合成。
+- 新增编号模拟器到 `tests/modular_support.py`，护栏断言从保存 XML 推导可见编号，而不是只断言 `numId`/`ilvl`；两个 F1 护栏在修复前绑定下实测失败。
+- 全量测试 `1236 passed, 0 failed`（基线 1232 加 FIX 轮 4 项）。T01 冻结库保持 11 passed 且未改动；T07 章标题与 IP 文档仍 `completed` 无诊断；`test_baseline.md` / `benchmark_report.md` 仍 `completed` 无风险。
+- **需要用户裁决的治理冲突**：默认策略让嵌套有序项保留真实层级并以二级样式显示，这与 `AGENTS.md` 关键决策记录 1（所有有编号列项统一一级 `a)` 样式、每章节重启）相反。决策 1 未被修订也未被否决，默认值变更需要明确授权；因 `run_result.py` 在禁改范围内且只接受 `wx-default-v2`，产品 CLI 目前无法选择非默认策略。
+- 仍有夹层与边界：深层无序因模板缺多级 bullet 实例仍夹层到 `ilvl 0`（有诊断）；二级项可见标记是列表实例自身的 `a.1` 而非模板二级样式的独立 `1)`；顶层有序编号全文档连续，未写 `w:startOverride`，决策 1 的「每章节重启」未落地。
+- 证据见 `docs/execution-v6/evidence/T08.md`，状态见 `docs/execution-v6/status.json`。未提交、未推送；预存 `_build/` 与 `paseo.json` 未处理。
 ## 2026-09-15 execution-v6 T07 标题与正文防歧义
 
 - FIX 轮：复审发现「标题 + 已确认编号」的同强度平局会把普通文档推成 `completed_with_warnings`，且受保护块以 info 诊断上报有同样后果。已撤回该平局（标题交回约束 6 可裁决的受保护路径），并把受保护块的 marker 记录从 `diagnostics` 移入 `downgrades`；`run_result.py` 与公开状态合同未改动。复测：章标题文档与 IP 段落文档均为 `completed`、诊断为空、降级记录保留。
@@ -7,11 +19,11 @@
 - 新增红灯文件 `tests/test_t07_heading_body_anti_ambiguity.py`（7 项），还原 `lists.py` / `protected.py` 到 HEAD 后 6 项失败、1 项通过：合成「标题 + 已确认编号」被静默提升为列表项、合成 IP/法规/API 路径/公式被提升为列表项、真实 DOCX 自定义章标题样式的标题被提升为列表项（端到端与转换报告各一项）、真实 DOCX 的 IP 地址正文段被提升为列表。
 - `protected.py`（受保护名单单一所有者）：`protected_text_reason` 在 `visible_marker` 分支之前新增 `api_path`（`_API_PATH_RE`）、`ip_address`（`_IPV4_RE` + `_is_ipv4`，逐段 0-255 且至少一段大于 9）、`legal_clause`（`_LEGAL_CLAUSE_RE`，`第N条/款/项`）；在无 marker 尾部新增 `formula`（`_looks_like_formula`，LaTeX 命令或数学符号，或无 CJK 的等式文本）。版本号与日期沿用既有规则。
 - `lists.py`：`_is_protected` 判定重排，标题结构（role / 标题样式 / 手写章节编号）先于 `numbering_status == "detected"` 短路，短路只对非标题内容生效；样式判定由 `"附录标题" in style` 放宽为 `"标题" in style`；新增 `_heading_evidence` / `_confirmed_numbering` / `_HEADING_PROTECTION_REASONS`。
-- `lists.py`：`_state_candidates_for_paragraph` 对「标题结构 + 已确认编号实例」发同强度候选对（`OUTSIDE_LIST` 与 `LIST_ITEM` 均 structural），由既有 `resolver.resolve` 判为 `candidate_conflict`，块不产生状态决策、不物化为列表项，歧义进入 `ambiguous_list_state` 诊断并把 `list_semantics.status` 置为 `unresolved`（README 约束 6/7，工作项 1/2）。该平局从真实 DOCX 可达：自定义 `章标题` 样式 + `w:numPr` 且解析器给出 `numbering_status="detected"`。
+- `lists.py`：`_state_candidates_for_paragraph` 对「标题结构 + 已确认编号实例」发结构证据的强 `OUTSIDE_LIST` 与弱 `LIST_ITEM`，结构证据胜出，标题成为正文且不制造 Resolver 平局（FIX 轮 F1 后的口径；README 约束 6 判定该情形可裁决）。受保护块的 marker 记录移入 `downgrades`，普通文档保持 `completed`。
 - `resolver.py` 本工单未改动（仅声明架构定案）；`transaction.py` 未改动。本工单只做加法，未改稳定接口。
 - T01 冻结库的「标题误识 / 正文误识」两项在实施前即已通过，属已绿回归守卫（heading 无 `numbering_status`、body 为 `numbering_status="ignored"`），不是本工单的新红灯；真实红灯转绿是新增 7 项测试中的 6 项。
 - 已记录残留：README 约束 7 的字面分数阈值语义与 LLM 门控归 T09；low-confidence 编号保持正文不进歧义报告归 T09；其他来源（嵌套父项竞争）的歧义仍只由合成证据可达，归 T09；`LIST_END` 仍未发出，归 T09/T10。
-- 全量测试 `1224 passed, 0 failed`（基线 `1217` 加新增 7 项）。真实转换：自定义章标题样式加两个连续 `w:numPr` 标题的 DOCX 转换 `status=completed_with_warnings`、`exit_code=0`、`list_semantics.list_count=0 / item_count=0`、两个 `ambiguous_list_state` 与两个 `protected_list_like_text(protected_style)`，模型审计与保存后审计通过；三个 IP 地址正文段的 DOCX 转换 `list_count=0 / item_count=0`、三个 `protected_list_like_text(ip_address)`。
+- 全量测试 `1224 passed, 0 failed`（基线 `1217` 加新增 7 项）。真实转换（FIX 轮后复测）：自定义章标题样式加两个连续 `w:numPr` 标题的 DOCX 与三个 IP 地址正文段的 DOCX 均为 `status=completed`、`exit_code=0`、`list_semantics.list_count=0 / item_count=0`、诊断为空、保留 info 降级记录，模型审计与保存后审计通过。
 - 证据见 `docs/execution-v6/evidence/T07.md`，状态见 `docs/execution-v6/status.json`。未提交、未推送；预存 `_build/`、`.commandcode/` 与 `paseo.json` 未处理。
 
 ## 2026-09-15 execution-v6 T06 编号边界（重启 / 拆分 / 复用 / 缺失）
