@@ -127,10 +127,34 @@ def _scope_id(ancestors: list[str], facts: Mapping[str, Any]) -> str:
 
 
 def evidence_lookup_restart_scope(group: Mapping[str, Any]) -> str:
-    restart_scope = group.get("source_sequence_id")
+    """Return the catalogue-derived restart scope for one published group.
+
+    README's evidence-field list defines ``restart_scope`` as derived from
+    ``num_id`` / ``abstract_num_id``, so the group scope must carry the parser's
+    scope identifier (``abstract:<id>`` or ``num:<id>``) instead of echoing the
+    sequence identity.  The value is read from the group's numbering evidence so
+    a group and its items agree on one scope.  A group with no catalogue scope
+    (Markdown implicit lists carry no ``numId``) falls back to its sequence
+    identity.
+    """
+
+    restart_scope = group.get("restart_scope")
     if isinstance(restart_scope, str) and restart_scope:
         return restart_scope
-    return str(group.get("list_id", "scope:document"))
+    return str(group.get("source_sequence_id") or group.get("list_id", "scope:document"))
+
+
+def _restart_scope_from_evidence(evidence: Mapping[str, Any], num_id: Any, abstract_id: Any) -> str | None:
+    """Return the restart scope the catalogue assigned to one numbering instance."""
+
+    scope = evidence.get("restart_scope")
+    if isinstance(scope, str) and scope:
+        return scope
+    if abstract_id is not None:
+        return f"abstract:{abstract_id}"
+    if num_id is not None:
+        return f"num:{num_id}"
+    return None
 
 
 def _list_family(evidence: Mapping[str, Any], container: Mapping[str, Any] | None = None) -> str | None:
@@ -216,6 +240,7 @@ def _emit_group(
     group_boundary: Mapping[str, Any] | None = None,
     restart_expression: Mapping[str, Any] | None = None,
     decided_states: Mapping[str, str] | None = None,
+    sequence_split_index: int = 0,
 ) -> None:
     group = {
         "list_id": list_id,
@@ -228,11 +253,23 @@ def _emit_group(
         "scope_id": scope_id,
         "parent_item_id": parent_item_id,
         "explicit": explicit,
+        # Sequence-split identity.  A split reuses the numbering instance, so
+        # ``source_sequence_id`` / ``sequence`` / ``restart_scope`` alone cannot
+        # tell two split groups apart.  This additive field is the zero-based
+        # index of the group within its run for one ``source_sequence_id``: 0 for
+        # the first group of an instance and 1, 2, ... for the groups split off
+        # from it.  The frozen ``docx-sequence-{num_id}-{abstract_num_id}``
+        # spelling is unchanged; this field only extends the identity.
+        "sequence_split_index": sequence_split_index,
     }
     if group_boundary is not None:
         group["group_boundary"] = copy.deepcopy(dict(group_boundary))
     if restart_expression is not None:
         group["restart_expression"] = copy.deepcopy(dict(restart_expression))
+        if restart_expression.get("restart_policy") is not None:
+            group["restart_policy"] = restart_expression["restart_policy"]
+        if restart_expression.get("merged_sequences"):
+            group["merged_sequences"] = list(restart_expression["merged_sequences"])
     result["lists"].append(group)
     last_by_depth: dict[int, str] = {}
     for index, item in enumerate(item_records):
@@ -686,6 +723,14 @@ def _build_state_candidates(
                         )
                     )
                 else:
+                    # Every unit outside a list item, paragraph or not, keeps the
+                    # states its raw evidence supports.  A non-paragraph unit
+                    # resolves to a protected ``OUTSIDE_LIST`` candidate here.
+                    # The implicit run's tail ownership pass is the only place
+                    # that suppresses the competing ``OUTSIDE_LIST`` candidate,
+                    # and only for the specific block it owns, so a
+                    # non-paragraph block that is not a run tail keeps its
+                    # protected state instead of losing every state decision.
                     candidates.extend(
                         _state_candidates_for_paragraph(
                             child_key,
@@ -838,6 +883,90 @@ def _numbering_sequence(evidence: Mapping[str, Any]) -> str | None:
         return f"num:{num_id}:abstract:{abstract_id}"
     sequence = evidence.get("sequence")
     return f"sequence:{sequence}" if sequence else None
+
+
+def _normalized_lvl_text(evidence: Mapping[str, Any]) -> str | None:
+    """Normalize placeholder indexes while preserving visible punctuation."""
+
+    value = evidence.get("lvl_text")
+    if not isinstance(value, str):
+        return None
+    return re.sub(r"%\d+", "%n", value)
+
+
+def _trailing_physical_run(group: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """Return the group's trailing run of items sharing one numbering instance.
+
+    A merged group can span several ``numId`` values, so the run that a
+    continuation has to continue is the maximal suffix of items whose numbering
+    instance equals the last item's.  The expected next ordinal is that run's
+    first ordinal plus the run length, matching the legacy group reconstruction.
+    """
+
+    items = list(group.get("items") or [])
+    if not items:
+        return []
+    last_identity = _numbering_sequence(items[-1]["evidence"])
+    run: list[Mapping[str, Any]] = []
+    for item in reversed(items):
+        if _numbering_sequence(item["evidence"]) != last_identity:
+            break
+        run.append(item)
+    run.reverse()
+    return run
+
+
+def _sequence_continues_open_group(
+    group: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+    family: str | None,
+) -> bool:
+    """Return whether an item continues the open group across an instance change.
+
+    A block whose numbering instance differs from the open group is not
+    automatically a sub-list.  When it does not restart (``restart_hint`` is
+    explicitly false), its numbered format matches the open group and its
+    ordinal continues the open group's trailing run it is the same logical
+    sequence split across ``numId`` values, so it continues the open list
+    instead of nesting under it (README constraint 8).  Format consistency is
+    ``num_fmt`` plus the visible ``lvlText`` template with placeholder indexes
+    normalized; ordinal continuity is that the block's ordinal equals the open
+    group's trailing run first ordinal plus the run length.  The native rule
+    therefore stands on its own instead of inheriting the legacy
+    ``list_detector._physical_groups_continue`` ordinal gate.
+    """
+
+    if evidence.get("restart_hint") is not False:
+        return False
+    if group.get("list_kind") != family:
+        return False
+    if group.get("instance_num_fmt") != evidence.get("num_fmt"):
+        return False
+    if group.get("instance_lvl_text") != _normalized_lvl_text(evidence):
+        return False
+    run = _trailing_physical_run(group)
+    first_ordinal = run[0]["evidence"].get("ordinal") if run else None
+    current_ordinal = evidence.get("ordinal")
+    if isinstance(first_ordinal, int) and isinstance(current_ordinal, int):
+        if current_ordinal != first_ordinal + len(run):
+            return False
+    return True
+
+
+def _restart_policy_for_level(level: int, evidence: Mapping[str, Any]) -> str | None:
+    """Return the sub-list restart policy for a nested level.
+
+    ``w:lvlRestart=0`` means the level never restarts, so a sub-list keeps its
+    numbering across parents.  Any other value, including an absent
+    ``lvlRestart``, keeps the OOXML default: the level restarts when its parent
+    level is used again.  A top-level group has no restart policy.
+    """
+
+    if level <= 0:
+        return None
+    if evidence.get("lvl_restart") == 0:
+        return "continue_across_parents"
+    return "restart_with_parent"
 
 
 def _resolve_sublist(
@@ -1223,6 +1352,14 @@ def analyze_lists(facts: Mapping[str, Any], *, context: Mapping[str, Any] | None
             seen_item_in_run = False
             flattened_source_depths: set[int] = set()
             pending_orphans: list[tuple[str, int]] = []
+            # The last open group per (numbering instance, depth), used to
+            # continue a sub-list across parents when ``w:lvlRestart=0`` tells us
+            # the level never restarts.
+            continuation_groups: dict[tuple[Any, int], dict[str, Any]] = {}
+            # How many groups this run created per (sequence, kind, parent,
+            # depth) slot, used to give split groups a distinguishable
+            # ``sequence_split_index``.
+            sequence_split_counts: dict[Any, int] = {}
             for unit_id in run:
                 evidence = facts["evidence"].get(unit_id, {})
                 source_depth = evidence.get("explicit_depth") if isinstance(evidence.get("explicit_depth"), int) else 0
@@ -1237,12 +1374,19 @@ def analyze_lists(facts: Mapping[str, Any], *, context: Mapping[str, Any] | None
                 # A block declared at level 0 whose numbering instance differs
                 # from the open level-0 list opens or continues a sub-list under
                 # an open item instead of starting a sibling top-level list.
+                # A block that continues the open sequence across instances is
+                # one logical list and must not be turned into a sub-list
+                # (README constraint 8).
                 if depth == 0:
-                    sublist = _resolve_sublist(
-                        active_groups, active_items, _numbering_sequence(evidence), family
-                    )
-                    if sublist is not None:
-                        depth, parent_item_id = sublist
+                    open_group = active_groups.get(0)
+                    if open_group is None or not _sequence_continues_open_group(
+                        open_group, evidence, family
+                    ):
+                        sublist = _resolve_sublist(
+                            active_groups, active_items, _numbering_sequence(evidence), family
+                        )
+                        if sublist is not None:
+                            depth, parent_item_id = sublist
                 if depth > 0 and parent_item_id is None:
                     if source_depth in flattened_source_depths:
                         depth = 0
@@ -1303,11 +1447,57 @@ def analyze_lists(facts: Mapping[str, Any], *, context: Mapping[str, Any] | None
                 effective_sequence = evidence.get("sequence") or json_sequence_id(evidence.get("numbering_definition_ref"), unit_id)
                 sequence_identity = _numbering_sequence(evidence)
                 current = active_groups.get(depth)
-                # Group identity stays ``list_kind`` plus parent.  Sequence merge and
-                # split across numbering instances is decided separately, so a new
-                # ``numId`` must not silently start a new list here.
-                if current is None or current["list_kind"] != family or current.get("parent_item_id") != parent_item_id:
-                    if current is None:
+                # A block that reuses the open numbering instance but restarts is
+                # a different logical list: the definition is reused, so the
+                # sequence splits instead of extending the open list (README
+                # constraint 8).
+                split_sequence = (
+                    current is not None
+                    and current["list_kind"] == family
+                    and current.get("parent_item_id") == parent_item_id
+                    and current.get("sequence_identity") == sequence_identity
+                    and bool(current["items"])
+                    and bool(evidence.get("restart_hint"))
+                )
+                if split_sequence:
+                    current = None
+                restart_policy = _restart_policy_for_level(depth, evidence)
+                sequence_start = max(1, int(evidence.get("start_value") or evidence.get("ordinal") or 1))
+                if restart_policy == "continue_across_parents":
+                    previous_group = continuation_groups.get((sequence_identity, depth))
+                    if previous_group is not None:
+                        sequence_start = int(previous_group.get("start_value", 1)) + len(previous_group["items"])
+                # Group identity stays ``list_kind`` plus parent.  A numbering
+                # instance change is a continuation only when the continuation
+                # evidence holds; a merge is recorded only then, and any other
+                # instance change splits into a new sequence (README constraint
+                # 8).  The depth>0 path applies the same continuation evidence as
+                # the depth==0 path, so a restarted sibling sub-list splits
+                # instead of being merged unconditionally.
+                group_key_matches = (
+                    current is not None
+                    and current["list_kind"] == family
+                    and current.get("parent_item_id") == parent_item_id
+                )
+                instance_changed = (
+                    current is not None
+                    and current.get("sequence_identity") != sequence_identity
+                )
+                continues_open_group = (
+                    not split_sequence
+                    and group_key_matches
+                    and instance_changed
+                    and _sequence_continues_open_group(current, evidence, family)
+                )
+                if current is None or not group_key_matches or (instance_changed and not continues_open_group):
+                    if split_sequence:
+                        group_boundary = {
+                            "kind": "sequence_split",
+                            "depth": depth,
+                            "sequence": sequence_identity,
+                            "previous_list_id": active_groups.get(depth, {}).get("list_id"),
+                        }
+                    elif current is None:
                         group_boundary = {"kind": "run_start", "depth": depth}
                     elif current["list_kind"] != family:
                         group_boundary = {
@@ -1317,7 +1507,7 @@ def analyze_lists(facts: Mapping[str, Any], *, context: Mapping[str, Any] | None
                             "to": family,
                             "previous_list_id": current["list_id"],
                         }
-                    else:
+                    elif current.get("parent_item_id") != parent_item_id:
                         group_boundary = {
                             "kind": "parent_item_switch",
                             "depth": depth,
@@ -1325,12 +1515,26 @@ def analyze_lists(facts: Mapping[str, Any], *, context: Mapping[str, Any] | None
                             "previous_parent_item_id": current.get("parent_item_id"),
                             "parent_item_id": parent_item_id,
                         }
+                    else:
+                        # A different numbering instance that does not continue
+                        # the open sequence is a restarted sibling list.  Split it
+                        # into a new sequence with the same boundary kind the
+                        # depth-0 reuse split emits.
+                        group_boundary = {
+                            "kind": "sequence_split",
+                            "depth": depth,
+                            "sequence": sequence_identity,
+                            "previous_list_id": current["list_id"],
+                        }
+                    split_key = (effective_sequence, family, parent_item_id, depth)
+                    split_index = sequence_split_counts.get(split_key, 0)
+                    sequence_split_counts[split_key] = split_index + 1
                     current = {
                         "list_id": f"implicit-list-{unit_id}-{len(group_specs)}",
                         "list_kind": family,
                         "source_sequence_id": effective_sequence,
-                        "source_start": max(1, int(evidence.get("start_value") or evidence.get("ordinal") or 1)),
-                        "start_value": max(1, int(evidence.get("start_value") or evidence.get("ordinal") or 1)),
+                        "source_start": sequence_start,
+                        "start_value": sequence_start,
                         "scope_id": _scope_id([*_ancestors(parent_id, parents), parent_id], facts),
                         "parent_item_id": parent_item_id,
                         "items": [],
@@ -1338,9 +1542,24 @@ def analyze_lists(facts: Mapping[str, Any], *, context: Mapping[str, Any] | None
                         "effective_num_id": effective_num_id,
                         "effective_abstract_id": effective_abstract_id,
                         "sequence_identity": sequence_identity,
+                        "instance_num_fmt": evidence.get("num_fmt"),
+                        "instance_lvl_text": _normalized_lvl_text(evidence),
+                        "restart_policy": restart_policy,
+                        "restart_scope": _restart_scope_from_evidence(evidence, effective_num_id, effective_abstract_id),
+                        "sequence_split_index": split_index,
                     }
                     group_specs.append(current)
                     active_groups[depth] = current
+                    if restart_policy is not None:
+                        continuation_groups[(sequence_identity, depth)] = current
+                elif instance_changed:
+                    # The block continues the open group across a numbering
+                    # instance change: record the merged instance while the group
+                    # keeps its first instance as the canonical identity, so the
+                    # split list is published as one sequence (README constraint 8).
+                    merged = current.setdefault("merged_sequences", [])
+                    if effective_sequence is not None and effective_sequence not in merged:
+                        merged.append(effective_sequence)
                 current["items"].append({
                     "item_id": unit_id,
                     "evidence": evidence,
@@ -1352,13 +1571,20 @@ def analyze_lists(facts: Mapping[str, Any], *, context: Mapping[str, Any] | None
                     active_items.pop(old_depth, None)
                     active_groups.pop(old_depth, None)
             for group in group_specs:
+                first_evidence = group["items"][0]["evidence"] if group["items"] else {}
                 restart_expression = {
                     "start_value": group.get("start_value", group["source_start"]),
                     "sequence": group["source_sequence_id"],
                     "restart_scope": evidence_lookup_restart_scope(group),
                     "num_id": group.get("effective_num_id"),
                     "abstract_num_id": group.get("effective_abstract_id"),
+                    "lvl_restart": first_evidence.get("lvl_restart"),
+                    "start_override": first_evidence.get("start_override"),
+                    "restart_policy": group.get("restart_policy"),
                 }
+                if group.get("merged_sequences"):
+                    restart_expression["merged_sequences"] = list(group["merged_sequences"])
+                restart_expression["sequence_split_index"] = group.get("sequence_split_index", 0)
                 _emit_group(
                     result,
                     facts,
@@ -1373,6 +1599,7 @@ def analyze_lists(facts: Mapping[str, Any], *, context: Mapping[str, Any] | None
                     group_boundary=group.get("group_boundary"),
                     restart_expression=restart_expression,
                     decided_states=decided_states,
+                    sequence_split_index=group.get("sequence_split_index", 0),
                 )
 
     # Tail content of implicit runs.  A body paragraph, table, image, quote,
@@ -1415,6 +1642,26 @@ def analyze_lists(facts: Mapping[str, Any], *, context: Mapping[str, Any] | None
                     result["child_blocks"].append(entry)
 
     if tail_candidates:
+        # A non-paragraph unit that is the tail of an implicit run is owned by
+        # the item, so its own protected ``OUTSIDE_LIST`` candidate would tie
+        # with the ownership state at equal evidence strength.  Suppress the
+        # competing candidate only for those tail blocks.  A non-paragraph block
+        # that is not a run tail keeps the protected ``OUTSIDE_LIST`` state it
+        # was offered, so the removal stays scoped to the tie it fixes.
+        tail_node_ids = {str(candidate["node_id"]) for candidate in tail_candidates}
+        non_paragraph_tails = {
+            node_id
+            for node_id in tail_node_ids
+            if str(facts["units"].get(node_id, {}).get("kind") or "") != "paragraph"
+        }
+        state_candidates = [
+            candidate
+            for candidate in state_candidates
+            if not (
+                str(candidate["node_id"]) in non_paragraph_tails
+                and candidate["state"] == "OUTSIDE_LIST"
+            )
+        ]
         state_candidates = [*state_candidates, *tail_candidates]
         _validate_state_enum(state_candidates)
         state_decisions, state_unresolved = _arbitrate_state_candidates(state_candidates)
