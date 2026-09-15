@@ -5,13 +5,14 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from docx.oxml.ns import qn
 
-from list_style_mapping import normalize_wx_list_type, source_list_type
+from .list_policy import normalize_wx_list_type, source_list_type
 from note_semantics import source_note_role
 from text_utils import looks_like_list_item
 from unordered_lists import paragraph_layout_evidence
@@ -846,7 +847,7 @@ def describe_docx_paragraph(
 ) -> dict[str, Any] | None:
     """Return native numbering evidence for one paragraph outside the body.
 
-    ``analyze_docx_lists`` keeps the historical top-level source position
+    ``analyze_docx_numbering`` keeps the historical top-level source position
     contract.  Nested table cells need the same numbering vocabulary without
     pretending that their paragraphs occupy top-level document positions.
 
@@ -930,6 +931,282 @@ def describe_docx_paragraph(
     }
 
 
+_ORDERED_NUMBERING_FORMATS = _NUMBERING_LIST_FORMATS - {"bullet"}
+
+
+def _normalized_marker_template(value: Any) -> str:
+    """Normalize placeholder indexes while preserving visible punctuation."""
+
+    return re.sub(r"%\d+", "%n", value or "")
+
+
+def _bullet_marker_family(value: Any) -> str:
+    marker = str(value or "").strip()
+    if marker in {"•", "·", "●", "○", "◦", "∙"}:
+        return "round"
+    if marker in {"■", "□", "▪", "▫", "◆", "◇"}:
+        return "geometric"
+    if marker in {"-", "–", "—", "－"}:
+        return "line"
+    return marker
+
+
+def _layouts_compatible(previous: Mapping[str, Any], current: Mapping[str, Any]) -> bool:
+    previous_layout = previous.get("layout", {}) or {}
+    current_layout = current.get("layout", {}) or {}
+    for field in ("left_twips", "right_twips", "first_line_twips"):
+        previous_value = previous_layout.get(field)
+        current_value = current_layout.get(field)
+        if not isinstance(previous_value, int) or not isinstance(current_value, int):
+            continue
+        if abs(previous_value - current_value) > 120:
+            return False
+    return True
+
+
+def _bullet_groups_continue(
+    previous: list[dict[str, Any]],
+    current: list[dict[str, Any]],
+) -> bool:
+    previous_first = previous[0]
+    current_first = current[0]
+    if previous_first.get("num_fmt") != "bullet" or current_first.get("num_fmt") != "bullet":
+        return False
+    if _bullet_marker_family(previous_first.get("lvl_text")) != _bullet_marker_family(current_first.get("lvl_text")):
+        return False
+    previous_style = str(previous_first.get("style") or "").casefold().strip()
+    current_style = str(current_first.get("style") or "").casefold().strip()
+    if previous_style != current_style:
+        return False
+    return _layouts_compatible(previous[-1], current_first)
+
+
+def _physical_groups_continue(
+    previous: list[dict[str, Any]],
+    current: list[dict[str, Any]],
+) -> bool:
+    """Return whether two Word numbering instances form one visible sequence.
+
+    OOXML producers frequently create a new ``numId`` for an item that merely
+    continues the displayed sequence, so continuity uses observable invariants
+    instead of identifier equality alone.  This is the native port of the legacy
+    physical-group continuation gate; the effective level is used
+    so a paragraph-style numbering level drives the grouping.
+    """
+
+    if not previous or not current:
+        return False
+    previous_last = previous[-1]
+    current_first = current[0]
+    if current_first["source_position"] != previous_last["source_position"] + 1:
+        return False
+    if any(_is_protected_style(str(item.get("style") or "")) for item in (*previous, *current)):
+        return False
+    if len({int(item.get("effective_ilvl") or 0) for item in previous}) != 1:
+        return False
+    if len({int(item.get("effective_ilvl") or 0) for item in current}) != 1:
+        return False
+    if int(previous[0].get("effective_ilvl") or 0) != int(current_first.get("effective_ilvl") or 0):
+        return False
+    previous_format = previous[0].get("num_fmt")
+    current_format = current_first.get("num_fmt")
+    if previous_format == "bullet" or current_format == "bullet":
+        return _bullet_groups_continue(previous, current)
+    if previous_format not in _ORDERED_NUMBERING_FORMATS or current_format != previous_format:
+        return False
+    if _normalized_marker_template(previous[0].get("lvl_text")) != _normalized_marker_template(current_first.get("lvl_text")):
+        return False
+    if str(previous[0].get("style") or "").casefold().strip() != str(current_first.get("style") or "").casefold().strip():
+        return False
+    try:
+        expected_start = int(previous[0].get("start") or 1) + len(previous)
+        actual_start = int(current_first.get("start") or 1)
+    except (TypeError, ValueError):
+        return False
+    return actual_start == expected_start
+
+
+def analyze_docx_numbering(
+    document: Any,
+    report: dict[str, Any],
+    *,
+    excluded_source_positions: set[int] | None = None,
+    catalog: dict[str, Any] | None = None,
+) -> dict[int, dict[str, Any]]:
+    """Return numbering descriptors keyed by stable top-level source position.
+
+    Native group decision over the DOCX numbering catalogue.  Each candidate
+    paragraph is described through the native catalogue, so the format and level
+    follow the effective ``w:numPr`` level and the pStyle association instead of
+    the declared ``w:ilvl``; the group decision then merges contiguous numbering
+    instances into one visible sequence and publishes the same ``source_lists``
+    report shape the legacy analysis did.
+    """
+
+    from docx.text.paragraph import Paragraph
+
+    excluded = excluded_source_positions or set()
+    catalog = catalog or build_numbering_catalog(document)
+    candidates: list[dict[str, Any]] = []
+    position = 0
+    for child in document.element.body.iterchildren():
+        if child.tag == qn("w:p"):
+            if position not in excluded:
+                paragraph = Paragraph(child, document)
+                descriptor = describe_docx_paragraph(document, paragraph, catalog)
+                if descriptor is not None:
+                    candidates.append({
+                        "source_position": position,
+                        "text": paragraph.text.strip(),
+                        "style": _style_name(paragraph),
+                        "num_id": descriptor.get("num_id"),
+                        "ilvl": descriptor.get("ilvl") or 0,
+                        "effective_ilvl": descriptor.get("effective_ilvl") or 0,
+                        "abstract_num_id": descriptor.get("abstract_num_id"),
+                        "num_fmt": descriptor.get("num_fmt"),
+                        "lvl_text": descriptor.get("lvl_text"),
+                        "p_style": descriptor.get("p_style"),
+                        "start": descriptor.get("start", 1),
+                        "numbering_source": descriptor.get("numbering_source"),
+                        "layout": descriptor.get("layout"),
+                        "has_drawing": paragraph._p.find(".//" + qn("w:drawing")) is not None,
+                    })
+            position += 1
+        elif child.tag == qn("w:tbl"):
+            position += 1
+
+    physical_group_id = 0
+    previous: dict[str, Any] | None = None
+    physical_groups: list[list[dict[str, Any]]] = []
+    for candidate in candidates:
+        contiguous = (
+            previous is not None
+            and candidate["num_id"] == previous["num_id"]
+            and candidate["source_position"] == previous["source_position"] + 1
+        )
+        if not contiguous:
+            physical_group_id += 1
+            physical_groups.append([])
+        candidate["physical_group_id"] = f"num_group_{physical_group_id}"
+        physical_groups[-1].append(candidate)
+        previous = candidate
+
+    groups: list[list[dict[str, Any]]] = []
+    previous_physical_group: list[dict[str, Any]] | None = None
+    for physical_group in physical_groups:
+        if (
+            groups
+            and previous_physical_group is not None
+            and _physical_groups_continue(previous_physical_group, physical_group)
+        ):
+            groups[-1].extend(physical_group)
+        else:
+            groups.append(list(physical_group))
+        previous_physical_group = physical_group
+
+    result: dict[int, dict[str, Any]] = {}
+    for numeric_group_id, group in enumerate(groups, 1):
+        logical_num_ids = list(dict.fromkeys(int(item["num_id"]) for item in group))
+        continued_across_num_id = len(logical_num_ids) > 1
+        for group_index, candidate in enumerate(group):
+            style_name = candidate["style"]
+            num_fmt = candidate.get("num_fmt")
+            p_style = str(candidate.get("p_style") or "").casefold()
+            evidence: list[str] = []
+            if candidate.get("abstract_num_id") is not None and num_fmt in _NUMBERING_LIST_FORMATS:
+                evidence.append("valid_numbering_definition")
+            if _is_list_style(style_name):
+                evidence.append("list_style")
+            physical_group_size = sum(
+                1 for item in group
+                if item.get("physical_group_id") == candidate.get("physical_group_id")
+            )
+            if physical_group_size >= 2:
+                evidence.append("consecutive_num_id_group")
+            if len(group) >= 2:
+                evidence.append("consecutive_numbering_sequence")
+            if continued_across_num_id:
+                evidence.append("continued_across_num_id")
+                if num_fmt == "bullet":
+                    evidence.append("structural_bullet_continuity")
+            if looks_like_list_item(candidate.get("text", "")):
+                evidence.append("visible_list_marker")
+            if candidate.get("numbering_source") == "direct":
+                evidence.append("direct_num_pr")
+            if candidate.get("has_drawing"):
+                evidence.append("image_content")
+            has_content = bool(candidate.get("text") or candidate.get("has_drawing"))
+
+            note_role = source_note_role(style_name, candidate, candidate.get("text"))
+            protected = (
+                _is_protected_style(style_name)
+                or p_style.startswith("heading")
+                or note_role is not None
+            )
+            valid = candidate.get("abstract_num_id") is not None and num_fmt in _NUMBERING_LIST_FORMATS
+            if not has_content and valid and ("list_style" in evidence or candidate.get("numbering_source") == "direct"):
+                evidence.append("empty_list_item")
+            high = valid and bool({
+                "list_style", "consecutive_numbering_sequence", "visible_list_marker", "empty_list_item",
+            } & set(evidence))
+            if protected or num_fmt == "none" or not valid or (not has_content and "empty_list_item" not in evidence):
+                status = "ignored"
+                confidence = 0.0
+                if protected:
+                    evidence.append("protected_role")
+                elif not valid:
+                    evidence.append("invalid_numbering_definition")
+            elif high:
+                status = "detected"
+                confidence = 0.98 if "list_style" in evidence and len(group) >= 2 else 0.90
+            else:
+                status = "ambiguous"
+                confidence = 0.55
+                evidence.append("isolated_generic_numbering")
+
+            descriptor = {
+                key: value for key, value in candidate.items()
+                if key not in {"text", "effective_ilvl"}
+            }
+            source_marker_type = source_list_type(num_fmt, candidate.get("lvl_text"))
+            descriptor.update({
+                "group_size": len(group),
+                "group_index": group_index,
+                "group_id": f"list_group_{numeric_group_id}",
+                "logical_num_ids": logical_num_ids,
+                "continued_across_num_id": continued_across_num_id,
+                "restart": group_index == 0,
+                "status": status,
+                "confidence": confidence,
+                "evidence": evidence,
+                "semantic_role": note_role,
+                "source_list_type": source_marker_type,
+                "list_type": normalize_wx_list_type(
+                    source_marker_type,
+                    int(candidate.get("ilvl") or 0),
+                ),
+            })
+            result[candidate["source_position"]] = descriptor
+
+    statuses = Counter(item["status"] for item in result.values())
+    report["source_lists"] = {
+        "detected": statuses.get("detected", 0),
+        "ambiguous": statuses.get("ambiguous", 0),
+        "ignored": statuses.get("ignored", 0),
+        "group_count": len(groups),
+        "physical_group_count": len(physical_groups),
+        "cross_num_id_group_count": sum(1 for group in groups if len({item["num_id"] for item in group}) > 1),
+        "candidates": list(result.values()),
+    }
+    if statuses.get("ambiguous"):
+        report.setdefault("risk_warnings", []).append({
+            "type": "ambiguous_source_lists",
+            "count": statuses["ambiguous"],
+            "message": "Word 编号候选证据不足，普通模式保留为正文。",
+        })
+    return result
+
+
 def _numbering_start_value(level: Mapping[str, Any], override: Mapping[str, Any]) -> int:
     """Return the effective start ordinal, preferring ``w:startOverride``."""
 
@@ -965,7 +1242,7 @@ def _numbering_catalogue_evidence(descriptor: Mapping[str, Any]) -> dict[str, An
     """Return the OOXML catalogue evidence fields for one numbered paragraph.
 
     The group decision (status / restart / group identity) belongs to
-    ``analyze_docx_lists``; these fields come from the native numbering catalog
+    ``analyze_docx_numbering``; these fields come from the native numbering catalog
     and are additive to it.
     """
 
@@ -990,7 +1267,6 @@ def _parse_docx(source: Path | str, *, store: SourceStore) -> dict[str, Any]:
     from docx.table import Table, _Cell
     from docx.text.paragraph import Paragraph
     from docx.oxml.ns import qn
-    from list_detector import analyze_docx_lists
     from table_semantics import classify_docx_table
     from .semantics.tables import capture_docx_table_layout
 
@@ -1000,18 +1276,10 @@ def _parse_docx(source: Path | str, *, store: SourceStore) -> dict[str, Any]:
     parser_version = facts["parser"]["version"]
     report: dict[str, Any] = {}
     numbering_catalog = build_numbering_catalog(document)
-    # One native catalog feeds the group analysis.  ``numbering_maps`` is the
-    # legacy positional shape; the level maps now carry the full OOXML coverage
-    # (w:ind, w:suff, w:lvlRestart, w:pStyle) built by ``build_numbering_catalog``.
-    numbering = analyze_docx_lists(
-        document,
-        report,
-        numbering_maps=(
-            numbering_catalog["num_to_abstract"],
-            numbering_catalog["abstract_levels"],
-            numbering_catalog["num_level_overrides"],
-        ),
-    )
+    # One native catalog feeds the native group analysis directly.  The old
+    # positional ``numbering_maps`` shape is gone: the native catalogue already
+    # carries the full OOXML coverage (w:ind, w:suff, w:lvlRestart, w:pStyle).
+    numbering = analyze_docx_numbering(document, report, catalog=numbering_catalog)
     body = document.element.body
     position = 0
     nested_list_ordinals: dict[tuple[str, int, int, str | None], int] = {}
@@ -1211,12 +1479,24 @@ def detect_source_type(input_path: Path | str) -> str:
 
 def parse(source: Path | str, context: dict[str, Any] | None = None) -> dict[str, Any]:
     context = context or {}
-    store = context.get("source_store") or SourceStore()
-    owns_store = "source_store" not in context
+    store = context.get("source_store")
+    owns_store = store is None
+    if store is None:
+        store = SourceStore()
     text = context.get("text")
+    # A caller that already knows the container can pass a ``source_type`` hint.
+    # The saved-output readback re-parses a staging artifact whose name
+    # (``.<name>.native-v2.staging``) carries no usable suffix, so without the
+    # hint the dispatch would take the Markdown branch and decode the DOCX zip as
+    # UTF-8.
+    hinted = context.get("source_type")
+    source_type = (
+        hinted
+        if hinted in {"docx", "markdown"}
+        else ("docx" if Path(source).suffix.lower() == ".docx" else "markdown")
+    )
     try:
-        suffix = Path(source).suffix.lower()
-        if suffix == ".docx":
+        if source_type == "docx":
             return _parse_docx(source, store=store)
         return _parse_markdown(source, store=store, text=text)
     finally:

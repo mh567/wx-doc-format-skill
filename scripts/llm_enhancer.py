@@ -487,22 +487,20 @@ def _list_detect_ambiguous_blocks(model: dict) -> list[dict]:
     """Return the blocks that already carry multiple candidates.
 
     A block qualifies when the deterministic rules left it with more than one
-    reading instead of a decided one: an ``ambiguous`` OOXML numbering status, a
-    competing unordered-marker candidate, or a list-group candidate the rules
-    flagged for review.  Only those fragments are offered to ``list_detect`` so
-    the capability cannot act on a block the rules already decided.
+    reading instead of a decided one: an ``ambiguous`` OOXML numbering status or a
+    competing unordered-marker candidate.  Only those fragments are offered to
+    ``list_detect`` so the capability cannot act on a block the rules already
+    decided.  The retired ``list_group_detection`` "review" candidate channel is
+    gone with its producer, so it is not consulted here.
     """
 
     blocks: list[dict] = []
     for block in model.get("document", {}).get("blocks", []):
         source = block.get("source", {})
         numbering = source.get("numbering", {})
-        group = source.get("list_group_candidate", {})
         ambiguous = (
             numbering.get("status") == "ambiguous"
-            or source.get("unordered_candidate")
-            or (isinstance(group, Mapping) and group.get("status") == "review")
-            or (isinstance(group, Mapping) and bool(group.get("conflicts")))
+            or bool(source.get("unordered_candidate"))
         )
         if ambiguous:
             blocks.append(block)
@@ -757,7 +755,6 @@ def _collect_suspicious_sections(
         + _get_count("inferred_headings", parse_report)
         + _get_count("ambiguous_numbered_paragraphs", parse_report)
         + _get_count("ambiguous_unordered_paragraphs", parse_report)
-        + _get_count("semantic_list_groups", parse_report)
     )
     if total_suspicious == 0:
         return sections
@@ -782,8 +779,6 @@ def _collect_suspicious_sections(
         source = b.get("source", {})
         numbering = source.get("numbering", {})
         if source.get("unordered_candidate"):
-            suspicious_ids.add(bid)
-        if source.get("list_group_candidate", {}).get("status") == "review":
             suspicious_ids.add(bid)
         if numbering.get("status") == "ambiguous":
             suspicious_ids.add(bid)
@@ -1022,25 +1017,6 @@ def validate_patch(patch: dict, model: dict, allowed_ops: frozenset[str]) -> lis
                     "block_id": bid,
                     "message": "Unordered-marker candidates must use an unordered list_type",
                 })
-            list_group = source.get("list_group_candidate", {})
-            protected_family = list_group.get("family_source") in {
-                "source_ordered", "source_unordered",
-                "visible_ordered_marker", "visible_unordered_marker",
-                "named_ordered_style", "named_unordered_style",
-            }
-            if to_type == "list_item" and list_group and protected_family:
-                expected_family = list_group.get("family")
-                actual_family = (
-                    "unordered" if to_.get("list_type") in {"dash", "bullet_dot"}
-                    else "ordered"
-                )
-                if actual_family != expected_family:
-                    errors.append({
-                        "decision_index": idx,
-                        "block_id": bid,
-                        "message": "High-confidence list family evidence must be preserved",
-                    })
-
             allowed_retype_fields = {
                 "heading": {"block_type", "level"},
                 "body": {"block_type"},
@@ -1204,44 +1180,11 @@ def validate_patch(patch: dict, model: dict, allowed_ops: frozenset[str]) -> lis
                         "message": "exclude_toc_region cannot change candidate identity or boundaries",
                     })
 
-    group_decisions: dict[str, list[dict[str, Any]]] = {}
-    for decision in decisions:
-        if not isinstance(decision, dict) or decision.get("operation") != "retype":
-            continue
-        block = blocks_by_id.get(str(decision.get("block_id") or ""), {})
-        group = block.get("source", {}).get("list_group_candidate", {})
-        group_id = str(group.get("group_id") or "")
-        if group_id and decision.get("to", {}).get("block_type") == "list_item":
-            group_decisions.setdefault(group_id, []).append(decision)
-    for group_id, member_decisions in group_decisions.items():
-        first_block = blocks_by_id.get(str(member_decisions[0].get("block_id") or ""), {})
-        group = first_block.get("source", {}).get("list_group_candidate", {})
-        expected_ids = {
-            str(block_id) for block_id in group.get("item_block_ids", [])
-            if blocks_by_id.get(str(block_id), {}).get("block_type") == "body"
-        }
-        actual_ids = {str(decision.get("block_id")) for decision in member_decisions}
-        if actual_ids != expected_ids:
-            errors.append({
-                "field": "decisions",
-                "group_id": group_id,
-                "message": "Semantic list groups must be retyped atomically",
-                "expected_block_ids": sorted(expected_ids),
-                "actual_block_ids": sorted(actual_ids),
-            })
-        targets = [decision.get("to", {}) for decision in member_decisions]
-        families = {
-            "unordered" if target.get("list_type") in {"dash", "bullet_dot"} else "ordered"
-            for target in targets
-        }
-        levels = {target.get("level") for target in targets}
-        if len(families) > 1 or len(levels) > 1:
-            errors.append({
-                "field": "decisions",
-                "group_id": group_id,
-                "message": "Semantic list group members must use one family and level",
-            })
-
+    # The retired ``list_group_detection`` produced ``list_group_candidate`` with a
+    # ``group_id`` and ``item_block_ids``; its atomic-group and one-family/level
+    # validation has no producer left, so it is gone rather than reading a dead
+    # contract.  The Resolver still enforces one ownership per block and the
+    # candidate-state arbitration.
     return errors
 
 
@@ -1542,7 +1485,6 @@ def _build_phase_a_prompt(
         source_role = source.get("inferred_role", "-")
         numbering = source.get("numbering", {})
         unordered_candidate = source.get("unordered_candidate", {})
-        list_group = source.get("list_group_candidate", {})
         numbering_summary = "-"
         if numbering:
             numbering_summary = (
@@ -1560,24 +1502,11 @@ def _build_phase_a_prompt(
                 f" repeated={unordered_candidate.get('section_marker_count')}"
                 f" layout={unordered_candidate.get('layout', {})}"
             )
-        group_summary = "-"
-        if list_group:
-            group_summary = (
-                f"id={list_group.get('group_id')}"
-                f" status={list_group.get('status')}"
-                f" items={list_group.get('item_block_ids')}"
-                f" groupConfidence={list_group.get('group_confidence')}"
-                f" family={list_group.get('family')}"
-                f" familySource={list_group.get('family_source')}"
-                f" familyConfidence={list_group.get('family_confidence')}"
-                f" evidence={list_group.get('evidence', [])}"
-                f" conflicts={list_group.get('conflicts', [])}"
-            )
         lines.append(
             f"  [{bid}] section={section} source_style={source_style}"
             f" source_role={source_role} type={btype} role={role} level={level}"
             f" list={list_type} cap={cap_type} numbering=({numbering_summary})"
-            f" unordered=({unordered_summary}) group=({group_summary}) | {text}"
+            f" unordered=({unordered_summary}) | {text}"
         )
 
     example = _format_patch_example({
@@ -1603,8 +1532,6 @@ def _build_phase_a_prompt(
         "缺少 OOXML numbering 时，先判断列表家族。具有明确先后顺序的步骤使用有序列表，平行功能点使用无序列表。",
         "unordered 中出现任意 marker、Unicode 名称和重复次数时，应结合缩进、相邻段落和章节语义判断，不能只依赖圆点或方块枚举。",
         "原始无序项目符号只提供列表类别证据。当前章节的最外层使用 level=0, list_type=dash；有效父项下的子层使用 level>=1, list_type=bullet_dot。",
-        "group 中相同 group_id 的候选必须作为完整组审查，结合 anchor、item_block_ids、evidence 和 conflicts 判断成员边界。",
-        "familySource=semantic_default_ordered 时，可以根据整组语义改为有序或无序；高置信度源类别证据必须保留。",
         "引导关系、冒号和短标签均为软证据，不能要求固定引导词，也不能要求每个条目都采用标签加冒号结构。",
         "无父项的孤立深层列表要提升到 level=0。原始圆点、方块、菱形或其他符号不决定最终层级。",
         "标题层级必须在 1 到 6。",
@@ -2128,15 +2055,12 @@ def compute_suspicion_score(report: dict) -> float:
     ambiguous_unordered_paragraphs = _signal(
         parse_report.get("ambiguous_unordered_paragraphs", 0)
     )
-    semantic_group_items = sum(
-        len(group.get("item_block_ids", []))
-        for group in parse_report.get("semantic_list_groups", [])
-        if isinstance(group, dict) and group.get("status") == "review"
-    )
+    # The retired ``list_group_detection`` fed ``parse_report.semantic_list_groups``
+    # into this signal; with no producer left, only the ambiguous short and
+    # unordered paragraph signals remain.
     ambiguous_short_paragraphs = max(
         ambiguous_short_paragraphs,
         ambiguous_unordered_paragraphs,
-        semantic_group_items,
     )
     inferred_headings = _signal(parse_report.get("inferred_headings", 0))
     inferred_lists = _signal(parse_report.get("inferred_lists", 0))

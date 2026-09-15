@@ -499,7 +499,7 @@ def _numbering_is_low_confidence(evidence: Mapping[str, Any]) -> bool:
     The DOCX adapter marks a paragraph whose numbering definition resolves but
     whose evidence is insufficient for a confident list classification with
     ``numbering_status="ambiguous"`` and the ``isolated_generic_numbering``
-    evidence class (see ``scripts/list_detector.py``).  Such a paragraph
+    evidence class (see ``wxdf.parsers.analyze_docx_numbering``).  Such a paragraph
     arrives without ``marker_kind``, so this signal is the adapter's ambiguity
     channel and must reach the ambiguity report instead of being dropped.
     """
@@ -563,10 +563,10 @@ def _state_candidates_for_paragraph(
         ]
     if not marker_kind:
         if _numbering_is_low_confidence(evidence):
-            # ``list_detector`` saw a numbering definition but could not confirm
-            # the block as a list item (``numbering_status="ambiguous"`` with
-            # ``isolated_generic_numbering``), and it keeps the paragraph as body
-            # text.  The verdict is already body text, so the block stays body
+            # The native group analysis saw a numbering definition but could not
+            # confirm the block as a list item (``numbering_status="ambiguous"``
+            # with ``isolated_generic_numbering``), and it keeps the paragraph as
+            # body text.  The verdict is already body text, so the block stays body
             # text instead of entering a Resolver conflict.  The decision is not
             # silent: it is recorded as a ``low_confidence_list_marker``
             # downgrade (severity info) that is published in the report.
@@ -957,7 +957,7 @@ def _sequence_continues_open_group(
     normalized; ordinal continuity is that the block's ordinal equals the open
     group's trailing run first ordinal plus the run length.  The native rule
     therefore stands on its own instead of inheriting the legacy
-    ``list_detector._physical_groups_continue`` ordinal gate.
+    physical-group ordinal gate.
     """
 
     if evidence.get("restart_hint") is not False:
@@ -1265,8 +1265,9 @@ def analyze_lists(facts: Mapping[str, Any], *, context: Mapping[str, Any] | None
     _validate_state_enum(state_candidates)
     result["state_candidates"] = state_candidates
     # A block whose numbering evidence was merely low confidence stays body text.
-    # ``list_detector`` already resolved it to a body paragraph, so this is not a
-    # Resolver conflict and must not leave ``list_semantics.status`` unresolved or
+    # The native group analysis already resolved it to a body paragraph, so this
+    # is not a Resolver conflict and must not leave ``list_semantics.status``
+    # unresolved or
     # turn a clean document into ``completed_with_warnings``.  It is recorded as
     # an info downgrade so the decision is visible in the published report.
     for node_id in low_confidence_nodes:

@@ -22,7 +22,7 @@ def test_docx_source_facts_only_marks_detected_numbering_as_list(monkeypatch, tm
     document.add_paragraph("有效列项")
     document.save(source)
 
-    def fake_analysis(document, report, *, numbering_maps=None):
+    def fake_analysis(document, report, *, excluded_source_positions=None, catalog=None):
         report["source_lists"] = {"detected": 1, "ignored": 1}
         return {
             0: {
@@ -51,7 +51,7 @@ def test_docx_source_facts_only_marks_detected_numbering_as_list(monkeypatch, tm
             },
         }
 
-    monkeypatch.setattr("list_detector.analyze_docx_lists", fake_analysis)
+    monkeypatch.setattr("wxdf.parsers.analyze_docx_numbering", fake_analysis)
     facts = parse(source)
     by_position = {
         evidence["source_position"]: evidence

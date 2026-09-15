@@ -666,13 +666,19 @@ def _rebuild_readback_lists(
     non-blocking ``list_readback_rebuild_skipped`` info record so an output the
     parser cannot read back still completes: it is not a list defect the author
     can act on.
+
+    The saved artifact is always a DOCX written to a staging path whose name
+    (``.<name>.native-v2.staging``) has no ``.docx`` suffix, so the DOCX
+    container is passed to ``parse`` as an explicit ``source_type`` hint.  A
+    suffix-based dispatch would take the Markdown branch and read the zip as
+    UTF-8, which fails and silently skips every semantic invariant.
     """
 
     try:
         from .parsers import parse
         from .semantics.lists import analyze_lists
 
-        facts = parse(Path(path), {"source_store": None})
+        facts = parse(Path(path), {"source_store": None, "source_type": "docx"})
         return analyze_lists(facts), facts, None
     except Exception as exc:  # pragma: no cover - defensive, output-specific
         return None, None, {

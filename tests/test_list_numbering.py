@@ -13,13 +13,12 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from list_detector import analyze_docx_lists, audit_list_preservation
-from list_style_mapping import normalize_wx_list_type, wx_list_style_name
+from wxdf.parsers import analyze_docx_numbering
+from wxdf.list_policy import normalize_wx_list_type, wx_list_style_name
 from llm_enhancer import enhance_document_model, validate_patch
 from template_profile import load_template_profile, template_numbering_ids
 from docx_render import _handle_inferred
 from word_model_renderer import render_document_model
-from list_hierarchy import resolve_list_hierarchy
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -53,7 +52,7 @@ def test_list_number_style_is_detected() -> None:
     doc.add_paragraph("功能二", style="List Number")
     report: dict = {}
 
-    context = analyze_docx_lists(doc, report)
+    context = analyze_docx_numbering(doc, report)
 
     assert report["source_lists"]["detected"] == 2
     assert all(item["status"] == "detected" for item in context.values())
@@ -67,7 +66,7 @@ def test_list_bullet_style_is_detected() -> None:
     doc.add_paragraph("功能一", style="List Bullet")
     doc.add_paragraph("功能二", style="List Bullet")
 
-    context = analyze_docx_lists(doc, {})
+    context = analyze_docx_numbering(doc, {})
 
     assert all(item["status"] == "detected" for item in context.values())
     assert all(item["source_list_type"] == "bullet_dot" for item in context.values())
@@ -83,7 +82,7 @@ def test_list_paragraph_and_custom_style_use_numbering_evidence() -> None:
     _set_direct_numbering(first, num_id)
     _set_direct_numbering(second, num_id)
 
-    context = analyze_docx_lists(doc, {})
+    context = analyze_docx_numbering(doc, {})
 
     assert [item["status"] for item in context.values()] == ["detected", "detected"]
 
@@ -96,7 +95,7 @@ def test_multilevel_numbering_preserves_ilvl() -> None:
     _set_direct_numbering(first, num_id, 0)
     _set_direct_numbering(second, num_id, 1)
 
-    context = analyze_docx_lists(doc, {})
+    context = analyze_docx_numbering(doc, {})
 
     assert [item["ilvl"] for item in context.values()] == [0, 1]
     assert [item["list_type"] for item in context.values()] == [
@@ -167,7 +166,7 @@ def test_numbered_heading_is_protected() -> None:
     heading = doc.add_paragraph("项目概述", style="Heading 1")
     _set_direct_numbering(heading, num_id)
 
-    context = analyze_docx_lists(doc, {})
+    context = analyze_docx_numbering(doc, {})
 
     item = next(iter(context.values()))
     assert item["status"] == "ignored"
@@ -181,7 +180,7 @@ def test_numbered_toc_style_is_protected() -> None:
     paragraph = doc.add_paragraph("项目概述", style=toc_style)
     _set_direct_numbering(paragraph, num_id)
 
-    context = analyze_docx_lists(doc, {})
+    context = analyze_docx_numbering(doc, {})
 
     assert next(iter(context.values()))["status"] == "ignored"
 
@@ -193,7 +192,7 @@ def test_isolated_normal_numbering_is_ambiguous() -> None:
     _set_direct_numbering(paragraph, num_id)
     report: dict = {}
 
-    context = analyze_docx_lists(doc, report)
+    context = analyze_docx_numbering(doc, report)
 
     item = next(iter(context.values()))
     assert item["status"] == "ambiguous"
@@ -205,7 +204,7 @@ def test_invalid_num_id_is_ignored() -> None:
     paragraph = doc.add_paragraph("无效编号定义。")
     _set_direct_numbering(paragraph, 9999)
 
-    context = analyze_docx_lists(doc, {})
+    context = analyze_docx_numbering(doc, {})
 
     item = next(iter(context.values()))
     assert item["status"] == "ignored"
@@ -380,191 +379,3 @@ def test_enhancer_keeps_low_confidence_ambiguous_candidate_as_body() -> None:
 
     assert enhanced["document"]["blocks"][0]["block_type"] == "body"
     assert len(report["llm_enhancer"]["skipped"]) == 1
-
-
-def test_rendered_list_audit_excludes_numbered_title_style() -> None:
-    doc = Document()
-    title_style = doc.styles.add_style("文档标题", WD_STYLE_TYPE.PARAGRAPH)
-    list_style = doc.styles.add_style("1.1一级列项-编号", WD_STYLE_TYPE.PARAGRAPH)
-    title = doc.add_paragraph("文档标题", style=title_style)
-    list_num_id = _style_num_id(doc, "List Number")
-    _set_direct_numbering(title, list_num_id)
-    doc.add_paragraph("功能一", style=list_style)
-    model = {
-        "document": {
-            "blocks": [{
-                "id": "b0001",
-                "block_type": "list_item",
-                "text": "功能一",
-                "source": {"numbering": {"status": "detected"}},
-            }],
-        },
-    }
-
-    result = audit_list_preservation(
-        doc, model, {"detected": 1}, load_template_profile(TEMPLATE),
-    )
-
-    assert result["rendered_list_items"] == 1
-    assert result["passed"] is True
-
-
-def test_rendered_list_audit_rejects_secondary_style_for_level_zero() -> None:
-    doc = Document()
-    secondary = doc.styles.add_style("2.1二级列项-有编号", WD_STYLE_TYPE.PARAGRAPH)
-    doc.add_paragraph("功能一", style=secondary)
-    model = {
-        "document": {
-            "blocks": [{
-                "id": "b0001",
-                "block_type": "list_item",
-                "text": "功能一",
-                "level": 0,
-                "list_type": "lower_letter_paren",
-                "source": {"numbering": {"status": "detected"}},
-            }],
-        },
-    }
-
-    result = audit_list_preservation(doc, model, {"detected": 1})
-
-    assert result["style_level_mismatches"] == [{
-        "block_id": "b0001",
-        "level": 0,
-        "list_type": "lower_letter_paren",
-        "expected_style": "1.1一级列项-编号",
-        "rendered_style": "2.1二级列项-有编号",
-    }]
-    assert result["passed"] is False
-
-
-def test_rendered_list_audit_rejects_orphaned_nested_item() -> None:
-    doc = Document()
-    secondary = doc.styles.add_style("2.1二级列项-有编号", WD_STYLE_TYPE.PARAGRAPH)
-    doc.add_paragraph("子项", style=secondary)
-    model = {
-        "document": {
-            "blocks": [{
-                "id": "b0001",
-                "block_type": "list_item",
-                "text": "子项",
-                "level": 1,
-                "list_type": "decimal_paren",
-                "source": {"numbering": {"status": "detected"}},
-            }],
-        },
-    }
-
-    result = audit_list_preservation(doc, model, {"detected": 1})
-
-    assert result["missing_list_parents"] == [{
-        "block_id": "b0001",
-        "level": 1,
-        "parent_list_item_id": None,
-    }]
-    assert result["passed"] is False
-
-
-def _hierarchy_item(block_id: str, list_type: str, left: int, ilvl: int = 0) -> dict:
-    return {
-        "id": block_id,
-        "block_type": "list_item",
-        "text": block_id,
-        "level": ilvl,
-        "list_type": list_type,
-        "restart": False,
-        "source": {
-            "layout": {"left_twips": left},
-            "numbering": {"status": "detected", "ilvl": ilvl},
-        },
-    }
-
-
-def test_indent_recovers_ordered_and_unordered_nested_hierarchy() -> None:
-    blocks = [
-        _hierarchy_item("a", "lower_letter_paren", 0),
-        _hierarchy_item("a1", "dash", 720),
-        _hierarchy_item("a2", "dash", 720),
-        _hierarchy_item("b", "lower_letter_paren", 0),
-    ]
-
-    resolve_list_hierarchy({"document": {"blocks": blocks}}, [])
-
-    assert [(item["level"], item["list_type"]) for item in blocks] == [
-        (0, "lower_letter_paren"),
-        (1, "bullet_dot"),
-        (1, "bullet_dot"),
-        (0, "lower_letter_paren"),
-    ]
-    assert blocks[1]["parent_list_item_id"] == "a"
-    assert [item["restart"] for item in blocks] == [True, True, False, False]
-
-
-def test_indent_recovers_nested_unordered_hierarchy_when_ilvl_is_zero() -> None:
-    blocks = [
-        _hierarchy_item("a", "dash", 0),
-        _hierarchy_item("a1", "dash", 720),
-        _hierarchy_item("a2", "dash", 720),
-        _hierarchy_item("b", "dash", 0),
-    ]
-
-    resolve_list_hierarchy({"document": {"blocks": blocks}}, [])
-
-    assert [(item["level"], item["list_type"]) for item in blocks] == [
-        (0, "dash"),
-        (1, "bullet_dot"),
-        (1, "bullet_dot"),
-        (0, "dash"),
-    ]
-
-
-def test_source_numbering_restart_is_preserved_for_adjacent_ordered_groups() -> None:
-    blocks = [
-        _hierarchy_item("a", "lower_letter_paren", 0),
-        _hierarchy_item("b", "lower_letter_paren", 0),
-    ]
-    for block in blocks:
-        block["source"]["numbering"]["restart"] = True
-
-    resolve_list_hierarchy({"document": {"blocks": blocks}}, [])
-
-    assert [item["restart"] for item in blocks] == [True, True]
-
-
-def test_rendered_list_audit_rejects_parent_that_appears_later() -> None:
-    doc = Document()
-    primary = doc.styles.add_style("1.1一级列项-编号", WD_STYLE_TYPE.PARAGRAPH)
-    secondary = doc.styles.add_style("2.1二级列项-有编号", WD_STYLE_TYPE.PARAGRAPH)
-    doc.add_paragraph("子项", style=secondary)
-    doc.add_paragraph("父项", style=primary)
-    model = {
-        "document": {
-            "blocks": [
-                {
-                    "id": "child",
-                    "block_type": "list_item",
-                    "text": "子项",
-                    "level": 1,
-                    "list_type": "decimal_paren",
-                    "parent_list_item_id": "parent",
-                    "source": {"numbering": {"status": "detected"}},
-                },
-                {
-                    "id": "parent",
-                    "block_type": "list_item",
-                    "text": "父项",
-                    "level": 0,
-                    "list_type": "lower_letter_paren",
-                    "source": {"numbering": {"status": "detected"}},
-                },
-            ],
-        },
-    }
-
-    result = audit_list_preservation(doc, model, {"detected": 2})
-
-    assert result["missing_list_parents"] == [{
-        "block_id": "child",
-        "level": 1,
-        "parent_list_item_id": "parent",
-    }]

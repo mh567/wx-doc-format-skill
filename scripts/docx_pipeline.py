@@ -31,12 +31,10 @@ from document_model import (
     table_block,
 )
 from md_pipeline import model_list_type_for_kind
-from list_style_mapping import wx_list_style_name
+from wxdf.list_policy import wx_list_style_name
 from note_semantics import source_note_role, strip_source_note_marker
 from table_semantics import classify_docx_table
 from unordered_lists import annotate_unordered_candidates, paragraph_layout_evidence
-from list_hierarchy import resolve_list_hierarchy
-from list_group_detection import annotate_semantic_list_groups
 from appendix_semantics import (
     annotate_appendix_ranges,
     appendix_heading_level,
@@ -467,15 +465,6 @@ def parse_docx_to_model_simple(
 
     annotate_appendix_ranges(model, parse_report)
     annotate_unordered_candidates(model, parse_report)
-    annotate_semantic_list_groups(model, parse_report)
-    hierarchy_repairs: list[dict] = []
-    resolve_list_hierarchy(
-        model,
-        hierarchy_repairs,
-        preserve_declared_levels=True,
-    )
-    if hierarchy_repairs:
-        parse_report["list_hierarchy_repairs"] = hierarchy_repairs
     model["parse_report"] = parse_report
     return model
 

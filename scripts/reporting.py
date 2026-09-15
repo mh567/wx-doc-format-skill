@@ -261,8 +261,8 @@ def write_markdown_report(report: dict, path: Path) -> None:
             f"- 表格语义审计：{'passed' if report.get('table_semantics_audit', {}).get('passed') else 'failed'}",
             f"- 题注位置审计：{'passed' if report.get('caption_placement_audit', {}).get('passed') else 'failed'}",
             f"- 注语义保留审计：{'passed' if report.get('note_preservation_audit', {}).get('passed') else 'failed'}",
-            f"- 语义列表候选组：{parse_report.get('parallel_content_candidates', 0)}",
-            f"- 待增强复核列表组：{parse_report.get('unresolved_parallel_groups', 0)}",
+            f"- 语义列表数：{report.get('list_semantics', {}).get('list_count', 0)}",
+            f"- 语义列项数：{report.get('list_semantics', {}).get('item_count', 0)}",
             "",
         ]
     )

@@ -808,7 +808,8 @@ def test_t03_constraint_validation_agrees_with_materialized_flattening() -> None
 def test_t03_ambiguous_numbering_reaches_published_report(tmp_path: Path) -> None:
     """A DOCX the parser marks ``numbering_status=ambiguous`` stays body text.
 
-    ``list_detector`` could not confirm the marker as a list item, so it keeps
+    The native group analysis could not confirm the marker as a list item, so it
+    keeps
     the paragraph as body text.  The Resolver must not treat that as a genuine
     competing-state conflict: the block stays body text and the decision is
     published as a ``low_confidence_list_marker`` downgrade rather than an

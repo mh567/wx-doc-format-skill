@@ -15,7 +15,6 @@ from document_model import (
     image_block, list_item_block, new_document_model, separator_block,
     source_record, table_block,
 )
-from list_group_detection import annotate_semantic_list_groups
 from text_utils import (
     caption_parts, clean_note_prefix, heading_level_from_text,
     is_appendix_title, is_formula_text, strip_heading_marker,
@@ -233,7 +232,6 @@ class RecognitionBuilder:
             self.dispatch.get(token_type, self._on_unhandled)(token)
         self._ensure_title()
         annotate_unordered_candidates(self.model, self.parse_report)
-        annotate_semantic_list_groups(self.model, self.parse_report)
         self._validate_recognition_contract()
         source_lists = {
             "detected": self.source_audit["list_items"], "ambiguous": 0,

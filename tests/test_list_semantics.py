@@ -17,7 +17,7 @@ if str(SCRIPTS) not in sys.path:
 
 from docx_pipeline import infer_docx_role, parse_docx_to_model
 from docx_render import render_docx_direct
-from list_detector import analyze_docx_lists
+from wxdf.parsers import analyze_docx_numbering
 from model_normalization import normalize_document_model_simple
 from note_semantics import audit_note_preservation
 from reporting import add_risk_warnings, new_report
@@ -289,7 +289,7 @@ def test_invalid_numbering_cannot_be_revived_by_list_style() -> None:
     )
     _set_direct_num(paragraph, 0)
     report: dict = {}
-    numbering = analyze_docx_lists(doc, report)[0]
+    numbering = analyze_docx_numbering(doc, report)[0]
     parse_report: dict = {}
 
     _, _, role = infer_docx_role(paragraph, True, parse_report, numbering)
@@ -314,7 +314,7 @@ def test_cross_num_id_instances_are_reconstructed_as_one_sequence() -> None:
         _append_numbered(doc, f"步骤{step}", 103)
     report: dict = {}
 
-    descriptors = analyze_docx_lists(doc, report)
+    descriptors = analyze_docx_numbering(doc, report)
     ordered = [descriptors[index] for index in sorted(descriptors)]
 
     assert len(ordered) == 13
@@ -337,7 +337,7 @@ def test_cross_num_id_merge_requires_visible_sequence_continuity() -> None:
     _append_numbered(doc, "第二组步骤2", 111)
     report: dict = {}
 
-    descriptors = analyze_docx_lists(doc, report)
+    descriptors = analyze_docx_numbering(doc, report)
     groups = [descriptors[index]["group_id"] for index in sorted(descriptors)]
     restarts = [descriptors[index]["restart"] for index in sorted(descriptors)]
 
@@ -359,7 +359,7 @@ def test_fragmented_bullet_num_ids_are_reconstructed_by_structure() -> None:
         _set_direct_num(paragraph, num_id)
     report: dict = {}
 
-    descriptors = analyze_docx_lists(doc, report)
+    descriptors = analyze_docx_numbering(doc, report)
     items = [descriptors[index] for index in sorted(descriptors)]
 
     assert all(item["status"] == "detected" for item in items)
@@ -381,7 +381,7 @@ def test_fragmented_bullets_do_not_cross_layout_boundary() -> None:
         _set_direct_num(paragraph, num_id)
     report: dict = {}
 
-    descriptors = analyze_docx_lists(doc, report)
+    descriptors = analyze_docx_numbering(doc, report)
 
     assert descriptors[0]["group_id"] != descriptors[1]["group_id"]
     assert descriptors[0]["status"] == "ambiguous"
@@ -442,7 +442,7 @@ def test_note_numbering_is_protected_before_generic_list_detection() -> None:
     doc = _note_document()
     report: dict = {}
 
-    descriptors = analyze_docx_lists(doc, report)
+    descriptors = analyze_docx_numbering(doc, report)
     items = [descriptors[index] for index in sorted(descriptors)]
 
     assert [item["semantic_role"] for item in items] == [
@@ -459,7 +459,7 @@ def test_note_numbering_is_protected_before_generic_list_detection() -> None:
 
 def test_note_roles_are_written_into_source_ast() -> None:
     doc = _note_document()
-    numbering_context = analyze_docx_lists(doc, {})
+    numbering_context = analyze_docx_numbering(doc, {})
 
     model = parse_docx_to_model(
         Path("notes.docx"), doc, True, 0,
@@ -495,7 +495,7 @@ def test_note_roles_are_written_into_source_ast() -> None:
 
 def test_note_roles_render_with_template_styles_and_pass_audit() -> None:
     source_doc = _note_document()
-    numbering_context = analyze_docx_lists(source_doc, {})
+    numbering_context = analyze_docx_numbering(source_doc, {})
     model = parse_docx_to_model(
         Path("notes.docx"), source_doc, True, 0,
         skill_version=lambda: "test",
@@ -529,7 +529,7 @@ def test_note_roles_render_with_template_styles_and_pass_audit() -> None:
 
 def test_direct_docx_renderer_consumes_body_semantic_role_from_ast() -> None:
     source_doc = _note_document()
-    numbering_context = analyze_docx_lists(source_doc, {})
+    numbering_context = analyze_docx_numbering(source_doc, {})
     model = parse_docx_to_model(
         Path("notes.docx"), source_doc, True, 0,
         skill_version=lambda: "test",

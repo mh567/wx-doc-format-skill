@@ -147,48 +147,29 @@ def collect_audit_findings(report: dict, model: dict | None) -> list[dict[str, A
             block_id=block_id,
         ))
 
-    list_audit = report.get("list_preservation_audit", {})
-    list_fields = {
-        "source_list_body_residue": ("high", {"retype"}),
-        "list_level_jumps": ("medium", {"adjust_level"}),
-        "isolated_ast_list_items": ("medium", {"retype"}),
-        "protected_role_conflicts": ("high", {"retype"}),
-    }
-    for field, (severity, ops) in list_fields.items():
-        for index, raw_issue in enumerate(list_audit.get(field, [])):
-            issue = raw_issue if isinstance(raw_issue, dict) else {"block_id": raw_issue, "type": field}
-            block_id = str(issue.get("block_id") or "") or None
-            findings.append(_finding(
-                f"list:{field}:{index}", issue,
-                severity=severity,
-                category="semantic",
-                repairable=block_id in blocks,
-                block_id=block_id,
-                allowed_ops=ops,
-            ))
-
-    semantic_groups = report.get("parse_report", {}).get("semantic_list_groups", [])
-    for group_index, group in enumerate(semantic_groups):
-        if group.get("status") != "review":
-            continue
-        for item_index, raw_block_id in enumerate(group.get("item_block_ids", [])):
-            block_id = str(raw_block_id or "") or None
-            block = blocks.get(block_id or "", {})
-            if block.get("block_type") != "body":
-                continue
-            issue = {
-                "type": "unresolved_parallel_group",
-                "message": "并列内容组需要语义复核。",
-                **group,
-            }
-            findings.append(_finding(
-                f"semantic_list_group:{group_index}:{item_index}", issue,
-                severity="medium",
-                category="semantic",
-                repairable=True,
-                block_id=block_id,
-                allowed_ops={"retype"},
-            ))
+    # The retired ``list_detector.audit_list_preservation`` produced
+    # ``list_preservation_audit`` (``source_list_body_residue`` and friends) and
+    # the retired ``list_group_detection`` produced
+    # ``parse_report.semantic_list_groups``.  Both producers are gone, so no
+    # producer fills those keys any more.  The surviving list defect record is the
+    # native list readback (``audit_list_readback``), surfaced on the modular
+    # report under ``native_module_evidence``; this review loop reads it there
+    # instead of a contract nobody produces.
+    readback = (
+        report.get("native_module_evidence", {})
+        .get("native-auditor", {})
+        .get("downstream", {})
+        .get("list_readback", {})
+    )
+    for index, raw_issue in enumerate(readback.get("issues", [])):
+        issue = raw_issue if isinstance(raw_issue, dict) else {"type": "list_readback_issue"}
+        code = str(issue.get("code") or "list_readback_issue")
+        findings.append(_finding(
+            f"list_readback:{index}:{code}", issue,
+            severity="high",
+            category="semantic",
+            repairable=False,
+        ))
 
     audit = report.get("audit", {})
     heading_text_ids: dict[str, list[str]] = {}

@@ -274,9 +274,9 @@ def test_t06_ordinal_continuity_is_required_to_merge_across_instances() -> None:
     ``restart_hint`` is explicitly false and the format matches, but the second
     instance restarts at ordinal 1 instead of continuing the open group's
     trailing run (whose next ordinal is 2).  The native rule rejects the merge on
-    its own, so the block does not extend the open sequence.  ``list_detector``
-    never stamps this shape (its ``_physical_groups_continue`` ordinal gate
-    filters it first), so the native rule now stands without that legacy gate.
+    its own, so the block does not extend the open sequence.  The evidence layer
+    never stamps this shape (its physical-group ordinal gate filters it first),
+    so the native rule now stands without that legacy gate.
     """
 
     units = {

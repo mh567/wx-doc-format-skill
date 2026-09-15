@@ -8,8 +8,6 @@ import unicodedata
 from typing import Any
 
 
-UNORDERED_LIST_TYPES = frozenset({"dash", "bullet_dot"})
-
 _KNOWN_MARKERS = frozenset({
     "-", "–", "—", "－", "•", "·", "●", "○",
     "■", "□", "▪", "▫", "◆", "◇", "▶", "▷",
@@ -156,16 +154,3 @@ def strip_source_unordered_marker(block: dict) -> str:
     if marker and text.lstrip().startswith(marker):
         return text.lstrip()[len(marker):].lstrip()
     return text
-
-
-def normalize_unordered_hierarchy(model: dict, repairs: list[dict]) -> None:
-    """Compatibility wrapper for the unified list hierarchy resolver."""
-    from list_hierarchy import resolve_list_hierarchy
-
-    if not any(
-        block.get("block_type") == "list_item"
-        and block.get("list_type") in UNORDERED_LIST_TYPES
-        for block in model.get("document", {}).get("blocks", [])
-    ):
-        return
-    resolve_list_hierarchy(model, repairs)

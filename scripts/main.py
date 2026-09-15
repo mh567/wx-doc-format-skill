@@ -72,7 +72,7 @@ from toc_detector import (
     finalize_toc_selection,
     selected_source_positions,
 )
-from list_detector import analyze_docx_lists, audit_list_preservation
+from wxdf.parsers import analyze_docx_numbering
 from front_matter import (
     analyze_front_matter,
     audit_output_structure,
@@ -323,12 +323,6 @@ def _finalize_and_audit_output(
                 if item.get("role") == "code_block"
             }
         },
-    )
-    report["list_preservation_audit"] = audit_list_preservation(
-        out_doc,
-        normalized_model,
-        report.get("source_lists"),
-        template_profile,
     )
     report["note_preservation_audit"] = audit_note_preservation(
         out_doc, normalized_model, template_profile,
@@ -924,7 +918,7 @@ def convert_docx(src: Path, dst_doc, row_height_cm: float, row_height_rule: str,
             "unmatched_count": 0,
             "ambiguous_count": 0,
         }
-    numbering_context = analyze_docx_lists(
+    numbering_context = analyze_docx_numbering(
         src_doc,
         report,
         excluded_source_positions=excluded_source_positions,
@@ -1296,7 +1290,7 @@ def _run_generate_requests(args, report, runtime_context=None) -> None:
                 "unmatched_count": 0,
                 "ambiguous_count": 0,
             }
-        numbering_context = analyze_docx_lists(
+        numbering_context = analyze_docx_numbering(
             src_doc,
             report,
             excluded_source_positions=excluded_source_positions,

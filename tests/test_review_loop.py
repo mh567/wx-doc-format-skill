@@ -46,15 +46,15 @@ def _model():
 
 
 def _report():
+    # ``list_preservation_audit`` is no longer produced: its producer
+    # (``list_detector.audit_list_preservation``) was removed, so the report
+    # fixture does not carry it.  The surviving list defect record is the native
+    # readback (see ``test_list_readback_findings_come_from_the_native_evidence``).
     return {
         "skill_version": "0.12.8",
         "table_semantics_audit": {
             "passed": False,
             "issues": [{"type": "unknown_table_semantics", "block_id": "t1"}],
-        },
-        "list_preservation_audit": {
-            "passed": False,
-            "source_list_body_residue": ["b2"],
         },
         "audit": {"table_format_contract": {"passed": True}},
         "template_finalizer": {"style_audit": {"unexpected_styles": []}},
@@ -63,9 +63,31 @@ def _report():
 
 def test_review_packet_only_contains_repairable_stable_block_targets():
     packet = build_review_packet(_report(), _model())
-    assert packet["repairable_count"] == 2
-    assert {item["block_id"] for item in packet["targets"]} == {"b2", "t1"}
-    assert packet["baseline_score"]["high"] == 2
+    assert packet["repairable_count"] == 1
+    assert {item["block_id"] for item in packet["targets"]} == {"t1"}
+    assert packet["baseline_score"]["high"] == 1
+
+
+def test_list_readback_findings_come_from_the_native_evidence():
+    """The review loop reads the surviving native list readback, not a dead key."""
+
+    report = {
+        "native_module_evidence": {
+            "native-auditor": {
+                "downstream": {
+                    "list_readback": {
+                        "passed": False,
+                        "issues": [{"code": "list_readback_mismatch"}],
+                    }
+                }
+            }
+        }
+    }
+    findings = collect_audit_findings(report, _model())
+    assert [item["audit_id"] for item in findings] == [
+        "list_readback:0:list_readback_mismatch"
+    ], findings
+    assert findings[0]["repairable"] is False
 
 
 def test_review_patch_rejects_unlisted_blocks_and_low_confidence():
@@ -97,7 +119,6 @@ def test_candidate_requires_strict_audit_improvement_and_content_preservation():
     candidate_model["document"]["blocks"][2]["table_type"] = "data"
     candidate_report = deepcopy(_report())
     candidate_report["table_semantics_audit"] = {"passed": True, "issues": []}
-    candidate_report["list_preservation_audit"] = {"passed": True, "source_list_body_residue": []}
     accepted, reason, details = accepted_candidate(
         _report(), candidate_report, baseline_model, candidate_model,
     )
@@ -296,4 +317,4 @@ def test_resume_source_snapshot_must_match(tmp_path):
 
 def test_unknown_pattern_packet_includes_repairable_remaining_findings():
     packet = unknown_pattern_packet(_report(), _model(), input_hash="sha256:test")
-    assert {item.get("block_id") for item in packet["unresolved_findings"]} >= {"b2", "t1"}
+    assert {item.get("block_id") for item in packet["unresolved_findings"]} >= {"t1"}

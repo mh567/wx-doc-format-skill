@@ -16,10 +16,8 @@ from text_utils import (
     strip_list_marker,
 )
 from document_model import summarize_document_model, validate_document_model
-from list_style_mapping import normalize_wx_list_type
+from wxdf.list_policy import normalize_wx_list_type
 from caption_placement import normalize_caption_placement
-from list_hierarchy import resolve_list_hierarchy
-from list_group_detection import apply_semantic_list_groups
 from appendix_semantics import (
     annotate_appendix_ranges,
     appendix_heading_level,
@@ -61,7 +59,6 @@ def normalize_document_model_simple(
     model = deepcopy(source_model)
     repairs = []
     active_list_signatures: set[tuple[int, str]] = set()
-    apply_semantic_list_groups(model, repairs)
 
     for index, block in enumerate(model.get("document", {}).get("blocks", []), 1):
         block_type = block.get("block_type")
@@ -253,6 +250,27 @@ def normalize_document_model_simple(
             if clean_text != original_text:
                 block["text"] = clean_text
                 repairs.append({"block": index, "type": "list_manual_marker_removed", "from": original_text, "to": clean_text})
+            # A list item retyped from a body paragraph keeps its reviewed source
+            # marker in the text; strip it so the rendered marker is not doubled.
+            # This used to ride on the legacy ``resolve_list_hierarchy`` patch,
+            # which T10 removed, so the strip now lives with the other marker
+            # normalization in this branch.
+            source_marker = str((block.get("source", {}).get("unordered_candidate") or {}).get("marker") or "")
+            current_text = str(block.get("text") or "")
+            if (
+                source_marker
+                and block.get("list_type") in {"dash", "bullet_dot"}
+                and current_text.lstrip().startswith(source_marker)
+            ):
+                stripped_text = current_text.lstrip()[len(source_marker):].lstrip()
+                if stripped_text != current_text:
+                    block["text"] = stripped_text
+                    repairs.append({
+                        "block": index,
+                        "type": "unordered_source_marker_removed",
+                        "from": current_text,
+                        "to": stripped_text,
+                    })
             if block.get("list_type") not in {"lower_letter_paren", "decimal_paren", "bullet_dot", "dash"}:
                 kind = list_kind_for_text(original_text)
                 block["list_type"] = _model_list_type_for_kind(kind)
@@ -333,7 +351,6 @@ def normalize_document_model_simple(
                     block["row_height_rule"] = "atLeast"
                     repairs.append({"block": index, "type": "table_row_height_rule_at_least"})
 
-    resolve_list_hierarchy(model, repairs)
     normalize_caption_placement(model, repairs)
     annotate_appendix_ranges(model)
 

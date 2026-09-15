@@ -21,7 +21,6 @@ from model_normalization import normalize_document_model_simple
 from unordered_lists import (
     annotate_unordered_candidates,
     leading_unordered_marker_candidate,
-    normalize_unordered_hierarchy,
 )
 
 
@@ -63,68 +62,6 @@ def test_candidate_annotation_records_repetition_and_layout() -> None:
     assert candidate["marker"] == "■"
     assert candidate["section_marker_count"] == 2
     assert candidate["layout"]["left_twips"] == 0
-
-
-def test_all_round_bullets_are_rebased_to_primary_unordered_style() -> None:
-    model = _model([
-        {"id": "b1", "block_type": "list_item", "text": "项目一", "level": 1, "list_type": "bullet_dot"},
-        {"id": "b2", "block_type": "list_item", "text": "项目二", "level": 1, "list_type": "bullet_dot"},
-    ])
-    repairs: list[dict] = []
-
-    normalize_unordered_hierarchy(model, repairs)
-
-    assert [(b["level"], b["list_type"]) for b in model["document"]["blocks"]] == [
-        (0, "dash"),
-        (0, "dash"),
-    ]
-
-
-def test_layout_and_parent_relationship_define_unordered_depth() -> None:
-    model = _model([
-        {
-            "id": "b1", "block_type": "list_item", "text": "认证能力",
-            "level": 1, "list_type": "bullet_dot",
-            "source": {"layout": {"left_twips": 0}},
-        },
-        {
-            "id": "b2", "block_type": "list_item", "text": "指纹认证",
-            "level": 1, "list_type": "bullet_dot",
-            "source": {"layout": {"left_twips": 720}},
-        },
-        {
-            "id": "b3", "block_type": "list_item", "text": "人脸认证",
-            "level": 1, "list_type": "bullet_dot",
-            "source": {"layout": {"left_twips": 720}},
-        },
-    ])
-    repairs: list[dict] = []
-
-    normalize_unordered_hierarchy(model, repairs)
-
-    assert [(b["level"], b["list_type"]) for b in model["document"]["blocks"]] == [
-        (0, "dash"),
-        (1, "bullet_dot"),
-        (1, "bullet_dot"),
-    ]
-
-
-def test_ordered_list_fields_remain_unchanged() -> None:
-    blocks = [
-        {
-            "id": "b1", "block_type": "list_item", "text": "第一步",
-            "level": 0, "list_type": "lower_letter_paren", "restart": True,
-        },
-        {
-            "id": "b2", "block_type": "list_item", "text": "第二步",
-            "level": 1, "list_type": "decimal_paren", "restart": False,
-        },
-    ]
-    before = [dict(block) for block in blocks]
-
-    normalize_unordered_hierarchy(_model(blocks), [])
-
-    assert blocks == before
 
 
 def test_unknown_marker_llm_decision_must_remain_unordered() -> None:
@@ -192,8 +129,12 @@ def test_enhanced_unknown_marker_is_retyped_stripped_and_canonicalized() -> None
     block = normalized["document"]["blocks"][0]
 
     assert block["text"] == "指纹认证"
-    assert block["level"] == 0
-    assert block["list_type"] == "dash"
+    # The two-level model keeps the level the LLM chose: the normalization layer
+    # no longer rebases every unordered item to level 0 (that legacy list patch
+    # was removed in T10), so the retyped level 1 stays and its marker is the
+    # level-1 unordered type.
+    assert block["level"] == 1
+    assert block["list_type"] == "bullet_dot"
 
 
 def test_list_detect_prompt_exposes_unknown_marker_evidence() -> None:
@@ -277,5 +218,8 @@ def test_named_unordered_style_is_preserved_as_unordered_evidence() -> None:
 
     normalized = normalize_document_model_simple(model, {})
     normalized_block = normalized["document"]["blocks"][0]
-    assert normalized_block["level"] == 0
-    assert normalized_block["list_type"] == "dash"
+    # A named second-level unordered style stays at the level its style declares;
+    # the T10 removal dropped the legacy ``resolve_list_hierarchy`` rebase that
+    # forced every unordered item to the primary level.
+    assert normalized_block["level"] == 1
+    assert normalized_block["list_type"] == "bullet_dot"

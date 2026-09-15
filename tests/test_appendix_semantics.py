@@ -21,7 +21,7 @@ from appendix_semantics import (
 )
 from docx_pipeline import infer_docx_role, parse_docx_to_model
 from docx_render import render_docx_direct
-from list_detector import analyze_docx_lists
+from wxdf.parsers import analyze_docx_numbering
 from model_normalization import normalize_document_model_simple
 from reporting import add_risk_warnings, new_report
 from template_profile import load_template_profile, template_numbering_ids
@@ -61,7 +61,7 @@ def _appendix_document() -> Document:
 
 
 def _parse(doc: Document) -> dict:
-    numbering_context = analyze_docx_lists(doc, {})
+    numbering_context = analyze_docx_numbering(doc, {})
     return parse_docx_to_model(
         Path("appendix.docx"), doc, True, 0,
         skill_version=lambda: "test",
@@ -89,7 +89,7 @@ def _irregular_appendix_document(*, marker_style: str = "Normal") -> Document:
 
 def test_appendix_styles_are_protected_before_generic_list_detection() -> None:
     doc = _appendix_document()
-    descriptors = analyze_docx_lists(doc, {})
+    descriptors = analyze_docx_numbering(doc, {})
 
     for source_position in (1, 2, 3, 4):
         assert descriptors[source_position]["status"] == "ignored"

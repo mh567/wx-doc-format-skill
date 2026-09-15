@@ -11,7 +11,7 @@ from docx.enum.style import WD_STYLE_TYPE
 from docx.shared import RGBColor
 from table_formatting import normalize_table
 
-from list_style_mapping import (
+from wxdf.list_policy import (
     normalize_wx_list_type,
     wx_list_style_name,
     wx_numbering_abstract_key,

@@ -611,5 +611,69 @@ def test_t09_list_detect_makes_exactly_one_call_scoped_to_the_ambiguous_fragment
     assert "clean2" not in calls[0]
 
 
+# ---------------------------------------------------------------------------
+# T10 F1: the semantic rebuild must run on the real staging artifact
+# ---------------------------------------------------------------------------
+
+def test_t09_readback_semantic_rebuild_runs_in_production(tmp_path: Path) -> None:
+    """A real conversion must actually run the semantic readback rebuild.
+
+    The kernel stages the output as ``.<name>.native-v2.staging``.  A
+    suffix-dispatched re-parse read that DOCX as UTF-8, failed, and reported every
+    semantic invariant as ``None`` (skipped) behind a passing readback, so the
+    invariants were unenforced in every conversion.  The production report now
+    shows ``semantic_rebuild_checked`` true with the four semantic invariants
+    evaluated rather than ``null``.
+    """
+    _normalized, _output, result = _convert_markdown(
+        tmp_path,
+        "# 文档\n\n## 两级列表\n\n1. 一级一\n   1. 二级一\n   2. 二级二\n2. 一级二\n",
+    )
+    assert result.status == "completed", result.diagnostics
+    readback = result.report["native_module_evidence"]["native-auditor"]["downstream"]["list_readback"]
+    assert readback["semantic_rebuild_checked"] is True, readback.get("rebuild")
+    for key in _SEMANTIC_INVARIANT_KEYS:
+        assert readback["invariants"][key] is True, readback["invariants"]
+
+
+def test_t09_readback_rebuild_still_flags_a_tampered_staging_document(
+    tmp_path: Path,
+) -> None:
+    """The semantic rebuild must still be able to fail on a tampered staging DOCX.
+
+    ``deep_items_have_parent`` is not hardwired true: pointing a child at a
+    valid multi-level instance at ``w:ilvl 2`` while no level-1 item exists makes
+    the rebuild report a deep item without a parent.  The check runs against the
+    real ``.<name>.native-v2.staging`` artifact, so it fails on the tree where the
+    rebuild never ran.
+    """
+    from wxdf.auditing import audit_list_readback
+
+    normalized, output, result = _convert_markdown(
+        tmp_path,
+        "# 文档\n\n## 两级列表\n\n1. 一级一\n   1. 二级一\n   2. 二级二\n2. 一级二\n",
+    )
+    assert result.status == "completed", result.diagnostics
+    staging = output.with_name(f".{output.name}.native-v2.staging")
+    os.replace(output, staging)
+
+    def push_a_child_to_depth_two(root):
+        for paragraph in root.iter(f"{{{WORD_NS}}}p"):
+            if _paragraph_text(paragraph) == "二级一":
+                num_pr = paragraph.find("w:pPr/w:numPr", _NS)
+                num_pr.find("w:numId", _NS).set(f"{{{WORD_NS}}}val", "2")
+                ilvl = num_pr.find("w:ilvl", _NS)
+                if ilvl is None:
+                    ilvl = ElementTree.SubElement(num_pr, f"{{{WORD_NS}}}ilvl")
+                ilvl.set(f"{{{WORD_NS}}}val", "2")
+
+    _rewrite_part(staging, "word/document.xml", push_a_child_to_depth_two)
+    comparison = audit_list_readback(staging, normalized)
+    assert comparison["semantic_rebuild_checked"] is True, comparison.get("rebuild")
+    assert comparison["invariants"]["deep_items_have_parent"] is False
+    codes = [issue["code"] for issue in comparison["issues"]]
+    assert "list_deep_item_without_parent" in codes, codes
+
+
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-q"]))
