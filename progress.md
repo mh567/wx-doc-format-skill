@@ -1,16 +1,50 @@
 # 当前架构收敛进度
 
-## 2026-09-15 execution-v6 T08 ListPolicy 提取 + 真实多级 WX 渲染
+## 2026-09-15 execution-v6 T10 收口（移除遗留列表逻辑 + 全矩阵验证）
+
+- 基线：提交 `1df3926`，全量 `1259 passed, 0 failed`。
+- 删除四个遗留列表模块：`list_detector.py`、`list_group_detection.py`、`list_hierarchy.py`、`list_style_mapping.py`；grep 确认无残留导入（仅注释提到）。职责归属：编号目录与逐段证据 T02 已原生实现，分组裁决由新增的 `parsers.analyze_docx_numbering` 原生接管，源标记类型与 WX 角色映射迁入叶模块 `wxdf/list_policy.py` 作为唯一属主。
+- 一并移除 `model_normalization.py`、`docx_render.py`、`word_model_renderer.py`、`main.py`、`docx_pipeline.py`、`markdown_recognition.py`、`unordered_lists.py` 中的旧列表修补与引用。
+- 关闭一条长期残留：pStyle 层级继承端到端生效（`analyze_docx_numbering` 取代 `analyze_docx_lists`，`effective_ilvl` 由 `source_ilvl` 与 `pStyle` 继承综合得出并参与原生裁决）。`num_id` 双源**未关闭**：证据里 `numbering_definition_ref.num_id` 与顶层 `num_id` 仍各写一份，本工单未去除重复字段。
+- 删除只测已移除实现的测试：`tests/test_list_group_detection.py` 整文件（9 项），`tests/test_list_numbering.py`（7 项）与 `tests/test_unordered_lists.py`（3 项）中仅针对遗留实现的用例；共降 19 项，逐条分类见 `docs/execution-v6/evidence/T10.md`。
+- 全量测试移除阶段 `1240 passed, 0 failed`。数量低于基线 19 项是删除遗留测试文件的直接结果，没有为通过而删测试；T01 冻结库未改动且保持 11 passed。
+- FIX 轮（独立复审发现一个 BLOCKER、一个 MAJOR、三个 MINOR）：
+  - [F1，BLOCKER] 输出暂存为 `.<name>.native-v2.staging`，回读语义重建用 `parse(path)` 按后缀分派到 Markdown 分支，把 DOCX 当 UTF-8 读抛 `UnicodeDecodeError`，于是每次真实转换 `semantic_rebuild_checked=false`、四个语义不变量为 `null` 却报 `passed=true`。修复：`wxdf.parsers.parse` 接受 `source_type` 容器提示，`_rebuild_readback_lists` 传 `docx`。新增两项守卫（真实转换断言、暂存名篡改断言），修复前 `2 failed`。真实转换现报 `semantic_rebuild_checked=true`，四个语义不变量实际求值。
+  - [F2，MAJOR] `report["list_preservation_audit"]` 连同生产者 `list_detector.audit_list_preservation` 一起删除，消费方 `review_loop.collect_audit_findings` 仍读该键。选择「有意移除并记录为显式合同变更」，消费方改读原生列表回读（`native_module_evidence`）；该字段不在公开报告摘要合同内。
+  - [F3，MINOR] 清掉已删除生产者的死读：`review_loop` 的 `semantic_list_groups` 与 `list_preservation_audit`、`reporting` 的 `parallel_content_candidates` / `unresolved_parallel_groups`、`llm_enhancer` 的 `list_group_candidate` 与 `semantic_list_groups`。
+  - [F4，MINOR] 缩进簇层级恢复与无标记并行内容组检测随模块删除且无等价物，二者都选择记录为有意移除（都指向 README 要修的「连续正文段被当列表」误判），不再声称由 T03/T04/T06 覆盖。
+- 真实转换：`input/test_baseline.md`、`input/benchmark_report.md`、两级嵌套列表 Markdown 与软换行续接文档均 `completed`、`saved_output_audit.passed=true`、`unexpected_styles=[]`、`risk_warnings` 为空；T07 章标题与 IP 地址样例保持 `completed` 且无诊断。
+- 全量测试 `1243 passed, 0 failed`（移除阶段 `1240` 加 FIX 轮新增 3 项）。
+- 未关闭事项：约束 7 的字面阈值语义与更广的歧义来源、`LIST_END` 未发出、渲染夹层仍非阻断、回读审计的两处盲区、`transaction.py` 排序修正仍欠独立工单、`num_id` 双源、`effective_ilvl` 的 `w:ind` 缺口、F4 两项未恢复能力、全矩阵缺口（WPS/LibreOffice、页眉页脚脚注文本框、3-8 级）、同类别相邻新 numId 的嵌套仍是启发式、跨类别 `ilvl=0` 子表未自动嵌套。
+- `docs/execution-v6/status.json` 中十张工单全部 done。证据见 `docs/execution-v6/evidence/T10.md`。未提交、未推送；未执行任何远程操作；预存 `_build/` 与 `paseo.json` 未处理。
+
+## 2026-09-15 execution-v6 T09 回读审计 + LLM 门控
+
+- 新增红灯文件 `tests/test_t09_readback_audit.py`（首轮 14 项，FIX 轮后 23 项），回退实现后全部失败，实现后全部通过。
+- `auditing.py` 的回读审计扩展为不变量级覆盖：保存后用同一套 SourceFacts 语义重解析输出文档，逐项比对列表项保留一次、深层项有父项、续接正文有 `owner_item_id`、编号序列一致（`_saved_number_sequence` 读 `w:start` / `w:lvlRestart` / `w:lvlOverride`，含纯 `w:startOverride`）、AST 与回读树一致、低置信度记录一致、无未记录歧义。
+- 两级模型下两个有序层级的 `w:ilvl` 都是 0，层级信息落在样式与编号实例上，因此回读的层级链改由样式角色逐行恢复（`_expected_render_levels_and_chain` / `_actual_render_levels`）；`w:ilvl` 缺省按 OOXML 语义取 0。
+- `llm_enhancer.py` 新增 `_list_detect_ambiguous_blocks` 与单批次空收集返回空批次：只把**已存在多候选**的片段（编号状态 `ambiguous`、存在竞争的无序标记候选、规则已标记待复核的列表组候选）交给 `list_detect`；无歧义片段时能力完全不调用模型。`_validate_list_detect_patch` 拒绝改写尚无多候选的干净块，把 LLM 输出限制在 Resolver 全局约束内。
+- FIX 轮（复审发现一个 BLOCKER、一个 MAJOR 与四个 MINOR）：
+  - [F1，BLOCKER] `_paragraph_text` 只拼 `w:t`，丢掉软换行，带续写的普通列表被判 `list_item_preservation_mismatch` 并让转换 `status=failed`；改为与内联投影一致（`w:br`/`w:cr` → `"\n"`，`w:tab` → `"\t"`）。新增有序/无序软换行续接端到端测试，修复前 `status=failed`，修复后 `completed`。
+  - [F2，MAJOR] `_make_phase_batches` 对 `batching == "single"` 无条件返回 `[items]`，空收集时是 `[[]]`（真值），干净文档仍走一次全量提示词 LLM 调用；改为空单批次返回 `[]`。新增直接驱动 `enhance_document_model` 的零调用与一次调用测试，并适配 `tests/test_llm_file_protocol.py`。
+  - [F3] 不变量 `every_block_preserved_once` 只比较列表项文本，重命名为 `list_items_preserved_once`，问题码 `list_item_preservation_mismatch`，并注明非列表块重复由 `check_saved_output.paragraph_order_changed` 兜住；删除证据中不存在的 `list_readback_duplicate_item`。
+  - [F4] `low_confidence_has_diagnostics` 改为双向检查（幽灵记录即失败，且每个 ambiguous 证据节点必须有裁决或记录）；`no_silent_ambiguity` 改为每条未解决候选必须留下匹配的 `ambiguous_list_state` 记录且状态不得报 `completed`。
+  - [F5] rebuild 失败时四项语义不变量从 `True` 改为 `None`，新增 `semantic_rebuild_checked` 布尔位，跳过与通过可区分。
+  - [F6] `_actual_render_levels` 改为逐行降级，表外未映射样式单独报 `list_render_style_unmapped`，一次允许的样式改动无法关闭整链；表格单元格内列表项使用 `表正文` 属设计行为，单列为不可由样式恢复层级。
+- 全量测试 `1259 passed, 0 failed`（首轮 `1250` 加 FIX 轮 9 项）。`input/test_baseline.md` 与 `input/benchmark_report.md` 仍 `completed`、无风险；T07 章标题与 IP 地址样例 7 passed；T01 冻结库保持 11 passed 且未改动。
+- 已记录残留：约束 7 的字面阈值语义与更广的歧义来源仍归 T10；`LIST_END` 未发出；渲染夹层仍非阻断；渲染层级链仅在角色合法地对应多个投影层级时跳过，多实例共享抽象定义的 override 交互边界未覆盖。
+- 证据见 `docs/execution-v6/evidence/T09.md`，状态见 `docs/execution-v6/status.json`。未提交、未推送；预存 `_build/`、`.commandcode/` 与 `paseo.json` 未处理。
+
+## 2026-09-15 execution-v6 T08 ListPolicy 提取 + 两级 WX 渲染
 
 - 新增红灯测试文件 `tests/test_t08_multilevel_rendering.py`，首轮 6 项失败（两层/三层有序全被钉在 level 0、默认策略不保留真实层级、策略不可替换）。
-- 抽出 `scripts/wxdf/list_policy.py`（叶子模块，`normalization` 原样再导出）：`ListProjection` / `ListPolicy`（`ordered_roles` / `unordered_roles` / `chapter_scoped_sequence` / `bind_multilevel_numbering`）与 `LIST_POLICIES`；默认策略零级有序用一级字母样式、深层用二级样式。新增三级样式只需改策略，已由 `test_t08_list_policy_is_swappable_for_a_third_template_level` 证明。
-- `normalization.normalize` 改为消费存下来的 `semantic_level`（不再自行按容器深度重算），`render_level` 改由策略投影产生。
-- **FIX 轮修复 BLOCKER**：首轮把深层有序项绑到模板的标题大纲实例 `numId 1`，导致后续标题编号被污染（`H2` 变 `1.2`→`1.3`）且子项不按顶层项重启。现改为在产出文档内合成列表专用编号实例：`numId 22 / abstractNum 10`，第 0 级 `lowerLetter %1)`、第 1 级起 `decimal %1.%2`，并写入 `w:lvlRestart`（第 0 级 0、第 1 级起逐级）。标题实例与列表实例彻底分离。
-- 复验（保存 XML + 独立计数模拟）：标题、嵌套有序列表、后续标题的文档中后续标题编号为 `1.2`（未污染）；同一章内第二个顶层项的子项重启为 `b.1`；模板文件 sha256 未变；合成实例 OOXML 合规、无 id 冲突、不会被重复合成。
-- 新增编号模拟器到 `tests/modular_support.py`，护栏断言从保存 XML 推导可见编号，而不是只断言 `numId`/`ilvl`；两个 F1 护栏在修复前绑定下实测失败。
-- 全量测试 `1236 passed, 0 failed`（基线 1232 加 FIX 轮 4 项）。T01 冻结库保持 11 passed 且未改动；T07 章标题与 IP 文档仍 `completed` 无诊断；`test_baseline.md` / `benchmark_report.md` 仍 `completed` 无风险。
-- **需要用户裁决的治理冲突**：默认策略让嵌套有序项保留真实层级并以二级样式显示，这与 `AGENTS.md` 关键决策记录 1（所有有编号列项统一一级 `a)` 样式、每章节重启）相反。决策 1 未被修订也未被否决，默认值变更需要明确授权；因 `run_result.py` 在禁改范围内且只接受 `wx-default-v2`，产品 CLI 目前无法选择非默认策略。
-- 仍有夹层与边界：深层无序因模板缺多级 bullet 实例仍夹层到 `ilvl 0`（有诊断）；二级项可见标记是列表实例自身的 `a.1` 而非模板二级样式的独立 `1)`；顶层有序编号全文档连续，未写 `w:startOverride`，决策 1 的「每章节重启」未落地。
+- 抽出 `scripts/wxdf/list_policy.py`（叶子模块，`normalization` 原样再导出）：`ListProjection`（含 `clamped`）/ `ListPolicy`（`ordered_roles` / `unordered_roles` / `chapter_scoped_sequence` / `max_level`）与 `LIST_POLICIES`。`ListProjection.clamped` 是渲染器发夹层诊断的唯一依据。新增三级样式只需改策略，已由 `test_t08_list_policy_is_swappable_for_a_third_template_level` 证明。
+- `normalization.normalize` 改为消费存下来的 `semantic_level`（不再自行按容器深度重算），`render_level` 改由策略投影产生；每个列表节点保留 `semantic_level` 与 `render_level_clamped`。
+- **用户裁定解决治理冲突**：2026-09-15 用户裁定 `AGENTS.md` 关键决策记录 1 为两级模型，取代原先「所有有编号的列项统一使用一级列表样式」的表述。默认策略据此改为 `max_level=1`：语义层级 0 用第一级样式，语义层级 1 或更深用第二级样式；深于 2 的层夹到第二级并产出 `list_render_level_clamped`，提示改用标题层级。第二级角色绑回模板自带实例（有序 `list_decimal -> numId 8` 显示 `1)`，无序 `list_bullet -> numId 4`），删除了 FIX 轮的合成大纲实例 `numId 22 / abstractNum 10` 与大纲 `a.1` 编号。
+- 两级模型下所有列表角色都绑模板单级实例，因此每个列表项发射 `w:ilvl 0`，两级由样式与实例区分；这是设计结果，不发诊断。回读审计期望父链全为 `None`，与实际一致。
+- 复验（保存 XML + 独立计数模拟器）：两级有序 `a)`、`1)`、`2)`、`b)`；两级无序一级符号、`•`、`•`、一级符号；混合嵌套有序父无序子落 `list_bullet`（`•`），无序父有序子落 `list_decimal`（`1)`）；三层第三项夹到二级（`2)`）并带一条非阻断诊断；标题交叉处后续二级标题仍为 `1.2`，列表项不绑标题实例；模板文件 sha256 未变。
+- 全量测试 `1236 passed, 0 failed`。T01 冻结库保持 11 passed 且未改动；T07 章标题与 IP 文档仍 `completed` 无诊断；`test_baseline.md` / `benchmark_report.md` 仍 `completed` 无风险。
+- 保留的残留：深于两级的夹层（按裁定）、二级项因单级实例不随父项重启、每章节重启未落地（无 `w:startOverride`）、`list_render_level_clamped` 仍只进模块证据不阻断发布。
 - 证据见 `docs/execution-v6/evidence/T08.md`，状态见 `docs/execution-v6/status.json`。未提交、未推送；预存 `_build/` 与 `paseo.json` 未处理。
 ## 2026-09-15 execution-v6 T07 标题与正文防歧义
 

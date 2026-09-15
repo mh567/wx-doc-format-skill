@@ -4,8 +4,8 @@
   "branch": "dev",
   "baseline_head": "fc851e1c0ed1eb68a0c3db9e4cdd9e4f4a3f4e3b",
   "implementation_started": true,
-  "current_task": "T10",
-  "next_task": "T10",
+  "current_task": "done",
+  "next_task": null,
   "release_authorized": false,
   "recommended_order": [
     "T01",
@@ -191,9 +191,25 @@
     {
       "id": "T10",
       "subject": "收口:移除遗留列表逻辑并全矩阵验证",
-      "status": "pending",
+      "status": "done",
       "depends_on": [
         "T09"
+      ],
+      "residuals": [
+        "FIX round (blocker F1, fixed): the saved output is staged as .<name>.native-v2.staging and the semantic readback rebuild re-parsed it by suffix as Markdown, so every real conversion reported semantic_rebuild_checked=false with the four semantic invariants null behind a passing readback. Fixed by a source_type container hint on wxdf.parsers.parse; guarded by test_t09_readback_semantic_rebuild_runs_in_production and test_t09_readback_rebuild_still_flags_a_tampered_staging_document",
+        "FIX round (major F2, deliberate contract change): report[\"list_preservation_audit\"] and its producer list_detector.audit_list_preservation were removed; the contract change is recorded in evidence/T10.md, progress.md and this file, and the consumer review_loop.collect_audit_findings now reads the native list readback (native_module_evidence). The field is not part of the public report summary",
+        "FIX round (minor F3, fixed): dead reads of the removed producers were removed or re-pointed (review_loop.semantic_list_groups and list_preservation_audit, reporting.parallel_content_candidates/unresolved_parallel_groups, llm_enhancer.list_group_candidate)",
+        "FIX round (minor F4, recorded not restored): indentation-cluster level recovery and no-marker parallel-content group detection were removed with their modules and have no equivalent. Both fed the README '连续正文段被当列表' false positive, so the removal is deliberate and is not claimed to be covered by T03/T04/T06",
+        "README constraint 7's literal score-threshold semantics and broader ambiguity sources remain unimplemented; low-confidence numbering stays body text with only an info low_confidence_list_marker downgrade, and real input only produces ambiguous_list_state through the T03 equal-strength tie path",
+        "LIST_END is enumerated but not emitted; boundary termination is expressed by protected blocks and OUTSIDE_LIST",
+        "list_render_level_clamped stays module-evidence only and non-blocking; a deeper-than-two list clamps to the second level and advises heading levels",
+        "readback audit blind spots: the style-derived render chain is skipped when a role maps to several projected levels, and a list item inside a table cell carries the 表正文 style so its level is not recoverable from the style",
+        "the structural create-ordering fix in scripts/wxdf/transaction.py still lacks its own ticket; T10 did not touch that file",
+        "num_id is still a dual source: _numbering_catalogue_evidence writes a top-level num_id and add_unit writes numbering_definition_ref.num_id. T10 did not remove the duplicated field",
+        "the README field definition says effective_ilvl synthesizes w:ind, but _resolve_effective_ilvl only synthesizes source_ilvl and pStyle inheritance; the w:ind semantics gap remains",
+        "full-matrix gaps: input sources cover Markdown and Word-generated samples only (WPS and LibreOffice uncovered); containers cover body and table only (header, footer, footnote and textbox uncovered); levels cover 0-2 only (levels 3-8 uncovered)",
+        "same-category contiguous new-numId nesting remains a heuristic; the ilvl=0 restart variant is indistinguishable from a sub-list",
+        "cross-category ilvl=0 sub-list is treated as a same-level kind switch and is not auto-nested"
       ]
     }
   ],
