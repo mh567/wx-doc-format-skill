@@ -48,7 +48,7 @@
       ],
       "residuals": [
         "pStyle level inheritance still inert end-to-end: body evidence num_fmt/lvl_text/numbering_status still comes from the legacy group decision at the declared ilvl; effective_ilvl only enters evidence and candidate states (T04/T10)",
-        "non-zero multi-level output is blocked on the product path: wx-default-v2 pins ordered target_level to 0 in normalization.normalize, so every ordered item renders with role list_letter (numId 3) and list_decimal (numId 8) is never exercised; the template itself does provide nine-level instances numId 1/2/7/19 (T04/T08)",
+        "RESOLVED BY T08: the product path no longer pins ordered target_level to 0; wx-default-v2 projects two levels, so level-0 ordered items use list_letter (numId 3) and level-1 ordered items use list_decimal (numId 8), and anything deeper clamps to level 1 (T08)",
         "num_id remains a dual source (top-level and numbering_definition_ref) (T10)",
         "lvl_restart is catalogued and carried but not consumed; README constraint 10 belongs to T06",
         "LIST_END state is enumerated but not emitted yet; boundary termination is expressed via protected blocks and OUTSIDE_LIST (T06/T07)",
@@ -69,7 +69,7 @@
       ],
       "residuals": [
         "pStyle level inheritance still inert end-to-end; T04 nested on declared ilvl=0 plus numId identity, so effective_ilvl still does not drive grouping (T10)",
-        "non-zero multi-level output is blocked on the product path: wx-default-v2 pins ordered target_level to 0 in normalization, while the template does provide nine-level instances; real multi-level rendering belongs to T08 (T08)",
+        "RESOLVED BY T08: the product path no longer pins ordered target_level to 0; wx-default-v2 renders two levels (level 0 list_letter, level 1 list_decimal) and clamps anything deeper, so real multi-level rendering beyond two levels is intentionally not emitted (T08)",
         "cross-category ilvl=0 sub-list is treated as a same-level kind switch (README constraint 9) and is not auto-nested, because the evidence is indistinguishable from a same-level switch (T05/T08)",
         "implicit list runs still have no tail continuation; ITEM_CONTINUATION and ITEM_CHILD_BLOCK exist only inside explicit list_item containers (T05)",
         "lvl_restart is catalogued and carried but not consumed; README constraint 10 belongs to T06 (T06)",
@@ -99,7 +99,7 @@
         "cross-category ilvl=0 sub-list is treated as a same-level kind switch and is not auto-nested (T06/T08)",
         "the ambiguity report is still reachable only from synthetic evidence; competing parent candidates produced by nesting or continuation do not reach it yet (T09)",
         "pStyle level inheritance still inert end-to-end (T10)",
-        "non-zero multi-level output is blocked on the product path: wx-default-v2 pins ordered target_level to 0 (T08)",
+        "RESOLVED BY T08: the product path no longer pins ordered target_level to 0; wx-default-v2 projects the two recognised levels and clamps deeper levels (T08)",
         "num_id remains a dual source (top-level and numbering_definition_ref) (T10)",
         "list_parent_chain_mismatch compares the implied w:ilvl parent chain, not the per-level sequence values (T09)",
         "list_render_level_clamped is exposed through module evidence rather than blocking publication (T08)",
@@ -127,7 +127,7 @@
         "LIST_END is still enumerated but not emitted; emitting it as a candidate for a boundary block that is already arbitrated OUTSIDE_LIST would create an equal-strength tie, so boundary termination stays expressed by protected blocks and OUTSIDE_LIST (T07)",
         "cross-category ilvl=0 sub-list is still treated as a same-level kind switch (README constraint 9), because the shape is indistinguishable from the switch (T08)",
         "a table between two list items is not attributed to any item, and a note after a run is a protected block that is not attributed either; the tail scan only covers content after a run's last item (T10)",
-        "non-zero multi-level output is still blocked on the product path: wx-default-v2 pins ordered target_level to 0 (T08)",
+        "RESOLVED BY T08: the product path no longer pins ordered target_level to 0; wx-default-v2 projects the two recognised levels and clamps deeper levels (T08)",
         "list_parent_chain_mismatch compares the implied w:ilvl parent chain, not the per-level sequence values (T09)",
         "pStyle level inheritance still inert end-to-end (T10)",
         "num_id remains a dual source (top-level and numbering_definition_ref) (T10)"
@@ -153,25 +153,23 @@
     },
     {
       "id": "T08",
-      "subject": "ListPolicy 提取 + 真实多级 WX 渲染",
+      "subject": "ListPolicy 提取 + 两级 WX 渲染",
       "status": "done",
       "depends_on": [
         "T04",
         "T06"
       ],
       "residuals": [
-        "BLOCKING, needs user authorization: the default wx-default-v2 now keeps nested ordered items at their true level (a.1), which contradicts AGENTS.md 关键决策记录 decision 1 (all numbered items use the first-level a) style, restarting after each heading). Decision 1 was not amended and no non-default CLI value is reachable because run_result.py is off limits and rejects any value other than wx-default-v2 (T10/user)",
-        "deep unordered items still clamp to ilvl 0 because the template has no multi-level bullet instance; list_render_level_clamped records it (T10/template)",
-        "the level-2 visible marker is the list instance's own outline number (a.1) rather than the independent 1) the second-level style was designed around (T10/template)",
+        "RESOLVED BY USER RULING (2026-09-15): AGENTS.md 关键决策记录 1 now recognises at most two list levels. wx-default-v2 caps render_level at 1 and binds each role to the template's own instance (list_letter=3, list_decimal=8, list_dash=5, list_bullet=4), so the second ordered level shows the designed 1) form; the synthesized multi-level instance (numId 22/abstract 10) and the outline a.1 marker are removed (T10/user)",
+        "levels deeper than two clamp to render level 1 and emit list_render_level_clamped (semantic_level, render_level, max_level, emitted_level, num_id) so the author is told to use heading levels instead of more list levels; this is the intended two-level behaviour (T09/T10)",
+        "the template's second-level instances are single-level, so every list item emits w:ilvl 0 and the two levels are distinguished by style and instance rather than by the level attribute; a second-level item does not restart per parent because it shares numId 8 (T10/template)",
         "top-level ordered numbering is document-continuous; the saved output writes no w:startOverride, so decision 1's per-chapter restart is not implemented (T10)",
-        "list_render_level_clamped stays module-evidence only and non-blocking; it now fires only for levels the template genuinely cannot express (T09/T10)",
+        "list_render_level_clamped stays module-evidence only and non-blocking; it now fires only for a semantic level deeper than the two-level cap (T09/T10)",
         "cross-category ilvl=0 sub-list is treated as a same-level kind switch and is not auto-nested (T10)",
         "the ilvl=0 restart variant is indistinguishable from a sub-list (T10)",
         "restart_scope boundary reset is not implemented; confirmed no policy-layer boundary is needed (T10)",
-        "ordered items share one list-only numbering instance per document; no per-container w:num or w:startOverride is generated (T10)",
-        "the numbering simulator in tests/modular_support.py does not model w:lvlOverride/w:startOverride (T09)",
-        "docs/execution-v6/README.md:56 still describes render_level as capped by a policy max_level; no shipping policy implements a cap and the field is currently unread outside the semantics layer (spec note, T10)",
-        "scripts/wxdf/normalization._UNORDERED_NUMBER_FORMATS is dead (T10)"
+        "ordered and unordered items share one template numbering instance per level per document; no per-container w:num or w:startOverride is generated (T10)",
+        "the numbering simulator in tests/modular_support.py does not model w:lvlOverride/w:startOverride (T09)"
       ]
     },
     {
