@@ -26,6 +26,65 @@ class RenderError(RuntimeError):
     """Raised when a normalized node cannot be rendered with available resources."""
 
 
+def _write_direct_numbering(paragraph: Any, num_id: int, ilvl: int) -> None:
+    """Write an explicit list numbering reference on a paragraph.
+
+    The native renderer previously relied only on the paragraph style to carry
+    numbering, which pins every ordered item to the single ``w:ilvl`` of its
+    style.  Writing the numbering reference directly makes the emitted level
+    follow the normalized render level, so ordered lists no longer collapse to
+    a single zero level.  ``get_or_add_numPr`` inserts ``w:numPr`` in
+    ``CT_PPr`` schema order, so a paragraph that already carries ``w:ind``,
+    ``w:jc`` or ``w:rPr`` stays schema valid.
+    """
+
+    properties = paragraph._p.get_or_add_pPr()
+    num_pr = properties.get_or_add_numPr()
+    for child in list(num_pr):
+        num_pr.remove(child)
+    ilvl_element = OxmlElement("w:ilvl")
+    ilvl_element.set(qn("w:val"), str(max(0, int(ilvl))))
+    num_pr.append(ilvl_element)
+    num_id_element = OxmlElement("w:numId")
+    num_id_element.set(qn("w:val"), str(int(num_id)))
+    num_pr.append(num_id_element)
+
+
+def _numbering_levels_by_num_id(doc: Any) -> dict[int, set[int]] | None:
+    """Return the levels each numbering instance defines, or ``None`` when absent."""
+
+    try:
+        numbering = doc.part.numbering_part.element
+    except (KeyError, NotImplementedError, AttributeError, ValueError):
+        return None
+    abstract_levels: dict[str, set[int]] = {}
+    for abstract in numbering.findall(qn("w:abstractNum")):
+        abstract_id = abstract.get(qn("w:abstractNumId"))
+        levels: set[int] = set()
+        for level in abstract.findall(qn("w:lvl")):
+            try:
+                levels.add(int(level.get(qn("w:ilvl"), "0")))
+            except (TypeError, ValueError):
+                levels.add(0)
+        abstract_levels[str(abstract_id)] = levels
+    result: dict[int, set[int]] = {}
+    for num in numbering.findall(qn("w:num")):
+        reference = num.find(qn("w:abstractNumId"))
+        if reference is None:
+            continue
+        levels = set(abstract_levels.get(reference.get(qn("w:val")), set()))
+        for override in num.findall(qn("w:lvlOverride")):
+            try:
+                levels.add(int(override.get(qn("w:ilvl"), "0")))
+            except (TypeError, ValueError):
+                levels.add(0)
+        try:
+            result[int(num.get(qn("w:numId")))] = levels
+        except (TypeError, ValueError):
+            continue
+    return result
+
+
 def _profile_styles(normalized: Mapping[str, Any]) -> Mapping[str, str]:
     return normalized.get("presentation", {}).get("profile", {}).get("resolved_styles", {})
 
@@ -387,12 +446,16 @@ def render(
     document = ast["document"]
     media = MediaEmbedder(document.get("resources", {}), resources, error_type=RenderError)
     styles = _profile_styles(normalized)
+    numbering_ids = normalized.get("presentation", {}).get("profile", {}).get("numbering_ids", {})
+    if not isinstance(numbering_ids, Mapping):
+        numbering_ids = {}
     selected_template = template_bundle.path if template_bundle is not None else template_path
     doc = (
         Document(io.BytesIO(template_bundle.template_bytes))
         if template_bundle is not None
         else Document(str(selected_template)) if selected_template else Document()
     )
+    supported_numbering_levels = _numbering_levels_by_num_id(doc)
     body = doc._element.body
     for child in list(body):
         if child.tag != qn("w:sectPr"):
@@ -460,6 +523,12 @@ def render(
             _apply_layout_paragraph_format(
                 paragraph,
                 block.get("source_paragraph_format"),
+            )
+        if numbering and numbering.get("num_id") is not None:
+            _write_direct_numbering(
+                paragraph,
+                int(numbering["num_id"]),
+                int(numbering.get("num_ilvl") or 0),
             )
         if pending_page_break:
             paragraph.paragraph_format.page_break_before = True
@@ -624,6 +693,36 @@ def render(
         else:
             style_role = "list_dash" if presentation.get("target_level", 0) == 0 else "list_bullet"
             list_style = styles.get(style_role, "List Bullet")
+        target_level = presentation.get("target_level", 0)
+        try:
+            target_level = max(0, int(target_level))
+        except (TypeError, ValueError):
+            target_level = 0
+        raw_num_id = numbering_ids.get(style_role)
+        num_id: int | None = None
+        if raw_num_id is not None:
+            try:
+                num_id = int(raw_num_id)
+            except (TypeError, ValueError):
+                num_id = None
+        # Keep the emitted level within the levels the chosen numbering instance
+        # actually defines.  When the requested level is not defined the clamp is
+        # never silent: an explicit diagnostic records the requested and emitted
+        # levels so a level that cannot be rendered is observable downstream.
+        if num_id is not None and supported_numbering_levels is not None:
+            levels = supported_numbering_levels.get(num_id)
+            if levels is not None and target_level not in levels:
+                diagnostics.append({
+                    "code": "list_render_level_clamped",
+                    "severity": "warning",
+                    "node_id": child_id,
+                    "message": f"numbering instance {num_id} does not define level {target_level}; the emitted level was clamped to 0",
+                    "requested_level": target_level,
+                    "emitted_level": 0,
+                    "num_id": num_id,
+                    "defined_levels": sorted(levels),
+                })
+                target_level = 0
         add_paragraph(
             child_id,
             anchor_block,
@@ -632,6 +731,8 @@ def render(
                 "marker_kind": presentation.get("marker_kind"),
                 "target_level": presentation.get("target_level", 0),
                 "style_role": style_role,
+                "num_id": num_id,
+                "num_ilvl": target_level,
             },
             parent=parent,
         )

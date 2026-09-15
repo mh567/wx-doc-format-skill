@@ -352,6 +352,26 @@ def materialize_list_semantics(
                 }
                 if isinstance(unit.get("source_ref"), Mapping):
                     item_node["source_ref"] = copy.deepcopy(dict(unit["source_ref"]))
+                # List items may own heterogeneous content blocks (paragraph /
+                # table / image / quote / code / formula / note) and child lists.
+                # content_blocks is the ordered list of direct non-list children
+                # that belong to this item; child_lists holds nested list
+                # container ids discovered under the item in the source tree.
+                source_children = facts["children"].get(source_item_id, [])
+                content_blocks: list[str] = []
+                child_lists: list[str] = []
+                for child_id in source_children:
+                    child_kind = None
+                    if child_id in facts["units"]:
+                        child_kind = str(facts["units"][child_id].get("kind") or "")
+                    elif child_id in facts["containers"]:
+                        child_kind = str(facts["containers"][child_id].get("kind") or "")
+                    if child_kind == "list":
+                        child_lists.append(child_id)
+                    else:
+                        content_blocks.append(child_id)
+                item_node["content_blocks"] = content_blocks
+                item_node["child_lists"] = child_lists
                 candidates.append({
                     "candidate_id": f"list-item-structure-{source_item_id}",
                     "module_id": "list_semantics",

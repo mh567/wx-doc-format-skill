@@ -22,7 +22,7 @@ def test_docx_source_facts_only_marks_detected_numbering_as_list(monkeypatch, tm
     document.add_paragraph("有效列项")
     document.save(source)
 
-    def fake_analysis(document, report):
+    def fake_analysis(document, report, *, numbering_maps=None):
         report["source_lists"] = {"detected": 1, "ignored": 1}
         return {
             0: {

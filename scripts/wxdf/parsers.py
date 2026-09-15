@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import hashlib
-import inspect
 import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
+
+from docx.oxml.ns import qn
+
+from list_style_mapping import normalize_wx_list_type, source_list_type
+from note_semantics import source_note_role
+from text_utils import looks_like_list_item
+from unordered_lists import paragraph_layout_evidence
 
 from .contracts import SOURCE_FACTS_SCHEMA_VERSION
 from .source_store import SourceHandle, SourceStore
@@ -16,6 +22,11 @@ from .validation import validate_source_facts
 
 
 MARKDOWN_PARSER_VERSION = "1.1.0"
+_NUMBERING_LIST_FORMATS = frozenset({
+    "decimal", "decimalZero", "lowerLetter", "upperLetter",
+    "lowerRoman", "upperRoman", "bullet",
+})
+_NUMBERING_PROTECTED_STYLES = frozenset({"caption", "题注", "文档标题", "title"})
 _EMU_PER_POINT = 12700
 _EMU_PER_INCH = 914400
 _VML_NS = "{urn:schemas-microsoft-com:vml}"
@@ -588,12 +599,398 @@ def _docx_source_paragraph_format(paragraph: Any) -> dict[str, Any]:
     return result
 
 
+def _read_numbering_val(element: Any, attr: str) -> str | None:
+    if element is None:
+        return None
+    return element.get(qn(attr))
+
+
+def _read_numbering_int(element: Any, attr: str, default: int | None = None) -> int | None:
+    raw = _read_numbering_val(element, attr)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+def _level_ind_values(level: Any) -> dict[str, int | None]:
+    """Read the level indentation from ``w:lvl/w:pPr/w:ind``.
+
+    OOXML nests numbering-level indentation inside the level's paragraph
+    properties, not directly under ``w:lvl``.
+    """
+    p_pr = level.find(qn("w:pPr"))
+    ind = p_pr.find(qn("w:ind")) if p_pr is not None else None
+    if ind is None:
+        return {}
+    return {
+        "left_twips": _read_numbering_int(ind, "w:left"),
+        "left_chars": _read_numbering_int(ind, "w:leftChars"),
+        "hanging_twips": _read_numbering_int(ind, "w:hanging"),
+        "hanging_chars": _read_numbering_int(ind, "w:hangingChars"),
+        "first_line_twips": _read_numbering_int(ind, "w:firstLine"),
+        "first_line_chars": _read_numbering_int(ind, "w:firstLineChars"),
+    }
+
+
+def _level_child_int(level: Any, tag: str) -> int | None:
+    """Read an integer ``w:val`` from a ``w:lvl`` child element."""
+
+    return _read_numbering_int(level.find(qn(tag)), "w:val")
+
+
+def _level_values(level: Any) -> dict[str, Any]:
+    def value(tag: str) -> str | None:
+        child = level.find(qn(tag))
+        return child.get(qn("w:val")) if child is not None else None
+
+    start = _read_numbering_int(level.find(qn("w:start")), "w:val", 1)
+    ind_values = _level_ind_values(level)
+    return {
+        "num_fmt": value("w:numFmt"),
+        "lvl_text": value("w:lvlText"),
+        "p_style": value("w:pStyle"),
+        "start": start if start is not None else 1,
+        "ind": ind_values or None,
+        "suff": value("w:suff"),
+        "lvl_restart": _level_child_int(level, "w:lvlRestart"),
+        "jc": value("w:lvlJc"),
+    }
+
+
+def build_numbering_catalog(document: Any) -> dict[str, Any]:
+    """Build a native DOCX numbering catalog covering the full OOXML set.
+
+    Returns per-abstractNum level maps, num-to-abstract links, level overrides
+    (lvlOverride / startOverride), and a pStyle-to-ilvl lookup per abstractNum
+    that implements the MS NumberingProperties rule: when a numPr is on the
+    paragraph STYLE, its ilvl is IGNORED and the effective level comes from the
+    w:lvl/w:pStyle association.
+    """
+    num_to_abstract: dict[int, int] = {}
+    abstract_levels: dict[int, dict[int, dict[str, Any]]] = {}
+    abstract_pstyle: dict[int, dict[str, int]] = {}
+    num_level_overrides: dict[int, dict[int, dict[str, Any]]] = {}
+    try:
+        root = document.part.numbering_part.element
+    except Exception:
+        return {
+            "num_to_abstract": num_to_abstract,
+            "abstract_levels": abstract_levels,
+            "abstract_pstyle": abstract_pstyle,
+            "num_level_overrides": num_level_overrides,
+        }
+
+    for num in root.findall(qn("w:num")):
+        try:
+            num_id = int(num.get(qn("w:numId")))
+        except (TypeError, ValueError):
+            continue
+        abstract = num.find(qn("w:abstractNumId"))
+        if abstract is not None:
+            try:
+                num_to_abstract[num_id] = int(abstract.get(qn("w:val")))
+            except (TypeError, ValueError):
+                pass
+        overrides: dict[int, dict[str, Any]] = {}
+        for override in num.findall(qn("w:lvlOverride")):
+            try:
+                ilvl = int(override.get(qn("w:ilvl"), "0"))
+            except ValueError:
+                ilvl = 0
+            values: dict[str, Any] = {}
+            override_level = override.find(qn("w:lvl"))
+            if override_level is not None:
+                level_values = _level_values(override_level)
+                if override_level.find(qn("w:start")) is None:
+                    level_values.pop("start", None)
+                values.update({key: value for key, value in level_values.items() if value is not None})
+            start_override = override.find(qn("w:startOverride"))
+            if start_override is not None:
+                values["start"] = _read_numbering_int(start_override, "w:val", 1)
+            if values:
+                overrides[ilvl] = values
+        if overrides:
+            num_level_overrides[num_id] = overrides
+
+    for abstract in root.findall(qn("w:abstractNum")):
+        try:
+            abstract_id = int(abstract.get(qn("w:abstractNumId")))
+        except (TypeError, ValueError):
+            continue
+        levels: dict[int, dict[str, Any]] = {}
+        pstyle_map: dict[str, int] = {}
+        for level in abstract.findall(qn("w:lvl")):
+            try:
+                ilvl = int(level.get(qn("w:ilvl"), "0"))
+            except ValueError:
+                ilvl = 0
+            levels[ilvl] = _level_values(level)
+            p_style = levels[ilvl].get("p_style")
+            if isinstance(p_style, str) and p_style:
+                pstyle_map[p_style.casefold()] = ilvl
+        abstract_levels[abstract_id] = levels
+        abstract_pstyle[abstract_id] = pstyle_map
+
+    return {
+        "num_to_abstract": num_to_abstract,
+        "abstract_levels": abstract_levels,
+        "abstract_pstyle": abstract_pstyle,
+        "num_level_overrides": num_level_overrides,
+    }
+
+
+def _paragraph_num_info(paragraph: Any) -> tuple[int | None, int | None, str]:
+    """Return ``(ilvl, num_id, source)`` for a paragraph.
+
+    ``source`` is ``"direct"`` when the numPr lives on the paragraph itself,
+    ``"style"`` when it is inherited from the paragraph style, or ``"none"``
+    when no numbering is applied.
+    """
+    try:
+        p_pr = paragraph._p.pPr
+        num_pr = p_pr.numPr if p_pr is not None else None
+        if num_pr is not None and getattr(num_pr, "numId", None) is not None:
+            ilvl = _read_numbering_int(num_pr.ilvl, "w:val") if getattr(num_pr, "ilvl", None) is not None else 0
+            return int(ilvl) if ilvl is not None else 0, int(num_pr.numId.val), "direct"
+    except (AttributeError, TypeError, ValueError):
+        pass
+
+    try:
+        style_p_pr = paragraph.style.element.pPr
+        num_pr = style_p_pr.numPr if style_p_pr is not None else None
+        if num_pr is not None and getattr(num_pr, "numId", None) is not None:
+            ilvl = _read_numbering_int(num_pr.ilvl, "w:val") if getattr(num_pr, "ilvl", None) is not None else 0
+            return int(ilvl) if ilvl is not None else 0, int(num_pr.numId.val), "style"
+    except (AttributeError, TypeError, ValueError):
+        pass
+    return None, None, "none"
+
+
+def _resolve_effective_ilvl(
+    paragraph: Any,
+    num_id: int,
+    source_ilvl: int | None,
+    numbering_source: str,
+    catalog: dict[str, Any],
+) -> int:
+    """Resolve the effective ilvl honoring the MS NumberingProperties rule.
+
+    When the numPr is on the paragraph STYLE, its ilvl is IGNORED.  The effective
+    level comes from the w:lvl/w:pStyle association inside the abstractNum.  The
+    association is keyed by the style identifier, so both the style id and the
+    display name are accepted.
+    """
+    if numbering_source != "style":
+        return int(source_ilvl) if source_ilvl is not None else 0
+    abstract_id = catalog["num_to_abstract"].get(num_id)
+    if abstract_id is None:
+        return int(source_ilvl) if source_ilvl is not None else 0
+    pstyle_map = catalog["abstract_pstyle"].get(abstract_id, {})
+    for candidate in (_style_id(paragraph), _style_name(paragraph)):
+        if isinstance(candidate, str) and candidate:
+            ilvl = pstyle_map.get(candidate.casefold())
+            if ilvl is not None:
+                return ilvl
+    return int(source_ilvl) if source_ilvl is not None else 0
+
+
+def _style_name(paragraph: Any) -> str:
+    try:
+        return paragraph.style.name or ""
+    except Exception:
+        return ""
+
+
+def _style_id(paragraph: Any) -> str:
+    try:
+        return paragraph.style.style_id or ""
+    except Exception:
+        return ""
+
+
+def _is_list_style(style_name: str) -> bool:
+    """Return whether a DOCX paragraph style is a named list style."""
+
+    normalized = style_name.casefold().replace(" ", "")
+    return (
+        normalized.startswith("listnumber")
+        or normalized.startswith("listbullet")
+        or normalized == "listparagraph"
+        or "列项" in style_name
+    )
+
+
+def _is_protected_style(style_name: str) -> bool:
+    """Return whether a DOCX paragraph style must never become a list item."""
+
+    normalized = style_name.casefold().strip()
+    return (
+        normalized.startswith(("heading", "toc"))
+        or normalized in _NUMBERING_PROTECTED_STYLES
+        or source_note_role(style_name) is not None
+        or ("附录" in style_name and "标题" in style_name)
+        or any(token in normalized for token in ("目录", "题注", "注释", "公式", "附录标题"))
+    )
+
+
+def describe_docx_paragraph(
+    document: Any,
+    paragraph: Any,
+    catalog: dict[str, Any] | None = None,
+    *,
+    ordinal: int | None = None,
+    restart: bool = True,
+) -> dict[str, Any] | None:
+    """Return native numbering evidence for one paragraph outside the body.
+
+    ``analyze_docx_lists`` keeps the historical top-level source position
+    contract.  Nested table cells need the same numbering vocabulary without
+    pretending that their paragraphs occupy top-level document positions.
+
+    The catalog covers the full OOXML set: w:start, w:numFmt, w:lvlText,
+    w:pStyle, w:ind, w:suff, w:lvlRestart, w:lvlOverride and w:startOverride.
+    The MS NumberingProperties rule is applied: when the numPr lives on the
+    paragraph STYLE its ilvl is IGNORED and the effective level comes from the
+    w:lvl/w:pStyle association.
+    """
+    catalog = catalog or build_numbering_catalog(document)
+    ilvl, num_id, numbering_source = _paragraph_num_info(paragraph)
+    if num_id is None:
+        return None
+    abstract_id = catalog["num_to_abstract"].get(num_id)
+    effective_ilvl = _resolve_effective_ilvl(paragraph, num_id, ilvl, numbering_source, catalog)
+    # The applied level is the effective one.  A numPr on the paragraph style
+    # carries an ilvl that must be ignored, so the format follows the effective
+    # level rather than the declared one.
+    level_index = effective_ilvl
+    base_level: dict[str, Any] = dict(catalog["abstract_levels"].get(abstract_id, {}).get(level_index, {}))
+    override = catalog["num_level_overrides"].get(num_id, {}).get(level_index, {})
+    level = dict(base_level)
+    level.update(override)
+    style_name = _style_name(paragraph)
+    num_fmt = level.get("num_fmt")
+    valid = abstract_id is not None and isinstance(num_fmt, str) and num_fmt in _NUMBERING_LIST_FORMATS
+    evidence: list[str] = []
+    if valid:
+        evidence.append("valid_numbering_definition")
+    if _is_list_style(style_name):
+        evidence.append("list_style")
+    if looks_like_list_item(paragraph.text.strip()):
+        evidence.append("visible_list_marker")
+    has_drawing = paragraph._p.find(".//" + qn("w:drawing")) is not None
+    if has_drawing:
+        evidence.append("image_content")
+    if numbering_source == "direct":
+        evidence.append("direct_num_pr")
+    protected = _is_protected_style(style_name)
+    has_content = bool(paragraph.text.strip() or has_drawing)
+    if not has_content and valid and ("list_style" in evidence or numbering_source == "direct"):
+        evidence.append("empty_list_item")
+    if protected or num_fmt == "none" or not valid or (not has_content and "empty_list_item" not in evidence):
+        status = "ignored"
+        confidence = 0.0
+        if protected:
+            evidence.append("protected_role")
+        elif not valid:
+            evidence.append("invalid_numbering_definition")
+    else:
+        status = "detected"
+        confidence = 0.98 if "list_style" in evidence else 0.90
+    marker_type = source_list_type(num_fmt, level.get("lvl_text"))
+    return {
+        "num_id": num_id,
+        "ilvl": ilvl or 0,
+        "abstract_num_id": abstract_id,
+        "num_fmt": num_fmt,
+        "lvl_text": level.get("lvl_text"),
+        "p_style": level.get("p_style"),
+        "start": ordinal if ordinal is not None else int(level.get("start", 1) or 1),
+        "numbering_source": numbering_source,
+        "layout": paragraph_layout_evidence(paragraph),
+        "restart": restart,
+        "status": status,
+        "confidence": confidence,
+        "evidence": evidence,
+        "semantic_role": None,
+        "source_list_type": marker_type,
+        "list_type": normalize_wx_list_type(marker_type, int(ilvl or 0)),
+        "source_ilvl": ilvl or 0,
+        "effective_ilvl": effective_ilvl,
+        "start_value": int(_numbering_start_value(level, override) or 1),
+        "sequence_id": _numbering_sequence_id(num_id, abstract_id),
+        "restart_scope": _numbering_restart_scope(num_id, abstract_id),
+        "w_ind": (level.get("ind") or {}).get("left_twips"),
+        "suffix": level.get("suff"),
+        "p_style_ref": style_name or None,
+        "lvl_restart": level.get("lvl_restart"),
+        "start_override": override.get("start"),
+    }
+
+
+def _numbering_start_value(level: Mapping[str, Any], override: Mapping[str, Any]) -> int:
+    """Return the effective start ordinal, preferring ``w:startOverride``."""
+
+    for candidate in (override.get("start"), level.get("start")):
+        if isinstance(candidate, int):
+            return candidate
+    try:
+        return int(candidate)
+    except (TypeError, ValueError):
+        return 1
+
+
+def _numbering_sequence_id(num_id: int, abstract_id: int | None) -> str:
+    """Return the stable sequence identity for one numbering instance.
+
+    Keeps the ``docx-sequence-<num_id>-<abstract_num_id>`` spelling already used
+    by ``wxdf.semantics.lists.json_sequence_id`` so the native catalogue and the
+    list semantics agree on one identifier.
+    """
+
+    if abstract_id is None:
+        return f"docx-sequence-{num_id}"
+    return f"docx-sequence-{num_id}-{abstract_id}"
+
+
+def _numbering_restart_scope(num_id: int, abstract_id: int | None) -> str:
+    if abstract_id is not None:
+        return f"abstract:{abstract_id}"
+    return f"num:{num_id}"
+
+
+def _numbering_catalogue_evidence(descriptor: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the OOXML catalogue evidence fields for one numbered paragraph.
+
+    The group decision (status / restart / group identity) belongs to
+    ``analyze_docx_lists``; these fields come from the native numbering catalog
+    and are additive to it.
+    """
+
+    return {
+        "source_ilvl": descriptor.get("source_ilvl"),
+        "effective_ilvl": descriptor.get("effective_ilvl"),
+        "start_value": descriptor.get("start_value"),
+        "sequence": descriptor.get("sequence_id"),
+        "restart_scope": descriptor.get("restart_scope"),
+        "num_id": descriptor.get("num_id"),
+        "abstract_num_id": descriptor.get("abstract_num_id"),
+        "w_ind": descriptor.get("w_ind"),
+        "suffix": descriptor.get("suffix"),
+        "p_style_ref": descriptor.get("p_style_ref"),
+        "lvl_restart": descriptor.get("lvl_restart"),
+        "start_override": descriptor.get("start_override"),
+    }
+
+
 def _parse_docx(source: Path | str, *, store: SourceStore) -> dict[str, Any]:
     from docx import Document
     from docx.table import Table, _Cell
     from docx.text.paragraph import Paragraph
     from docx.oxml.ns import qn
-    from list_detector import _numbering_maps, analyze_docx_lists, describe_docx_paragraph
+    from list_detector import analyze_docx_lists
     from table_semantics import classify_docx_table
     from .semantics.tables import capture_docx_table_layout
 
@@ -602,16 +999,24 @@ def _parse_docx(source: Path | str, *, store: SourceStore) -> dict[str, Any]:
     facts = _empty_facts(handle, "docx-source-facts", "docx-ooxml", parser_version="1.1.0")
     parser_version = facts["parser"]["version"]
     report: dict[str, Any] = {}
-    numbering_maps = _numbering_maps(document)
-    if "numbering_maps" in inspect.signature(analyze_docx_lists).parameters:
-        numbering = analyze_docx_lists(document, report, numbering_maps=numbering_maps)
-    else:
-        numbering = analyze_docx_lists(document, report)
+    numbering_catalog = build_numbering_catalog(document)
+    # One native catalog feeds the group analysis.  ``numbering_maps`` is the
+    # legacy positional shape; the level maps now carry the full OOXML coverage
+    # (w:ind, w:suff, w:lvlRestart, w:pStyle) built by ``build_numbering_catalog``.
+    numbering = analyze_docx_lists(
+        document,
+        report,
+        numbering_maps=(
+            numbering_catalog["num_to_abstract"],
+            numbering_catalog["abstract_levels"],
+            numbering_catalog["num_level_overrides"],
+        ),
+    )
     body = document.element.body
     position = 0
     nested_list_ordinals: dict[tuple[str, int, int, str | None], int] = {}
 
-    def add_unit(parent_id: str, paragraph: Any, node_path: list[str | int], source_position: int, descriptor: dict[str, Any] | None = None) -> None:
+    def add_unit(parent_id: str, paragraph: Any, node_path: list[str | int], source_position: int, descriptor: dict[str, Any] | None = None, catalogue: dict[str, Any] | None = None) -> None:
         unit_id = _stable_id("u", handle.source_id, "paragraph", *node_path)
         ref = _source_ref(handle, "word/document.xml", node_path=node_path, parser_version=parser_version)
         facts["units"][unit_id] = {
@@ -649,6 +1054,8 @@ def _parse_docx(source: Path | str, *, store: SourceStore) -> dict[str, Any]:
                 evidence.update({
                     "marker_kind": "ordered" if descriptor.get("num_fmt") != "bullet" else "unordered",
                 })
+            if catalogue is not None:
+                evidence.update(_numbering_catalogue_evidence(catalogue))
         elif isinstance(paragraph.text, str):
             visible_marker = _docx_visible_list_marker(paragraph.text)
             if visible_marker is not None:
@@ -663,6 +1070,11 @@ def _parse_docx(source: Path | str, *, store: SourceStore) -> dict[str, Any]:
                     "marker_text": visible_marker["marker_text"],
                     "ordinal": visible_marker["ordinal"],
                     "marker_kind": visible_marker["marker_kind"],
+                    "source_ilvl": None,
+                    "effective_ilvl": 0,
+                    "num_id": None,
+                    "abstract_num_id": None,
+                    "p_style_ref": None,
                     "visible_marker": {
                         "marker_text": visible_marker["marker_text"],
                         "source_list_type": visible_marker["source_list_type"],
@@ -758,7 +1170,7 @@ def _parse_docx(source: Path | str, *, store: SourceStore) -> dict[str, Any]:
                 for child in cell._tc.iterchildren():
                     if child.tag == qn("w:p"):
                         paragraph = Paragraph(child, cell)
-                        descriptor = describe_docx_paragraph(document, paragraph, numbering_maps=numbering_maps)
+                        descriptor = describe_docx_paragraph(document, paragraph, numbering_catalog)
                         if descriptor is not None:
                             key = (cell_id, int(descriptor.get("num_id") or 0), int(descriptor.get("ilvl") or 0), descriptor.get("num_fmt"))
                             ordinal = nested_list_ordinals.get(key, 0) + 1
@@ -767,7 +1179,7 @@ def _parse_docx(source: Path | str, *, store: SourceStore) -> dict[str, Any]:
                             descriptor["start"] = ordinal
                             descriptor["restart"] = ordinal == 1
                         child_path = [*cell_path, "w:p", paragraph_index]
-                        add_unit(cell_id, paragraph, child_path, position, descriptor)
+                        add_unit(cell_id, paragraph, child_path, position, descriptor, descriptor)
                         paragraph_index += 1
                     elif child.tag == qn("w:tbl"):
                         child_path = [*cell_path, "w:tbl", nested_table_index]
@@ -779,7 +1191,8 @@ def _parse_docx(source: Path | str, *, store: SourceStore) -> dict[str, Any]:
     for child_index, child in enumerate(body.iterchildren()):
         if child.tag == qn("w:p"):
             paragraph = Paragraph(child, document)
-            add_unit("root", paragraph, ["body", child_index, "w:p"], position, numbering.get(position))
+            catalogue = describe_docx_paragraph(document, paragraph, numbering_catalog)
+            add_unit("root", paragraph, ["body", child_index, "w:p"], position, numbering.get(position), catalogue)
             position += 1
         elif child.tag == qn("w:tbl"):
             add_table("root", Table(child, document), ["body", child_index, "w:tbl"])

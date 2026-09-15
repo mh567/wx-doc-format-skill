@@ -293,17 +293,17 @@ def test_l08_docx_image_only_and_inline_image_lists_are_parsed(tmp_path: Path) -
 
 def test_docx_parser_reuses_numbering_maps_for_nested_content(monkeypatch, tmp_path: Path) -> None:
     source = _build_l09_docx(tmp_path)
-    import list_detector
+    from wxdf.parsers import build_numbering_catalog
 
-    real_numbering_maps = list_detector._numbering_maps
+    real_catalog = build_numbering_catalog
     calls = 0
 
-    def counted_numbering_maps(document):
+    def counted_catalog(document):
         nonlocal calls
         calls += 1
-        return real_numbering_maps(document)
+        return real_catalog(document)
 
-    monkeypatch.setattr(list_detector, "_numbering_maps", counted_numbering_maps)
+    monkeypatch.setattr("wxdf.parsers.build_numbering_catalog", counted_catalog)
     facts = parse(source)
 
     assert facts["parser"]["version"] == "1.1.0"
@@ -514,7 +514,13 @@ def test_l09_merged_and_nested_table_cells_are_unique_and_scope_local(tmp_path: 
 
     report, source_ast, normalized, output = _run_native(source, tmp_path, "l09")
 
+    # The two outer paragraphs carry an isolated general numbering definition,
+    # which the parser could not confirm as a list item, so they stay body text.
+    # A low-confidence marker is not a Resolver conflict, so the document
+    # completes cleanly instead of warning.
     _assert_native_completed(report, output)
+    with ZipFile(output) as archive:
+        assert archive.testzip() is None
     document = source_ast["document"]
     assert all(
         node.get("source_ref", {}).get("parser_version") == "1.1.0"

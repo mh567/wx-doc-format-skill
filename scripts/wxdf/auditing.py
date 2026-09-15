@@ -66,6 +66,186 @@ def collect_audit_findings(
     return findings
 
 
+_LIST_NUMBERING_FORMATS = frozenset({
+    "decimal", "decimalZero", "lowerLetter", "upperLetter", "lowerRoman", "upperRoman",
+})
+_BULLET_NUMBERING_FORMATS = frozenset({"bullet", "none"})
+
+
+def _list_kind_for_num_fmt(num_fmt: str | None) -> str | None:
+    if num_fmt is None:
+        return None
+    if num_fmt in _LIST_NUMBERING_FORMATS:
+        return "ordered"
+    if num_fmt in _BULLET_NUMBERING_FORMATS:
+        return "unordered"
+    return None
+
+
+def _expected_list_items(normalized: Mapping[str, Any]) -> list[tuple[str, int | None, int]]:
+    """Return (list_kind, numId, ilvl) for every list item in reading order.
+
+    The expectation is derived from the semantic list (marker kind and render
+    level) plus the template numbering ids the renderer writes, so it is the
+    same (list_kind, numId, ilvl) the saved artifact must carry.
+    """
+
+    document = normalized.get("source_ast", {}).get("document", {})
+    presentation = normalized.get("presentation", {})
+    nodes = presentation.get("nodes", {}) if isinstance(presentation, Mapping) else {}
+    profile = presentation.get("profile", {}) if isinstance(presentation, Mapping) else {}
+    numbering_ids = profile.get("numbering_ids", {}) if isinstance(profile, Mapping) else {}
+    children = document.get("children", {})
+    items: list[tuple[str, int | None, int]] = []
+
+    def walk(node_id: str) -> None:
+        for child_id in children.get(node_id, []):
+            node = nodes.get(child_id)
+            if isinstance(node, Mapping):
+                kind = str(node.get("marker_kind") or "ordered")
+                try:
+                    level = max(0, int(node.get("target_level") or 0))
+                except (TypeError, ValueError):
+                    level = 0
+                style_role = node.get("style_role")
+                num_id = numbering_ids.get(str(style_role)) if isinstance(numbering_ids, Mapping) and style_role else None
+                items.append((kind, num_id, level))
+            walk(child_id)
+
+    walk(document.get("root_id", "root"))
+    return items
+
+
+def _numbering_format_map(numbering_xml: bytes) -> dict[int, dict[int, str]]:
+    """Return ``{numId: {ilvl: numFmt}}`` parsed from the saved numbering part."""
+
+    result: dict[int, dict[int, str]] = {}
+    if not numbering_xml:
+        return result
+    namespace = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    ns = {"w": namespace}
+    root = ElementTree.fromstring(numbering_xml)
+    abstract_levels: dict[str, dict[int, str]] = {}
+    for abstract in root.findall("w:abstractNum", ns):
+        abstract_id = abstract.get(f"{{{namespace}}}abstractNumId")
+        levels: dict[int, str] = {}
+        for level in abstract.findall("w:lvl", ns):
+            try:
+                ilvl = int(level.get(f"{{{namespace}}}ilvl", "0"))
+            except (TypeError, ValueError):
+                ilvl = 0
+            num_fmt = level.find("w:numFmt", ns)
+            if num_fmt is not None:
+                levels[ilvl] = num_fmt.get(f"{{{namespace}}}val") or ""
+        abstract_levels[str(abstract_id)] = levels
+    for num in root.findall("w:num", ns):
+        try:
+            num_id = int(num.get(f"{{{namespace}}}numId"))
+        except (TypeError, ValueError):
+            continue
+        reference = num.find("w:abstractNumId", ns)
+        levels = (
+            dict(abstract_levels.get(reference.get(f"{{{namespace}}}val"), {}))
+            if reference is not None
+            else {}
+        )
+        for override in num.findall("w:lvlOverride", ns):
+            try:
+                ilvl = int(override.get(f"{{{namespace}}}ilvl", "0"))
+            except (TypeError, ValueError):
+                ilvl = 0
+            override_level = override.find("w:lvl/w:numFmt", ns)
+            if override_level is not None:
+                levels[ilvl] = override_level.get(f"{{{namespace}}}val") or ""
+        result[num_id] = levels
+    return result
+
+
+def _read_saved_list_parts(
+    path: Path | str,
+) -> tuple[bytes | None, dict[int, dict[int, str]], dict[str, Any] | None]:
+    output = Path(path)
+    try:
+        with ZipFile(output) as archive:
+            names = set(archive.namelist())
+            if "word/document.xml" not in names:
+                return None, {}, {"code": "list_readback_missing_parts"}
+            document_xml = archive.read("word/document.xml")
+            numbering_xml = archive.read("word/numbering.xml") if "word/numbering.xml" in names else b""
+    except (OSError, BadZipFile) as exc:
+        return None, {}, {"code": "list_readback_invalid_docx", "message": str(exc)}
+    return document_xml, _numbering_format_map(numbering_xml), None
+
+
+def _saved_list_items(
+    document_xml: bytes,
+    formats: Mapping[int, Mapping[int, str]],
+) -> list[tuple[str | None, int | None, int]]:
+    """Read (list_kind, numId, ilvl) from every saved paragraph's direct numPr."""
+
+    namespace = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    ns = {"w": namespace}
+    document_root = ElementTree.fromstring(document_xml)
+    items: list[tuple[str | None, int | None, int]] = []
+    for paragraph in document_root.findall(".//w:p", ns):
+        num_pr = paragraph.find("w:pPr/w:numPr", ns)
+        if num_pr is None:
+            continue
+        num_id_element = num_pr.find("w:numId", ns)
+        ilvl_element = num_pr.find("w:ilvl", ns)
+        try:
+            num_id = int(num_id_element.get(f"{{{namespace}}}val")) if num_id_element is not None else None
+        except (TypeError, ValueError):
+            num_id = None
+        try:
+            ilvl = int(ilvl_element.get(f"{{{namespace}}}val")) if ilvl_element is not None else 0
+        except (TypeError, ValueError):
+            ilvl = 0
+        if num_id is None or num_id == 0:
+            continue
+        levels = formats.get(num_id, {})
+        items.append((_list_kind_for_num_fmt(levels.get(ilvl) if isinstance(levels, Mapping) else None), num_id, ilvl))
+    return items
+
+
+def _clamp_expected_level(level: int, num_id: int | None, formats: Mapping[int, Mapping[int, str]]) -> int:
+    if num_id is None:
+        return level
+    levels = formats.get(num_id)
+    if levels and level not in levels:
+        return 0
+    return level
+
+
+def audit_list_readback(
+    path: Path | str,
+    normalized: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Re-parse the saved DOCX and compare its list numbering with the semantic list.
+
+    Every list paragraph's direct ``w:numPr/w:numId`` and ``w:numPr/w:ilvl`` is
+    read from the saved artifact and compared, in reading order, against the
+    ``(list_kind, numId, ilvl)`` the semantic list and the template numbering ids
+    require.  A tampered level, a tampered or remapped numbering id, or a
+    removed ``numPr`` therefore diverges from the expectation and is reported;
+    the AST list tree and the saved output cannot drift apart silently.
+    """
+
+    expected = _expected_list_items(normalized)
+    document_xml, formats, parse_error = _read_saved_list_parts(path)
+    if parse_error is not None or document_xml is None:
+        return {"passed": False, "issues": [parse_error or {"code": "list_readback_missing_parts"}], "expected": expected, "actual": []}
+    expected_effective = [
+        (kind, num_id, _clamp_expected_level(level, num_id, formats))
+        for kind, num_id, level in expected
+    ]
+    actual = _saved_list_items(document_xml, formats)
+    issues: list[dict[str, Any]] = []
+    if expected_effective != actual:
+        issues.append({"code": "list_readback_mismatch", "expected": expected_effective, "actual": actual})
+    return {"passed": not issues, "issues": issues, "expected": expected_effective, "actual": actual}
+
+
 def audit_bundle(
     path: Path | str,
     normalized: Mapping[str, Any],
@@ -78,6 +258,7 @@ def audit_bundle(
     audits = {
         "model": check_model(normalized),
         "saved_output": check_saved_output(path, normalized, render_map),
+        "list_readback": audit_list_readback(path, normalized),
         "appendix": dict(appendix_audit or {"passed": True, "issues": []}),
     }
     findings = collect_audit_findings(audits)
@@ -533,16 +714,28 @@ def check_saved_output(path: Path | str, expected: Mapping[str, Any], render_map
             break
         numbering = expected_item.get("numbering") or {}
         expected_kind = numbering.get("marker_kind")
-        expected_level = numbering.get("target_level")
+        # The renderer writes a direct ``w:numPr`` with the emitted level, so a
+        # multi-level ordered render is expected at the render map's level.  The
+        # style-derived level is only a fallback for a numbered block that the
+        # renderer carries without a direct numbering record.
+        direct_level = numbering.get("num_ilvl")
+        direct_num_id = numbering.get("num_id")
         expected_style_id = expected_style_ids_by_name.get(str(expected_item.get("style") or ""))
-        if expected_style_id in style_num_info:
-            expected_level = style_num_info[expected_style_id][1]
+        if isinstance(direct_level, int):
+            expected_level = direct_level
+        else:
+            expected_level = numbering.get("target_level")
+            if expected_style_id in style_num_info:
+                expected_level = style_num_info[expected_style_id][1]
         expected_fmt = None
         if expected_kind == "unordered":
             expected_fmt = "none" if numbering.get("style_role") == "list_dash" else "bullet"
         elif expected_kind == "ordered":
             expected_fmt = "lowerLetter" if expected_level in {None, 0} else "decimal"
-        expected_num_id = expected_numbering_ids.get(numbering.get("style_role")) if isinstance(expected_numbering_ids, Mapping) else None
+        if isinstance(direct_num_id, int):
+            expected_num_id = direct_num_id
+        else:
+            expected_num_id = expected_numbering_ids.get(numbering.get("style_role")) if isinstance(expected_numbering_ids, Mapping) else None
         expected_abstract_id = expected_numbering_ids.get(f"{numbering.get('style_role')}_abstract") if isinstance(expected_numbering_ids, Mapping) else None
         actual = actual_numbering[index]
         if expected_fmt is not None and actual.get("num_fmt") != expected_fmt:

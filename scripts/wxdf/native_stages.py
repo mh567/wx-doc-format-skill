@@ -466,7 +466,7 @@ def _native_renderer(context: ModuleExecutionContext) -> Mapping[str, Any]:
 
 
 def _native_auditor(context: ModuleExecutionContext) -> dict[str, Any]:
-    from .auditing import audit_bundle
+    from .auditing import audit_bundle, collect_audit_findings
 
     normalized = context.require("normalized")
     render_result = context.require("render_result")
@@ -487,16 +487,52 @@ def _native_auditor(context: ModuleExecutionContext) -> dict[str, Any]:
     model_findings = audits["model"]
     saved_findings = audits["saved_output"]
     appendix_findings = audits["appendix"]
+    list_readback_audit = audits["list_readback"]
+    # A list readback mismatch means the saved numPr disagrees with the semantic
+    # list, so it is folded into the report-visible saved-output audit while
+    # keeping its own ``list_readback_mismatch`` code.  Renderer clamp
+    # diagnostics stay non-blocking; they are carried on ``render_result`` and
+    # surfaced under ``native_module_evidence`` rather than failing a document
+    # that the single-level template cannot express at a deeper level.
+    downstream_issues = [dict(item) for item in (list_readback_audit.get("issues") or [])]
+    render_diagnostics = [dict(item) for item in (render_result.get("diagnostics") or [])]
+    if downstream_issues:
+        saved_findings = {
+            **saved_findings,
+            "issues": [*(saved_findings.get("issues") or []), *downstream_issues],
+            "passed": False,
+        }
     digest_after = digest_source_facts(dict(context.require("source_facts")))
+    # The readback issues are merged into the saved-output view above, so the
+    # normalized findings are computed from the merged audit instead of the
+    # pre-merge ``audit_bundle`` output.  Otherwise a readback issue would be
+    # visible under its own category but missing from the merged saved-output
+    # category that drives publication.
+    merged_findings = collect_audit_findings({**audits, "saved_output": saved_findings})
     context.provide("model_audit", model_findings)
     context.provide("saved_output_audit", saved_findings)
     context.provide("appendix_audit", appendix_findings)
-    context.provide("audit_findings", audits["findings"])
+    context.provide("audit_findings", merged_findings)
     context.provide("source_facts_integrity", {
         "digest_after": digest_after,
         "immutable": digest_after == context.require("source_facts_digest"),
     })
-    return {"model": model_findings, "saved": saved_findings, "appendix": appendix_findings}
+    # The list readback and renderer clamp results are surfaced through the
+    # saved-output audit and ``render_result`` above; keep the raw records in the
+    # module evidence so the separate audit seams stay inspectable without
+    # introducing a new capability or module-evidence key.
+    context.evidence["native-auditor"] = {
+        "downstream": {
+            "list_readback": _json_copy(list_readback_audit),
+            "render_diagnostics": _json_copy(render_diagnostics),
+        }
+    }
+    return {
+        "model": model_findings,
+        "saved": saved_findings,
+        "appendix": appendix_findings,
+        "list_readback": list_readback_audit,
+    }
 
 
 def _json_copy(value: Any) -> Any:
@@ -938,6 +974,11 @@ def _native_publisher(context: ModuleExecutionContext) -> bool:
         context.provide("published_output", None)
         return False
     audits = review_result["audits"]
+    # A list-readback mismatch is folded into ``saved_output`` by the auditor
+    # (see ``_native_auditor``), and ``saved_output.passed`` is the gate here, so
+    # a readback failure blocks publication through the saved-output audit
+    # rather than a separate ``list_readback`` key that never exists on this
+    # dict.
     audits_passed = (
         audits["model"].get("passed") is True
         and audits["saved_output"].get("passed") is True

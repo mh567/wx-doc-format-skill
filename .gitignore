@@ -25,8 +25,11 @@ docs/*
 !docs/execution-v4/
 !docs/execution-v4/**
 !docs/execution-v4/architecture-convergence.md
+!docs/list-semantic-compiler-design.md
 !docs/execution-v5/
 !docs/execution-v5/**
+!docs/execution-v6/
+!docs/execution-v6/**
 !docs/contracts/
 !docs/contracts/modular-v3/
 !docs/contracts/modular-v3/**
@@ -68,6 +71,9 @@ tests/*
 !tests/test_t05_digest_owner.py
 !tests/test_t06_transaction_proof_owner.py
 !tests/test_t07_checkpoint_split.py
+!tests/test_t01_list_fixtures.py
+!tests/test_t02_numbering_catalog.py
+!tests/test_t03_single_level_lists.py
 !tests/test_fu3_convergence.py
 !tests/test_t09_compiled_acceptance.py
 !tests/modular_support.py

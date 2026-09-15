@@ -92,8 +92,15 @@ def test_implicit_docx_depth_jump_is_unresolved_and_container_scope_isolated() -
     result = analyze_lists(_facts(containers, children, units, evidence))
 
     assert result["status"] == "unresolved"
-    assert result["diagnostics"][0]["code"] == "unresolved_list_parent"
-    assert len(result["diagnostics"]) == 1
+    codes = [item["code"] for item in result["diagnostics"]]
+    # The level jump is reported once as constraint 4; the materializer records
+    # the flattening it applies as ``unresolved_list_parent``.  A single defect
+    # must not also produce a constraint-3 "no parent" finding for the same node.
+    assert "unresolved_list_parent" in codes
+    constraint_findings = [
+        item for item in result["state_constraint_findings"] if item["code"] == "list_constraint_violation"
+    ]
+    assert [(item["constraint"], item["node_id"]) for item in constraint_findings] == [(4, "u2")], constraint_findings
     assert all(item["scope_id"] == "scope:document" for item in result["items"])
 
 
@@ -104,14 +111,23 @@ def test_implicit_docx_orphan_depth_is_flattened_to_local_list_root() -> None:
     children = {"root": ["u1", "u2"]}
     containers = {"root": {"kind": "document"}}
     evidence = {
-        "u1": {"marker_kind": "unordered", "marker_text": "", "ordinal": 1, "explicit_depth": 2, "numbering_definition_ref": {"num_id": 25}},
-        "u2": {"marker_kind": "unordered", "marker_text": "", "ordinal": 2, "explicit_depth": 2, "numbering_definition_ref": {"num_id": 25}},
+        "u1": {"marker_kind": "unordered", "marker_text": "", "ordinal": 1, "explicit_depth": 2, "numbering_definition_ref": {"num_id": 25}},
+        "u2": {"marker_kind": "unordered", "marker_text": "", "ordinal": 2, "explicit_depth": 2, "numbering_definition_ref": {"num_id": 25}},
     }
 
     result = analyze_lists(_facts(containers, children, units, evidence))
 
-    assert [item["code"] for item in result["diagnostics"]] == ["orphan_list_depth_flattened"]
-    assert result["diagnostics"][0]["severity"] == "info"
+    codes = [item["code"] for item in result["diagnostics"]]
+    assert sorted(codes) == sorted([
+        "orphan_list_depth_flattened",
+        "list_constraint_violation",
+        "list_constraint_violation",
+    ])
+    assert sorted(
+        (item["constraint"], item["node_id"]) for item in result["state_constraint_findings"]
+    ) == [(3, "u1"), (4, "u2")]
+    orphan = next(item for item in result["diagnostics"] if item["code"] == "orphan_list_depth_flattened")
+    assert orphan["severity"] == "info"
     assert all(item["parent_item_id"] is None for item in result["items"])
 
 
