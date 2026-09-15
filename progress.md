@@ -1,5 +1,16 @@
 # 当前架构收敛进度
 
+## 2026-09-16 execution-v6 残留收口轮（R1-R4）
+
+- 独立审查在收口轮自身也发现了问题，本轮按审查结论修正后再定案。
+- **R1 缩进簇层级细化**：`parsers.analyze_docx_numbering` 在编号组内按声明层级分区，对同一分区内的块做左缩进簇（容差 120 twips，沿用既有 `_layouts_compatible` 口径），当运行**回到更浅簇**时把更深块细化一层；规则、缩进值、簇秩与偏移量写入 `indent_cluster_level` 证据。复审发现两处需要更正并已处理：(a) 原来的实现会把「首项缩进较小、其余项缩进较大」的**扁平列表**误判为嵌套，现已要求运行回头（子表闭合）才细化，并补了反例测试；(b) 本规则综合的是**段落级**左缩进与邻接，不是 README 字段清单里那个**编号级** `w:ind`，字段语义差异已如实记录。以子表结尾、运行不回头的形状不再细化，作为保守取舍记录在案。
+- **R2 `num_id` 双源收口**：顶层 `num_id`/`abstract_num_id` 成为唯一属主，`numbering_definition_ref` 改为派生视图，消费方统一走 `lists._numbering_ids`，不再可观测到分叉；载荷形状未变，合同版本不变。
+- **R3 约束 7 的证据类别口径（部分收口）**：新增 `ambiguities_records`（按 `node_id` 索引，区分 `low_confidence_candidate` 与 `resolver_conflict`），模块证据暴露 `ambiguity_record_count`；低置信度块在真实输入上确实留下可索引记录。T04 移除数值 `score` 后，字面「证据评分阈值」不再可判定，已在冻结 spec 中以**追加注记**（不改动约束正文）的方式如实记录，并说明当前实现取证据类别模型支持的最强读法。
+- **R4 `list_render_level_clamped` 可见性**：进入 `saved_output_audit.list_render_clamped` 与 `public_summary.diagnostic_codes`，仍非阻断。副作用是夹层文档的 `public_summary.manual_review_required` 变为 `true`，已记录。
+- 新增 `tests/test_v6_residuals.py`（11 项）并补上 `.gitignore` 放行（首版曾被忽略，复审发现后修正）。
+- 全量测试 `1254 passed, 0 failed`。真实转换：`input/test_baseline.md`、`input/benchmark_report.md`、两级嵌套、软换行续接、T07 章标题与 IP 地址样例全部 `completed`、`saved_output_audit.passed=true`、`unexpected_styles=[]`、`risk_warnings` 为空。
+- 仍未关闭：`LIST_END` 未发出、固定门槛与更广歧义来源、矩阵空白格（WPS/LibreOffice、页眉页脚/脚注/文本框、3 级以上层级）、`transaction.py` 独立工单、其余归属决策类残留。证据见 `docs/execution-v6/evidence/residuals.md`。
+
 ## 2026-09-15 execution-v6 T10 收口（移除遗留列表逻辑 + 全矩阵验证）
 
 - 基线：提交 `1df3926`，全量 `1259 passed, 0 failed`。

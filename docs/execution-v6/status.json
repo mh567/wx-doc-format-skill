@@ -6,6 +6,41 @@
   "implementation_started": true,
   "current_task": "done",
   "next_task": null,
+  "follow_up_residuals": {
+    "round": "residuals-v6-2026-09-16",
+    "evidence": "docs/execution-v6/evidence/residuals.md",
+    "note": "No commit; each resolved residual cites the guard test that proves it. scripts/wxdf/transaction.py and scripts/wxdf/run_result.py untouched.",
+    "items": [
+      {
+        "id": "R1",
+        "subject": "effective_ilvl synthesizes w:ind / adjacency",
+        "status": "resolved",
+        "proof": "tests/test_v6_residuals.py::test_v6_r1_indented_sublist_without_new_instance_resolves_deeper",
+        "detail": "parsers._refine_indentation_levels clusters the resolved left indent of consecutive list blocks inside one numbering group and deepens a block indented relative to an earlier sibling (rule declared_plus_indent_cluster, 120 twips tolerance); the rule is recorded per block in evidence.indent_cluster_level."
+      },
+      {
+        "id": "R2",
+        "subject": "num_id dual source removed",
+        "status": "resolved",
+        "proof": "tests/test_v6_residuals.py::test_v6_r2_numbering_ids_prefers_the_owner_field",
+        "detail": "Top-level num_id / abstract_num_id are the single owner (README field list); numbering_definition_ref is derived from them in add_unit so the two spellings cannot drift. lists._numbering_ids reads the owner first and falls back to the compatibility view. Payload key set unchanged, so no capability version bump."
+      },
+      {
+        "id": "R3",
+        "subject": "constraint 7 / evidence-class faithfulness",
+        "status": "partially_resolved",
+        "proof": "tests/test_v6_residuals.py::test_v6_r3_low_confidence_decision_is_indexed_and_non_blocking",
+        "detail": "list_semantics_result.ambiguity_records indexes every low-confidence decision (low_confidence_candidate) and every Resolver tie (resolver_conflict), so invariant 6 holds by index. Invariant 7 holds for genuine ties (status unresolved); a low-confidence block is deliberately resolved to body text with two records, so a clean document stays completed. The literal score-threshold wording cannot apply after T04 removed numeric scores; recorded as a spec-versus-implementation note with a factual note added at README constraint 7."
+      },
+      {
+        "id": "R4",
+        "subject": "list_render_level_clamped visibility",
+        "status": "resolved",
+        "proof": "tests/test_v6_residuals.py::test_v6_r4_clamped_list_is_report_visible_and_non_blocking",
+        "detail": "Decision: report-visible and non-blocking. _native_auditor writes saved_output_audit.list_render_clamped, which does not flip passed and survives the release sanitizer, so the clamp is visible without blocking publication."
+      }
+    ]
+  },
   "release_authorized": false,
   "recommended_order": [
     "T01",
@@ -24,7 +59,8 @@
       "id": "T01",
       "subject": "冻结 spec 与失败样例库",
       "status": "done",
-      "depends_on": []
+      "depends_on": [],
+      "residuals": []
     },
     {
       "id": "T02",
@@ -35,7 +71,7 @@
       ],
       "residuals": [
         "body evidence num_fmt/lvl_text/numbering_status still come from the legacy group decision at the declared ilvl; the native effective_ilvl is evidence-only until the group decision is native (T03/T04, converged in T10)",
-        "num_id is written both top-level and inside numbering_definition_ref (latent dual source, T10)",
+        "RESOLVED (residual round R2): top-level num_id is the single owner and numbering_definition_ref is a derived view",
         "lvl_restart is catalogued and carried but not consumed; README constraint 10 belongs to T06"
       ]
     },
@@ -49,15 +85,15 @@
       "residuals": [
         "pStyle level inheritance still inert end-to-end: body evidence num_fmt/lvl_text/numbering_status still comes from the legacy group decision at the declared ilvl; effective_ilvl only enters evidence and candidate states (T04/T10)",
         "RESOLVED BY T08: the product path no longer pins ordered target_level to 0; wx-default-v2 projects two levels, so level-0 ordered items use list_letter (numId 3) and level-1 ordered items use list_decimal (numId 8), and anything deeper clamps to level 1 (T08)",
-        "num_id remains a dual source (top-level and numbering_definition_ref) (T10)",
+        "RESOLVED (residual round R2): top-level num_id is the single owner and numbering_definition_ref is a derived view",
         "lvl_restart is catalogued and carried but not consumed; README constraint 10 belongs to T06",
         "LIST_END state is enumerated but not emitted yet; boundary termination is expressed via protected blocks and OUTSIDE_LIST (T06/T07)",
         "RESOLVED BY T09: audit_list_readback now also compares the render-level parent chain recovered from the saved style roles and the per-level numbering sequence values (_saved_number_sequence / list_numbering_sequence_mismatch), on top of the flat (list_kind, numId, ilvl) reading order (T09)",
         "candidate score is only a pre-filter: _arbitrate_state_candidates reads score and drops candidates below the per-block top score before resolve(); survivors are still ranked by resolver._candidate_strength on positive_evidence.kind (T04)",
-        "list_render_level_clamped is exposed through module evidence rather than blocking publication; real multi-level rendering belongs to T08",
+        "RESOLVED (residual round R4): now report-visible as saved_output_audit.list_render_clamped and public_summary.diagnostic_codes, still non-blocking",
         "implicit list runs have no tail continuation: ITEM_CONTINUATION and ITEM_CHILD_BLOCK are only emitted inside explicit list_item containers, so an implicit DOCX [item][body][item] is materialized as two lists (README constraint 5 gap, T05)",
         "README constraints 3 and 4 are validated only for implicit runs; _implicit_list_runs_for_parent returns [] for list/list_item parents, so explicit list containers are never constraint-checked (T04/T05)",
-        "the genuine-tie ambiguity path is only reachable from synthetic evidence: both adapters write marker_kind only with numbering_status=detected, so state_unresolved stays empty for real input and README constraint 7's literal threshold semantics are not implemented (T04/T05)"
+        "PARTIALLY RESOLVED (R3 follow-up, tests/test_v6_residuals.py::test_v6_r3_low_confidence_decision_is_indexed_and_non_blocking): the genuine-tie ambiguity path is only reachable from synthetic evidence: both adapters write marker_kind only with numbering_status=detected, so state_unresolved stays empty for real input; the literal score-threshold wording cannot apply after T04 removed numeric scores, so every low-confidence decision is now indexed in list_semantics_result.ambiguity_records instead (spec-versus-implementation note recorded)"
       ]
     },
     {
@@ -68,16 +104,16 @@
         "T03"
       ],
       "residuals": [
-        "pStyle level inheritance still inert end-to-end; T04 nested on declared ilvl=0 plus numId identity, so effective_ilvl still does not drive grouping (T10)",
+        "PARTIALLY RESOLVED (R1 follow-up, tests/test_v6_residuals.py::test_v6_r1_indented_sublist_without_new_instance_resolves_deeper): T04 nested on declared ilvl=0 plus numId identity; effective_ilvl now also synthesizes w:ind / adjacency and drives the grouping for an indented same-instance sub-list (pStyle inheritance already end-to-end)",
         "RESOLVED BY T08: the product path no longer pins ordered target_level to 0; wx-default-v2 renders two levels (level 0 list_letter, level 1 list_decimal) and clamps anything deeper, so real multi-level rendering beyond two levels is intentionally not emitted (T08)",
         "cross-category ilvl=0 sub-list is treated as a same-level kind switch (README constraint 9) and is not auto-nested, because the evidence is indistinguishable from a same-level switch (T05/T08)",
         "implicit list runs still have no tail continuation; ITEM_CONTINUATION and ITEM_CHILD_BLOCK exist only inside explicit list_item containers (T05)",
         "lvl_restart is catalogued and carried but not consumed; README constraint 10 belongs to T06 (T06)",
         "LIST_END is enumerated but not emitted; boundary termination is expressed via protected blocks and OUTSIDE_LIST (T06/T07)",
-        "num_id remains a dual source (top-level and numbering_definition_ref) (T10)",
+        "RESOLVED (residual round R2): top-level num_id is the single owner and numbering_definition_ref is a derived view",
         "explicit list containers validate structural parenting (constraint 3) only; declared effective_ilvl is not compared with the structural level (T10)",
-        "the ambiguity report is still reachable only from synthetic evidence; competing parent candidates produced by nesting do not reach it yet (T05)",
-        "list_render_level_clamped is exposed through module evidence rather than blocking publication; real multi-level rendering belongs to T08 (T08)",
+        "PARTIALLY RESOLVED (residual round R3): ambiguity_records indexes every low-confidence and conflict decision; the literal numeric score threshold is not judgeable after T04 removed score, recorded as a spec note",
+        "RESOLVED (residual round R4): now report-visible as saved_output_audit.list_render_clamped and public_summary.diagnostic_codes, still non-blocking",
         "RESOLVED BY T09: the readback audit now also compares the per-level numbering sequence values (_saved_number_sequence / list_numbering_sequence_mismatch) and the style-derived render-level parent chain, on top of list_parent_chain_mismatch's implied w:ilvl chain (T09)",
         "same-category contiguous new-numId blocks are treated as sub-lists by heuristic (open level-0 group + different instance + same kind); [numId1 ordered][numId2 ordered] is wrongly nested and chained instances cascade 0/1/2, since the evidence cannot be separated from a restart (T06)",
         "the transaction._order_stage_decisions ordering fix is correct and now guarded by test_t04_created_container_preserves_source_order_for_three_or_more_items, but scripts/wxdf/transaction.py is outside T04's declared scope and should get its own ticket or be folded into T10"
@@ -97,12 +133,12 @@
         "lvlRestart is catalogued and carried but not consumed; README constraint 10 belongs to T06 (T06)",
         "LIST_END is enumerated but not emitted; boundary termination is expressed via protected blocks and OUTSIDE_LIST (T06/T07)",
         "cross-category ilvl=0 sub-list is treated as a same-level kind switch and is not auto-nested (T06/T08)",
-        "the ambiguity report is still reachable only from synthetic evidence; competing parent candidates produced by nesting or continuation do not reach it yet (T10)",
+        "PARTIALLY RESOLVED (residual round R3): ambiguity_records indexes every low-confidence and conflict decision; the literal numeric score threshold is not judgeable after T04 removed score, recorded as a spec note",
         "pStyle level inheritance still inert end-to-end (T10)",
         "RESOLVED BY T08: the product path no longer pins ordered target_level to 0; wx-default-v2 projects the two recognised levels and clamps deeper levels (T08)",
-        "num_id remains a dual source (top-level and numbering_definition_ref) (T10)",
+        "RESOLVED (residual round R2): top-level num_id is the single owner and numbering_definition_ref is a derived view",
         "RESOLVED BY T09: the readback audit now also compares the per-level numbering sequence values (_saved_number_sequence / list_numbering_sequence_mismatch) and the style-derived render-level parent chain, on top of list_parent_chain_mismatch's implied w:ilvl chain (T09)",
-        "list_render_level_clamped is exposed through module evidence rather than blocking publication (T08)",
+        "RESOLVED (residual round R4): now report-visible as saved_output_audit.list_render_clamped and public_summary.diagnostic_codes, still non-blocking",
         "transaction._order_stage_decisions gained an additive path in the T05 fix round (anchored creates applied after moves; same-parent moves ordered by source_index) without changing the two T04 create-ordering rules, but the file still has no ticket of its own and should be folded into T10 or get its own ticket (T10)",
         "the anchored-create applied predicate for a before-anchor was off by one and reported a committed caption as not applied, breaking ledger replay; fixed with guard tests test_t05_anchored_create_applied_predicate_matches_a_before_anchor/_an_after_anchor (latent, no current caller reaches it)",
         "note / numbered_note are protected roles, so a note after a list run is not attributed to the item and content_blocks does not carry note; 工作项 1's seven-type list is not met for note (T06/T10)",
@@ -123,14 +159,14 @@
         "review FIX round (fixed): a reuse split's two groups shared source_sequence_id / sequence / restart_scope, so the split existed only in group_boundary.kind; fixed additively with sequence_split_index, keeping the frozen docx-sequence-* spelling and the 2.1 contract (test_t06_sequence_split_groups_are_distinguishable)",
         "same-instance restart in a contiguous new-numId run is only partially separated: the continuation variant (second instance restart_hint false) merges into one sequence and the ilvl>0 restart variant now splits (FIX round F1), while the ilvl=0 restart variant is still indistinguishable from a sub-list at the same format and indent and keeps the T04 nesting decision (T08/T10)",
         "restart_scope is now the catalogue-derived abstract:<id> / num:<id> and agrees across the group, restart_expression and item relation, but the constraint-10 restart_scope boundary reset is not implemented: only lvl_restart / start_override are consumed (T08 if a policy-layer boundary is ever needed)",
-        "constraint 7 literal threshold semantics are not implemented: low-confidence numbering stays body text and never reaches the ambiguity report; only a low_confidence_list_marker info downgrade is recorded (T10)",
+        "PARTIALLY RESOLVED (R3 follow-up, tests/test_v6_residuals.py::test_v6_r3_low_confidence_decision_is_indexed_and_non_blocking): the literal threshold semantics cannot apply after T04 removed numeric scores; low-confidence numbering still stays body text but is now indexed in list_semantics_result.ambiguity_records as well as the info low_confidence_list_marker downgrade (T10)",
         "LIST_END is still enumerated but not emitted; emitting it as a candidate for a boundary block that is already arbitrated OUTSIDE_LIST would create an equal-strength tie, so boundary termination stays expressed by protected blocks and OUTSIDE_LIST (T07)",
         "cross-category ilvl=0 sub-list is still treated as a same-level kind switch (README constraint 9), because the shape is indistinguishable from the switch (T08)",
         "a table between two list items is not attributed to any item, and a note after a run is a protected block that is not attributed either; the tail scan only covers content after a run's last item (T10)",
         "RESOLVED BY T08: the product path no longer pins ordered target_level to 0; wx-default-v2 projects the two recognised levels and clamps deeper levels (T08)",
         "RESOLVED BY T09: the readback audit now also compares the per-level numbering sequence values (_saved_number_sequence / list_numbering_sequence_mismatch) and the style-derived render-level parent chain, on top of list_parent_chain_mismatch's implied w:ilvl chain (T09)",
         "pStyle level inheritance still inert end-to-end (T10)",
-        "num_id remains a dual source (top-level and numbering_definition_ref) (T10)"
+        "RESOLVED (residual round R2): top-level num_id is the single owner and numbering_definition_ref is a derived view"
       ]
     },
     {
@@ -141,10 +177,10 @@
         "T04"
       ],
       "residuals": [
-        "RESOLVED BY T09 (LLM gating only): list_detect now runs only on fragments that already have multiple candidates and makes no call at all on a clean model (_make_phase_batches returns no batch for an empty single-batch capability), so the LLM gate really stops the model; README constraint 7's literal score-threshold semantics remain unimplemented, and T07 no longer uses the heading-with-confirmed-numbering case as an ambiguity source because it is decidable under constraint 6 (T10)",
+        "PARTIALLY RESOLVED (residual round R3): ambiguity_records indexes every low-confidence and conflict decision; the literal numeric score threshold is not judgeable after T04 removed score, recorded as a spec note",
         "LIST_END is still enumerated but not emitted; boundary termination stays expressed by protected blocks and OUTSIDE_LIST (T10)",
-        "low-confidence numbering stays body text and never reaches the ambiguity report; only a low_confidence_list_marker info downgrade is recorded (T10)",
-        "the ambiguity report is reachable from real input only through the T03 equal-strength tie path; nesting parent competition and other sources remain synthetic (T10)",
+        "PARTIALLY RESOLVED (R3 follow-up): low-confidence numbering stays body text but is now indexed in list_semantics_result.ambiguity_records as well as the low_confidence_list_marker info downgrade (tests/test_v6_residuals.py::test_v6_r3_low_confidence_decision_is_indexed_and_non_blocking) (T10)",
+        "PARTIALLY RESOLVED (residual round R3): ambiguity_records indexes every low-confidence and conflict decision; the literal numeric score threshold is not judgeable after T04 removed score, recorded as a spec note",
         "scripts/wxdf/resolver.py was declared in T07's scope but needed no additive change and was not modified",
         "a style whose name contains both a list token and 标题 (for example 列项标题) is treated as a protected heading; no style in the reference template hits this (T10)",
         "a detected block whose text starts with a literal N.N marker (for example 1.2 需求分析) is now protected as a manual heading instead of becoming a list item; documented trade-off, no real list content contains the marker in its text (T10)",
@@ -161,10 +197,10 @@
       ],
       "residuals": [
         "RESOLVED BY USER RULING (2026-09-15): AGENTS.md 关键决策记录 1 now recognises at most two list levels. wx-default-v2 caps render_level at 1 and binds each role to the template's own instance (list_letter=3, list_decimal=8, list_dash=5, list_bullet=4), so the second ordered level shows the designed 1) form; the synthesized multi-level instance (numId 22/abstract 10) and the outline a.1 marker are removed (T10/user)",
-        "levels deeper than two clamp to render level 1 and emit list_render_level_clamped (semantic_level, render_level, max_level, emitted_level, num_id) so the author is told to use heading levels instead of more list levels; this is the intended two-level behaviour (T10)",
+        "RESOLVED (residual round R4): now report-visible as saved_output_audit.list_render_clamped and public_summary.diagnostic_codes, still non-blocking",
         "the template's second-level instances are single-level, so every list item emits w:ilvl 0 and the two levels are distinguished by style and instance rather than by the level attribute; a second-level item does not restart per parent because it shares numId 8 (T10/template)",
         "top-level ordered numbering is document-continuous; the saved output writes no w:startOverride, so decision 1's per-chapter restart is not implemented (T10)",
-        "list_render_level_clamped stays module-evidence only and non-blocking; it now fires only for a semantic level deeper than the two-level cap (T10)",
+        "RESOLVED (residual round R4): now report-visible as saved_output_audit.list_render_clamped and public_summary.diagnostic_codes, still non-blocking",
         "cross-category ilvl=0 sub-list is treated as a same-level kind switch and is not auto-nested (T10)",
         "the ilvl=0 restart variant is indistinguishable from a sub-list (T10)",
         "restart_scope boundary reset is not implemented; confirmed no policy-layer boundary is needed (T10)",
@@ -180,10 +216,10 @@
         "T08"
       ],
       "residuals": [
-        "README constraint 7's literal score-threshold semantics are still not implemented; a low-confidence numbering block stays body text with only an info low_confidence_list_marker downgrade and never enters the ambiguity report (T10)",
-        "the ambiguity report is reachable from real input only through the T03 equal-strength tie path; nesting parent competition and other sources remain synthetic (T10)",
+        "PARTIALLY RESOLVED (residual round R3): ambiguity_records indexes every low-confidence and conflict decision; the literal numeric score threshold is not judgeable after T04 removed score, recorded as a spec note",
+        "PARTIALLY RESOLVED (residual round R3): ambiguity_records indexes every low-confidence and conflict decision; the literal numeric score threshold is not judgeable after T04 removed score, recorded as a spec note",
         "LIST_END is enumerated but not emitted; boundary termination stays expressed by protected blocks and OUTSIDE_LIST (T10)",
-        "list_render_level_clamped is still module-evidence only and non-blocking; a list nested deeper than two levels is clamped and advised to use heading levels instead (T10)",
+        "RESOLVED (residual round R4): now report-visible as saved_output_audit.list_render_clamped and public_summary.diagnostic_codes, still non-blocking",
         "FIXED (F6): a saved list paragraph whose style does not map back to a projected role no longer disables the render-level chain; it now fails with list_render_style_unmapped, so a permitted style change (for example to Normal) cannot turn the comparison off. The chain is still skipped as a whole only when a role legitimately identifies more than one projected level (the legacy multi-level policy reuses list_decimal for levels 1 and 2), where the style genuinely cannot carry the level; within that skip only the flat (kind, numId, ilvl) sequence and the numbering sequence comparison guard, so a tamper that is indistinguishable from the reused-role policy is not caught by this chain (T10)",
         "the numbering sequence simulation reads w:startOverride from w:lvlOverride directly, so a pure w:startOverride without w:lvl is covered (test_t09_readback_detects_a_tampered_numbering_sequence builds exactly that); the remaining uncovered edge is the interaction of several w:num instances that share one abstract definition with per-instance overrides (T10)"
       ]
@@ -200,12 +236,12 @@
         "FIX round (major F2, deliberate contract change): report[\"list_preservation_audit\"] and its producer list_detector.audit_list_preservation were removed; the contract change is recorded in evidence/T10.md, progress.md and this file, and the consumer review_loop.collect_audit_findings now reads the native list readback (native_module_evidence). The field is not part of the public report summary",
         "FIX round (minor F3, fixed): dead reads of the removed producers were removed or re-pointed (review_loop.semantic_list_groups and list_preservation_audit, reporting.parallel_content_candidates/unresolved_parallel_groups, llm_enhancer.list_group_candidate)",
         "FIX round (minor F4, recorded not restored): indentation-cluster level recovery and no-marker parallel-content group detection were removed with their modules and have no equivalent. Both fed the README '连续正文段被当列表' false positive, so the removal is deliberate and is not claimed to be covered by T03/T04/T06",
-        "README constraint 7's literal score-threshold semantics and broader ambiguity sources remain unimplemented; low-confidence numbering stays body text with only an info low_confidence_list_marker downgrade, and real input only produces ambiguous_list_state through the T03 equal-strength tie path",
+        "PARTIALLY RESOLVED (residual round R3): ambiguity_records indexes every low-confidence and conflict decision; the literal numeric score threshold is not judgeable after T04 removed score, recorded as a spec note",
         "LIST_END is enumerated but not emitted; boundary termination is expressed by protected blocks and OUTSIDE_LIST",
-        "list_render_level_clamped stays module-evidence only and non-blocking; a deeper-than-two list clamps to the second level and advises heading levels",
+        "RESOLVED (residual round R4): now report-visible as saved_output_audit.list_render_clamped and public_summary.diagnostic_codes, still non-blocking",
         "readback audit blind spots: the style-derived render chain is skipped when a role maps to several projected levels, and a list item inside a table cell carries the 表正文 style so its level is not recoverable from the style",
         "the structural create-ordering fix in scripts/wxdf/transaction.py still lacks its own ticket; T10 did not touch that file",
-        "num_id is still a dual source: _numbering_catalogue_evidence writes a top-level num_id and add_unit writes numbering_definition_ref.num_id. T10 did not remove the duplicated field",
+        "RESOLVED (residual round R2): top-level num_id is the single owner and numbering_definition_ref is a derived view",
         "the README field definition says effective_ilvl synthesizes w:ind, but _resolve_effective_ilvl only synthesizes source_ilvl and pStyle inheritance; the w:ind semantics gap remains",
         "full-matrix gaps: input sources cover Markdown and Word-generated samples only (WPS and LibreOffice uncovered); containers cover body and table only (header, footer, footnote and textbox uncovered); levels cover 0-2 only (levels 3-8 uncovered)",
         "same-category contiguous new-numId nesting remains a heuristic; the ilvl=0 restart variant is indistinguishable from a sub-list",
@@ -216,5 +252,10 @@
   "external_gates": [
     "kylin_v10_arm64_real_machine_acceptance",
     "remote_push_and_release_authorization"
-  ]
+  ],
+  "follow_up_round": {
+    "date": "2026-09-16",
+    "scope": "residual closure R1-R4 plus a review-driven R1 correction",
+    "evidence": "docs/execution-v6/evidence/residuals.md"
+  }
 }

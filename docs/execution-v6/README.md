@@ -94,6 +94,8 @@ Resolver 对列表候选施加以下全局约束：
 9. 类别切换重启：同层级有序/无序切换时开启新列表，不强制合并。
 10. `restart_scope` 边界：`lvlRestart` 或 `startOverride` 触发时，在 `restart_scope` 边界处重置 `start_value`。
 
+> 实现注记（2026-09-16，R3 收口）：约束 7 的字面「证据评分阈值」在 T04 移除数值 `score`、改用 Resolver 证据类别后不再可判定。当前实现取证据类别模型支持的最强读法：真正的证据类别平局进入歧义报告并令 `list_semantics.status != "completed"`；证据类别不足（`isolated_generic_numbering` 或未解析定义）的候选保持正文，不静默提升，并以 `list_semantics_result.ambiguity_records` 与 `low_confidence_list_marker` 降级留痕，因此普通可转换文档仍为 `completed`。详见 `evidence/residuals.md`。
+
 ### 不变量清单
 
 转换全链路必须守住以下不变量：
