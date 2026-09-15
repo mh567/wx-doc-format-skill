@@ -452,7 +452,8 @@ def _contract_downgrades(facts: Mapping[str, Any]) -> list[dict[str, Any]]:
         if "invalid_numbering_definition" not in numbering_evidence:
             continue
         definition_ref = evidence.get("numbering_definition_ref")
-        missing_definition = not isinstance(definition_ref, Mapping) or definition_ref.get("abstract_num_id") is None
+        _num_id, abstract_id = _numbering_ids(evidence)
+        missing_definition = abstract_id is None
         code = "missing_numbering_definition" if missing_definition else "invalid_numbering_definition"
         downgrades.append(
             {
@@ -472,11 +473,31 @@ def _contract_downgrades(facts: Mapping[str, Any]) -> list[dict[str, Any]]:
     return downgrades
 
 
-def _has_numbering_definition(evidence: Mapping[str, Any]) -> bool:
+def _numbering_ids(evidence: Mapping[str, Any]) -> tuple[Any, Any]:
+    """Return ``(num_id, abstract_num_id)`` for one block's numbering instance.
+
+    The top-level ``num_id`` / ``abstract_num_id`` are the single documented owner
+    of the numbering instance identity (README 证据字段清单).  The nested
+    ``numbering_definition_ref`` is a derived compatibility view over them, kept
+    so a consumer that still reads the older mapping shape keeps working.  Reading
+    the owner first and falling back to the compatibility view therefore yields
+    one value from one source for either spelling.
+    """
+
+    num_id = evidence.get("num_id")
+    abstract_id = evidence.get("abstract_num_id")
     reference = evidence.get("numbering_definition_ref")
-    if isinstance(reference, Mapping) and reference.get("num_id") is not None:
-        return True
-    return evidence.get("num_id") is not None
+    if isinstance(reference, Mapping):
+        if num_id is None:
+            num_id = reference.get("num_id")
+        if abstract_id is None:
+            abstract_id = reference.get("abstract_num_id")
+    return num_id, abstract_id
+
+
+def _has_numbering_definition(evidence: Mapping[str, Any]) -> bool:
+    num_id, _abstract_id = _numbering_ids(evidence)
+    return num_id is not None
 
 
 def _raw_depth(evidence: Mapping[str, Any]) -> int:
@@ -895,14 +916,7 @@ def _numbering_sequence(evidence: Mapping[str, Any]) -> str | None:
     neither has no instance identity and cannot anchor or join a sub-list.
     """
 
-    num_id = evidence.get("num_id")
-    abstract_id = evidence.get("abstract_num_id")
-    reference = evidence.get("numbering_definition_ref")
-    if isinstance(reference, Mapping):
-        if num_id is None:
-            num_id = reference.get("num_id")
-        if abstract_id is None:
-            abstract_id = reference.get("abstract_num_id")
+    num_id, abstract_id = _numbering_ids(evidence)
     if num_id is not None:
         return f"num:{num_id}:abstract:{abstract_id}"
     sequence = evidence.get("sequence")
@@ -1477,8 +1491,7 @@ def analyze_lists(facts: Mapping[str, Any], *, context: Mapping[str, Any] | None
                     result["diagnostics"].append(diagnostic)
                     result["downgrades"].append(copy.deepcopy(diagnostic))
                     continue
-                effective_num_id = evidence.get("num_id") or (evidence.get("numbering_definition_ref") or {}).get("num_id")
-                effective_abstract_id = evidence.get("abstract_num_id") or (evidence.get("numbering_definition_ref") or {}).get("abstract_num_id")
+                effective_num_id, effective_abstract_id = _numbering_ids(evidence)
                 effective_sequence = evidence.get("sequence") or json_sequence_id(evidence.get("numbering_definition_ref"), unit_id)
                 sequence_identity = _numbering_sequence(evidence)
                 current = active_groups.get(depth)
@@ -1748,6 +1761,46 @@ def analyze_lists(facts: Mapping[str, Any], *, context: Mapping[str, Any] | None
             "conflict_code": entry.get("code"),
         })
     result["diagnostics"].sort(key=lambda item: (item.get("code", ""), item.get("node_id", "")))
+    # Invariant 6 (low-confidence decisions are indexable).  ``ambiguity_records``
+    # is the one index of every block whose list decision carried competing or
+    # low-confidence evidence, whatever the eventual verdict.  A genuine Resolver
+    # tie appears here as ``resolver_conflict``, and a low-confidence numbering
+    # block that was deliberately resolved to body text appears as
+    # ``low_confidence_candidate`` pointing at its ``low_confidence_list_marker``
+    # downgrade.  The record lives outside ``diagnostics`` so that a
+    # low-confidence-only document still reports ``completed``: the block is
+    # solved (kept as body text) with a recorded reason, which is what invariant 7
+    # means by "no unresolved candidate", rather than left in a Resolver tie.
+    ambiguity_records: list[dict[str, Any]] = []
+    for node_id in low_confidence_nodes:
+        offered_states = [
+            str(candidate.get("state"))
+            for candidate in state_candidates
+            if str(candidate.get("node_id")) == str(node_id)
+        ]
+        ambiguity_records.append(
+            {
+                "node_id": str(node_id),
+                "kind": "low_confidence_candidate",
+                "resolution": decided_states.get(str(node_id)),
+                "record": "low_confidence_list_marker",
+                "candidate_states": offered_states,
+                "reason": "the numbering evidence is low confidence, so the block is resolved to body text and the decision is recorded",
+            }
+        )
+    for entry in state_unresolved:
+        target_ids = entry.get("target_node_ids") or []
+        ambiguity_records.append(
+            {
+                "node_id": str(target_ids[0]) if target_ids else None,
+                "kind": "resolver_conflict",
+                "resolution": None,
+                "record": "ambiguous_list_state",
+                "candidate_ids": list(entry.get("candidate_ids") or []),
+                "reason": str(entry.get("code") or "candidate_conflict"),
+            }
+        )
+    result["ambiguity_records"] = ambiguity_records
     # Only warning/error severity escalates the list status.  An info-severity
     # record stays visible (in ``diagnostics``, and for a decision that keeps a
     # block as body text also in ``downgrades``) but must not flip the status, so

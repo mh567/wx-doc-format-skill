@@ -117,13 +117,15 @@ def list_semantics_module() -> RegisteredModule:
         state_candidates = result.get("state_candidates", [])
         state_decisions = result.get("state_decisions", [])
         state_unresolved = result.get("state_unresolved", [])
+        state_conflict_count = len(state_unresolved)
         constraint_findings = result.get("state_constraint_findings", [])
+        ambiguity_records = result.get("ambiguity_records", [])
         decided_states = [
             str((decision.get("value") or {}).get("state")) for decision in state_decisions
         ]
         outside_state_count = sum(1 for state in decided_states if state == "OUTSIDE_LIST")
         list_item_state_count = sum(1 for state in decided_states if state in {"LIST_ITEM", "NESTED_LIST_ITEM"})
-        evidence = {"status": result["status"], "list_count": len(result["lists"]), "item_count": len(result["items"]), "continuation_count": len(result["continuations"]), "diagnostic_count": len(result["diagnostics"]), "downgrade_count": downgrade_count, "restart_expression_count": restart_expressions, "state_candidate_count": len(state_candidates), "state_decision_count": len(state_decisions), "list_item_state_count": list_item_state_count, "outside_state_count": outside_state_count, "state_conflict_count": len(state_unresolved), "state_constraint_count": len(constraint_findings)}; c.provide("list_semantics_result", result)
+        evidence = {"status": result["status"], "list_count": len(result["lists"]), "item_count": len(result["items"]), "continuation_count": len(result["continuations"]), "diagnostic_count": len(result["diagnostics"]), "downgrade_count": downgrade_count, "restart_expression_count": restart_expressions, "state_candidate_count": len(state_candidates), "state_decision_count": len(state_decisions), "list_item_state_count": list_item_state_count, "outside_state_count": outside_state_count, "state_conflict_count": len(state_unresolved), "state_constraint_count": len(constraint_findings), "ambiguity_record_count": len(ambiguity_records)}; c.provide("list_semantics_result", result)
         c.provide("list_semantics_candidates", candidates); c.provide("list_item_map", item_map)
         c.provide("list_semantics", evidence); c.evidence["list-semantics"] = evidence; return evidence
     return _registered("list-semantics", ("relation",), ("source_facts", "source_ast"), ("list_semantics_result", "list_semantics_candidates", "list_item_map", "list_semantics"), execute)

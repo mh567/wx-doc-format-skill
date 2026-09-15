@@ -529,6 +529,22 @@ def _native_auditor(context: ModuleExecutionContext) -> dict[str, Any]:
             "issues": [*(saved_findings.get("issues") or []), *downstream_issues],
             "passed": False,
         }
+    # R4: a list nested deeper than the two-level WX model clamps to the second
+    # level (AGENTS.md decision 1) and the renderer records
+    # ``list_render_level_clamped``.  The clamp stays non-blocking, but it must be
+    # visible in the report instead of only under ``native_module_evidence``
+    # (which the release sanitizer strips).  It is published as a report-visible
+    # record on the saved-output audit.  It is not an ``issues`` entry, so
+    # ``passed`` is unchanged and publication is not blocked; the public summary
+    # still surfaces the code because its evidence scan walks the audit
+    # dictionaries.
+    render_clamps = [
+        dict(item)
+        for item in render_diagnostics
+        if item.get("code") == "list_render_level_clamped"
+    ]
+    if render_clamps:
+        saved_findings = {**saved_findings, "list_render_clamped": render_clamps}
     digest_after = digest_source_facts(dict(context.require("source_facts")))
     # The readback issues are merged into the saved-output view above, so the
     # normalized findings are computed from the merged audit instead of the

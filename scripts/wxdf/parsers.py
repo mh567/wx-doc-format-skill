@@ -1026,6 +1026,120 @@ def _physical_groups_continue(
     return actual_start == expected_start
 
 
+# ---------------------------------------------------------------------------
+# R1: the adjacency / ``w:ind`` contribution to ``effective_ilvl``.
+#
+# ``_resolve_effective_ilvl`` resolves the level of one paragraph from the
+# declared ``w:numPr`` (``source_ilvl``) and the pStyle association.  The README
+# field list defines ``effective_ilvl`` as synthesizing ``source_ilvl``, the
+# pStyle inheritance, ``w:ind`` and the adjacency of consecutive list blocks, and
+# a per-paragraph function cannot see the adjacency.  The refinement below adds
+# exactly that evidence, in the way the removed ``list_hierarchy`` indentation
+# cluster recovery did: inside one numbering-instance run it clusters the
+# resolved left indent of the consecutive list blocks, and deepens a block that
+# is indented relative to an earlier sibling.  A block that is not indented
+# relative to an earlier sibling keeps its declared level, so a flat list with
+# uniform indents and a block that only differs from its neighbour by jitter are
+# unchanged.
+_INDENT_CLUSTER_TOLERANCE_TWIPS = 120
+
+
+def _resolved_left_indent(candidate: Mapping[str, Any]) -> int | None:
+    """Return the resolved left indent (twips) captured for one candidate."""
+
+    layout = candidate.get("layout")
+    if isinstance(layout, Mapping):
+        left = layout.get("left_twips")
+        if isinstance(left, int) and not isinstance(left, bool):
+            return left
+    return None
+
+
+def _indent_cluster_ranks(values: list[int]) -> dict[int, int]:
+    """Map each distinct resolved left indent to its ascending cluster rank.
+
+    Two indents share a cluster when their distance is smaller than the
+    tolerance, so presentation jitter does not create a spurious level.  The
+    clustering follows the removed ``list_hierarchy._layout_levels`` rule so the
+    recovered level matches the deleted indentation-cluster recovery.
+    """
+
+    unique = sorted(set(values))
+    clusters: list[int] = []
+    for value in unique:
+        if not clusters or value - clusters[-1] >= _INDENT_CLUSTER_TOLERANCE_TWIPS:
+            clusters.append(value)
+    ranks: dict[int, int] = {}
+    for index, cluster in enumerate(clusters):
+        for value in unique:
+            if abs(value - cluster) < _INDENT_CLUSTER_TOLERANCE_TWIPS:
+                ranks[value] = index
+    return ranks
+
+
+def _refine_indentation_levels(
+    groups: list[list[dict[str, Any]]],
+) -> dict[int, dict[str, Any]]:
+    """Return the indentation-refined effective level for every candidate.
+
+    Each numbering group is one run of consecutive listed blocks.  Inside a run
+    the candidates are partitioned by their declared effective level, so an
+    explicitly deeper declared level is never lowered.  Within a partition the
+    blocks are walked in source order: a block whose indent cluster is deeper
+    than the shallowest cluster seen so far is deepened by the difference, and
+    everything else keeps the declared level.  The requirement that a shallower
+    block precedes the deeper one is what a nested sub-list actually looks like,
+    so a single more-indented leading block is not promoted on its own.
+
+    The returned record is the published evidence for the rule:
+    ``declared_effective_ilvl``, ``indent_left_twips``, ``cluster_rank``,
+    ``indent_offset`` and the applied ``effective_ilvl``.
+    """
+
+    refined: dict[int, dict[str, Any]] = {}
+    for group in groups:
+        partitions: dict[int, list[dict[str, Any]]] = {}
+        for candidate in group:
+            declared = candidate.get("effective_ilvl")
+            declared_level = int(declared) if isinstance(declared, int) and not isinstance(declared, bool) else 0
+            partitions.setdefault(declared_level, []).append(candidate)
+        for declared_level, members in partitions.items():
+            indents = [indent for member in members for indent in [_resolved_left_indent(member)] if indent is not None]
+            ranks = _indent_cluster_ranks(indents) if indents else {}
+            ranks_in_order = [
+                ranks.get(indent) if (indent := _resolved_left_indent(member)) is not None else None
+                for member in members
+            ]
+            shallowest_seen: int | None = None
+            for index, member in enumerate(members):
+                indent = _resolved_left_indent(member)
+                rank = ranks_in_order[index]
+                offset = 0
+                if rank is not None:
+                    # A deeper indent only means a nested sub-list when the run
+                    # later returns to a shallower cluster, because a sub-list
+                    # closes.  Without that return the blocks are more likely one
+                    # flat list whose leading item carries a smaller indent, so
+                    # the declared level stands.
+                    closes = any(
+                        later is not None and later < rank
+                        for later in ranks_in_order[index + 1:]
+                    )
+                    if shallowest_seen is not None and rank > shallowest_seen and closes:
+                        offset = rank - shallowest_seen
+                    shallowest_seen = rank if shallowest_seen is None else min(shallowest_seen, rank)
+                refined[int(member["source_position"])] = {
+                    "effective_ilvl": declared_level + offset,
+                    "rule": "declared_plus_indent_cluster",
+                    "declared_effective_ilvl": declared_level,
+                    "indent_left_twips": indent,
+                    "cluster_rank": rank,
+                    "indent_offset": offset,
+                    "tolerance_twips": _INDENT_CLUSTER_TOLERANCE_TWIPS,
+                }
+    return refined
+
+
 def analyze_docx_numbering(
     document: Any,
     report: dict[str, Any],
@@ -1105,6 +1219,11 @@ def analyze_docx_numbering(
         previous_physical_group = physical_group
 
     result: dict[int, dict[str, Any]] = {}
+    # The adjacency-refined effective level: the declared level from
+    # ``describe_docx_paragraph`` is the base, and the indentation cluster of the
+    # consecutive blocks in the same group deepens a nested sub-list that carries
+    # no distinct numbering instance (R1).
+    refinements = _refine_indentation_levels(groups)
     for numeric_group_id, group in enumerate(groups, 1):
         logical_num_ids = list(dict.fromkeys(int(item["num_id"]) for item in group))
         continued_across_num_id = len(logical_num_ids) > 1
@@ -1166,8 +1285,16 @@ def analyze_docx_numbering(
 
             descriptor = {
                 key: value for key, value in candidate.items()
-                if key not in {"text", "effective_ilvl"}
+                if key != "text"
             }
+            # ``effective_ilvl`` is published as the indentation-refined level;
+            # the refinement record documents the rule for the same block.
+            refinement = refinements.get(int(candidate["source_position"]))
+            if refinement is not None:
+                descriptor["effective_ilvl"] = refinement["effective_ilvl"]
+                descriptor["indent_cluster_level"] = {
+                    key: value for key, value in refinement.items() if key != "effective_ilvl"
+                }
             source_marker_type = source_list_type(num_fmt, candidate.get("lvl_text"))
             descriptor.update({
                 "group_size": len(group),
@@ -1244,6 +1371,12 @@ def _numbering_catalogue_evidence(descriptor: Mapping[str, Any]) -> dict[str, An
     The group decision (status / restart / group identity) belongs to
     ``analyze_docx_numbering``; these fields come from the native numbering catalog
     and are additive to it.
+
+    ``num_id`` and ``abstract_num_id`` are the single owner of the numbering
+    instance identity in the published evidence (README 证据字段清单).  The
+    ``numbering_definition_ref`` mapping ``add_unit`` writes is a derived
+    compatibility view over these two fields, so a consumer that reads either
+    spelling sees the same value and the two cannot drift.
     """
 
     return {
@@ -1311,10 +1444,6 @@ def _parse_docx(source: Path | str, *, store: SourceStore) -> dict[str, Any]:
                 "ordinal": descriptor.get("start"),
                 "explicit_depth": descriptor.get("ilvl"),
                 "restart_hint": descriptor.get("restart"),
-                "numbering_definition_ref": {
-                    "num_id": descriptor.get("num_id"),
-                    "abstract_num_id": descriptor.get("abstract_num_id"),
-                },
                 "blank_before": False,
                 "continuation_hint": False,
             })
@@ -1324,6 +1453,22 @@ def _parse_docx(source: Path | str, *, store: SourceStore) -> dict[str, Any]:
                 })
             if catalogue is not None:
                 evidence.update(_numbering_catalogue_evidence(catalogue))
+            # ``numbering_definition_ref`` is a compatibility view over the
+            # single owner of the numbering instance identity (the top-level
+            # ``num_id`` / ``abstract_num_id`` written by
+            # ``_numbering_catalogue_evidence``); it is derived here so the two
+            # spellings cannot drift.
+            evidence["numbering_definition_ref"] = {
+                "num_id": evidence.get("num_id"),
+                "abstract_num_id": evidence.get("abstract_num_id"),
+            }
+            # R1: the group decision's ``effective_ilvl`` is the one refined by
+            # the indentation cluster of the consecutive blocks, so it replaces
+            # the per-paragraph base level the catalogue wrote.
+            if isinstance(descriptor.get("effective_ilvl"), int):
+                evidence["effective_ilvl"] = descriptor["effective_ilvl"]
+            if descriptor.get("indent_cluster_level") is not None:
+                evidence["indent_cluster_level"] = dict(descriptor["indent_cluster_level"])
         elif isinstance(paragraph.text, str):
             visible_marker = _docx_visible_list_marker(paragraph.text)
             if visible_marker is not None:
