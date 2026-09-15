@@ -1,5 +1,19 @@
 # 当前架构收敛进度
 
+## 2026-09-15 execution-v6 T07 标题与正文防歧义
+
+- FIX 轮：复审发现「标题 + 已确认编号」的同强度平局会把普通文档推成 `completed_with_warnings`，且受保护块以 info 诊断上报有同样后果。已撤回该平局（标题交回约束 6 可裁决的受保护路径），并把受保护块的 marker 记录从 `diagnostics` 移入 `downgrades`；`run_result.py` 与公开状态合同未改动。复测：章标题文档与 IP 段落文档均为 `completed`、诊断为空、降级记录保留。
+
+- 新增红灯文件 `tests/test_t07_heading_body_anti_ambiguity.py`（7 项），还原 `lists.py` / `protected.py` 到 HEAD 后 6 项失败、1 项通过：合成「标题 + 已确认编号」被静默提升为列表项、合成 IP/法规/API 路径/公式被提升为列表项、真实 DOCX 自定义章标题样式的标题被提升为列表项（端到端与转换报告各一项）、真实 DOCX 的 IP 地址正文段被提升为列表。
+- `protected.py`（受保护名单单一所有者）：`protected_text_reason` 在 `visible_marker` 分支之前新增 `api_path`（`_API_PATH_RE`）、`ip_address`（`_IPV4_RE` + `_is_ipv4`，逐段 0-255 且至少一段大于 9）、`legal_clause`（`_LEGAL_CLAUSE_RE`，`第N条/款/项`）；在无 marker 尾部新增 `formula`（`_looks_like_formula`，LaTeX 命令或数学符号，或无 CJK 的等式文本）。版本号与日期沿用既有规则。
+- `lists.py`：`_is_protected` 判定重排，标题结构（role / 标题样式 / 手写章节编号）先于 `numbering_status == "detected"` 短路，短路只对非标题内容生效；样式判定由 `"附录标题" in style` 放宽为 `"标题" in style`；新增 `_heading_evidence` / `_confirmed_numbering` / `_HEADING_PROTECTION_REASONS`。
+- `lists.py`：`_state_candidates_for_paragraph` 对「标题结构 + 已确认编号实例」发同强度候选对（`OUTSIDE_LIST` 与 `LIST_ITEM` 均 structural），由既有 `resolver.resolve` 判为 `candidate_conflict`，块不产生状态决策、不物化为列表项，歧义进入 `ambiguous_list_state` 诊断并把 `list_semantics.status` 置为 `unresolved`（README 约束 6/7，工作项 1/2）。该平局从真实 DOCX 可达：自定义 `章标题` 样式 + `w:numPr` 且解析器给出 `numbering_status="detected"`。
+- `resolver.py` 本工单未改动（仅声明架构定案）；`transaction.py` 未改动。本工单只做加法，未改稳定接口。
+- T01 冻结库的「标题误识 / 正文误识」两项在实施前即已通过，属已绿回归守卫（heading 无 `numbering_status`、body 为 `numbering_status="ignored"`），不是本工单的新红灯；真实红灯转绿是新增 7 项测试中的 6 项。
+- 已记录残留：README 约束 7 的字面分数阈值语义与 LLM 门控归 T09；low-confidence 编号保持正文不进歧义报告归 T09；其他来源（嵌套父项竞争）的歧义仍只由合成证据可达，归 T09；`LIST_END` 仍未发出，归 T09/T10。
+- 全量测试 `1224 passed, 0 failed`（基线 `1217` 加新增 7 项）。真实转换：自定义章标题样式加两个连续 `w:numPr` 标题的 DOCX 转换 `status=completed_with_warnings`、`exit_code=0`、`list_semantics.list_count=0 / item_count=0`、两个 `ambiguous_list_state` 与两个 `protected_list_like_text(protected_style)`，模型审计与保存后审计通过；三个 IP 地址正文段的 DOCX 转换 `list_count=0 / item_count=0`、三个 `protected_list_like_text(ip_address)`。
+- 证据见 `docs/execution-v6/evidence/T07.md`，状态见 `docs/execution-v6/status.json`。未提交、未推送；预存 `_build/`、`.commandcode/` 与 `paseo.json` 未处理。
+
 ## 2026-09-15 execution-v6 T06 编号边界（重启 / 拆分 / 复用 / 缺失）
 
 - 新增红灯测试文件 `tests/test_t06_numbering_boundary.py`（11 项），实施前 9 项失败：跨 numId 续接被误判为子表、同实例重启未拆序列、重启表达式缺少 `lvl_restart / start_override`、子表重启策略字段缺失、隐式运行尾部非段落单元的伪歧义。两项在基线即通过（起始值重置、损坏编号降级守卫），作为回归基线保留。

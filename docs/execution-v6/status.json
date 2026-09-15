@@ -4,8 +4,8 @@
   "branch": "dev",
   "baseline_head": "fc851e1c0ed1eb68a0c3db9e4cdd9e4f4a3f4e3b",
   "implementation_started": true,
-  "current_task": "T07",
-  "next_task": "T07",
+  "current_task": "T08",
+  "next_task": "T08",
   "release_authorized": false,
   "recommended_order": [
     "T01",
@@ -136,9 +136,19 @@
     {
       "id": "T07",
       "subject": "标题与正文防歧义",
-      "status": "pending",
+      "status": "done",
       "depends_on": [
         "T04"
+      ],
+      "residuals": [
+        "README constraint 7 literal score-threshold semantics and LLM gating are not implemented; T07 no longer uses the heading-with-confirmed-numbering case as an ambiguity source because it is decidable under constraint 6 (T09)",
+        "LIST_END is still enumerated but not emitted; boundary termination stays expressed by protected blocks and OUTSIDE_LIST (T09/T10)",
+        "low-confidence numbering stays body text and never reaches the ambiguity report; only a low_confidence_list_marker info downgrade is recorded (T09)",
+        "the ambiguity report is reachable from real input only through the T03 equal-strength tie path; nesting parent competition and other sources remain synthetic (T09)",
+        "scripts/wxdf/resolver.py was declared in T07's scope but needed no additive change and was not modified",
+        "a style whose name contains both a list token and 标题 (for example 列项标题) is treated as a protected heading; no style in the reference template hits this (T10)",
+        "a detected block whose text starts with a literal N.N marker (for example 1.2 需求分析) is now protected as a manual heading instead of becoming a list item; documented trade-off, no real list content contains the marker in its text (T10)",
+        "protected-list precision: a valid low-octet IPv4 such as 1.2.3.4 falls through to manual_heading_marker rather than ip_address, and the formula symbol branch does not apply the CJK guard (T10)"
       ]
     },
     {
