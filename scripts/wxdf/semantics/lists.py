@@ -6,6 +6,7 @@ import copy
 import re
 from typing import Any, Mapping
 
+from ..list_policy import default_projection
 from ..validation import validate_source_facts
 from .protected import protected_code_style, protected_text_reason
 
@@ -252,6 +253,7 @@ def _emit_group(
     restart_expression: Mapping[str, Any] | None = None,
     decided_states: Mapping[str, str] | None = None,
     sequence_split_index: int = 0,
+    document_level: int | None = None,
 ) -> None:
     group = {
         "list_id": list_id,
@@ -306,8 +308,14 @@ def _emit_group(
         effective_ilvl_value = evidence.get("effective_ilvl")
         if not isinstance(effective_ilvl_value, int):
             effective_ilvl_value = depth
-        semantic_level = depth
-        render_level = depth
+        # ``semantic_level`` is the item's logical level in the document list
+        # tree.  An explicit list container encodes that nesting in the container
+        # tree, so the caller passes the container's structural level; an
+        # implicit run carries it in its resolved ``depth``.  ``render_level`` is
+        # the WX projection of that level through the product default policy, so
+        # the published field is a projection and not a copy of ``semantic_level``.
+        semantic_level = document_level if document_level is not None else depth
+        render_level = default_projection(list_kind, semantic_level).render_level
         relation = {
             "item_id": item_id,
             "list_id": list_id,
@@ -1342,6 +1350,7 @@ def analyze_lists(facts: Mapping[str, Any], *, context: Mapping[str, Any] | None
             parent_item_id=parent_item_id,
             explicit=True,
             decided_states=decided_states,
+            document_level=_structural_list_level(container_id, facts, parents),
         )
 
     for parent_id in sorted(facts["children"]):

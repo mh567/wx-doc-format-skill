@@ -74,11 +74,13 @@ def test_native_modular_path_commits_source_hierarchy_before_flattening(tmp_path
     assert result.report["native_transaction"]["status"] == "committed"
     assert result.report["native_transaction"]["decision_count"] > 0
     assert result.report["capability_migration"]["list_semantics"] == "consumed"
-    assert all(
-        item["target_level"] == 0
+    # T08: the source hierarchy survives normalization.  The nested ordered child
+    # keeps its level instead of every ordered item being pinned to level 0.
+    assert sorted(
+        item["target_level"]
         for item in normalized["presentation"]["nodes"].values()
         if item["marker_kind"] == "ordered"
-    )
+    ) == [0, 0, 1]
 
 
 def _list_facts(*, continuation: bool = False, empty_item: bool = False) -> dict:

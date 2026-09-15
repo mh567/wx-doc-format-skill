@@ -354,16 +354,25 @@ def test_saved_output_audit_rejects_missing_numbering_definition(tmp_path: Path)
 
     def remap_abstract(data: bytes) -> bytes:
         root = ElementTree.fromstring(data)
+        # T08: the ordered list renders through the list-only numbering instance
+        # the produced document synthesizes, so the remap targets the instance
+        # the normalized presentation actually binds instead of a template numId.
+        list_num_id = str(normalized["presentation"]["profile"]["numbering_ids"]["list_letter"])
+        list_abstract_id = next(
+            number.find("w:abstractNumId", ns).get(f"{{{namespace}}}val")
+            for number in root.findall("w:num", ns)
+            if number.get(f"{{{namespace}}}numId") == list_num_id
+        )
         source_abstract = next(
             abstract
             for abstract in root.findall("w:abstractNum", ns)
-            if abstract.get(f"{{{namespace}}}abstractNumId") == "4"
+            if abstract.get(f"{{{namespace}}}abstractNumId") == list_abstract_id
         )
         duplicate = ElementTree.fromstring(ElementTree.tostring(source_abstract))
         duplicate.set(f"{{{namespace}}}abstractNumId", "999")
         root.append(duplicate)
         for number in root.findall("w:num", ns):
-            if number.get(f"{{{namespace}}}numId") == "3":
+            if number.get(f"{{{namespace}}}numId") == list_num_id:
                 number.find("w:abstractNumId", ns).set(f"{{{namespace}}}val", "999")
         return ElementTree.tostring(root, encoding="utf-8", xml_declaration=True)
 

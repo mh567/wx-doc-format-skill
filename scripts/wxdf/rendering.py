@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import io
 import posixpath
 from pathlib import Path
@@ -48,6 +49,168 @@ def _write_direct_numbering(paragraph: Any, num_id: int, ilvl: int) -> None:
     num_id_element = OxmlElement("w:numId")
     num_id_element.set(qn("w:val"), str(int(num_id)))
     num_pr.append(num_id_element)
+
+
+# ``w:lvl`` children follow the CT_Lvl sequence; a synthesized child is
+# inserted at the position its name has in this order so the produced part stays
+# schema valid.
+_LEVEL_CHILD_ORDER = (
+    "w:start", "w:numFmt", "w:lvlRestart", "w:pStyle", "w:isLgl", "w:suff",
+    "w:lvlText", "w:lvlPicBulletId", "w:legacy", "w:lvlJc", "w:pPr", "w:rPr",
+)
+
+
+def _abstract_num_element(numbering: Any, abstract_num_id: Any) -> Any | None:
+    try:
+        wanted = str(int(abstract_num_id))
+    except (TypeError, ValueError):
+        return None
+    for abstract in numbering.findall(qn("w:abstractNum")):
+        if abstract.get(qn("w:abstractNumId")) == wanted:
+            return abstract
+    return None
+
+
+def _level_element(abstract: Any | None, ilvl: int) -> Any | None:
+    if abstract is None:
+        return None
+    for level in abstract.findall(qn("w:lvl")):
+        try:
+            declared = int(level.get(qn("w:ilvl"), "0"))
+        except (TypeError, ValueError):
+            declared = 0
+        if declared == ilvl:
+            return level
+    return None
+
+
+def _set_level_child_value(level: Any, tag: str, value: str) -> None:
+    """Set ``tag`` on one ``w:lvl``, inserting it in ``CT_Lvl`` order when absent."""
+
+    element = level.find(qn(tag))
+    if element is None:
+        element = OxmlElement(tag)
+        position = len(level)
+        wanted = _LEVEL_CHILD_ORDER.index(tag) if tag in _LEVEL_CHILD_ORDER else len(_LEVEL_CHILD_ORDER)
+        for index, child in enumerate(level):
+            name = "w:" + str(child.tag).rsplit("}", 1)[-1]
+            child_position = (
+                _LEVEL_CHILD_ORDER.index(name)
+                if name in _LEVEL_CHILD_ORDER
+                else len(_LEVEL_CHILD_ORDER)
+            )
+            if child_position > wanted:
+                position = index
+                break
+        level.insert(position, element)
+    element.set(qn("w:val"), str(value))
+
+
+def _build_list_only_abstract(numbering: Any, spec: Mapping[str, Any]) -> Any | None:
+    """Clone the template outline into a list-only numbering definition.
+
+    The deeper levels come from the template's multi-level ordered abstract; the
+    level-0 definition comes from the template's own first-level letter instance
+    so the first-level WX appearance is unchanged.  ``w:pStyle`` links are
+    stripped so the clone never binds a paragraph style (in particular a heading
+    style) to the list instance, and ``w:lvlRestart`` is written explicitly:
+    level 0 never restarts, every deeper level restarts when the level above it
+    is used (the OOXML default, made explicit).
+    """
+
+    deeper = _abstract_num_element(numbering, spec.get("deeper_abstract_num_id"))
+    if deeper is None:
+        return None
+    abstract = copy.deepcopy(deeper)
+    try:
+        abstract.set(qn("w:abstractNumId"), str(int(spec["abstract_num_id"])))
+    except (KeyError, TypeError, ValueError):
+        return None
+    for tag in ("w:nsid", "w:tmpl"):
+        for child in abstract.findall(qn(tag)):
+            abstract.remove(child)
+    multi_level = abstract.find(qn("w:multiLevelType"))
+    if multi_level is None:
+        multi_level = OxmlElement("w:multiLevelType")
+        abstract.insert(0, multi_level)
+    multi_level.set(qn("w:val"), "multilevel")
+    level_zero_source = _abstract_num_element(numbering, spec.get("level_zero_abstract_num_id"))
+    if level_zero_source is not None and level_zero_source is not deeper:
+        source_level = _level_element(level_zero_source, 0)
+        current_level = _level_element(abstract, 0)
+        if source_level is not None:
+            replacement = copy.deepcopy(source_level)
+            replacement.set(qn("w:ilvl"), "0")
+            if current_level is not None:
+                current_level.addprevious(replacement)
+                abstract.remove(current_level)
+            else:
+                abstract.insert(0, replacement)
+    level_zero = _level_element(abstract, 0)
+    if level_zero is not None:
+        if spec.get("level_zero_num_fmt"):
+            _set_level_child_value(level_zero, "w:numFmt", str(spec["level_zero_num_fmt"]))
+        if spec.get("level_zero_lvl_text"):
+            _set_level_child_value(level_zero, "w:lvlText", str(spec["level_zero_lvl_text"]))
+    for level in abstract.findall(qn("w:lvl")):
+        try:
+            ilvl = int(level.get(qn("w:ilvl"), "0"))
+        except (TypeError, ValueError):
+            ilvl = 0
+        for p_style in level.findall(qn("w:pStyle")):
+            level.remove(p_style)
+        _set_level_child_value(level, "w:lvlRestart", "0" if ilvl == 0 else str(ilvl))
+    return abstract
+
+
+def materialize_list_numbering(doc: Any, specs: Any) -> list[dict[str, Any]]:
+    """Write the synthesized list-only numbering instances into the document.
+
+    The template is an input and stays untouched on disk: the extra definitions
+    are cloned from it into the produced ``w:numbering`` part.  Returns one
+    diagnostic per instance that could not be materialized so the caller reports
+    it instead of silently writing a ``w:numId`` that has no definition.
+    """
+
+    requested = [dict(spec) for spec in (specs or []) if isinstance(spec, Mapping)]
+    if not requested:
+        return []
+    try:
+        numbering = doc.part.numbering_part.element
+    except (KeyError, NotImplementedError, AttributeError, ValueError):
+        return [
+            {
+                "code": "list_numbering_part_missing",
+                "severity": "warning",
+                "message": "the produced document has no numbering part for the synthesized list instance",
+                "num_id": spec.get("num_id"),
+            }
+            for spec in requested
+        ]
+    diagnostics: list[dict[str, Any]] = []
+    for spec in requested:
+        abstract = _build_list_only_abstract(numbering, spec)
+        if abstract is None:
+            diagnostics.append({
+                "code": "list_numbering_source_missing",
+                "severity": "warning",
+                "message": "the template did not provide the abstract definition the list-only instance is built from",
+                "abstract_num_id": spec.get("abstract_num_id"),
+                "source_abstract_num_id": spec.get("deeper_abstract_num_id"),
+            })
+            continue
+        abstracts = numbering.findall(qn("w:abstractNum"))
+        if abstracts:
+            abstracts[-1].addnext(abstract)
+        else:
+            numbering.insert(0, abstract)
+        instance = OxmlElement("w:num")
+        instance.set(qn("w:numId"), str(int(spec["num_id"])))
+        reference = OxmlElement("w:abstractNumId")
+        reference.set(qn("w:val"), str(int(spec["abstract_num_id"])))
+        instance.append(reference)
+        numbering.append(instance)
+    return diagnostics
 
 
 def _numbering_levels_by_num_id(doc: Any) -> dict[int, set[int]] | None:
@@ -446,7 +609,10 @@ def render(
     document = ast["document"]
     media = MediaEmbedder(document.get("resources", {}), resources, error_type=RenderError)
     styles = _profile_styles(normalized)
-    numbering_ids = normalized.get("presentation", {}).get("profile", {}).get("numbering_ids", {})
+    presentation_profile = normalized.get("presentation", {}).get("profile", {})
+    if not isinstance(presentation_profile, Mapping):
+        presentation_profile = {}
+    numbering_ids = presentation_profile.get("numbering_ids", {})
     if not isinstance(numbering_ids, Mapping):
         numbering_ids = {}
     selected_template = template_bundle.path if template_bundle is not None else template_path
@@ -454,6 +620,14 @@ def render(
         Document(io.BytesIO(template_bundle.template_bytes))
         if template_bundle is not None
         else Document(str(selected_template)) if selected_template else Document()
+    )
+    # The synthesized list-only numbering instance belongs to the produced
+    # document, so the template on disk is never modified.  It is materialized
+    # before the level catalog is read, so the clamp check already sees the
+    # levels the new instance defines.
+    numbering_diagnostics = materialize_list_numbering(
+        doc,
+        presentation_profile.get("synthesized_numbering"),
     )
     supported_numbering_levels = _numbering_levels_by_num_id(doc)
     body = doc._element.body
@@ -471,7 +645,7 @@ def render(
                 settings.append(update_fields)
             update_fields.set(qn("w:val"), "true")
     render_map: dict[str, dict[str, Any]] = {}
-    diagnostics: list[dict[str, Any]] = []
+    diagnostics: list[dict[str, Any]] = list(numbering_diagnostics)
     paragraph_counter = 0
     table_counter = 0
     initial_cell_paragraphs: set[Any] = set()
@@ -687,17 +861,22 @@ def render(
         if anchor_block is None:
             generated = next((item for item in normalized.get("generated_nodes", []) if item.get("node_id") == anchor_id), None)
             anchor_block = generated or {"block_type": "paragraph", "role": "body", "inline_content": []}
-        if presentation.get("marker_kind") == "ordered":
-            style_role = "list_letter" if presentation.get("target_level", 0) == 0 else "list_decimal"
-            list_style = styles.get(style_role, "List Number")
-        else:
-            style_role = "list_dash" if presentation.get("target_level", 0) == 0 else "list_bullet"
-            list_style = styles.get(style_role, "List Bullet")
-        target_level = presentation.get("target_level", 0)
+        marker_kind = presentation.get("marker_kind")
         try:
-            target_level = max(0, int(target_level))
+            target_level = max(0, int(presentation.get("target_level", 0)))
         except (TypeError, ValueError):
             target_level = 0
+        # The ListPolicy already resolved the WX style role for this item's render
+        # level, so the renderer consumes it instead of re-deriving it from the
+        # level.  The fallback keeps a hand-built normalized view (a caller that
+        # supplies its own presentation nodes) rendering as before.
+        style_role = presentation.get("style_role")
+        if not isinstance(style_role, str) or not style_role:
+            if marker_kind == "ordered":
+                style_role = "list_letter" if target_level == 0 else "list_decimal"
+            else:
+                style_role = "list_dash" if target_level == 0 else "list_bullet"
+        list_style = styles.get(style_role, "List Number" if marker_kind == "ordered" else "List Bullet")
         raw_num_id = numbering_ids.get(style_role)
         num_id: int | None = None
         if raw_num_id is not None:

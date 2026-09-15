@@ -368,6 +368,32 @@ def _native_transaction(context: ModuleExecutionContext) -> Any:
     return committed
 
 
+def _list_container_levels(context: ModuleExecutionContext) -> list[dict[str, Any]]:
+    """Return the ``semantic_level`` the list semantics layer published per list.
+
+    The list semantics module owns the logical level of every list relation, so
+    the normalizer consumes that stored level instead of re-deriving it from the
+    materialized container tree.  The artifact is absent from the review
+    re-resolution context, which falls back to the structural walk.
+    """
+
+    result = context.artifacts.get("list_semantics_result")
+    if not isinstance(result, Mapping):
+        return []
+    levels: dict[str, int] = {}
+    for item in result.get("items") or []:
+        if not isinstance(item, Mapping):
+            continue
+        list_id = item.get("list_id")
+        level = item.get("semantic_level")
+        if not isinstance(list_id, str) or not list_id:
+            continue
+        if not isinstance(level, int) or isinstance(level, bool) or level < 0:
+            continue
+        levels[list_id] = min(levels.get(list_id, level), level)
+    return [{"list_id": list_id, "semantic_level": level} for list_id, level in levels.items()]
+
+
 def _native_normalizer(context: ModuleExecutionContext) -> Mapping[str, Any]:
     from .normalization import normalize
     from .template import load_template_bundle
@@ -403,6 +429,7 @@ def _native_normalizer(context: ModuleExecutionContext) -> Mapping[str, Any]:
             context={
                 "transaction_id": committed.transaction_id,
                 "decision_set_version": decision_set["decision_set_version"],
+                "list_container_levels": _list_container_levels(context),
             },
         )
     restored_resources = options.get("restored_resource_bytes")

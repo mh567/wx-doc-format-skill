@@ -10,7 +10,8 @@ from xml.etree import ElementTree
 import pytest
 from docx import Document
 
-from modular_support import _append_numbering_definition, _set_numbering
+from modular_support import _append_numbering_definition, _set_numbering, simulate_saved_numbering
+from test_t08_multilevel_rendering import _abstract_of, _heading_numbering_instances
 
 ROOT = Path(__file__).resolve().parents[1]
 PYTHON = Path(sys.executable)
@@ -165,7 +166,9 @@ def _assert_render_plan(report: dict, source_ast: dict) -> None:
         "ordered",
         "ordered",
     ]
-    assert [item["target_level"] for item in presentations] == [0, 1, 0, 0]
+    # T08: the ListPolicy keeps the true semantic level instead of pinning every
+    # ordered item to level 0, so the nested ordered grandchild renders at level 2.
+    assert [item["target_level"] for item in presentations] == [0, 1, 2, 0]
     assert [item["target_ordinal"] for item in presentations] == [1, None, 2, 3]
     assert [item["restart"] for item in presentations] == [True, True, False, False]
 
@@ -193,19 +196,29 @@ def _assert_saved_numbering(output: Path) -> None:
         if style_id is not None and num_pr is not None:
             style_num_pr[style_id] = num_pr
     assert numbers
+    # T08: ordered items keep their real render level through ONE list-only
+    # numbering instance the produced document synthesizes.  Level 0 keeps the
+    # first-level letter form, the level-2 ordered grandchild is a real decimal
+    # level 2, and no item shares the heading outline (the pre-fix binding put
+    # the deeper items on the heading instance, so a following heading was
+    # renumbered and children never restarted).  The level-1 unordered middle
+    # item has no multi-level bullet instance, so it still clamps to ilvl 0
+    # (bullet).
     paragraph_levels = {
         "一级有序": "0",
         "二级无序": "0",
-        "三级有序": "0",
+        "三级有序": "2",
         "第二个一级": "0",
     }
     paragraph_formats = {
         "一级有序": "lowerLetter",
         "二级无序": "bullet",
-        "三级有序": "lowerLetter",
+        "三级有序": "decimal",
         "第二个一级": "lowerLetter",
     }
+    heading_instances, heading_abstracts = _heading_numbering_instances()
     seen_texts = []
+    ordered_num_ids = set()
     for paragraph in document.findall(".//w:p", NS):
         text = "".join(node.text or "" for node in paragraph.findall(".//w:t", NS))
         if text not in paragraph_levels:
@@ -231,7 +244,28 @@ def _assert_saved_numbering(output: Path) -> None:
         num_fmt = level.find("w:numFmt", NS)
         assert num_fmt is not None
         assert num_fmt.get(f"{{{W_NS}}}val") == paragraph_formats[text]
+        if paragraph_formats[text] != "bullet":
+            assert num_id_value not in heading_instances, (text, num_id_value, heading_instances)
+            assert abstract_id not in heading_abstracts, (text, abstract_id, heading_abstracts)
+            ordered_num_ids.add(num_id_value)
     assert seen_texts == list(paragraph_levels)
+    # Level 0 and the deeper ordered levels share one instance, so ``%1`` is the
+    # list's own first-level counter and a new top-level item restarts its
+    # children.
+    assert len(ordered_num_ids) == 1, ordered_num_ids
+    assert not (ordered_num_ids & heading_instances), (ordered_num_ids, heading_instances)
+    assert _abstract_of(output, next(iter(ordered_num_ids))) not in heading_abstracts, ordered_num_ids
+
+    # The visible numbering the saved XML produces: the nested unordered item
+    # clamped to its single-level bullet instance, the nested ordered item
+    # carries the list's own level-0 letter with its deeper counters, and the
+    # second top-level item keeps its own letter.
+    markers = {
+        row["text"]: row["marker"]
+        for row in simulate_saved_numbering(output)
+        if row.get("marker") is not None and row.get("text")
+    }
+    assert [markers[text] for text in paragraph_levels] == ["a)", "•", "a.1.1", "b)"], markers
 
 
 @pytest.mark.parametrize("source_kind", ["markdown", "docx"])
