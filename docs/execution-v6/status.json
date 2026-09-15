@@ -4,8 +4,8 @@
   "branch": "dev",
   "baseline_head": "fc851e1c0ed1eb68a0c3db9e4cdd9e4f4a3f4e3b",
   "implementation_started": true,
-  "current_task": "T06",
-  "next_task": "T06",
+  "current_task": "T07",
+  "next_task": "T07",
   "release_authorized": false,
   "recommended_order": [
     "T01",
@@ -114,9 +114,23 @@
     {
       "id": "T06",
       "subject": "编号边界(重启/拆分/复用/缺失)",
-      "status": "pending",
+      "status": "done",
       "depends_on": [
         "T03"
+      ],
+      "residuals": [
+        "review FIX round (reachable MAJOR, fixed): the depth>0 instance-change branch merged unconditionally, so a genuinely restarted sibling sub-list (different numId at the same depth, parent and family) was merged and all children flattened to one level; fixed by gating the depth>0 branch on the same continuation evidence and emitting a sequence_split boundary (test_t06_restarted_sibling_sublist_splits_instead_of_merging / _end_to_end)",
+        "review FIX round (fixed): a reuse split's two groups shared source_sequence_id / sequence / restart_scope, so the split existed only in group_boundary.kind; fixed additively with sequence_split_index, keeping the frozen docx-sequence-* spelling and the 2.1 contract (test_t06_sequence_split_groups_are_distinguishable)",
+        "same-instance restart in a contiguous new-numId run is only partially separated: the continuation variant (second instance restart_hint false) merges into one sequence and the ilvl>0 restart variant now splits (FIX round F1), while the ilvl=0 restart variant is still indistinguishable from a sub-list at the same format and indent and keeps the T04 nesting decision (T08/T10)",
+        "restart_scope is now the catalogue-derived abstract:<id> / num:<id> and agrees across the group, restart_expression and item relation, but the constraint-10 restart_scope boundary reset is not implemented: only lvl_restart / start_override are consumed (T08 if a policy-layer boundary is ever needed)",
+        "constraint 7 literal threshold semantics are not implemented: low-confidence numbering stays body text and never reaches the ambiguity report; only a low_confidence_list_marker info downgrade is recorded (T09)",
+        "LIST_END is still enumerated but not emitted; emitting it as a candidate for a boundary block that is already arbitrated OUTSIDE_LIST would create an equal-strength tie, so boundary termination stays expressed by protected blocks and OUTSIDE_LIST (T07)",
+        "cross-category ilvl=0 sub-list is still treated as a same-level kind switch (README constraint 9), because the shape is indistinguishable from the switch (T08)",
+        "a table between two list items is not attributed to any item, and a note after a run is a protected block that is not attributed either; the tail scan only covers content after a run's last item (T10)",
+        "non-zero multi-level output is still blocked on the product path: wx-default-v2 pins ordered target_level to 0 (T08)",
+        "list_parent_chain_mismatch compares the implied w:ilvl parent chain, not the per-level sequence values (T09)",
+        "pStyle level inheritance still inert end-to-end (T10)",
+        "num_id remains a dual source (top-level and numbering_definition_ref) (T10)"
       ]
     },
     {

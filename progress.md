@@ -1,5 +1,29 @@
 # 当前架构收敛进度
 
+## 2026-09-15 execution-v6 T06 编号边界（重启 / 拆分 / 复用 / 缺失）
+
+- 新增红灯测试文件 `tests/test_t06_numbering_boundary.py`（11 项），实施前 9 项失败：跨 numId 续接被误判为子表、同实例重启未拆序列、重启表达式缺少 `lvl_restart / start_override`、子表重启策略字段缺失、隐式运行尾部非段落单元的伪歧义。两项在基线即通过（起始值重置、损坏编号降级守卫），作为回归基线保留。
+- `lists.py` 新增 `_normalized_lvl_text`（`%n` 归一化保留可见标点）、`_sequence_continues_open_group`（跨实例续接判定：`restart_hint` 显式为 False 且 `num_fmt` 与归一化 `lvlText` 一致）、`_restart_policy_for_level`（`lvlRestart=0` 映射为 `continue_across_parents`，否则 `restart_with_parent`）。
+- 隐式列表段循环：一级块先判续接再决定是否走 `_resolve_sublist`（README 约束 8 的跨 numId 合并）；同开放实例再次出现且 `restart_hint` 为真时拆分新组并产出 `sequence_split` 边界（同 numId 复用的拆分）；`continuation_groups` 让 `continue_across_parents` 的子表跨父项继续计数。
+- 组字典新增 `restart_policy / merged_sequences` 与实例格式字段；`restart_expression` 扩展 `lvl_restart / start_override / restart_policy / merged_sequences`（README 约束 10 的输入与重启策略）；`_emit_group` 透传新字段。
+- 序列身份对外拼写固定为已发布的 `docx-sequence-{num_id}-{abstract_num_id}`（与 `parsers._numbering_sequence_id` 和 `lists.json_sequence_id` 一致，T01/T02 冻结测试断言该拼写）；内部比较键保留 T04 的 `num:{num_id}:abstract:{abstract_id}` 不对外暴露。
+- 残留修复：`_build_state_candidates` 对无归属的非段落单元不再发受保护 `OUTSIDE_LIST` 候选，消解与隐式运行尾部 `ITEM_CHILD_BLOCK` 的同强度平局（`test_t06_non_paragraph_unit_after_run_is_owned_without_ambiguity_tie`）。
+- 工作项 3 降级路径保持不变：`missing_numbering_definition` / `invalid_numbering_definition` 诊断与 `downgrades` 记录仍在，块保持正文且源内容保留，守卫测试覆盖。
+- 真实转换：跨 numId 续接样例（numId 1000 起 1、1001 起 3、1002 起 4）转换后 `list_semantics.list_count=1 / item_count=4`、`source_ast_hierarchy.list_count=1`，四项同一级 0 层序列。
+- 全量测试 `1212 passed, 0 failed`（`1201` 基线加 11 项）；`tests/test_t01_list_fixtures.py` 保持 11 passed 且未改动。
+- 已记录残留：同实例重启变体（第二个实例 `restart_hint=true`）与子表证据不可分，保持 T04 嵌套裁决（T08/T10）；`LIST_END` 未发出（T07）；跨类别 `ilvl=0` 子表（T08）；两个列表项之间的表格不归属（T10）；产品路径非零多级输出受阻（T08）；回读父链不含每级序号值（T09）；pStyle 层级继承（T10）；`num_id` 双源（T10）。
+- FIX 轮（独立审查发现一个可达 MAJOR 与若干夸大表述）：
+  - [F1，可达 MAJOR] `depth > 0` 的实例变更分支无条件合并，绕过续接证据；改为与 `depth == 0` 同一续接门控，不续接时产出 `sequence_split` 组边界。真实 DOCX 复现一个父项加两个 `ilvl=1` 子表（首个子表 `numId 2000`、重启兄弟子表 `numId 2001`）：修复前 `list_count=2` 且第二个组带 `merged_sequences=['docx-sequence-2001-2000']`、三个子项同层塌到一组；修复后 `list_count=3`、两条 `ilvl=1` 序列。
+  - [F2] 拆分只存在于 `group_boundary.kind`，两组身份相同；新增加性字段 `sequence_split_index`（同 `(sequence, kind, parent, depth)` 槽位内序号），`docx-sequence-*` 拼写与 2.1 合同不变。
+  - [F3] `evidence_lookup_restart_scope` 曾返回 `source_sequence_id`，组上 `restart_scope` 是 `sequence` 的重复；改为目录派生的 `abstract:<id>` / `num:<id>`，组、`restart_expression` 与逐项关系一致。约束 10 的 `restart_scope` 边界重置未实现，只有 `lvl_restart / start_override` 被消费（已如实记录）。
+  - [F4] `OUTSIDE_LIST` 候选的移除范围过宽；恢复非段落单元的受保护 `OUTSIDE_LIST` 候选，只在隐式运行尾部归属的块上抑制竞争候选。
+  - [F5] `_sequence_continues_open_group` 增加序号连续检查，原生门控独立成立；记录此前依赖 legacy `_physical_groups_continue` 的输入。
+  - [F6] 两项测试断言的是透传而非派生行为，重写并改名，避免测试名声称未覆盖的行为。
+  - [F7] 更正被证伪的文档表述：约束 4、5、7、8、10 行，验收对照两行，残留处置中约束 8 与 10 不再标「关闭」。
+- FIX 轮红灯：临时回退 F1 门控与 F2 字段后 `tests/test_t06_numbering_boundary.py` 为 `4 failed, 12 passed`。
+- FIX 轮全量测试 `1217 passed, 0 failed`（首轮 `1212` 加 FIX 轮 5 项并重写 2 项）；FIX 轮专项 16 passed；`tests/test_t01_list_fixtures.py` 保持 11 passed 且未改动。
+- 证据见 `docs/execution-v6/evidence/T06.md`，状态见 `docs/execution-v6/status.json`。未提交、未推送；预存 `_build/` 与 `paseo.json` 未处理。
+
 ## 2026-09-15 execution-v6 T05 列表项混合内容
 
 - 首轮新增红灯测试文件 `tests/test_t05_mixed_content.py`，实施前 5 项失败：隐式列表段后的正文段没有归属记录、`child_blocks` 为空、`owner_item_id` 查询返回 `None`。首轮实现后 6 项通过。
