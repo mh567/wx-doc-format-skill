@@ -133,7 +133,18 @@ def _validate_source_preconditions(ast: Mapping[str, Any], decision: Mapping[str
 def _order_stage_decisions(snapshot: StageSnapshot, decisions: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
     """Apply structure creation dependencies before edits in one stage batch."""
 
+    def _anchored(decision: Mapping[str, Any]) -> bool:
+        return isinstance((decision.get("value") or {}).get("anchor_node_id"), str)
+
     create_decisions = [decision for decision in decisions if decision.get("operation") == "create_node"]
+    # A ``create_node`` may carry ``anchor_node_id``: the created node is placed
+    # next to a sibling that is resolved when the decision is applied, instead of
+    # against the parent and index the proposal recorded.  Anchored creates run
+    # after the moves so the anchor has reached its final parent and the created
+    # node stays attached to it, which keeps a generated caption directly above
+    # its table even when that table is moved under a list item in the same batch.
+    anchored_creates = [decision for decision in create_decisions if _anchored(decision)]
+    plain_creates = [decision for decision in create_decisions if not _anchored(decision)]
     other_decisions = [decision for decision in decisions if decision.get("operation") != "create_node"]
     available = set(_node_map(snapshot.ast))
     # Children inserted under a parent that is itself created in this batch fill
@@ -146,7 +157,7 @@ def _order_stage_decisions(snapshot: StageSnapshot, decisions: Sequence[Mapping[
         str((decision.get("value") or {}).get("node_id"))
         for decision in create_decisions
     }
-    pending = list(enumerate(create_decisions))
+    pending = list(enumerate(plain_creates))
     ordered: list[Mapping[str, Any]] = []
     while pending:
         ready: list[tuple[int, Mapping[str, Any]]] = []
@@ -175,14 +186,26 @@ def _order_stage_decisions(snapshot: StageSnapshot, decisions: Sequence[Mapping[
             pending = [item for item in pending if item[0] != original_index]
     move_decisions = [decision for decision in other_decisions if decision.get("operation") == "move_node"]
     remaining_decisions = [decision for decision in other_decisions if decision.get("operation") != "move_node"]
+    # Same-parent moves keep their source order through ``source_index``: the
+    # ownership record a list materializer emits is in source order, so a table
+    # interleaved between two continuation paragraphs is placed in its source
+    # slot rather than by node id.  ``index`` stays the primary key for the moves
+    # that anchor against a fixed slot.
     move_decisions.sort(
         key=lambda decision: (
             str((decision.get("value") or {}).get("new_parent_id")),
             int((decision.get("value") or {}).get("index", 10**9)),
+            int((decision.get("value") or {}).get("source_index", 10**9)),
             str((decision.get("target_node_ids") or [""])[0]),
         )
     )
-    return [*ordered, *move_decisions, *remaining_decisions]
+    anchored_creates.sort(
+        key=lambda decision: (
+            str((decision.get("value") or {}).get("anchor_node_id")),
+            str((decision.get("value") or {}).get("node_id")),
+        )
+    )
+    return [*ordered, *move_decisions, *anchored_creates, *remaining_decisions]
 
 
 def _parent_map(ast: Mapping[str, Any]) -> dict[str, str]:
@@ -345,13 +368,28 @@ def _apply_update_association(ast: dict[str, Any], decision: Mapping[str, Any]) 
 def _apply_create_node(ast: dict[str, Any], decision: Mapping[str, Any]) -> None:
     value = decision.get("value") or {}
     node_id = value.get("node_id")
-    parent_id = value.get("parent_id")
     node = value.get("node")
-    if not isinstance(node_id, str) or not isinstance(parent_id, str) or not isinstance(node, Mapping):
-        raise TransactionConflict("create_node requires node_id, parent_id and node")
+    if not isinstance(node_id, str) or not isinstance(node, Mapping):
+        raise TransactionConflict("create_node requires node_id and node")
     document = ast["document"]
-    if node_id in _node_map(ast) or parent_id not in _node_map(ast):
-        raise TransactionConflict("create_node references a duplicate or unknown node")
+    if node_id in _node_map(ast):
+        raise TransactionConflict("create_node references a duplicate node")
+    anchor_id = value.get("anchor_node_id")
+    if isinstance(anchor_id, str):
+        # Resolve the slot against the anchor's current position so the created
+        # node stays adjacent to it even when the anchor moved in this batch.
+        parent_id = _parent_map(ast).get(anchor_id)
+        siblings = document["children"].get(parent_id, []) if isinstance(parent_id, str) else []
+        if not isinstance(parent_id, str) or anchor_id not in siblings:
+            raise TransactionConflict("create_node anchor is unknown")
+        index = siblings.index(anchor_id) + (1 if value.get("anchor_position") == "after" else 0)
+    else:
+        parent_id = value.get("parent_id")
+        if not isinstance(parent_id, str):
+            raise TransactionConflict("create_node requires parent_id")
+        if parent_id not in _node_map(ast):
+            raise TransactionConflict("create_node references an unknown node")
+        index = value.get("index")
     if node.get("block_type"):
         document["blocks"][node_id] = copy.deepcopy(dict(node))
     elif node.get("kind"):
@@ -360,7 +398,6 @@ def _apply_create_node(ast: dict[str, Any], decision: Mapping[str, Any]) -> None
         raise TransactionConflict("create_node node requires block_type or kind")
     document["children"].setdefault(node_id, [])
     siblings = document["children"].setdefault(parent_id, [])
-    index = value.get("index")
     if isinstance(index, int) and not isinstance(index, bool):
         siblings.insert(max(0, min(index, len(siblings))), node_id)
     else:
@@ -426,12 +463,26 @@ def _applied_create_node(
     nodes = {**document["blocks"], **document["containers"]}
     value = decision.get("value") or {}
     node_id = value.get("node_id")
+    if not isinstance(node_id, str) or node_id not in nodes:
+        return False
+    if nodes[node_id] != value.get("node"):
+        return False
+    anchor_id = value.get("anchor_node_id")
+    if isinstance(anchor_id, str):
+        parent_id = _parent_map(ast).get(anchor_id)
+        if not isinstance(parent_id, str):
+            return False
+        siblings = document["children"].get(parent_id, [])
+        if node_id not in siblings or anchor_id not in siblings:
+            return False
+        # A node anchored "before" is inserted AT the anchor index, which pushes
+        # the anchor one slot later; anchored "after" is inserted at the slot
+        # following the anchor.
+        expected = siblings.index(anchor_id) + (1 if value.get("anchor_position") == "after" else -1)
+        return siblings.index(node_id) == expected
     parent_id = value.get("parent_id")
     return (
-        isinstance(node_id, str)
-        and isinstance(parent_id, str)
-        and node_id in nodes
-        and nodes[node_id] == value.get("node")
+        isinstance(parent_id, str)
         and node_id in document["children"].get(parent_id, [])
     )
 

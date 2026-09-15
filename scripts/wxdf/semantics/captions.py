@@ -105,7 +105,15 @@ def audit_caption_placement(ast: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _caption_block(parent_id: str, index: int, caption_id: str, target_id: str, caption_type: str) -> dict[str, Any]:
-    """Build the generated caption node for one eligible target."""
+    """Build the generated caption node for one eligible target.
+
+    ``parent_id`` / ``index`` record where the target sits in the revision the
+    candidate reads.  The proposal also carries ``anchor_node_id`` (the target)
+    and ``anchor_position``, so the transaction resolves the caption's final
+    parent and slot against the target's position when it applies the decision.
+    A target that is moved in the same batch (a data table owned by a list item)
+    therefore still gets its caption directly above it.
+    """
 
     return {
         "operation": "create_node",
@@ -114,6 +122,8 @@ def _caption_block(parent_id: str, index: int, caption_id: str, target_id: str, 
             "node_id": caption_id,
             "parent_id": parent_id,
             "index": index,
+            "anchor_node_id": target_id,
+            "anchor_position": "after" if caption_type == "figure" else "before",
             "node": {
                 "block_type": "paragraph",
                 "role": "caption",

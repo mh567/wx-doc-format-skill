@@ -241,6 +241,54 @@ def materialize_list_semantics(
     for relation in list_result.get("items", []):
         item_records.setdefault(str(relation["list_id"]), []).append(relation)
 
+    # Content ownership of a list item, keyed by the source item id.  A
+    # continuation paragraph is recorded in ``continuations`` and a non-paragraph
+    # content block (table / image / quote / code / note) in ``child_blocks``.
+    # ``owned_content`` carries the same records in source order, so a table that
+    # is interleaved between two continuation paragraphs keeps its source slot
+    # instead of being concatenated after every paragraph.  DOCX-derived items are
+    # source paragraph units, so they carry no source children of their own: the
+    # materializer nests their owned content under the item instead of leaving it
+    # a sibling in the parent.  This is the same seam for implicit and explicit
+    # items, so ``content_blocks`` / ``child_lists`` describe one ownership model.
+    owned_entries: list[Mapping[str, Any]] = list(list_result.get("owned_content") or [])
+    if not owned_entries:
+        # Fall back to the filtered views when a caller supplies the older shape
+        # without the ordered record.
+        for entry in list_result.get("continuations", []):
+            owned_entries.append({**dict(entry), "state": "ITEM_CONTINUATION"})
+        for entry in list_result.get("child_blocks", []):
+            owned_entries.append({**dict(entry), "state": "ITEM_CHILD_BLOCK"})
+    owned_ordered: dict[str, list[str]] = {}
+    for entry in owned_entries:
+        owner_source_id = str(entry.get("owner_item_id") or "")
+        node_id = str(entry.get("node_id") or "")
+        if owner_source_id and node_id:
+            owned_ordered.setdefault(owner_source_id, []).append(node_id)
+    # An owned paragraph may carry inline images that were materialized as
+    # sibling ``image`` nodes.  They belong to the same item as the paragraph, so
+    # the ownership record and the structural move expand to include them.
+    materialized_images: dict[str, list[str]] = {}
+    for node_id, block in blocks.items():
+        if not isinstance(block, Mapping) or block.get("block_type") != "image":
+            continue
+        basis = block.get("generation_basis") or []
+        if basis and isinstance(basis[0], str):
+            materialized_images.setdefault(str(basis[0]), []).append(node_id)
+
+    def expand_owned(node_ids: list[str]) -> list[str]:
+        expanded: list[str] = []
+        for node_id in node_ids:
+            expanded.append(node_id)
+            expanded.extend(materialized_images.get(node_id, []))
+        return expanded
+
+    nested_lists_for_item: dict[str, list[str]] = {}
+    for list_id, spec in list_specs.items():
+        parent_item_id = spec.get("parent_item_id")
+        if parent_item_id is not None:
+            nested_lists_for_item.setdefault(str(parent_item_id), []).append(list_id)
+
     item_map: dict[str, str] = {}
     for relation in list_result.get("items", []):
         source_item_id = str(relation["item_id"])
@@ -357,7 +405,9 @@ def materialize_list_semantics(
                 # content_blocks is the ordered list of direct non-list children
                 # that belong to this item; child_lists holds nested list
                 # container ids discovered under the item in the source tree.
-                source_children = facts["children"].get(source_item_id, [])
+                # The AST children are read (not the raw facts) so materialized
+                # sibling image nodes are included.
+                source_children = children.get(source_item_id) or facts["children"].get(source_item_id, [])
                 content_blocks: list[str] = []
                 child_lists: list[str] = []
                 for child_id in source_children:
@@ -366,10 +416,23 @@ def materialize_list_semantics(
                         child_kind = str(facts["units"][child_id].get("kind") or "")
                     elif child_id in facts["containers"]:
                         child_kind = str(facts["containers"][child_id].get("kind") or "")
+                    elif child_id in blocks:
+                        child_kind = str(blocks[child_id].get("block_type") or "")
                     if child_kind == "list":
                         child_lists.append(child_id)
                     else:
                         content_blocks.append(child_id)
+                if not source_children:
+                    # A DOCX-derived item is a source paragraph unit with no
+                    # source children: its own paragraph plus the content the
+                    # list semantics attributed to it, in the source order the
+                    # ownership record preserves, and the sub-lists that hang
+                    # under the item, form the ownership record.
+                    content_blocks = expand_owned([
+                        source_item_id,
+                        *owned_ordered.get(source_item_id, []),
+                    ])
+                    child_lists = list(nested_lists_for_item.get(source_item_id, []))
                 item_node["content_blocks"] = content_blocks
                 item_node["child_lists"] = child_lists
                 candidates.append({
@@ -451,6 +514,68 @@ def materialize_list_semantics(
             "rationale": "continuation association derived from list item ownership",
         })
         continuation_tails[source_item_id] = target_id
+
+    # Non-paragraph content blocks, and continuation paragraphs of DOCX-derived
+    # items, are source siblings of their item.  Move them under the item so the
+    # materialized AST expresses the ownership ``content_blocks`` records: the
+    # table / image / quote / code / note and the tail continuation "hang under
+    # the right item" instead of staying document-root siblings.  A block that is
+    # already a child of its item (an explicit list_item container's content) is
+    # left in place.
+    item_list_id = {
+        str(relation["item_id"]): str(relation["list_id"])
+        for relation in list_result.get("items", [])
+        if relation.get("item_id") and relation.get("list_id")
+    }
+    # The owned content of each item in source order, with the sibling image nodes
+    # of an owned paragraph folded in next to it.  Its position is the
+    # ``source_index`` the transaction uses to apply the same-parent moves in
+    # source order instead of by node id.
+    owned_expanded: dict[str, list[str]] = {}
+    for entry in owned_entries:
+        owner_source_id = str(entry.get("owner_item_id") or "")
+        target_id = str(entry.get("node_id") or "")
+        if not owner_source_id or not target_id:
+            continue
+        owned_expanded.setdefault(owner_source_id, []).extend(expand_owned([target_id]))
+    for entry in owned_entries:
+        owner_source_id = str(entry.get("owner_item_id") or "")
+        target_id = str(entry.get("node_id") or "")
+        if not owner_source_id or not target_id:
+            continue
+        owner_native = item_map.get(owner_source_id, owner_source_id)
+        positions = {
+            node_id: position
+            for position, node_id in enumerate(owned_expanded.get(owner_source_id, []))
+        }
+        for content_id in expand_owned([target_id]):
+            if original_parents.get(content_id) == owner_native:
+                continue
+            if content_id not in nodes:
+                continue
+            ref = source_ref(content_id)
+            candidates.append({
+                "candidate_id": f"list-item-content-{owner_native}-{content_id}",
+                "module_id": "list_semantics",
+                "module_version": "1.0",
+                "target_source_refs": [ref] if ref is not None else [],
+                "target_node_ids": [content_id],
+                "proposal": {
+                    "operation": "move_node",
+                    "property_scope": ["children"],
+                    "value": {
+                        "new_parent_id": owner_native,
+                        "list_id": item_list_id.get(owner_source_id),
+                        "parent_item_id": owner_native,
+                        "source_index": positions.get(content_id, 0),
+                    },
+                },
+                "positive_evidence": [{"kind": "structural", "source": "source_facts_list_item_content"}],
+                "negative_evidence": [],
+                "scope": {"stages": ["relation"]},
+                "constraints": [{"kind": "preserve_list_owner", "owner_item_id": owner_native}],
+                "rationale": "list item content hangs under its owning item in source order",
+            })
 
     for relation in list_result.get("items", []):
         if not relation.get("generated_anchor_required"):

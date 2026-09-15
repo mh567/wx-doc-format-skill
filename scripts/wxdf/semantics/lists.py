@@ -327,9 +327,14 @@ def _emit_group(
                     ):
                         continue
                 if not continuation_evidence.get("marker_kind"):
-                    result["continuations"].append(
-                        {"node_id": continuation_id, "owner_item_id": item_id, "list_id": list_id, "scope_id": scope_id}
-                    )
+                    entry = {"node_id": continuation_id, "owner_item_id": item_id, "list_id": list_id, "scope_id": scope_id}
+                    result["continuations"].append(entry)
+                    # ``owned_content`` keeps one ownership record per item in
+                    # source order, mixing continuation paragraphs and
+                    # non-paragraph content.  ``continuations`` / ``child_blocks``
+                    # stay filtered views over it for the consumers that read
+                    # one state at a time.
+                    result.setdefault("owned_content", []).append({**entry, "state": "ITEM_CONTINUATION"})
 
 
 LIST_STATE_ENUM = (
@@ -731,6 +736,87 @@ def _implicit_list_runs_for_parent(
     return runs
 
 
+def _tail_content_owner(
+    run: list[str],
+    item_levels: Mapping[str, Any],
+) -> str | None:
+    """Return the item that owns a run's trailing content.
+
+    A body block that follows a list run belongs to the item at the block's own
+    level: for a plain body paragraph that is the run's level-0 item (README
+    constraint 5 keeps body content inside the list instead of terminating it).
+    The last matching item wins, so a tail paragraph after ``[item][body]`` is a
+    continuation of that item and a tail after ``[parent][child][body]`` is a
+    continuation of the parent, not of the deepest child.
+    """
+
+    owner: str | None = None
+    for item_id in run:
+        if item_levels.get(item_id) == 0:
+            owner = item_id
+    if owner is None and run:
+        owner = run[-1]
+    return owner
+
+
+def _implicit_tail_content(
+    facts: Mapping[str, Any],
+    parent_id: str,
+    run: list[str],
+    item_levels: Mapping[str, Any],
+    decided_states: Mapping[str, str],
+) -> tuple[str | None, list[tuple[str, str]]]:
+    """Return ``(owner_item_id, [(node_id, state)])`` for a run's tail blocks.
+
+    The tail is the contiguous block of non-list children that follows an
+    implicit list run inside the same parent, up to the next list item, a list
+    container, a heading or other protected block, or the end of the parent's
+    children.  A paragraph is an ``ITEM_CONTINUATION``; any other block (table /
+    image / quote / code / note) is an ``ITEM_CHILD_BLOCK``.  The scan stops at a
+    protected or low-confidence block, so a heading or an unconfirmed numbering
+    marker still ends the list instead of being absorbed (README constraint 6).
+    """
+
+    children = facts["children"].get(parent_id, [])
+    run_set = {str(item_id) for item_id in run}
+    last_run_index = -1
+    for index, child_id in enumerate(children):
+        if str(child_id) in run_set:
+            last_run_index = index
+    if last_run_index < 0:
+        return None, []
+    owner = _tail_content_owner(run, item_levels)
+    tails: list[tuple[str, str]] = []
+    for child_id in children[last_run_index + 1:]:
+        child_key = str(child_id)
+        if child_id in facts["units"]:
+            kind = str(facts["units"][child_id].get("kind") or "")
+            if decided_states.get(child_key) in {"LIST_ITEM", "NESTED_LIST_ITEM"}:
+                break
+            if kind != "paragraph":
+                # A code block or other non-paragraph unit is content of the item.
+                tails.append((child_key, "ITEM_CHILD_BLOCK"))
+                continue
+            evidence = facts["evidence"].get(child_id, {})
+            if evidence.get("marker_kind"):
+                # A block with its own marker is a candidate list item, not the
+                # content of the preceding one.
+                break
+            if _numbering_is_low_confidence(evidence):
+                break
+            protected, _reason = _is_protected(facts["units"][child_id], evidence)
+            if protected:
+                break
+            state = "ITEM_CONTINUATION"
+        else:
+            kind = str(facts["containers"].get(child_id, {}).get("kind") or "")
+            if kind not in {"table", "quote"}:
+                break
+            state = "ITEM_CHILD_BLOCK"
+        tails.append((child_key, state))
+    return owner, tails
+
+
 def _numbering_sequence(evidence: Mapping[str, Any]) -> str | None:
     """Return a stable identity for the numbering instance a block belongs to.
 
@@ -1010,6 +1096,8 @@ def analyze_lists(facts: Mapping[str, Any], *, context: Mapping[str, Any] | None
         "lists": [],
         "items": [],
         "continuations": [],
+        "child_blocks": [],
+        "owned_content": [],
         "candidates": [],
         "diagnostics": [],
         "downgrades": [],
@@ -1042,15 +1130,11 @@ def analyze_lists(facts: Mapping[str, Any], *, context: Mapping[str, Any] | None
             }
         )
 
+    # Arbitrate the block states first so the grouping materializes the verdict.
+    # A second arbitration pass below adds the tail-content states of implicit
+    # runs; it never changes a list-item decision because tail content is never a
+    # list item.
     state_decisions, state_unresolved = _arbitrate_state_candidates(state_candidates)
-    constraint_findings = _validate_state_constraints(state_decisions, facts)
-    result["state_decisions"] = state_decisions
-    result["state_unresolved"] = state_unresolved
-    result["state_constraint_findings"] = constraint_findings
-    # The constraint findings are warnings on ``diagnostics`` so they set
-    # ``list_semantics.status`` to ``unresolved`` and reach the publisher's
-    # fatal/blocking set, instead of staying an unobservable internal list.
-    result["diagnostics"].extend(copy.deepcopy(constraint_findings))
     decided_states = {
         str(decision["target_node_ids"][0]): str((decision.get("value") or {}).get("state"))
         for decision in state_decisions
@@ -1290,6 +1374,65 @@ def analyze_lists(facts: Mapping[str, Any], *, context: Mapping[str, Any] | None
                     restart_expression=restart_expression,
                     decided_states=decided_states,
                 )
+
+    # Tail content of implicit runs.  A body paragraph, table, image, quote,
+    # code or note block that follows an implicit list run is content of a list
+    # item instead of an independent body block (README constraint 5).  The
+    # ownership is a candidate state offered to the same Resolver, so the block
+    # carries an explicit ITEM_CONTINUATION / ITEM_CHILD_BLOCK decision and the
+    # materializer reads one ownership seam for both implicit and explicit items.
+    item_by_id = {str(item["item_id"]): item for item in result["items"]}
+    item_levels = {item_id: item.get("semantic_level") for item_id, item in item_by_id.items()}
+    tail_candidates: list[dict[str, Any]] = []
+    for parent_id in sorted(facts["children"]):
+        if _node_kind(facts, parent_id) in {"list", "list_item"}:
+            continue
+        for run in _implicit_list_runs_for_parent(facts, parent_id, decided_states):
+            owner, tails = _implicit_tail_content(facts, parent_id, run, item_levels, decided_states)
+            if owner is None or owner not in item_by_id:
+                continue
+            owner_relation = item_by_id[owner]
+            for node_id, state in tails:
+                tail_candidates.append(
+                    _state_candidate(
+                        node_id,
+                        state,
+                        list_id=owner_relation["list_id"],
+                        parent_item_id=owner,
+                        positive_evidence=[{"kind": "structure", "source": "implicit_list_tail_content"}],
+                    )
+                )
+                entry = {
+                    "node_id": node_id,
+                    "owner_item_id": owner,
+                    "list_id": owner_relation["list_id"],
+                    "scope_id": owner_relation["scope_id"],
+                }
+                result.setdefault("owned_content", []).append({**entry, "state": state})
+                if state == "ITEM_CONTINUATION":
+                    result["continuations"].append(entry)
+                else:
+                    result["child_blocks"].append(entry)
+
+    if tail_candidates:
+        state_candidates = [*state_candidates, *tail_candidates]
+        _validate_state_enum(state_candidates)
+        state_decisions, state_unresolved = _arbitrate_state_candidates(state_candidates)
+        decided_states = {
+            str(decision["target_node_ids"][0]): str((decision.get("value") or {}).get("state"))
+            for decision in state_decisions
+            if decision.get("target_node_ids")
+        }
+
+    constraint_findings = _validate_state_constraints(state_decisions, facts)
+    result["state_candidates"] = state_candidates
+    result["state_decisions"] = state_decisions
+    result["state_unresolved"] = state_unresolved
+    result["state_constraint_findings"] = constraint_findings
+    # The constraint findings are warnings on ``diagnostics`` so they set
+    # ``list_semantics.status`` to ``unresolved`` and reach the publisher's
+    # fatal/blocking set, instead of staying an unobservable internal list.
+    result["diagnostics"].extend(copy.deepcopy(constraint_findings))
 
     relation_by_id = {item["item_id"]: item for item in result["items"]}
     counters: dict[str, int] = {}

@@ -75,6 +75,7 @@ tests/*
 !tests/test_t02_numbering_catalog.py
 !tests/test_t03_single_level_lists.py
 !tests/test_t04_nesting.py
+!tests/test_t05_mixed_content.py
 !tests/test_fu3_convergence.py
 !tests/test_t09_compiled_acceptance.py
 !tests/modular_support.py

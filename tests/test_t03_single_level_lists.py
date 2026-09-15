@@ -252,8 +252,9 @@ def test_t03_state_candidates_encode_competing_states_from_raw_evidence() -> Non
     # A marker-bearing block offers LIST_ITEM and a lower OUTSIDE_LIST
     # alternative, so the Resolver has to arbitrate rather than re-confirm.
     assert {candidate["state"] for candidate in by_node["i1"]} == {"LIST_ITEM", "OUTSIDE_LIST"}
-    # A plain body paragraph has no competing alternative.
-    assert {candidate["state"] for candidate in by_node["body"]} == {"OUTSIDE_LIST"}
+    # A body paragraph that follows a list run is a continuation candidate (T05),
+    # so it offers OUTSIDE_LIST and ITEM_CONTINUATION and the Resolver decides.
+    assert {candidate["state"] for candidate in by_node["body"]} == {"OUTSIDE_LIST", "ITEM_CONTINUATION"}
 
     decided = {
         decision["target_node_ids"][0]: decision["value"]["state"]
@@ -263,7 +264,7 @@ def test_t03_state_candidates_encode_competing_states_from_raw_evidence() -> Non
         "h1": "OUTSIDE_LIST",
         "i1": "LIST_ITEM",
         "i2": "LIST_ITEM",
-        "body": "OUTSIDE_LIST",
+        "body": "ITEM_CONTINUATION",
     }, decided
 
 
