@@ -1,5 +1,21 @@
 # 当前架构收敛进度
 
+## 2026-09-15 execution-v6 T04 多层嵌套与父项裁决
+
+- 新增红灯测试文件 `tests/test_t04_nesting.py`（10 项），实施前 9 项失败：新 numId 在 ilvl=0 未识别为子级、显式列表容器不做约束校验、子项先于父项无显式诊断、回读审计无父链比对、候选带未被消费的 `score`。
+- `lists.py` 新增 `_numbering_sequence`（numId+abstractNumId 实例身份）、`_resolve_sublist`（新实例在 ilvl=0 的嵌套裁决，含同类别约束）、`_structural_list_level`（祖先 `list` 容器计数）；隐式列表段循环改为先取声明层级、再按实例身份判定子表层级与父项、再走孤儿与跳级降级、最后对运行起始孤儿做滞后父项检测。
+- 冻结红灯转绿：`test_t01_sublist_new_numid_ilvl0` 与聚合用例 `test_t01_failing_samples_satisfy_expected_semantics` 由 2 failed 转为 10 passed，冻结样例文件未改动。
+- 工作项 3：运行起始的深层孤儿追加 `late_list_parent`（warning，含 `declared_level` 与 `parent_appears_after`），不再静默挂到最近项。
+- 承 T03 残留 9：`_validate_state_constraints` 新增显式 `list` 容器的约束 3 校验；约束 4 对结构层级不可达已在 docstring 说明。
+- 承 T03 残留 6：`audit_list_readback` 改用 `_expected_list_tree` 与 `_level_parent_chain` 追加父链比对，不一致产出 `list_parent_chain_mismatch`，与 `list_readback_mismatch` 一同并入 `saved_output_audit` 与发布门禁。
+- 承 T03 残留 7：删除 `_state_candidate.score` 与每块最高分预过滤，候选完全由 Resolver 的证据类别裁决。
+- `transaction._order_stage_decisions` 修正结构创建顺序：同批次新建父节点的子创建按升序 index 落地（空子列表填充即源顺序），既有父节点保持降序（题注锚点依赖尾部回插）。复审更正口径：该修正不是嵌套样例顺序的前提（嵌套容器只有两个子项，升降序一致），实际修复的是三项以上新建容器（如平坦多项 DOCX 列表）的源顺序；护栏 `test_t04_created_container_preserves_source_order_for_three_or_more_items` 在旧排序下失败、新排序下通过。该文件不在 README 架构定案清单，已声明并记录为独立工单候选。
+- 真实转换：三层有序加交叉嵌套 Markdown 与三个新 numId 的 DOCX 样例树形正确（深度逐层递增），`status=completed`、`saved_output_audit.passed=true`、无列表诊断。
+- 全量测试 `1186 passed, 0 failed`，基线为 `2 failed, 1172 passed`；T01 冻结库由 `2 failed, 9 passed` 转为 `11 passed`。
+- 复审补充护栏：三层纯无序嵌套端到端、三项以上新建容器源顺序回归（后者在旧排序下实测失败）。
+- 已记录残留：同类别相邻新 numId 的嵌套判定仍为启发式（T06）、结构创建排序修正缺少工单归属（T10）、pStyle 层级继承仍未端到端生效（T10）、产品路径非零多级输出受阻于有序钉死规则（T08）、跨类别 ilvl=0 子表与隐式段尾部续接（T05）、`lvlRestart` 与 `LIST_END`（T06/T07）、`num_id` 双源与显式容器声明层级（T10/T09）、歧义报告可达性（T05）、渲染夹层口径（T08）、父链比对不含每级序号值（T09）。
+- 证据见 `docs/execution-v6/evidence/T04.md`，状态见 `docs/execution-v6/status.json`。未提交、未推送；预存 `_build/` 与 `paseo.json` 未处理。
+
 ## 2026-09-15 execution-v6 T03 第一刀：单级有序/无序列表端到端
 
 - 新增红灯测试文件 `tests/test_t03_single_level_lists.py`，实施前多项失败：候选状态编码缺失、Resolver 未裁决状态集合、回读审计函数缺失、渲染器从不写显式编号、约束 3/4 无执行者。

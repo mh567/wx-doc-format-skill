@@ -4,8 +4,8 @@
   "branch": "dev",
   "baseline_head": "fc851e1c0ed1eb68a0c3db9e4cdd9e4f4a3f4e3b",
   "implementation_started": true,
-  "current_task": "T04",
-  "next_task": "T04",
+  "current_task": "T05",
+  "next_task": "T05",
   "release_authorized": false,
   "recommended_order": [
     "T01",
@@ -63,9 +63,24 @@
     {
       "id": "T04",
       "subject": "多层嵌套与父项裁决",
-      "status": "pending",
+      "status": "done",
       "depends_on": [
         "T03"
+      ],
+      "residuals": [
+        "pStyle level inheritance still inert end-to-end; T04 nested on declared ilvl=0 plus numId identity, so effective_ilvl still does not drive grouping (T10)",
+        "non-zero multi-level output is blocked on the product path: wx-default-v2 pins ordered target_level to 0 in normalization, while the template does provide nine-level instances; real multi-level rendering belongs to T08 (T08)",
+        "cross-category ilvl=0 sub-list is treated as a same-level kind switch (README constraint 9) and is not auto-nested, because the evidence is indistinguishable from a same-level switch (T05/T08)",
+        "implicit list runs still have no tail continuation; ITEM_CONTINUATION and ITEM_CHILD_BLOCK exist only inside explicit list_item containers (T05)",
+        "lvl_restart is catalogued and carried but not consumed; README constraint 10 belongs to T06 (T06)",
+        "LIST_END is enumerated but not emitted; boundary termination is expressed via protected blocks and OUTSIDE_LIST (T06/T07)",
+        "num_id remains a dual source (top-level and numbering_definition_ref) (T10)",
+        "explicit list containers validate structural parenting (constraint 3) only; declared effective_ilvl is not compared with the structural level (T09/T10)",
+        "the ambiguity report is still reachable only from synthetic evidence; competing parent candidates produced by nesting do not reach it yet (T05)",
+        "list_render_level_clamped is exposed through module evidence rather than blocking publication; real multi-level rendering belongs to T08 (T08)",
+        "list_parent_chain_mismatch compares the implied w:ilvl parent chain, not per-level sequence values (T09)",
+        "same-category contiguous new-numId blocks are treated as sub-lists by heuristic (open level-0 group + different instance + same kind); [numId1 ordered][numId2 ordered] is wrongly nested and chained instances cascade 0/1/2, since the evidence cannot be separated from a restart (T06)",
+        "the transaction._order_stage_decisions ordering fix is correct and now guarded by test_t04_created_container_preserves_source_order_for_three_or_more_items, but scripts/wxdf/transaction.py is outside T04's declared scope and should get its own ticket or be folded into T10"
       ]
     },
     {
