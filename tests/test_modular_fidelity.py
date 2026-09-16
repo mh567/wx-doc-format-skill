@@ -276,6 +276,33 @@ def test_paragraph_presentation_carries_only_the_alignment_a_style_cannot() -> N
         "document": {
             "blocks": {
                 "image": {"block_type": "image", "resource_id": "r"},
+                "image_carrier": {
+                    "block_type": "paragraph",
+                    "role": "body",
+                    "inline_content": [{"kind": "image", "resource_id": "r", "alt_text": ""}],
+                },
+                "image_with_text": {
+                    "block_type": "paragraph",
+                    "role": "body",
+                    "inline_content": [
+                        {"kind": "text", "text": "见图", "marks": []},
+                        {"kind": "image", "resource_id": "r", "alt_text": ""},
+                    ],
+                },
+                "heading_with_image": {
+                    "block_type": "paragraph",
+                    "role": "heading",
+                    "level": 2,
+                    "inline_content": [{"kind": "image", "resource_id": "r", "alt_text": ""}],
+                },
+                "layout_table": {"block_type": "table", "table_type": "layout"},
+                "layout_row": {"kind": "table_row"},
+                "layout_cell": {"kind": "table_cell"},
+                "layout_cell_image": {
+                    "block_type": "paragraph",
+                    "role": "body",
+                    "inline_content": [{"kind": "image", "resource_id": "r", "alt_text": ""}],
+                },
                 "formula_number": {
                     "block_type": "paragraph",
                     "role": "body",
@@ -297,18 +324,103 @@ def test_paragraph_presentation_carries_only_the_alignment_a_style_cannot() -> N
                     "inline_content": [{"kind": "text", "text": "标题", "marks": []}],
                     "source_paragraph_format": {"alignment": "right"},
                 },
-            }
+            },
+            "containers": {
+                "layout_row": {"kind": "table_row"},
+                "layout_cell": {"kind": "table_cell"},
+            },
+            "children": {
+                "layout_table": ["layout_row"],
+                "layout_row": ["layout_cell"],
+                "layout_cell": ["layout_cell_image"],
+            },
         }
     }
 
     presentation = _paragraph_presentation(ast)
 
-    # Only the image paragraph and the formula number own an alignment: any other
-    # alignment belongs to the template style.
+    # Only the image node, the paragraph whose content is an inline image and the
+    # formula number own an alignment: a paragraph that mixes text with an image,
+    # a heading and a table cell keep the template style or the table contract,
+    # and any other alignment belongs to the template style.
     assert presentation == {
         "image": {"alignment": "center"},
+        "image_carrier": {"alignment": "center"},
         "formula_number": {"alignment": "right"},
     }
+
+
+def test_an_inline_image_paragraph_is_centred_without_a_style(tmp_path: Path) -> None:
+    """The paragraph that draws an inline image keeps the template's image form.
+
+    The template's own image paragraphs carry no style and ``jc=center``, so the
+    delivered document reproduces that: the paragraph that draws the image has no
+    ``pStyle`` and its only paragraph property is the centred alignment.  Reading
+    the alignment off the materialized image node instead would leave the
+    paragraph that actually draws the image uncentred, because the renderer skips
+    that node while the token stays in the paragraph.
+    """
+
+    from wxdf.rendering import render
+    from wxdf.semantics.source_ast import build_source_ast
+
+    source = tmp_path / "image.docx"
+    image = tmp_path / "pixel.png"
+    image.write_bytes(
+        bytes.fromhex(
+            "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
+            "0000000d49444154789c6360f8cfc000000301010018dd8db10000000049454e44ae426082"
+        )
+    )
+    document = Document()
+    paragraph = document.add_paragraph()
+    paragraph.add_run().add_picture(str(image))
+    document.save(source)
+
+    store = SourceStore()
+    store.open_source(source)
+    facts = parse(source, {"source_store": store})
+    ast = build_source_ast(facts)
+    carrier_id = next(
+        node_id
+        for node_id, block in ast["document"]["blocks"].items()
+        if block.get("block_type") == "paragraph"
+        and any(item.get("kind") == "image" for item in block.get("inline_content", []))
+    )
+    assert any(
+        block.get("block_type") == "image" and block.get("materialization_mode") != "standalone"
+        for block in ast["document"]["blocks"].values()
+    )
+
+    template_bundle = load_template_bundle(TEMPLATE)
+    normalized = normalize(ast, template_bundle.profile, strategy="legacy")
+    output = tmp_path / "image-output.docx"
+    result = render(
+        normalized,
+        output,
+        template_bundle=template_bundle,
+        resources={
+            block["resource_id"]: store.resolve(block["source_ref"])
+            for block in ast["document"]["blocks"].values()
+            if block.get("block_type") == "image"
+        },
+    )
+
+    rendered = Document(output)
+    image_paragraph = next(
+        paragraph
+        for paragraph in rendered.paragraphs
+        if any(element.tag.rsplit("}", 1)[-1] == "blip" for element in paragraph._p.iter())
+    )
+    properties = image_paragraph._p.find(qn("w:pPr"))
+    assert properties is not None
+    # No style and no other property: the centred alignment is the whole of the
+    # image paragraph's presentation, which is decision 2's contract.  A
+    # ``pStyle`` or any other paragraph property would show up in this list.
+    assert [element.tag.rsplit("}", 1)[-1] for element in properties] == ["jc"]
+    assert [element.get(qn("w:val")) for element in properties.iter(qn("w:jc"))] == ["center"]
+    assert carrier_id in result["render_map"]
+    assert len(result["render_map"][carrier_id]["image_resources"]) == 1
 
 
 def test_table_number_column_is_the_table_own_numbering() -> None:

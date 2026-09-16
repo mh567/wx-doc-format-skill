@@ -204,16 +204,81 @@ def _reading_order(ast: Mapping[str, Any]) -> list[str]:
     return order
 
 
+_INERT_INLINE_KINDS = frozenset({"bookmark", "break", "tab"})
+
+
+def _inline_content_is_one_image(items: list[Mapping[str, Any]]) -> bool:
+    """Return whether inline content carries an image and nothing else the author wrote.
+
+    An image paragraph is a paragraph whose content is the image, so a paragraph
+    that mixes text with an image is left to the template style.  Anchors and
+    spacing are inert, and a link is scanned because the renderer draws an image
+    nested inside a hyperlink too.
+    """
+
+    has_image = False
+    for item in items:
+        if not isinstance(item, Mapping):
+            return False
+        kind = item.get("kind")
+        if kind == "image":
+            has_image = True
+        elif kind == "text":
+            if str(item.get("text") or "").strip():
+                return False
+        elif kind == "link":
+            if not _inline_content_is_one_image(list(item.get("children") or [])):
+                return False
+            has_image = True
+        elif kind not in _INERT_INLINE_KINDS:
+            return False
+    return has_image
+
+
+def _table_owned_nodes(document: Mapping[str, Any]) -> set[str]:
+    """Return every node a table owns.
+
+    A table cell's paragraph is formatted by the table's own contract, which a
+    per-paragraph presentation record must not compete with.  A semantic cell is
+    centred by the 表正文 style, and a layout cell keeps the source paragraph
+    format the layout table restored (AGENTS.md decision 5), so the paragraph
+    presentation stays out of both.
+    """
+
+    blocks = document.get("blocks") or {}
+    containers = document.get("containers") or {}
+    children = document.get("children") or {}
+    owned: set[str] = set()
+    pending = [
+        str(node_id)
+        for node_id, block in blocks.items()
+        if isinstance(block, Mapping) and block.get("block_type") == "table"
+    ]
+    while pending:
+        node_id = pending.pop()
+        for child_id in children.get(node_id) or []:
+            child_key = str(child_id)
+            if child_key in owned:
+                continue
+            owned.add(child_key)
+            if child_key in containers:
+                pending.append(child_key)
+    return owned
+
+
 def _paragraph_presentation(ast: Mapping[str, Any]) -> dict[str, dict[str, str]]:
     """Return the presentation each non-list paragraph owns.
 
     An image paragraph inherits no style, so its centred alignment is the whole
-    of its presentation (AGENTS.md decision 2).  A formula number is right
-    aligned in the source and no style says so, so that alignment is recorded
-    too.  Any other alignment belongs to the template style, not to the source.
+    of its presentation (AGENTS.md decision 2).  The template's own image
+    paragraphs carry no style and ``jc=center``, which is what this record
+    reproduces.  A formula number is right aligned in the source and no style
+    says so, so that alignment is recorded too.  Any other alignment belongs to
+    the template style, not to the source.
     """
 
     document = ast["document"]
+    table_owned = _table_owned_nodes(document)
     result: dict[str, dict[str, str]] = {}
     for node_id, block in document["blocks"].items():
         if not isinstance(block, Mapping):
@@ -221,7 +286,19 @@ def _paragraph_presentation(ast: Mapping[str, Any]) -> dict[str, dict[str, str]]
         if block.get("block_type") == "image":
             result[str(node_id)] = {"alignment": "center"}
             continue
-        if block.get("block_type") != "paragraph" or block.get("role") != "body":
+        if block.get("block_type") != "paragraph":
+            continue
+        if block.get("role") != "body":
+            continue
+        if (
+            str(node_id) not in table_owned
+            and _inline_content_is_one_image(list(block.get("inline_content") or []))
+        ):
+            # A body paragraph whose content is the image is the image paragraph
+            # the template centres.  A paragraph with its own style (heading,
+            # caption, note) keeps that style's alignment, and the inline image
+            # stays in the body paragraph that draws it.
+            result[str(node_id)] = {"alignment": "center"}
             continue
         if block.get("semantic_role") != "formula_number":
             continue
