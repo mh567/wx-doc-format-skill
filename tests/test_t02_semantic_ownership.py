@@ -36,7 +36,6 @@ from wxdf.semantics.captions import (
 )
 from wxdf.semantics.lists import recognize_list_semantics
 from wxdf.semantics.source_ast import build_source_ast
-from wxdf.semantics.source_projection import project_source_facts
 from wxdf.semantics.tables import (
     collect_source_table_semantics,
     recognize_table_semantics,

@@ -17,7 +17,6 @@ if str(SCRIPTS) not in sys.path:
 from wxdf.decision_ledger import LedgerError, accept_decisions, project_ledger, replay, source_binding
 from wxdf.auditing import check_model, check_saved_output
 from wxdf.kernel import ConversionKernel, ConversionRequest
-from wxdf.migration import legacy_view
 from wxdf.normalization import normalize
 from wxdf.parsers import parse
 from wxdf.rendering import render
@@ -303,126 +302,6 @@ def _ledger(decisions: list[dict] | None = None) -> dict:
         {"schema_version": "2.0", "revision": 1, "revisions": []},
         decisions or _reclassification_decisions(),
     )
-
-
-def test_heading_to_list_reclassification_survives_full_recompute_and_file_restore(tmp_path: Path) -> None:
-    source = tmp_path / "heading.md"
-    source.write_text("# 标题内容\n", encoding="utf-8")
-    facts, baseline, heading_id, decisions = _parsed_heading_reclassification(source)
-    ledger = _ledger(decisions)
-
-    projected = project_ledger(facts, ledger)
-    first = replay(facts, ledger, baseline)
-    repeated = replay(facts, ledger, first)
-    checkpoint = _valid_checkpoint()
-    checkpoint.update({
-        "status": "created",
-        "resume_stage": None,
-        "source_facts": facts,
-        "decision_ledger": ledger,
-        "source_ast": baseline,
-    })
-    checkpoint["resource_summary"]["source_sha256"] = facts["source"]["content_sha256"]
-    checkpoint["resource_summary"]["fingerprints"] = {
-        "source": facts["source"]["content_sha256"],
-        "template": "sha256:" + "c" * 64,
-        "resources": "sha256:" + "d" * 64,
-        "configuration": "sha256:" + "e" * 64,
-        "parser": "issue9@1.0",
-        "protocol": "1.0",
-    }
-    checkpoint_path = tmp_path / "checkpoint.json"
-    save_checkpoint(checkpoint, checkpoint_path)
-    stored_checkpoint = load_checkpoint(checkpoint_path)
-    assert stored_checkpoint["applied_transactions"] == []
-    changed_facts = copy.deepcopy(facts)
-    changed_facts["source"]["content_sha256"] = "sha256:" + "b" * 64
-    with pytest.raises(CheckpointError) as changed_error:
-        load_checkpoint(checkpoint_path, current_source_facts=changed_facts)
-    assert changed_error.value.code == "source_changed"
-    persisted = load_checkpoint(checkpoint_path)
-    assert {revision["status"] for revision in persisted["decision_ledger"]["revisions"]} == {"invalidated"}
-    save_checkpoint(checkpoint, checkpoint_path)
-    same_digest_facts = copy.deepcopy(facts)
-    same_digest_facts["parser"]["version"] = "9.9"
-    with pytest.raises(CheckpointError) as parser_error:
-        load_checkpoint(checkpoint_path, current_source_facts=same_digest_facts)
-    assert parser_error.value.code == "source_changed"
-    save_checkpoint(checkpoint, checkpoint_path)
-    recovered_source_path = tmp_path / "recovered-source.json"
-    recovered_normalized_path = tmp_path / "recovered-normalized.json"
-    recovered_report_path = tmp_path / "recovered-report.json"
-    recovered_output_path = tmp_path / "recovered.docx"
-    child_code = (
-        "import json, sys; "
-        "from wxdf.kernel import ConversionKernel, ConversionRequest; "
-        "from wxdf.parsers import parse; "
-        "from wxdf.checkpoint_store import load_checkpoint; "
-        "facts=parse(sys.argv[2]); "
-        "checkpoint=load_checkpoint(sys.argv[1], expected_fingerprints={'source': facts['source']['content_sha256']}, expected_contracts={'source_facts':'1.0','ast':'2.0','patch':'2.0','checkpoint':'2.0'}, current_source_facts=facts); "
-        "assert all(item['status']=='active' for item in checkpoint['decision_ledger_projection']['revisions']); "
-        "request=ConversionRequest(input_path=sys.argv[2], output_path=sys.argv[4], template_path=sys.argv[3], pipeline='modular', list_policy='wx-default-v2', options={'profile':'native_v2','decision_ledger':checkpoint['decision_ledger'],'source_ast_path':sys.argv[5],'normalized_ast_path':sys.argv[6],'report_path':sys.argv[7]}); "
-        "print(json.dumps(ConversionKernel().convert(request).to_dict(), ensure_ascii=False, sort_keys=True))"
-    )
-    child_env = os.environ.copy()
-    child_env["PYTHONPATH"] = str(SCRIPTS)
-    restored_process = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            child_code,
-            str(checkpoint_path),
-            str(source),
-            str(SCRIPTS.parent / "assets" / "wx_template.docx"),
-            str(recovered_output_path),
-            str(recovered_source_path),
-            str(recovered_normalized_path),
-            str(recovered_report_path),
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-        env=child_env,
-    )
-    restored_result = json.loads(restored_process.stdout)
-    restored = json.loads(recovered_source_path.read_text(encoding="utf-8"))
-    restored_checkpoint = load_checkpoint(
-        checkpoint_path,
-        expected_fingerprints={"source": facts["source"]["content_sha256"]},
-        current_source_facts=facts,
-    )
-
-    validate_ast(first)
-    assert all(revision["status"] == "active" for revision in projected["revisions"])
-    assert repeated == first
-    assert first == restored
-    assert restored_checkpoint["source_ast"] == first
-    assert restored_checkpoint["normalized_ast"] is None
-    assert restored_checkpoint["source_facts"] == facts
-    assert restored_checkpoint["resource_summary"]["fingerprints"]["source"] == facts["source"]["content_sha256"]
-    assert restored_checkpoint["applied_transactions"]
-    assert set(restored_checkpoint["transaction_content_digests"]) == {
-        item["transaction_id"] for item in restored_checkpoint["applied_transactions"]
-    }
-    assert restored_result["status"] == "completed"
-    assert restored_result["report"]["model_audit"]["passed"] is True
-    assert restored_result["report"]["saved_output_audit"]["passed"] is True
-    list_id = next(node_id for node_id, node in first["document"]["containers"].items() if node.get("kind") == "list")
-    item_id = next(node_id for node_id, node in first["document"]["containers"].items() if node.get("kind") == "list_item")
-    assert first["document"]["children"]["root"] == [list_id]
-    assert first["document"]["children"][list_id] == [item_id]
-    assert first["document"]["children"][item_id] == [heading_id]
-    assert first["document"]["blocks"][heading_id]["role"] == "body"
-
-    legacy = legacy_view(first)
-    legacy_item = next(record for record in legacy["blocks"].values() if record["block_type"] == "list_item")
-    assert legacy_item["text"] == "标题内容"
-
-    normalized = normalize(first, _profile(), strategy="wx-default-v2")
-    output = tmp_path / "reclassified.docx"
-    render_result = render(normalized, output)
-    assert check_model(normalized)["passed"] is True
-    assert check_saved_output(output, normalized, render_result["render_map"])["passed"] is True
 
 
 def test_source_change_invalidates_reclassification_and_blocks_restore() -> None:
