@@ -58,6 +58,39 @@ def _write_compilation_evidence(dist: Path) -> None:
     build._write_runtime_module_manifest(dist, report, source_identity=fixture_source_identity(dist.parent))
 
 
+def test_nuitka_report_reader_accepts_the_declaration_nuitka_writes(tmp_path: Path) -> None:
+    """Nuitka declares ``encoding='utf8'``, which this expat build rejects.
+
+    The report carries the build paths, so a project directory outside ASCII is
+    enough to make the report unreadable and fail the build after a successful
+    compile.
+    """
+
+    report = tmp_path / "编译 报告" / "compilation-report.xml"
+    report.parent.mkdir()
+    report.write_text(
+        "<?xml version='1.0' encoding='utf8'?>\n"
+        "<nuitka-compilation-report completion=\"yes\" mode=\"standalone\">\n"
+        "  <option value=\"--output-dir=/Users/harris/Documents/zero项目/build\" />\n"
+        '  <module name="wxdf.kernel"/>\n'
+        "</nuitka-compilation-report>\n",
+        encoding="utf-8",
+    )
+
+    assert build._report_wxdf_modules(report) == ("wxdf.kernel",)
+
+
+def test_nuitka_report_reader_rejects_a_report_that_is_not_nuitkas(tmp_path: Path) -> None:
+    report = tmp_path / "compilation-report.xml"
+    report.write_text(
+        '<?xml version="1.0" encoding="utf-8"?>\n<not-a-nuitka-report />\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="root must be nuitka-compilation-report"):
+        build._report_wxdf_modules(report)
+
+
 def _mutate_module_manifest(dist: Path, **overrides) -> None:
     manifest_path = dist / "wxdf-module-manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))

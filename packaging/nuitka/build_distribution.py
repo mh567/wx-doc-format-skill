@@ -197,7 +197,11 @@ def _report_wxdf_modules(report_path: Path) -> tuple[str, ...]:
     if not report_path.is_file():
         raise RuntimeError(f"Nuitka compilation report is missing: {report_path}")
     try:
-        root = ElementTree.parse(report_path).getroot()
+        # Parse the decoded text rather than the file: Nuitka declares
+        # ``encoding='utf8'``, and the expat build in this toolchain does not
+        # resolve that alias, so it rejects every non-ASCII byte in the report.
+        # A project path is enough to trigger it.
+        root = ElementTree.fromstring(report_path.read_text(encoding="utf-8"))
     except ElementTree.ParseError as exc:
         raise RuntimeError(f"Nuitka compilation report is invalid: {exc}") from exc
     if root.tag != "nuitka-compilation-report":
