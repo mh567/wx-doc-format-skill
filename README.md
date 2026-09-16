@@ -28,7 +28,7 @@ LLM 增强以 Capability 插拔方式接入，当前能力：`toc_region_review`
 | `scripts/main.py` | CLI 入口，开发运行 `scripts/.venv/bin/python3 -m main` |
 | `scripts/wxdf/` | native-v2 核心：kernel、registry、parser、semantics、normalization、rendering、audit、publication |
 | `scripts/wxdf/semantics/` | 各语义能力模块：lists、tables、captions、appendices、regions、structure、protected |
-| `tests/` | 75 个测试文件 |
+| `tests/` | 76 个测试文件 |
 | `packaging/nuitka/` | Nuitka 构建、公开薄 Skill 组装 |
 | `docs/` | 设计文档与执行记录 |
 | `assets/wx_template.docx` | WX 格式模板 |

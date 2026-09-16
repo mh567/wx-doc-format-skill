@@ -92,6 +92,7 @@ tests/*
 !tests/test_fu3_convergence.py
 !tests/test_t09_compiled_acceptance.py
 !tests/test_corpus_defects.py
+!tests/test_kept_semantics.py
 !tests/modular_support.py
 !tests/fixtures/
 !tests/fixtures/modular_v3/

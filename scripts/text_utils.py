@@ -875,9 +875,8 @@ def source_numbering_heading_level(paragraph) -> int | None:
                             if lvl is not None:
                                 p_style = lvl.find("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}pStyle")
                                 if p_style is not None:
-                                    from docx_pipeline import heading_level_from_pstyle
                                     from docx.oxml.ns import qn
-                                    return heading_level_from_pstyle(p_style.get(qn("w:val")))
+                                    return heading_level_from_style(p_style.get(qn("w:val")))
     except Exception:
         pass
     return None
