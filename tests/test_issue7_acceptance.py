@@ -191,7 +191,7 @@ def test_l14_mixed_inline_order_links_breaks_and_resources_survive_native_pipeli
         image = tmp_path / "pixel.png"
         image.write_bytes(PNG_1X1)
         source = tmp_path / "mixed.md"
-        source.write_text("前 ![像素](pixel.png) 中 [链接](https://example.org) 后\n换行\n", encoding="utf-8")
+        source.write_text("前 ![像素](pixel.png) 中 [链接](https://example.org) 后\\\n换行\n", encoding="utf-8")
     else:
         source = _build_docx(tmp_path)
 

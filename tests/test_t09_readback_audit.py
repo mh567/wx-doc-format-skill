@@ -137,27 +137,28 @@ def test_t09_readback_audit_covers_every_invariant_end_to_end(tmp_path: Path) ->
     "marker,kind_style",
     [("1.", "ordered"), ("-", "unordered")],
 )
-def test_t09_soft_break_list_continuation_stays_completed(
+def test_t09_hard_break_list_continuation_stays_completed(
     tmp_path: Path, marker: str, kind_style: str,
 ) -> None:
-    """A list item whose text carries a soft break must not fail the conversion.
+    """A list item whose text carries a break must not fail the conversion.
 
-    Rendering a continuation on the next line emits ``<w:t/><w:br/><w:t/>`` in
-    one paragraph.  The readback text must render that break as ``"\\n"`` exactly
-    as the AST inline projection does, otherwise an ordinary list continuation
-    mismatches and the whole conversion is marked failed.
+    Rendering a hard break emits ``<w:t/><w:br/><w:t/>`` in one paragraph.  The
+    readback text must render that break as ``"\\n"`` exactly as the AST inline
+    projection does, otherwise an ordinary list continuation mismatches and the
+    whole conversion is marked failed.  A soft break stays a space, so the
+    fixture asks for a hard break with the trailing backslash.
     """
     from wxdf.auditing import audit_list_readback
 
     normalized, output, result = _convert_markdown(
         tmp_path,
-        f"# 文档\n\n## 列表\n\n{marker} 第一项\n   续接正文一\n{marker} 第二项\n",
+        f"# 文档\n\n## 列表\n\n{marker} 第一项\\\n   续接正文一\n{marker} 第二项\n",
     )
     assert result.status == "completed", result.diagnostics
     audit = audit_list_readback(output, normalized)
     assert audit["passed"] is True, audit["issues"]
     assert audit["invariants"]["list_items_preserved_once"] is True
-    # The first item rendered the continuation inside one paragraph via a soft
+    # The first item rendered the continuation inside one paragraph past a hard
     # break, so the readback text is the concatenation of both runs with the
     # break between them rather than a separate list item.
     with ZipFile(output) as archive:

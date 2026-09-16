@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from pathlib import Path
 from typing import Any, Mapping
 
 from ..model import inline_text_projection
@@ -45,6 +46,51 @@ def _docx_style_role(style_name: str) -> tuple[str | None, int | None]:
     ):
         return None, None
     return "body", None
+
+
+def _generated_title_candidate(facts: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Return the candidate that gives a Markdown source its document title.
+
+    A Markdown source without a leading H1 still needs a title: the template
+    renders one above the table of contents, and the author's file name is the
+    only evidence left.  The node records that it was generated, so no reader
+    mistakes it for authored content.  A source that does not name its file
+    yields no candidate, so nothing invents a title out of nothing.
+    """
+
+    name = str(facts["source"].get("name") or "")
+    title = Path(name).stem
+    if not title:
+        return None
+    return {
+        "candidate_id": "structure-generated-title",
+        "module_id": "source_structure",
+        "module_version": "1.0",
+        "target_source_refs": [],
+        "target_node_ids": ["generated-title"],
+        "proposal": {
+            "operation": "create_node",
+            "property_scope": ["children"],
+            "value": {
+                "node_id": "generated-title",
+                "parent_id": "root",
+                "index": 0,
+                "node": {
+                    "block_type": "paragraph",
+                    "role": "title",
+                    "inline_content": [{"kind": "text", "text": title, "marks": []}],
+                    "generated_by": "structure_semantics.filename_title",
+                    "generation_basis": [name],
+                },
+            },
+        },
+        "positive_evidence": [{"kind": "format_contract", "source": "markdown_filename_title"}],
+        "negative_evidence": [],
+        "scope": {"stages": ["role"]},
+        "constraints": [],
+        "rationale": "a Markdown source without a leading H1 needs the document title the template renders",
+        "confidence": None,
+    }
 
 
 def collect_structure_candidates(
@@ -149,7 +195,26 @@ def collect_structure_candidates(
         elif text.strip():
             result.append(_candidate(str(node_id), unit, {"role": "body"}, [{"kind": "structural", "source": "source_facts", "text_present": True}]))
             semantic_content_seen = True
+    if is_markdown and not title_seen:
+        # A Markdown source without a leading H1 still needs the document title
+        # the template renders, so the file name supplies it.
+        generated = _generated_title_candidate(facts)
+        if generated is not None:
+            result.insert(0, generated)
     return result
 
 
-__all__ = ["collect_structure_candidates"]
+def generated_title(candidates: list[Mapping[str, Any]]) -> str | None:
+    """Return the title a structure candidate set generated from a file name."""
+
+    for candidate in candidates:
+        if str(candidate.get("candidate_id") or "") != "structure-generated-title":
+            continue
+        value = candidate.get("proposal", {}).get("value", {})
+        inline = value.get("node", {}).get("inline_content") or []
+        if inline:
+            return str(inline[0].get("text") or "") or None
+    return None
+
+
+__all__ = ["collect_structure_candidates", "generated_title"]

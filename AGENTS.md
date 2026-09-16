@@ -89,6 +89,11 @@ LLM 增强为 Capability 插拔架构：
 - 源目录由 `w:sdt` 承载时，解析阶段为该控件内每个段落登记 `source_toc` 证据，范围模块据此整段排除
 - 列项自身的段落就是承载标记的段落，空段落也不例外；只有列项自身没有段落时才生成承载锚点，且只生成一个
 
+### 11. Markdown 读取
+- 软换行是空格，只有硬换行成为换行；来源同一段的折行不改变输出换行
+- 方言关闭 HTML，标签按文本到达，读取时剥离标签保留可读文本并记录 `html_inline`
+- 源没有一级标题时，结构语义按文件名生成 `role=title` 的块（`generated_by=structure_semantics.filename_title`），并在报告写入 `markdown_title_generated` 风险提示
+
 ## 输出验证不变量
 
 - unexpected_styles 必须为空
@@ -101,6 +106,7 @@ LLM 增强为 Capability 插拔架构：
 - 源文档自带目录区段不进入输出，目录域只来自模板
 - 公式、域代码与书签按源引用复制，数量与源文档一致
 - 表格编号列使用模板普通十进制编号，不出现列项样式
+- Markdown 输入没有一级标题时仍产出文档标题，并给出 `markdown_title_generated` 风险提示
 
 ## 多 Agent 协作分工
 

@@ -138,6 +138,7 @@ def _empty_facts(handle: SourceHandle, parser_id: str, parser_config: str, *, pa
             "source_type": handle.source_type,
             "content_sha256": handle.content_sha256,
             "encoding": handle.encoding,
+            "name": handle.path.name,
         },
         "parser": {
             "id": parser_id,
@@ -238,7 +239,10 @@ def _inline_nodes(tokens: Iterable[Any], handle: SourceHandle, part: str, resour
             elif kind == "code_inline":
                 result.append({"kind": "text", "text": token.content, "marks": [*marks, "code"]})
             elif kind == "softbreak":
-                result.append({"kind": "break"})
+                # A soft break is a space: Markdown only breaks the line when the
+                # author asked for a hard break, so the wrapped source line must
+                # not become a line break in the document.
+                result.append({"kind": "text", "text": " ", "marks": list(marks)})
             elif kind == "hardbreak":
                 result.append({"kind": "break"})
             elif kind in {"strong_open", "em_open"}:
@@ -286,7 +290,51 @@ def _inline_nodes(tokens: Iterable[Any], handle: SourceHandle, part: str, resour
             diagnostics.append({"code": "unclosed_inline_container", "severity": "warning", "message": stop_kind})
         return result, index
 
-    return parse_range(0)[0]
+    return _without_html_markup(parse_range(0)[0], diagnostics)
+
+
+def _without_html_markup(
+    items: list[dict[str, Any]],
+    diagnostics: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Strip HTML markup the dialect hands over as inline text.
+
+    The Markdown dialect reads with HTML disabled, so a tag arrives inside a text
+    run.  A WX document has no representation for it, and the readable text the
+    tag wrapped is what the author wrote, so the markup is removed and recorded
+    instead of the whole run being kept as literal text.  Only text that looks
+    like a tag is removed, and a code span keeps its text: the author showed the
+    markup there on purpose.
+    """
+
+    if not any(_html_markup_in(item) for item in items):
+        return items
+    cleaned: list[dict[str, Any]] = []
+    for item in items:
+        text = item.get("text") if _html_markup_in(item) else None
+        if text is None:
+            cleaned.append(item)
+            continue
+        remaining = _HTML_MARKUP_RE.sub("", str(text))
+        if remaining:
+            cleaned.append({**item, "text": remaining})
+    diagnostics.append({"code": "html_inline", "severity": "warning", "message": "HTML markup is not representable; its readable text is kept"})
+    return cleaned
+
+
+# A tag the Markdown dialect left as text.  A bare ``<`` and a comparison are
+# prose, so only a tag-shaped run is markup.
+_HTML_MARKUP_RE = re.compile(r"</?[A-Za-z][A-Za-z0-9]*(?:\s[^<>]*)?/?>|<!--.*?-->")
+
+
+def _html_markup_in(item: Mapping[str, Any]) -> bool:
+    """Return whether a run carries HTML markup the dialect left as text."""
+
+    if item.get("kind") != "text":
+        return False
+    if "code" in (item.get("marks") or []):
+        return False
+    return bool(_HTML_MARKUP_RE.search(str(item.get("text") or "")))
 
 
 def _marker(line: str) -> tuple[str | None, int | None, int]:
@@ -475,7 +523,10 @@ class _MarkdownFactsBuilder:
             elif token_type == "hr":
                 self._new_unit("separator", token, raw_text="")
             elif token_type == "html_block":
-                unit_id = self._new_unit("opaque", token, raw_text=token.content, diagnostic_ids=["unsupported_html_block"])
+                # The block keeps the readable text its tags wrapped, because a WX
+                # document has no HTML representation and the raw markup stays
+                # recoverable through the source reference.
+                unit_id = self._new_unit("opaque", token, raw_text=_HTML_MARKUP_RE.sub("", token.content).strip(), diagnostic_ids=["unsupported_html_block"])
                 self.facts["evidence"][unit_id] = {"source_token": token_type}
                 self.facts["diagnostics"].append({"code": "unsupported_html_block", "severity": "warning", "message": "HTML block is retained as opaque source content"})
             elif token.map is not None and token_type not in {"thead_open", "thead_close", "tbody_open", "tbody_close", "paragraph_close", "heading_close", "table_close"}:

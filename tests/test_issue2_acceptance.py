@@ -204,8 +204,10 @@ def test_l04_external_body_separates_list_groups_and_source_sequences(tmp_path: 
     ]
     root_blocks = [node_id for node_id in root_children if node_id in document["blocks"]]
     assert len(root_lists) == 2
-    assert [document["containers"].get(node_id, {}).get("kind", "paragraph") for node_id in root_children] == ["list", "paragraph", "list"]
-    assert [_paragraph_text(document["blocks"][node_id]) for node_id in root_blocks] == ["正文段落"]
+    # The document begins with its title: the fixture has no leading H1, so the
+    # title is generated from the file name.
+    assert [document["containers"].get(node_id, {}).get("kind", "paragraph") for node_id in root_children] == ["paragraph", "list", "paragraph", "list"]
+    assert [_paragraph_text(document["blocks"][node_id]) for node_id in root_blocks] == ["l04", "正文段落"]
     assert document["containers"][root_lists[0]]["source_sequence_id"] != document["containers"][root_lists[1]]["source_sequence_id"]
     rendered = _render_items(report, source_ast)
     assert [text for text, _ in rendered] == ["第一项", "第二项"]

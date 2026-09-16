@@ -29,6 +29,7 @@ from wxdf.normalization import _body_outline_overrides, _drop_excluded_blocks, _
 from wxdf.parsers import parse
 from wxdf.rendering import _write_caption
 from wxdf.semantics.regions import classify_regions, resolve_source_regions
+from wxdf.semantics.structure import _generated_title_candidate, collect_structure_candidates, generated_title
 from wxdf.semantics.lists import analyze_lists
 from wxdf.source_store import SourceStore
 from wxdf.template import load_template_bundle
@@ -378,6 +379,103 @@ def test_an_item_with_its_own_empty_paragraph_generates_no_anchor() -> None:
     assert nodes["i1"]["generated_anchor"] is False
     assert nodes["i2"]["marker_anchor"] == "text"
     assert normalized["generated_nodes"] == []
+
+
+def test_markdown_soft_break_is_a_space_and_markup_is_stripped(tmp_path: Path) -> None:
+    source = tmp_path / "source.md"
+    source.write_text(
+        "# 标题\n\n第一行\n第二行\n\n<b>粗体</b> 说明\n\n`<i>` 是代码，a < b 是比较\n",
+        encoding="utf-8",
+    )
+
+    facts = parse(source)
+    units = [unit for unit in _paragraph_units(facts)]
+    texts = [
+        "".join(
+            str(item.get("text") or "")
+            for item in unit.get("inline_content") or []
+            if item.get("kind") == "text"
+        )
+        for unit in units
+    ]
+
+    # A soft break is a space: only a hard break becomes a line break.
+    assert "第一行 第二行" in texts
+    # HTML markup has no representation, so its readable text is kept without it.
+    assert "粗体 说明" in texts
+    assert "html_inline" in [item["code"] for item in facts["diagnostics"]]
+    # A code span shows the markup on purpose, and a comparison is prose.
+    assert "<i> 是代码，a < b 是比较" in texts
+    assert not any(
+        item.get("kind") == "break"
+        for unit in units
+        for item in unit.get("inline_content") or []
+    )
+
+
+def test_markdown_hard_break_stays_a_line_break(tmp_path: Path) -> None:
+    source = tmp_path / "source.md"
+    source.write_text("# 标题\n\n上一行\\\n下一行\n", encoding="utf-8")
+
+    facts = parse(source)
+    breaks = [
+        item
+        for unit in _paragraph_units(facts)
+        for item in unit.get("inline_content") or []
+        if item.get("kind") == "break"
+    ]
+
+    assert len(breaks) == 1
+
+
+def test_a_markdown_source_without_a_leading_h1_gets_a_filename_title(tmp_path: Path) -> None:
+    source = tmp_path / "无一级标题的方案.md"
+    source.write_text("## 第一节\n\n正文。\n", encoding="utf-8")
+    bundle = load_template_bundle(TEMPLATE)
+
+    facts = parse(source)
+    candidates = collect_structure_candidates(facts, {"regions": []})
+    generated = [
+        candidate
+        for candidate in candidates
+        if candidate.get("candidate_id") == "structure-generated-title"
+    ]
+
+    assert len(generated) == 1
+    node = generated[0]["proposal"]["value"]["node"]
+    assert node["role"] == "title"
+    assert node["inline_content"][0]["text"] == "无一级标题的方案"
+    assert node["generated_by"] == "structure_semantics.filename_title"
+    assert generated_title(candidates) == "无一级标题的方案"
+
+    # A source that already carries a leading H1 keeps its own title.
+    with_h1 = tmp_path / "有标题.md"
+    with_h1.write_text("# 自带标题\n\n正文。\n", encoding="utf-8")
+    titles = [
+        candidate
+        for candidate in collect_structure_candidates(parse(with_h1), {"regions": []})
+        if candidate.get("proposal", {}).get("value", {}).get("role") == "title"
+    ]
+    assert all(candidate["candidate_id"] != "structure-generated-title" for candidate in titles)
+    assert generated_title(collect_structure_candidates(parse(with_h1), {"regions": []})) is None
+    # A source with nothing but a level-2 heading still needs the document title.
+    empty = tmp_path / "空文件.md"
+    empty.write_text("## 只有二级标题\n", encoding="utf-8")
+    assert generated_title(collect_structure_candidates(parse(empty), {"regions": []})) == "空文件"
+    # A source that does not name its file yields no title rather than an invented one.
+    assert _generated_title_candidate({"source": {"name": ""}}) is None
+    assert bundle is not None
+
+
+def test_docx_source_never_gets_a_filename_title(tmp_path: Path) -> None:
+    source = tmp_path / "source.docx"
+    document = Document()
+    document.add_paragraph("正文。")
+    document.save(source)
+
+    candidates = collect_structure_candidates(parse(source), {"regions": []})
+
+    assert all(candidate.get("candidate_id") != "structure-generated-title" for candidate in candidates)
 
 
 def test_normalization_prunes_excluded_regions_and_maps_the_outline(tmp_path: Path) -> None:

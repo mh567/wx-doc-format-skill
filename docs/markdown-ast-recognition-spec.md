@@ -1,5 +1,9 @@
 # Markdown AST 识别规范
 
+> 适用范围说明：本规范定义的是 legacy adapter seam 的识别合同。当前默认的模块化链路由
+> `scripts/wxdf/parsers.py::_parse_markdown` 读取同一份 Markdown 语义，并在语义阶段落实第 6 至第 8 节的规则。
+> 两处规则一致时以本规范为准；落点或呈现不同时，以 `AGENTS.md` 决策 11 为准，差异记录在该决策下。
+
 ## 1. 目标与范围
 
 本规范定义 Markdown Source Document 如何转换为统一 DocumentModel。识别结果是后续规范化、模板渲染和守恒审计的唯一语义来源。
@@ -156,6 +160,14 @@ quoted_heading
 unknown_block_token
 unknown_inline_token
 recognition_contract_violation
+```
+
+模块化链路的落点差异：
+
+```text
+markdown_title_generated   以报告的 risk_warnings 条目呈现，承载生成出的标题文本
+html_block                 读取器沿用既有的 unsupported_html_block 诊断码记录，块内标签剥离后保留可读文本
+html_inline                行内投影剥离标签后保留可读文本并记录 html_inline
 ```
 
 可恢复问题生成 Fallback Representation 和 Diagnostic。依赖缺失、输入不可读和 Recognition Contract 违反属于识别错误。

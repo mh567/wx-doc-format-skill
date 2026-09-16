@@ -468,3 +468,20 @@
 - 审查轴一确认合理的解释：一个保留对象携带两个引用（原子指向真实部件与节点路径，资源指向可解析的分片部件）符合决策 9；`presentation.paragraphs` 只被渲染器消费且已接线；`_drop_excluded_blocks` 在规范化阶段消费显式 `semantic_scope` 证据，不越阶段。
 - 复审：全量测试 `1321 passed, 0 failed`。真实文档 release 形态：`oMath` 6、`oMathPara` 2、`REF` 7、`SEQ 公式` 3、书签 88 对 88、题注 `SEQ Table` 1，三项审计 passed、`unexpected_styles` 空，公式编号保持右对齐。16 份探针 16/16 退出码 0。
 - 残留：附录题注若把编号放在域里（而非源文本的字面 `A.1`），题注语义会先丢弃该 SEQ 域，保留态题注将拿不到编号。
+
+## 2026-09-16 Markdown 读取与旧实现的差异收口
+
+- 起因：核对新链路与旧 md 链路的差异，实测确认三处用户可见差异，按裁定修复。
+- 历史结论：旧识别模块 `markdown_recognition.py` 建于 2026-08-24（`4824675`）；新的 md 读取器 `wxdf/parsers.py::_parse_markdown` 建于 2026-09-08 的模块化 v3 基线提交（`7074afb`），与旧模块并列而非复用，尽管设计文档当时写的是「保留其内部 tokenizer，仅在外侧设置接口」。两者底层方言相同（commonmark + table，关闭 html），差异出在投影与决策：文件名标题原本是旧识别器的 title 决策，迁移时没有承接方；软换行与硬换行被折叠成同一个 `break`；HTML 保留策略是新读取器的有意取舍。
+- 修复：软换行投影为空格（只有硬换行成为换行）；方言关闭 HTML 时标签按文本到达，读取时剥离标签保留可读文本并记录 `html_inline`；源没有一级标题时由结构语义生成 `role=title` 的块并写入 `markdown_title_generated` 风险提示。三处都落在解析与语义阶段，渲染不变。
+- 验收同步：`tests/test_t09_readback_audit.py` 的软换行续段夹具改用硬换行（保留读回对换行的断言），`tests/test_issue7_acceptance.py` 的 l14 混合行内夹具同理，`tests/test_issue2_acceptance.py` 的 l04 期望加入生成标题。
+- 验证：全量测试 `1321 passed, 0 failed`（`tests/test_modular_fidelity.py` 增到 16 项）。样例矩阵实测：无一级标题的 md 输出带文档标题且报告给出风险提示；软换行处为空格、硬换行处为换行；HTML 块与行内标签剥离后保留可读文本并记录 `html_inline`。两个 md 基准仍为 `completed` 且无风险提示。
+- 文档同步：`AGENTS.md` 决策 11 与不变量；`docs/markdown-ast-recognition-spec.md` 增加适用范围说明，标注该规范定义 legacy adapter seam 的合同，模块化链路的规则落点与诊断呈现差异另列。
+
+### 独立审查与复审（Markdown 修补轮）
+
+- 审查轴二（规格）指出五处，已核实并修：标题生成原先要求已见到语义内容，与「没有一级标题时仍产出文档标题」的不变量冲突，改为只要 Markdown 源没有 title 就生成；`source.name` 缺失时会退回字面「文档」，改为不生成标题也不报警，避免凭空造标题；HTML 标签剥离原先把代码跨度里的文本当作标签（读取器把 `code_inline` 编码为带 `code` 标记的文本），改为跳过 `code` 标记的运行并只用标签形状的正则；HTML 块原先整块按字面保留，改为块内剥离标签保留可读文本，原始标记仍可经源引用取回；警告原先只在成功分支写入的疑虑已核对，写入位置在状态判定之前，JSON 与 Markdown 报告都能读到。
+- 审查轴一（规范）指出三处，已修：`semantic_modules` 硬编码候选 id 并深入到候选内部结构取标题，改为由 `structure.generated_title` 单一所有者解析；HTML 剥离的正则在两处重复，改为一个 `_HTML_MARKUP_RE` 常量；`test_t09_soft_break_list_continuation_stays_completed` 的夹具已改为硬换行，测试名与注释随行为更名。
+- 审查轴一确认合理的解释：软换行落在行内投影符合规范第 6 节；哈希与渲染、审计、读回、迁移各处都按通用 `break` 形状消费，无需同步改动；两个夹具（t09、issue7）改成硬换行是规则的正当结果，其断言未削弱，软换行与硬换行各自另有专项用例。
+- 复审：全量测试 `1325 passed, 0 failed`。样例矩阵端到端：无一级标题的 md 产出 `[文档标题] sample`，JSON 与 Markdown 报告都带 `markdown_title_generated`；软换行成空格、硬换行成换行；代码跨度里的尖括号与 `a < b` 这类比较保留，HTML 块与行内标签剥离后保留可读文本。
+- 残留：实体写法（如 `&lt;div&gt;`）解码后与真实标签在文本里不可区分，剥离规则只按标签形状判断，因此作者用实体写出的尖括号文本会被当作标签移除。legacy 读取器存在同样限制。

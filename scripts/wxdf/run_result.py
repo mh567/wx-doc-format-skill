@@ -271,6 +271,21 @@ def build_native_run_result(
         for decision in decision_set.get("decisions", [])
         if anchor_candidate_ids.intersection(str(item) for item in decision.get("candidate_ids", []))
     )
+    generated_title = None
+    structure_evidence = (context.evidence or {}).get("document-structure")
+    if isinstance(structure_evidence, Mapping):
+        generated_title = structure_evidence.get("generated_title")
+    if generated_title:
+        # The title came from the file name, not from the source, so the reader
+        # is told to check it.
+        report["risk_warnings"] = [
+            *list(report.get("risk_warnings") or []),
+            {
+                "type": "markdown_title_generated",
+                "message": "Markdown had no leading H1; filename title was generated.",
+                "title": str(generated_title),
+            },
+        ]
     status = "completed" if not diagnostics else "completed_with_warnings"
     report.update({
         "status": status,

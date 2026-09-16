@@ -18,7 +18,7 @@ from .semantics.paragraphs import collect_paragraph_candidates
 from .semantics.protected import collect_protected_candidates
 from .semantics.regions import resolve_source_regions
 from .semantics.source_ast import materialize_list_semantics
-from .semantics.structure import collect_structure_candidates
+from .semantics.structure import collect_structure_candidates, generated_title
 from .semantics.tables import collect_source_table_semantics, collect_table_candidates, recognize_table_semantics
 
 class _ObservedMapping(MutableMapping[str, Any]):
@@ -101,7 +101,8 @@ def source_region_module() -> RegisteredModule:
 
 def document_structure_module() -> RegisteredModule:
     def execute(c: ModuleExecutionContext) -> dict[str, Any]:
-        items = collect_structure_candidates(c.require("source_facts"), c.require("source_regions"), protect_semantics=True); evidence = {"candidate_count": len(items), "title_candidate_count": sum(x.get("proposal", {}).get("value", {}).get("role") == "title" for x in items), "heading_candidate_count": sum(x.get("proposal", {}).get("value", {}).get("role") == "heading" for x in items), "body_candidate_count": sum(x.get("proposal", {}).get("value", {}).get("role") == "body" for x in items)}; c.provide("document_structure_candidates", items); c.provide("document_structure", evidence); c.evidence["document-structure"] = evidence; return evidence
+        items = collect_structure_candidates(c.require("source_facts"), c.require("source_regions"), protect_semantics=True)
+        evidence = {"candidate_count": len(items), "title_candidate_count": sum(x.get("proposal", {}).get("value", {}).get("role") == "title" for x in items), "heading_candidate_count": sum(x.get("proposal", {}).get("value", {}).get("role") == "heading" for x in items), "body_candidate_count": sum(x.get("proposal", {}).get("value", {}).get("role") == "body" for x in items), "generated_title": generated_title(items)}; c.provide("document_structure_candidates", items); c.provide("document_structure", evidence); c.evidence["document-structure"] = evidence; return evidence
     return _registered("document-structure", ("role",), ("source_facts", "source_regions"), ("document_structure_candidates", "document_structure"), execute)
 
 def protected_content_module() -> RegisteredModule:
