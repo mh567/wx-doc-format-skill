@@ -6,11 +6,21 @@ import copy
 from pathlib import Path
 from typing import Any, Mapping
 
-from ..model import inline_text_projection
+from ..model import consume_leading_text, inline_text_projection
 from ..validation import validate_source_facts
 from note_semantics import heading_style_level
+from text_utils import strip_heading_marker_prefix
 
 from .protected import protected_unit_semantics
+
+
+_GRADED_HEADING_ROLES = frozenset({"heading", "title"})
+# A manually numbered heading keeps its heading role (ruling of 2026-09-16): the
+# marker is text the converter removes, so the style decides the role and the
+# cleanup removes the marker.  Every other protection reason names content the
+# document keeps as it stands (an API label, a date, a legal clause, a formula),
+# so it keeps its precedence and its protected role, which L11 pins.
+_PROTECTION_REASONS_A_HEADING_OUTWEIGHS = frozenset({"manual_heading_marker"})
 
 
 def _candidate(node_id: str, unit: Mapping[str, Any], value: dict[str, Any], evidence: list[dict[str, Any]]) -> dict[str, Any]:
@@ -46,6 +56,93 @@ def _docx_style_role(style_name: str) -> tuple[str | None, int | None]:
     ):
         return None, None
     return "body", None
+
+
+def _marker_content_candidate(
+    node_id: str,
+    unit: Mapping[str, Any],
+    text: str,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Return the marker-free content write for one graded heading, and its record.
+
+    A graded heading never carries a manual marker in the delivered document, so
+    the text the template renders is the source text without it (AGENTS.md
+    decision 10).  The vocabulary is ``text_utils.strip_heading_marker_prefix``
+    and the marker leaves the inline content by consuming the same number of
+    visible characters, so the marks inside the heading survive.
+
+    Two shapes keep the source text and return a record instead of a write: a
+    heading whose whole text is the marker, which would otherwise become empty,
+    and a marker the walk cannot consume because an object sits inside it.  Both
+    are reported rather than applied in part.
+    """
+
+    stripped = strip_heading_marker_prefix(text)
+    if stripped == text:
+        return None, None
+    if not stripped:
+        return None, _marker_record(node_id, "heading_marker_only_text", text)
+    content = consume_leading_text(list(unit.get("inline_content") or []), len(text) - len(stripped))
+    if inline_text_projection(content) != stripped:
+        return None, _marker_record(node_id, "heading_marker_not_consumed", text)
+    source_ref = unit.get("source_ref")
+    return {
+        "candidate_id": f"heading-marker-{node_id}",
+        "module_id": "source_structure",
+        "module_version": "1.0",
+        "target_source_refs": [copy.deepcopy(dict(source_ref))] if isinstance(source_ref, Mapping) else [],
+        "target_node_ids": [node_id],
+        "proposal": {
+            "operation": "update_node_content",
+            "property_scope": ["inline_content"],
+            "value": {"inline_content": content},
+        },
+        "positive_evidence": [{
+            "kind": "format_contract",
+            "source": "heading_marker_stripped",
+            "marker_length": len(text) - len(stripped),
+        }],
+        "negative_evidence": [],
+        "scope": {"stages": ["role", "relation"]},
+        "constraints": [{"kind": "preserve_inline_marks"}],
+        "rationale": "a graded heading never carries a manual marker",
+        "confidence": None,
+    }, None
+
+
+def _marker_record(node_id: str, code: str, text: str) -> dict[str, Any]:
+    """Return the record for a heading marker that stays in the source text."""
+
+    return {
+        "kind": "diagnostic",
+        "source": code,
+        "code": code,
+        "severity": "info",
+        "node_id": node_id,
+        "message": f"{code}: the manual marker stays in the heading text",
+        "source_text": text,
+    }
+
+
+def _graded_candidates(
+    node_id: str,
+    unit: Mapping[str, Any],
+    text: str,
+    value: Mapping[str, Any],
+    evidence: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return the role candidate of a graded heading and its marker cleanup.
+
+    The cleanup is published next to the role it belongs to, so one module owns
+    both facts about a heading: which role it has and what text it renders.
+    """
+
+    content, record = _marker_content_candidate(node_id, unit, text)
+    items = [*evidence, record] if record is not None else list(evidence)
+    candidates = [_candidate(node_id, unit, dict(value), items)]
+    if content is not None:
+        candidates.append(content)
+    return candidates
 
 
 def _generated_title_candidate(facts: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -136,39 +233,65 @@ def collect_structure_candidates(
             continue
         evidence = facts["evidence"].get(node_id, {})
         protected = protected_unit_semantics(unit, evidence)
-        if protect_semantics and protected is not None:
-            protected_role = str(protected.get("role") or "")
-            resolved_role = protected_role if protected_role in {"title", "body", "heading", "caption", "note", "numbered_note", "unknown"} else "body"
-            result.append(_candidate(
-                str(node_id),
-                unit,
-                {"role": resolved_role},
-                [{"kind": "format_contract", "source": "protected_content", "reason": protected.get("reason")}],
-            ))
-            semantic_content_seen = True
-            continue
+        source_style = ""
+        style_role: str | None = None
+        style_level: int | None = None
         if not is_markdown:
             source_style = str(unit.get("style") or evidence.get("style") or "")
             style_role, style_level = _docx_style_role(source_style)
+        # A heading the source itself declares, through a heading style or a
+        # Markdown marker, outweighs the manual-marker protection (decision 10).
+        # The reason still rides on the role candidate as evidence.  A protection
+        # that names a role of its own keeps its precedence, so a numbered note
+        # stays a note and a code block keeps its role.
+        marker_evidence: list[dict[str, Any]] = []
+        if protect_semantics and protected is not None:
+            explicit_heading = style_role in _GRADED_HEADING_ROLES or (is_markdown and role == "heading")
+            if explicit_heading and protected.get("reason") in _PROTECTION_REASONS_A_HEADING_OUTWEIGHS:
+                marker_evidence = [{
+                    "kind": "structural",
+                    "source": "manual_heading_marker",
+                    "reason": protected.get("reason"),
+                }]
+            else:
+                protected_role = str(protected.get("role") or "")
+                resolved_role = protected_role if protected_role in {"title", "body", "heading", "caption", "note", "numbered_note", "unknown"} else "body"
+                result.append(_candidate(
+                    str(node_id),
+                    unit,
+                    {"role": resolved_role},
+                    [{"kind": "format_contract", "source": "protected_content", "reason": protected.get("reason")}],
+                ))
+                semantic_content_seen = True
+                continue
+        if not is_markdown:
             if style_role is None:
                 semantic_content_seen = True
                 continue
             if style_role == "title" and not title_seen:
-                result.append(_candidate(
+                result.extend(_graded_candidates(
                     str(node_id),
                     unit,
+                    text,
                     {"role": "title"},
-                    [{"kind": "structural", "source": "docx_style", "style": source_style}],
+                    [
+                        {"kind": "structural", "source": "docx_style", "style": source_style},
+                        *marker_evidence,
+                    ],
                 ))
                 title_seen = True
                 semantic_content_seen = True
                 continue
             if style_role == "heading":
-                result.append(_candidate(
+                result.extend(_graded_candidates(
                     str(node_id),
                     unit,
+                    text,
                     {"role": "heading", "level": style_level},
-                    [{"kind": "structural", "source": "docx_style", "style": source_style}],
+                    [
+                        {"kind": "structural", "source": "docx_style", "style": source_style},
+                        *marker_evidence,
+                    ],
                 ))
                 semantic_content_seen = True
                 continue
@@ -176,20 +299,22 @@ def collect_structure_candidates(
         if role == "heading":
             level = int(unit.get("level") or evidence.get("level") or 1)
             if is_markdown and level == 1 and not title_seen and not semantic_content_seen:
-                result.append(_candidate(
+                result.extend(_graded_candidates(
                     str(node_id),
                     unit,
+                    text,
                     {"role": "title"},
-                    [{"kind": "structural", "source": "markdown_leading_h1"}],
+                    [{"kind": "structural", "source": "markdown_leading_h1"}, *marker_evidence],
                 ))
                 title_seen = True
             else:
                 normalized_level = level - 1 if is_markdown else level
-                result.append(_candidate(
+                result.extend(_graded_candidates(
                     str(node_id),
                     unit,
+                    text,
                     {"role": "heading", "level": max(1, min(normalized_level, 6))},
-                    [{"kind": "structural", "source": "source_facts", "level": level}],
+                    [{"kind": "structural", "source": "source_facts", "level": level}, *marker_evidence],
                 ))
             semantic_content_seen = True
         elif text.strip():

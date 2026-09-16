@@ -7,6 +7,7 @@ import re
 from typing import Any, Mapping
 
 from ..list_policy import default_projection
+from ..model import consume_leading_text
 from ..validation import validate_source_facts
 from .protected import protected_code_style, protected_style_reason, protected_text_reason
 from note_semantics import source_note_role
@@ -105,26 +106,7 @@ def strip_visible_list_marker(
     match = prefix.match(visible)
     if match is None:
         return copy.deepcopy(list(inline_content))
-
-    remaining = match.end()
-    result: list[dict[str, Any]] = []
-    for item in inline_content:
-        copied = copy.deepcopy(dict(item))
-        kind = copied.get("kind")
-        if remaining <= 0 or kind not in {"text", "tab"}:
-            result.append(copied)
-            continue
-        item_text = str(copied.get("text") or "") if kind == "text" else "\t"
-        consume = min(remaining, len(item_text))
-        remaining -= consume
-        retained = item_text[consume:]
-        if kind == "text":
-            if retained:
-                copied["text"] = retained
-                result.append(copied)
-        elif remaining <= 0 and retained:
-            result.append({"kind": "text", "text": retained, "marks": []})
-    return result
+    return consume_leading_text(list(inline_content), match.end())
 
 
 def _inline_text(items: list[Mapping[str, Any]]) -> str:

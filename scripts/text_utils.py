@@ -81,7 +81,33 @@ def hierarchical_heading_level_from_text(text: str) -> int | None:
     return min(len(parts), 6)
 
 
+def strip_heading_marker_prefix(text: str) -> str:
+    """Remove the manual heading marker at the start of *text*.
+
+    One owner for the marker vocabulary: a hierarchical Arabic number, a leading
+    decimal run, then ``HEADING_PATTERNS``, applied once each in that order.  Only
+    the start is touched, so a caller that consumes the same number of visible
+    characters from inline content stays aligned with what was removed.
+    """
+
+    value = text.lstrip()
+    value = _HIERARCHICAL_ARABIC_HEADING.sub("", value, count=1)
+    value = re.sub(r"^\d+\s+", "", value)
+    for pattern, _ in HEADING_PATTERNS:
+        value = pattern.sub("", value, count=1)
+    return value.lstrip()
+
+
 def strip_heading_marker(text: str) -> str:
+    """Retired entry point: the manual marker plus a trailing page number.
+
+    Its callers read the historical order, which applies the page-number rule
+    between the hierarchical and the decimal prefix rules, so the order is kept
+    here instead of composing the prefix entry point.  On a text whose remainder
+    is a number the two orders differ, and a caller that asks only for the marker
+    to leave should use ``strip_heading_marker_prefix``.
+    """
+
     text = text.strip()
     text = _HIERARCHICAL_ARABIC_HEADING.sub("", text, count=1)
     # Trailing page numbers or tabs: "概述	1", "依据文件 1"

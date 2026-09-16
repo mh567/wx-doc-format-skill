@@ -23,9 +23,19 @@ def _ordered_ids(children: Mapping[str, list[str]], root_id: str) -> list[str]:
 
 
 def _candidate_roles(candidates: list[Mapping[str, Any]]) -> dict[str, Mapping[str, Any]]:
+    """Return the role decision each node owns.
+
+    Only a candidate that states a role counts: a module may publish another
+    write for the same node (the heading marker cleanup writes inline content),
+    and reading that write as the node's role would compare a content payload
+    against the migrated model's role.
+    """
+
     result: dict[str, Mapping[str, Any]] = {}
     for candidate in candidates:
         value = candidate.get("proposal", {}).get("value", {})
+        if not isinstance(value, Mapping) or "role" not in value:
+            continue
         for node_id in candidate.get("target_node_ids", []):
             result[str(node_id)] = value
     return result

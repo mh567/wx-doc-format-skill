@@ -83,6 +83,7 @@ LLM 增强为 Capability 插拔架构：
 
 ### 10. 证据优先级与呈现归属
 - 显式标题样式强于注的文本前缀；仅当标题文本是光秃秃的“注”标记时由样式裁决，“注2 说明”这类带序号的注仍是注
+- 手工编号标题按 2026-09-16 裁定处理：源已声明的标题（DOCX 标题样式，或 Markdown 的标题标记）强于 `manual_heading_marker` 文本保护，标题保留层级，交付文本去掉段首手工标记。标记词表归 `text_utils.strip_heading_marker_prefix` 单一所有者，标记由 `model.consume_leading_text` 按可见字符数从行内内容取出，标题内部的 marks 保留。整段只有标记时保留源文本并留 `heading_marker_only_text` 记录，标记跨过无法消费的行内对象时留 `heading_marker_not_consumed` 记录。其余文本型保护理由（API 标签、API 路径、日期版本、法规条款、公式、IP 地址）优先级不变，带角色的保护结论（注、有编号注、代码块、公式原子）亦不变
 - 列项样式层级的 `numFmt=none` 且 `lvlText` 非空时仍是列项，标记与列表种类由 `lvlText` 决定，不由 `numFmt` 决定
 - 段落对齐作为呈现记录在 `presentation.paragraphs`：图片段落居中，正文段落保留源作者对齐
 - 语义表格单元格的样式与对齐由表格格式合同拥有，段落呈现不覆盖它

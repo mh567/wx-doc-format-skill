@@ -2,10 +2,10 @@
   "schema_version": 1,
   "objective": "manual_heading_marker_keeps_the_heading_and_loses_the_marker",
   "branch": "dev",
-  "baseline_head": "2faa8bc",
-  "implementation_started": false,
+  "baseline_head": "b8858e6",
+  "implementation_started": true,
   "current_task": "T01",
-  "next_task": "T01",
+  "next_task": null,
   "user_ruling": {
     "date": "2026-09-16",
     "question": "显式标题样式 + 手工编号文本的归属",
@@ -14,12 +14,12 @@
     "conflict_resolved": "AGENTS.md 不变量「标题文本不含手工编号」、决策 10「显式标题样式强于文本证据」与退役实现（docx_pipeline.py:294,375 / markdown_recognition.py:411,636 的 strip_heading_marker）三者一致指向 A"
   },
   "defect_evidence": {
-    "candidate_level": "collect_structure_candidates(protect_semantics=True) returns role=body for Heading 1 + 第一章 概述, Heading 2 + 1.2 需求分析, Heading 2 + 第一节 背景; protect_semantics=False returns role=heading with level from the style",
-    "end_to_end": "the demoted paragraph carries no pStyle in the output and inherits the template Normal style; the decision ledger holds update_role role=body plus overlay protected/reason=manual_heading_marker, while status=completed and all three audits pass",
-    "markdown": "a leading H1 with a manual marker is demoted, so the structure module generates a filename title and writes the markdown_title_generated risk warning",
+    "candidate_level": "collect_structure_candidates(protect_semantics=True) returned role=body for Heading 1 + 第一章 概述, Heading 2 + 1.2 需求分析, Heading 2 + 第一节 背景; protect_semantics=False returned role=heading with the level from the style",
+    "end_to_end": "the demoted paragraph carried no pStyle in the output and inherited the template Normal style; the decision ledger held update_role role=body plus overlay protected/reason=manual_heading_marker, while status=completed and all three audits passed",
+    "markdown": "a leading H1 with a manual marker was demoted, so the structure module generated a filename title and wrote the markdown_title_generated risk warning",
     "root_cause": [
       "scripts/wxdf/semantics/protected.py:173,174 classify the text as manual_heading_marker and protected_unit_semantics returns role=None for that reason (:206,:207)",
-      "scripts/wxdf/semantics/structure.py:139 puts the protected branch before the explicit style branch and coerces None to body",
+      "scripts/wxdf/semantics/structure.py:139 put the protected branch before the explicit style branch and coerced None to body",
       "scripts/wxdf/semantic_modules.py:104,199 call the structure module with protect_semantics=True on the production path"
     ]
   },
@@ -30,30 +30,63 @@
     {
       "id": "T01",
       "subject": "手工编号标题:去编号保标题",
-      "status": "pending",
+      "status": "done",
       "depends_on": [],
       "scope": [
         "scripts/wxdf/semantics/structure.py",
-        "tests/test_modular_heading_marker.py",
+        "scripts/text_utils.py",
+        "scripts/wxdf/model.py",
+        "scripts/wxdf/semantics/lists.py",
+        "scripts/wxdf/semantics/equivalence.py",
         "AGENTS.md decision 10 amendment",
-        ".gitignore allowlist for the new test file"
+        "tests/test_modular_heading_marker.py",
+        ".gitignore allowlist for the new docs package"
       ],
+      "proof": {
+        "red": "tests/test_modular_heading_marker.py 7 failed, 3 passed before the change",
+        "green": "tests/test_modular_heading_marker.py 12 passed; full suite 1338 passed (baseline 1326 + 12)",
+        "real_documents": "wx_output/t01-heading-marker/{out,out-md,template-self}.report.json: status completed, model_audit passed, saved_output_audit passed, unexpected_styles empty, risk_warnings empty; the template self-conversion is paragraph-for-paragraph identical to the pre-change output (99 rows, no difference); the only model finding is the pre-existing source_heading_level_normalized advisory",
+        "text_utils_identity": "differential probe against HEAD over 404272 corpus entries: no mismatch",
+        "consume_leading_text_identity": "200000-case randomised differential against the loop removed from HEAD: 0 mismatches"
+      },
       "invariants": [
-        "a graded heading never renders a manual marker",
+        "a graded heading (heading or title) never renders a manual marker, unless the guard keeps the source text and records it",
         "a body paragraph without a heading style keeps its protection and never becomes a list item",
         "a numbered note under a heading style stays a note (decision 10)",
-        "a marker-only heading keeps its source text and leaves an info record",
+        "a marker-only heading, or a marker that spans an unconsumable object, keeps its source text and leaves a record",
         "three audits passed, unexpected_styles empty, risk_warnings empty for ordinary documents"
       ],
-      "residuals": []
+      "review": {
+        "rounds": 2,
+        "axis_standards": [
+          "S1 fixed: strip_heading_marker was refactored, which reordered the trailing page-number rule against the leading rules and diverged from HEAD on 5 degenerate inputs; the HEAD order is restored and the entry point stays byte-identical",
+          "S2 fixed: the spec named strip_heading_marker as the owner while the implementation uses the new strip_heading_marker_prefix",
+          "S3 fixed: a stale lists.py line reference in the spec (134 -> 116)",
+          "S4 compliant: model.consume_leading_text is the single owner of the character walk; no stable interface renamed; no em dash and no banned construction in the added prose"
+        ],
+        "axis_spec": [
+          "P1 fixed: the spec said every text reason yields to an explicit heading, while the implementation and L11 acceptance narrow it to manual_heading_marker",
+          "P2 fixed: the stated scope (heading) contradicted the acceptance list (a clean Markdown document title); the scope is now heading and title",
+          "P3 fixed: invariant 1 needed the guard qualifier",
+          "P4 fixed: the record channel is the role candidate's positive_evidence, not downgrades (the structure seam returns candidates only)",
+          "P5/P6/P7 verified: marks survive, body protection is not weakened, the appendix residual is reachable and declared out of scope",
+          "count corrected: the full suite is 1338 (12 new tests), not 1336"
+        ],
+        "counterexample_matrix": "marker across runs, whole-heading bold, bookmark-wrapped marker, field after the marker, field inside the marker, break after the marker, marker-only text, punctuation-only remainder, Markdown link/emphasis, table-cell heading, heading inside a list item: all behave as designed, no silent corruption"
+      },
+      "residuals": [
+        "an appendix heading keeps its own numbering form and is owned by appendix semantics; a marked appendix heading has no test",
+        "the vocabulary keeps the existing ^\\d+\\s+ rule, so a heading such as 1 2号机组运行规程 loses the leading 1 ; the retired implementation behaves the same",
+        "the heading_marker_not_consumed guard is unreachable on real documents (a manual marker is always literal text) and is covered by a synthetic unit only"
+      ]
     }
   ],
   "residuals": [
-    "role=title blocks are out of scope for the marker cleanup in T01",
-    "appendix headings keep their own numbering form and are owned by appendix semantics; a marked appendix heading is not covered by T01"
+    "role=title blocks are covered for the marker cleanup (scope widened during implementation, recorded in the spec)",
+    "appendix headings are out of scope for T01"
   ],
   "external_gates": [
     "remote_push_and_release_authorization"
   ],
-  "note": "Docs-only package until the user approves T01. No source change yet. The image-paragraph presentation fix from the previous round is uncommitted and lives in scripts/wxdf/normalization.py plus tests/test_modular_fidelity.py."
+  "note": "Uncommitted: scripts/wxdf/semantics/structure.py, scripts/wxdf/semantics/equivalence.py, scripts/wxdf/semantics/lists.py, scripts/wxdf/model.py, scripts/text_utils.py, AGENTS.md, tests/test_modular_heading_marker.py, docs/execution-v7/. The image-paragraph presentation fix landed earlier as commit 739286d."
 }

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Mapping
@@ -93,6 +94,36 @@ def effective_outline_level(
     if isinstance(level, int) and not isinstance(level, bool):
         return level
     return None
+
+
+def consume_leading_text(items: list[Mapping[str, Any]], count: int) -> list[dict[str, Any]]:
+    """Return inline content with the first *count* visible characters removed.
+
+    Only a leading text or tab token carries those characters, so the count is
+    consumed across them in order and every other token is copied as it stands.
+    The list marker and the heading marker are both removed this way, so the walk
+    has one owner and a marker cannot be removed by two different rules.
+    """
+
+    remaining = max(0, int(count))
+    result: list[dict[str, Any]] = []
+    for item in items:
+        copied = copy.deepcopy(dict(item))
+        kind = copied.get("kind")
+        if remaining <= 0 or kind not in {"text", "tab"}:
+            result.append(copied)
+            continue
+        item_text = str(copied.get("text") or "") if kind == "text" else "\t"
+        consume = min(remaining, len(item_text))
+        remaining -= consume
+        retained = item_text[consume:]
+        if kind == "text":
+            if retained:
+                copied["text"] = retained
+                result.append(copied)
+        elif retained:
+            result.append({"kind": "text", "text": retained, "marks": []})
+    return result
 
 
 def inline_text_projection(inline_content: list[Mapping[str, Any]]) -> str:
