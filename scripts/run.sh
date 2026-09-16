@@ -15,6 +15,52 @@ case "$SYSTEM/$MACHINE" in
         ;;
 esac
 
+MANIFEST_PATH="$SKILL_DIR/artifacts/manifest.json"
+if [ ! -r "$MANIFEST_PATH" ]; then
+    echo "WXDF-E-MANIFEST-MISSING: public runtime manifest is unavailable" >&2
+    exit 3
+fi
+if LC_ALL=C od -An -v -t u1 "$MANIFEST_PATH" |
+    awk '{ for (i = 1; i <= NF; i++) if ($i == 0) found = 1 } END { exit(found ? 0 : 1) }'
+then
+    echo "WXDF-E-MANIFEST-INVALID: public runtime manifest contains a NUL byte" >&2
+    exit 3
+fi
+if ! LC_ALL=C awk -f "$SKILL_DIR/scripts/validate-manifest.awk" "$MANIFEST_PATH"; then
+    echo "WXDF-E-MANIFEST-INVALID: public runtime manifest is not valid JSON" >&2
+    exit 3
+fi
+MANIFEST_COMPACT=$(LC_ALL=C tr -d ' \t\r\n' < "$MANIFEST_PATH")
+case "$MANIFEST_COMPACT" in
+    *'"platforms":{'*) ;;
+    *)
+        echo "WXDF-E-MANIFEST-INVALID: public runtime manifest has no platforms mapping" >&2
+        exit 3
+        ;;
+esac
+if ! printf '%s\n' "$MANIFEST_COMPACT" | grep -F "\"$PLATFORM\":{" >/dev/null; then
+    echo "WXDF-E-RUNTIME-UNAVAILABLE: $PLATFORM is not declared in release v$VERSION" >&2
+    exit 3
+fi
+PLATFORM_STATUS=$(
+    printf '%s\n' "$MANIFEST_COMPACT" |
+        sed -n 's/.*"'"$PLATFORM"'":{[^}]*"status":"\([^"]*\)".*/\1/p'
+)
+case "$PLATFORM_STATUS" in
+    accepted) ;;
+    candidate)
+        echo "WXDF-W-RUNTIME-CANDIDATE: $PLATFORM requires target-platform acceptance" >&2
+        ;;
+    unavailable)
+        echo "WXDF-E-RUNTIME-UNAVAILABLE: $PLATFORM is unavailable in release v$VERSION" >&2
+        exit 3
+        ;;
+    *)
+        echo "WXDF-E-MANIFEST-INVALID: invalid status for $PLATFORM" >&2
+        exit 3
+        ;;
+esac
+
 if [ "$PLATFORM" = "macos-arm64" ]; then
     MIN_MACOS_VERSION=$(tr -d '\r\n' < "$SKILL_DIR/artifacts/MACOS_MIN_VERSION.txt")
     if [ "$MIN_MACOS_VERSION" != "unknown" ]; then

@@ -1,26 +1,86 @@
 {
   "schema_version": 1,
-  "version": "0.12.19",
+  "version": "0.16.0",
+  "source_identity": {
+    "version": "0.16.0",
+    "commit": "bd8d3673a64556e104e7cd5adfe8a076e6218177",
+    "tree": "35436aa07775d502588c46cd75a56964718834e5"
+  },
+  "builds": [
+    {
+      "platform": "kylin-v10-arm64",
+      "source_identity": {
+        "version": "0.16.0",
+        "commit": "bd8d3673a64556e104e7cd5adfe8a076e6218177",
+        "tree": "35436aa07775d502588c46cd75a56964718834e5",
+        "toolchain": {
+          "python": "3.13.15",
+          "nuitka": "4.1.2",
+          "system": "Linux",
+          "machine": "aarch64",
+          "build_image": "quay.io/pypa/manylinux2014_aarch64@sha256:1145c233b5693c770b878d51e64261603b0d374942ff134d589656799f72e9f9"
+        }
+      }
+    },
+    {
+      "platform": "macos-arm64",
+      "source_identity": {
+        "version": "0.16.0",
+        "commit": "bd8d3673a64556e104e7cd5adfe8a076e6218177",
+        "tree": "35436aa07775d502588c46cd75a56964718834e5",
+        "toolchain": {
+          "python": "3.13.15",
+          "nuitka": "4.1.2",
+          "system": "Darwin",
+          "machine": "arm64",
+          "build_image": "native"
+        }
+      }
+    }
+  ],
+  "platforms": {
+    "kylin-v10-arm64": {
+      "status": "candidate",
+      "name": "wx-doc-format-skill-0.16.0-kylin-v10-arm64.tar.gz",
+      "sha256": "693fa331b5391b1098d9a6534d029e2f006399d01d129fa29fbde079686799e5",
+      "size": 18220340
+    },
+    "macos-arm64": {
+      "status": "accepted",
+      "name": "wx-doc-format-skill-0.16.0-macos-arm64.tar.gz",
+      "sha256": "de3fafbc9a97f500227c66fca62acf67665580783fb23c915cb0d7c070bf2813",
+      "size": 16973163
+    }
+  },
   "available_platforms": [
     "kylin-v10-arm64",
     "macos-arm64"
   ],
-  "unavailable_platforms": [
-    "windows-x86_64"
-  ],
+  "unavailable_platforms": [],
   "macos_min_version": "26.0",
+  "public_report_summary": {
+    "schema_version": "1.0",
+    "field": "public_summary",
+    "required_fields": [
+      "status",
+      "audits",
+      "unexpected_styles_count",
+      "manual_review_required",
+      "diagnostic_codes"
+    ]
+  },
   "artifacts": [
     {
       "platform": "kylin-v10-arm64",
-      "name": "wx-doc-format-skill-0.12.19-kylin-v10-arm64.tar.gz",
-      "sha256": "fd05723ce35b7cfb1a6a237e83e61f22c79ea877a931ba898412f43ba8e1f729",
-      "size": 20439939
+      "name": "wx-doc-format-skill-0.16.0-kylin-v10-arm64.tar.gz",
+      "sha256": "693fa331b5391b1098d9a6534d029e2f006399d01d129fa29fbde079686799e5",
+      "size": 18220340
     },
     {
       "platform": "macos-arm64",
-      "name": "wx-doc-format-skill-0.12.19-macos-arm64.tar.gz",
-      "sha256": "679a501d55db6a1086ff552e576c76a906688fb0639730a21470028b5aad8d2e",
-      "size": 21210003
+      "name": "wx-doc-format-skill-0.16.0-macos-arm64.tar.gz",
+      "sha256": "de3fafbc9a97f500227c66fca62acf67665580783fb23c915cb0d7c070bf2813",
+      "size": 16973163
     }
   ]
 }
