@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "objective": "manual_heading_marker_keeps_the_heading_and_loses_the_marker",
+  "branch": "dev",
+  "baseline_head": "2faa8bc",
+  "implementation_started": false,
+  "current_task": "T01",
+  "next_task": "T01",
+  "user_ruling": {
+    "date": "2026-09-16",
+    "question": "显式标题样式 + 手工编号文本的归属",
+    "ruling": "A: 去编号保标题",
+    "rejected": "B: 保持受保护正文（现状）",
+    "conflict_resolved": "AGENTS.md 不变量「标题文本不含手工编号」、决策 10「显式标题样式强于文本证据」与退役实现（docx_pipeline.py:294,375 / markdown_recognition.py:411,636 的 strip_heading_marker）三者一致指向 A"
+  },
+  "defect_evidence": {
+    "candidate_level": "collect_structure_candidates(protect_semantics=True) returns role=body for Heading 1 + 第一章 概述, Heading 2 + 1.2 需求分析, Heading 2 + 第一节 背景; protect_semantics=False returns role=heading with level from the style",
+    "end_to_end": "the demoted paragraph carries no pStyle in the output and inherits the template Normal style; the decision ledger holds update_role role=body plus overlay protected/reason=manual_heading_marker, while status=completed and all three audits pass",
+    "markdown": "a leading H1 with a manual marker is demoted, so the structure module generates a filename title and writes the markdown_title_generated risk warning",
+    "root_cause": [
+      "scripts/wxdf/semantics/protected.py:173,174 classify the text as manual_heading_marker and protected_unit_semantics returns role=None for that reason (:206,:207)",
+      "scripts/wxdf/semantics/structure.py:139 puts the protected branch before the explicit style branch and coerces None to body",
+      "scripts/wxdf/semantic_modules.py:104,199 call the structure module with protect_semantics=True on the production path"
+    ]
+  },
+  "recommended_order": [
+    "T01"
+  ],
+  "tasks": [
+    {
+      "id": "T01",
+      "subject": "手工编号标题:去编号保标题",
+      "status": "pending",
+      "depends_on": [],
+      "scope": [
+        "scripts/wxdf/semantics/structure.py",
+        "tests/test_modular_heading_marker.py",
+        "AGENTS.md decision 10 amendment",
+        ".gitignore allowlist for the new test file"
+      ],
+      "invariants": [
+        "a graded heading never renders a manual marker",
+        "a body paragraph without a heading style keeps its protection and never becomes a list item",
+        "a numbered note under a heading style stays a note (decision 10)",
+        "a marker-only heading keeps its source text and leaves an info record",
+        "three audits passed, unexpected_styles empty, risk_warnings empty for ordinary documents"
+      ],
+      "residuals": []
+    }
+  ],
+  "residuals": [
+    "role=title blocks are out of scope for the marker cleanup in T01",
+    "appendix headings keep their own numbering form and are owned by appendix semantics; a marked appendix heading is not covered by T01"
+  ],
+  "external_gates": [
+    "remote_push_and_release_authorization"
+  ],
+  "note": "Docs-only package until the user approves T01. No source change yet. The image-paragraph presentation fix from the previous round is uncommitted and lives in scripts/wxdf/normalization.py plus tests/test_modular_fidelity.py."
+}
