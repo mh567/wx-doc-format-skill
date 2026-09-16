@@ -96,6 +96,46 @@ def _int_attribute(element, name: str, default: int) -> int:
         return default
 
 
+def _level_definition(level) -> dict:
+    """Return the visible fields of one ``w:lvl`` element."""
+
+    num_fmt = level.find("w:numFmt", _NUMBERING_NS)
+    lvl_text = level.find("w:lvlText", _NUMBERING_NS)
+    restart = level.find("w:lvlRestart", _NUMBERING_NS)
+    start = level.find("w:start", _NUMBERING_NS)
+    return {
+        "num_fmt": num_fmt.get(f"{{{_NUMBERING_NAMESPACE}}}val") if num_fmt is not None else None,
+        "lvl_text": lvl_text.get(f"{{{_NUMBERING_NAMESPACE}}}val") if lvl_text is not None else None,
+        "restart": (
+            _int_attribute(restart, "val", 0) if restart is not None else None
+        ),
+        "start": _int_attribute(start, "val", 1),
+    }
+
+
+def _numbering_level_overrides(instance) -> dict[int, dict]:
+    """Return per-level overrides for one ``w:num``.
+
+    Each override is keyed by ``w:ilvl`` and records a ``definition`` when the
+    override carries a replacement ``w:lvl`` (which replaces the abstract level's
+    definition) and a ``start`` when it carries a ``w:startOverride`` (which sets
+    that instance's start for the level).
+    """
+
+    overrides: dict[int, dict] = {}
+    for override in instance.findall("w:lvlOverride", _NUMBERING_NS):
+        ilvl = _int_attribute(override, "ilvl", 0)
+        entry: dict = {"definition": None, "start": None}
+        replacement = override.find("w:lvl", _NUMBERING_NS)
+        if replacement is not None:
+            entry["definition"] = _level_definition(replacement)
+        start_override = override.find("w:startOverride", _NUMBERING_NS)
+        if start_override is not None:
+            entry["start"] = _int_attribute(start_override, "val", 1)
+        overrides[ilvl] = entry
+    return overrides
+
+
 def simulate_saved_numbering(path: Path) -> list[dict]:
     """Return the visible numbering the saved DOCX produces, paragraph by paragraph.
 
@@ -107,6 +147,11 @@ def simulate_saved_numbering(path: Path) -> list[dict]:
     appears in the same instance (the value is a one-based index, ``0`` means the
     level never restarts, and an omitted ``w:lvlRestart`` restarts the level when
     the level above it is used, per ECMA-376 17.9.11).
+
+    A ``w:lvlOverride`` is honoured: a replacement ``w:lvl`` replaces the
+    abstract level's definition for that instance, and a ``w:startOverride`` sets
+    that instance's start for the level.  A document without overrides keeps the
+    exact behaviour it had before overrides were modelled.
 
     Every returned row carries the paragraph text, the numbering ``num_id`` /
     ``ilvl`` actually used, the paragraph style id, and ``marker``: the
@@ -127,28 +172,40 @@ def simulate_saved_numbering(path: Path) -> list[dict]:
         levels: dict[int, dict] = {}
         for level in abstract.findall("w:lvl", _NUMBERING_NS):
             ilvl = _int_attribute(level, "ilvl", 0)
-            num_fmt = level.find("w:numFmt", _NUMBERING_NS)
-            lvl_text = level.find("w:lvlText", _NUMBERING_NS)
-            restart = level.find("w:lvlRestart", _NUMBERING_NS)
-            start = level.find("w:start", _NUMBERING_NS)
-            levels[ilvl] = {
-                "num_fmt": num_fmt.get(f"{{{_NUMBERING_NAMESPACE}}}val") if num_fmt is not None else None,
-                "lvl_text": lvl_text.get(f"{{{_NUMBERING_NAMESPACE}}}val") if lvl_text is not None else None,
-                "restart": (
-                    _int_attribute(restart, "val", 0) if restart is not None else None
-                ),
-                "start": _int_attribute(start, "val", 1),
-            }
+            levels[ilvl] = _level_definition(level)
         abstract_levels[str(abstract_id)] = levels
 
     num_to_abstract: dict[str, str] = {}
+    num_level_overrides: dict[str, dict[int, dict]] = {}
     for instance in numbering.findall("w:num", _NUMBERING_NS):
         reference = instance.find("w:abstractNumId", _NUMBERING_NS)
         if reference is None:
             continue
-        num_to_abstract[instance.get(f"{{{_NUMBERING_NAMESPACE}}}numId")] = reference.get(
+        num_id = instance.get(f"{{{_NUMBERING_NAMESPACE}}}numId")
+        num_to_abstract[num_id] = reference.get(
             f"{{{_NUMBERING_NAMESPACE}}}val"
         )
+        overrides = _numbering_level_overrides(instance)
+        if overrides:
+            num_level_overrides[num_id] = overrides
+
+    def effective_levels(num_id: str) -> dict[int, dict]:
+        """Return the visible levels for one instance, overrides applied."""
+
+        levels = dict(abstract_levels.get(num_to_abstract.get(num_id, ""), {}))
+        for ilvl, override in num_level_overrides.get(num_id, {}).items():
+            definition = override.get("definition")
+            if definition is not None:
+                resolved = dict(definition)
+            else:
+                resolved = dict(
+                    levels.get(ilvl)
+                    or {"num_fmt": None, "lvl_text": None, "restart": None, "start": 1}
+                )
+            if override.get("start") is not None:
+                resolved["start"] = override["start"]
+            levels[ilvl] = resolved
+        return levels
 
     style_numbering: dict[str, tuple[str, int]] = {}
     for style in styles.findall("w:style", _NUMBERING_NS):
@@ -181,7 +238,7 @@ def simulate_saved_numbering(path: Path) -> list[dict]:
         else:
             rows.append({"text": text, "style_id": style_id, "num_id": None, "ilvl": None, "marker": None})
             continue
-        levels = abstract_levels.get(num_to_abstract.get(num_id, ""), {})
+        levels = effective_levels(num_id)
         if ilvl not in levels:
             rows.append({"text": text, "style_id": style_id, "num_id": num_id, "ilvl": ilvl, "marker": None})
             continue

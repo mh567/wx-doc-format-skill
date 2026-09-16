@@ -1,5 +1,14 @@
 # 当前架构收敛进度
 
+## 2026-09-16 execution-v6 残留收口第四轮（R7：包裹正文、模拟器 override、LIST_END 定案）
+
+- **A 包裹正文转换**：区分「包裹起来的正文」与「另一套文档面」。内容控件（`w:sdt` → `w:sdtContent`）与文本框（run 内嵌 `w:txbxContent`）现在按文档顺序转换其中的段落与表格，**表格单元格内**的同类包裹同样转换；`mc:AlternateContent` 的 `Choice`/`Fallback` 对同一形状只取一个分支，因此内容不会重复。页眉 / 页脚 / 脚注 / 尾注 / 批注仍跳过（输出使用模板自身页眉页脚），由 R6 的非阻断记录命名；已转换的标签不再产生跳过记录。
+- **B 编号模拟器**：`simulate_saved_numbering` 现在建模 `w:lvlOverride` 与 `w:startOverride`（级别定义覆盖、实例起点），无 override 文档行为不变。R5 的每章节重启因此可以**只用可见标记**证明：`甲一 a)`、`甲二 b)`、`乙一 a)`、`乙二 b)`，不依赖编号实例 id。
+- **C `LIST_END` 定案保留不发出**：边界终止由受保护块与 `OUTSIDE_LIST` 表达；对已裁决为 `OUTSIDE_LIST` 的边界块再发同证据类候选会制造等强平局。冻结 spec 未改正文，仅追加实现注记说明该状态为保留。
+- 新增 `tests/test_v6_residuals_r7.py`（13 项），已放行 `.gitignore` 并复核可见。
+- 全量测试 `1297 passed, 0 failed`。真实转换全部 `completed`、`saved_output_audit.passed=true`、`unexpected_styles=[]`、无风险、无重复块。
+- 仍未关闭：约束 7 的字面数值阈值、`transaction.py` 独立工单、同类别相邻新 numId 的嵌套启发式与 `ilvl=0` 重启变体、跨类别 `ilvl=0` 子表、回读审计盲区、缩进细化的适用边界、显式容器 `content_blocks` 为 `None` 且不做约束 4、真实 WPS/LibreOffice 与麒麟真机验收。证据见 `docs/execution-v6/evidence/residuals.md`。
+
 ## 2026-09-16 execution-v6 残留收口第二轮（R5：归属缺口与每章节重启）
 
 - **A 注记归属**：尾部扫描不再把 `note`/`numbered_note` 当终止块，运行之后的注记归最后一个列表项（`ITEM_CHILD_BLOCK`），注记的角色、样式与文本不变；T05 工作项 1 的七类内容里有六类归为 `ITEM_CHILD_BLOCK`，`formula` 仍走 `ITEM_CONTINUATION`；注记是最后一类原先完全无归属的类型。

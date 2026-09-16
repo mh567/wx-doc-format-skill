@@ -242,7 +242,7 @@
         "the structural create-ordering fix in scripts/wxdf/transaction.py still lacks its own ticket; T10 did not touch that file",
         "RESOLVED (residual round R2): top-level num_id is the single owner and numbering_definition_ref is a derived view",
         "the README field definition says effective_ilvl synthesizes w:ind, but _resolve_effective_ilvl only synthesizes source_ilvl and pStyle inheritance; the w:ind semantics gap remains",
-        "PARTIALLY RESOLVED (round R6 M1-M4): levels 3-8 are covered by a table-driven clamp test (M2); same indent different level and different indent same level are pinned (M4); synthetic WPS / LibreOffice numbering shapes (missing abstract, mismatched style ilvl, run split across numIds, omitted ilvl) are covered and degrade gracefully (M3); containers remain an owned gap because the source parser reads only top-level body paragraphs and tables, so a numbered list in a header, footer, footnote, endnote, textbox or SDT is silently dropped (M1, owner: later full-matrix round); real WPS / LibreOffice acceptance remains an external gap (owner: kylin_v10_arm64_real_machine_acceptance)",
+        "RESOLVED (round R7 A): a content control, a text box and an mc:AlternateContent shape inside the document body and inside a table cell are converted exactly once (only the first mc:Choice is read); header, footer, footnote, endnote and comment parts stay outside the converted block set and are named by a non-blocking record",
         "same-category contiguous new-numId nesting remains a heuristic; the ilvl=0 restart variant is indistinguishable from a sub-list",
         "cross-category ilvl=0 sub-list is treated as a same-level kind switch and is not auto-nested"
       ]
@@ -254,12 +254,13 @@
   ],
   "follow_up_round": {
     "date": "2026-09-16",
-    "scope": "residual closure R1-R4 plus a review-driven R1 correction, R5 (note / in-run table / per-chapter restart), R6 (protected-list precision and test-matrix gaps)",
+    "scope": "residual closure of the closed execution-v6 package: R1-R4, R5, R6, R7; see docs/execution-v6/evidence/residuals.md",
     "evidence": "docs/execution-v6/evidence/residuals.md",
     "rounds": [
       "R1-R4",
       "R5 (A/B/C)",
-      "R6 (P1-P4, M1-M4) + M1 diagnostic"
+      "R6 (P1-P4, M1-M4) + M1 diagnostic",
+      "R7 (A wrapped body incl. cells, B simulator overrides, C LIST_END decision)"
     ]
   },
   "follow_up_residuals_r6": {
@@ -304,7 +305,7 @@
         "status": "recorded_owned_gap",
         "owner": "later full-matrix round",
         "proof": "tests/test_v6_residuals_r6.py::test_r6_m1_header_textbox_and_sdt_lists_are_not_read",
-        "detail": "The source parser reads only top-level body w:p and w:tbl (plus table cells). A numbered list in a header, footer, footnote, endnote, textbox or SDT is silently dropped. Fixing it needs extra parts and nested elements, so it is recorded as an owned gap. README 不在范围 still covers content-control lists and multi-level lists in merged cells; table cells (including horizontally merged cells) are read."
+        "detail": "body-level and cell-level content controls and text boxes are converted exactly once since round R7; header, footer, footnote, endnote and comment content stays skipped and is named by an info record"
       },
       {
         "id": "M2",

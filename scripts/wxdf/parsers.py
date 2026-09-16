@@ -1140,12 +1140,116 @@ def _refine_indentation_levels(
     return refined
 
 
+_MC_NS = "http://schemas.openxmlformats.org/markup-compatibility/2006"
+_MC_ALTERNATE_CONTENT = f"{{{_MC_NS}}}AlternateContent"
+_MC_CHOICE = f"{{{_MC_NS}}}Choice"
+_MC_FALLBACK = f"{{{_MC_NS}}}Fallback"
+
+
+def _docx_textbox_contents(paragraph: Any) -> list[Any]:
+    """Return the ``w:txbxContent`` elements a paragraph carries, without duplicates.
+
+    A text box is nested inside a run (``w:drawing`` or ``w:pict``), so it is not
+    a body child.  Markup compatibility resolves an ``mc:AlternateContent`` to
+    its FIRST supported ``mc:Choice`` and only falls back when no choice is
+    supported, so exactly one branch is read: the first ``mc:Choice`` that
+    carries a text box, otherwise the ``mc:Fallback``.  Any other branch is a
+    duplicate of the same shape and is skipped so the wrapped content is
+    converted exactly once.
+
+    A text box that is not inside an ``mc:AlternateContent`` at all is returned
+    as itself.
+    """
+
+    contents: list[Any] = []
+    seen_alternates: set[int] = set()
+    for content in paragraph.iter(qn("w:txbxContent")):
+        alternate = None
+        for ancestor in content.iterancestors():
+            if ancestor.tag == _MC_ALTERNATE_CONTENT:
+                alternate = ancestor
+                break
+        if alternate is None:
+            contents.append(content)
+            continue
+        key = id(alternate)
+        if key in seen_alternates:
+            continue
+        seen_alternates.add(key)
+        preferred = None
+        for choice in alternate.findall(_MC_CHOICE):
+            candidate = choice.find(".//" + qn("w:txbxContent"))
+            if candidate is not None:
+                preferred = candidate
+                break
+        if preferred is None:
+            fallback = alternate.find(_MC_FALLBACK)
+            if fallback is not None:
+                preferred = fallback.find(".//" + qn("w:txbxContent"))
+        # The element must be reachable from this paragraph to be yielded, and
+        # only the preferred branch of its alternate survives.
+        if preferred is not None and id(preferred) == id(content):
+            contents.append(content)
+    return contents
+
+
+def _iter_docx_source_blocks(
+    container: Any,
+    *,
+    container_path: list[Any],
+    descend_wrappers: bool,
+):
+    """Yield ``(kind, element, node_path)`` for the body-like blocks under ``container``.
+
+    A ``w:p`` or ``w:tbl`` is a block.  Two shapes are really body content in a
+    wrapper and are descended into when ``descend_wrappers`` is set: a content
+    control (``w:sdt`` whose ``w:sdtContent`` holds the real blocks) and a text
+    box (``w:txbxContent`` nested inside a run).  Header, footer, footnote,
+    endnote and comment parts are a different surface and are not reached here.
+    An ``mc:AlternateContent`` body child is read through one branch only so its
+    duplicated shape is not converted twice.
+    """
+
+    for index, child in enumerate(container):
+        tag = child.tag
+        if tag == qn("w:p"):
+            yield ("p", child, [*container_path, index, "w:p"])
+            if descend_wrappers:
+                for textbox_index, textbox in enumerate(_docx_textbox_contents(child)):
+                    yield from _iter_docx_source_blocks(
+                        textbox,
+                        container_path=[*container_path, index, "w:txbxContent", textbox_index],
+                        descend_wrappers=True,
+                    )
+        elif tag == qn("w:tbl"):
+            yield ("tbl", child, [*container_path, index, "w:tbl"])
+        elif descend_wrappers and tag == qn("w:sdt"):
+            content = child.find(qn("w:sdtContent"))
+            if content is not None:
+                yield from _iter_docx_source_blocks(
+                    content,
+                    container_path=[*container_path, index, "w:sdtContent"],
+                    descend_wrappers=True,
+                )
+        elif descend_wrappers and tag == _MC_ALTERNATE_CONTENT:
+            branch = child.find(_MC_CHOICE)
+            if branch is None:
+                branch = child.find(_MC_FALLBACK)
+            if branch is not None:
+                yield from _iter_docx_source_blocks(
+                    branch,
+                    container_path=[*container_path, index, "mc:AlternateContent"],
+                    descend_wrappers=True,
+                )
+
+
 def analyze_docx_numbering(
     document: Any,
     report: dict[str, Any],
     *,
     excluded_source_positions: set[int] | None = None,
     catalog: dict[str, Any] | None = None,
+    descend_wrappers: bool = False,
 ) -> dict[int, dict[str, Any]]:
     """Return numbering descriptors keyed by stable top-level source position.
 
@@ -1155,6 +1259,12 @@ def analyze_docx_numbering(
     the declared ``w:ilvl``; the group decision then merges contiguous numbering
     instances into one visible sequence and publishes the same ``source_lists``
     report shape the legacy analysis did.
+
+    When ``descend_wrappers`` is set the source position walks into a content
+    control (``w:sdt`` -> ``w:sdtContent``) and a text box (``w:txbxContent``), so
+    the wrapped paragraphs are numbered exactly as ``parse`` converts them.  The
+    legacy callers that count only the top-level body children keep the default
+    ``False`` so their positions are unchanged.
     """
 
     from docx.text.paragraph import Paragraph
@@ -1163,8 +1273,12 @@ def analyze_docx_numbering(
     catalog = catalog or build_numbering_catalog(document)
     candidates: list[dict[str, Any]] = []
     position = 0
-    for child in document.element.body.iterchildren():
-        if child.tag == qn("w:p"):
+    for kind, child, _node_path in _iter_docx_source_blocks(
+        document.element.body,
+        container_path=["body"],
+        descend_wrappers=descend_wrappers,
+    ):
+        if kind == "p":
             if position not in excluded:
                 paragraph = Paragraph(child, document)
                 descriptor = describe_docx_paragraph(document, paragraph, catalog)
@@ -1186,7 +1300,7 @@ def analyze_docx_numbering(
                         "has_drawing": paragraph._p.find(".//" + qn("w:drawing")) is not None,
                     })
             position += 1
-        elif child.tag == qn("w:tbl"):
+        elif kind == "tbl":
             position += 1
 
     physical_group_id = 0
@@ -1412,7 +1526,9 @@ def _parse_docx(source: Path | str, *, store: SourceStore) -> dict[str, Any]:
     # One native catalog feeds the native group analysis directly.  The old
     # positional ``numbering_maps`` shape is gone: the native catalogue already
     # carries the full OOXML coverage (w:ind, w:suff, w:lvlRestart, w:pStyle).
-    numbering = analyze_docx_numbering(document, report, catalog=numbering_catalog)
+    numbering = analyze_docx_numbering(
+        document, report, catalog=numbering_catalog, descend_wrappers=True
+    )
     body = document.element.body
     position = 0
     nested_list_ordinals: dict[tuple[str, int, int, str | None], int] = {}
@@ -1594,29 +1710,89 @@ def _parse_docx(source: Path | str, *, store: SourceStore) -> dict[str, Any]:
                         child_path = [*cell_path, "w:p", paragraph_index]
                         add_unit(cell_id, paragraph, child_path, position, descriptor, descriptor)
                         paragraph_index += 1
+                        # A text box inside a cell paragraph is wrapped content
+                        # too, so it is converted rather than dropped.
+                        for textbox in _docx_textbox_contents(child):
+                            add_nested_block(cell_id, textbox, cell_path, cell)
                     elif child.tag == qn("w:tbl"):
                         child_path = [*cell_path, "w:tbl", nested_table_index]
                         add_table(cell_id, Table(child, cell), child_path)
                         nested_table_index += 1
+                    elif child.tag in {qn("w:sdt"), _MC_ALTERNATE_CONTENT}:
+                        add_nested_block(cell_id, child, cell_path, cell)
                 column_cursor += col_span
         facts["evidence"][table_id] = {"source_position": table_position, "table_scope": "cell_local"}
 
-    for child_index, child in enumerate(body.iterchildren()):
-        if child.tag == qn("w:p"):
+    def add_nested_block(parent_id: str, container: Any, container_path: list[Any], proxy: Any) -> None:
+        """Convert the wrapped paragraphs and tables under one container.
+
+        A content control or a text box inside a table cell holds real blocks,
+        so they are converted here instead of being dropped.  ``proxy`` is the
+        python-docx parent (the document or the cell) the wrapped elements
+        belong to.  The wrapper is unwrapped first: an ``mc:AlternateContent``
+        resolves to its first ``mc:Choice`` or else its ``mc:Fallback``, so the
+        same shape is never read twice.
+        """
+
+        if container.tag == qn("w:sdt"):
+            inner = container.find(qn("w:sdtContent"))
+            if inner is None:
+                return
+            container = inner
+        elif container.tag == _MC_ALTERNATE_CONTENT:
+            inner = None
+            for choice in container.findall(_MC_CHOICE):
+                inner = choice
+                break
+            if inner is None:
+                inner = container.find(_MC_FALLBACK)
+            if inner is None:
+                return
+            container = inner
+        for kind, element, node_path in _iter_docx_source_blocks(
+            container, container_path=container_path, descend_wrappers=True
+        ):
+            if kind == "p":
+                paragraph = Paragraph(element, proxy)
+                descriptor = describe_docx_paragraph(document, paragraph, numbering_catalog)
+                if descriptor is not None:
+                    key = (parent_id, int(descriptor.get("num_id") or 0), int(descriptor.get("ilvl") or 0), descriptor.get("num_fmt"))
+                    ordinal = nested_list_ordinals.get(key, 0) + 1
+                    nested_list_ordinals[key] = ordinal
+                    descriptor = dict(descriptor)
+                    descriptor["start"] = ordinal
+                    descriptor["restart"] = ordinal == 1
+                add_unit(parent_id, paragraph, node_path, position, descriptor, descriptor)
+            else:
+                add_table(parent_id, Table(element, proxy), node_path)
+
+    # A content control (``w:sdt``) and a text box (``w:txbxContent``) are really
+    # body content in a wrapper, so the traversal descends into them and the
+    # wrapped paragraphs and tables are converted in document order.  Header,
+    # footer, footnote, endnote and comment parts are a different document surface
+    # and are still skipped.  ``_iter_docx_source_blocks`` reads an
+    # ``mc:AlternateContent`` shape through one branch only, so a text box that
+    # appears in both ``mc:Choice`` and ``mc:Fallback`` is not converted twice.
+    for kind, child, node_path in _iter_docx_source_blocks(
+        body,
+        container_path=["body"],
+        descend_wrappers=True,
+    ):
+        if kind == "p":
             paragraph = Paragraph(child, document)
             catalogue = describe_docx_paragraph(document, paragraph, numbering_catalog)
-            add_unit("root", paragraph, ["body", child_index, "w:p"], position, numbering.get(position), catalogue)
+            add_unit("root", paragraph, node_path, position, numbering.get(position), catalogue)
             position += 1
-        elif child.tag == qn("w:tbl"):
-            add_table("root", Table(child, document), ["body", child_index, "w:tbl"])
+        elif kind == "tbl":
+            add_table("root", Table(child, document), node_path)
             position += 1
 
     # Numbering that lives outside the converted block set is reported instead
-    # of being dropped silently.  The adapter reads the document body, so a
-    # numbered list inside a header, footer, footnote, endnote, text box or
-    # content control would otherwise disappear without a trace.  The record is
-    # informational: it names the skipped content and does not change the run
-    # status.
+    # of being dropped silently.  The adapter reads the document body (now
+    # including content controls and text boxes), so a numbered list inside a
+    # header, footer, footnote or endnote part would otherwise disappear without
+    # a trace.  The record is informational: it names the skipped content and
+    # does not change the run status.
     def _has_numbering(element: Any) -> bool:
         return element is not None and element.find(".//" + qn("w:numPr")) is not None
 
@@ -1638,8 +1814,12 @@ def _parse_docx(source: Path | str, *, store: SourceStore) -> dict[str, Any]:
                 "severity": "info",
                 "message": f"numbered content in {part_name} is outside the converted document body and was skipped",
             })
+    # A body child that is a paragraph, a table, a content control or an
+    # ``mc:AlternateContent`` shape is now converted, so the record is narrowed
+    # to wrapper kinds that remain outside the converted block set.
+    converted_body_tags = {qn("w:p"), qn("w:tbl"), qn("w:sdt"), _MC_ALTERNATE_CONTENT}
     for child in body.iterchildren():
-        if child.tag in {qn("w:p"), qn("w:tbl")}:
+        if child.tag in converted_body_tags:
             continue
         if child.find(".//" + qn("w:numPr")) is not None or child.find(".//" + qn("w:txbxContent")) is not None:
             kind = child.tag.rsplit("}", 1)[-1]

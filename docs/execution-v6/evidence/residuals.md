@@ -347,3 +347,34 @@ FAILED tests/test_v6_residuals_r6.py::test_r6_p3_list_item_title_style_is_not_a_
 - 真实 WPS 与 LibreOffice 验收不可执行（M3，外部缺口）。
 - 独立的审查轮未在本轮内执行。
 - 本轮未提交、未推送、未执行任何远程操作。
+
+## R7 包裹正文转换、模拟器补 override、LIST_END 定案
+
+### A 包裹正文转换（FIXED）
+
+R6 记录「非正文容器被静默丢弃」。复审 R7 区分了两类形状：内容控件（`w:sdt` 的 `w:sdtContent`）与文本框（run 内嵌的 `w:txbxContent`）本质上是**包裹起来的正文**，应当转换；而页眉 / 页脚 / 脚注 / 尾注 / 批注属于另一套文档面，输出使用模板自身的页眉页脚，因此继续跳过并留痕。
+
+实现：`parsers.py` 的正文遍历新增包裹下潜（`descend_wrappers`），`w:sdt` 走 `w:sdtContent`、`mc:AlternateContent` 与文本框走 `w:txbxContent`，按文档顺序转换其中真正的 `w:p` / `w:tbl`；**表格单元格内**的同类包裹同样转换（`add_nested_block` 解包 `w:sdtContent` 与 `mc:AlternateContent` 后走同一遍历），单元格内包裹内容不再丢失。重复风险来自 `mc:AlternateContent` 同时携带 `mc:Choice` 与 `mc:Fallback` 的同一个形状：`_docx_textbox_contents` 只取**第一个** `mc:Choice`（无 Choice 时取 `mc:Fallback`），因此同一形状只出现一次。跳过的记录收窄为「仍被跳过的正文标签」，已转换的标签不再产生 `unread_body_content_skipped`。
+
+护栏：`test_r7_a_wrapped_sdt_list_is_converted`、`test_r7_a_sdt_preserves_real_numbering`（包裹正文保留真实编号）、`test_r7_a_textbox_list_is_converted`、`test_r7_a_alternate_content_textbox_yields_content_once`（同一形状只出现一次，且不产生跳过记录）、`test_r7_a_alternate_content_reads_only_the_first_choice`（只读第一个 Choice）、`test_r7_a_cell_nested_content_control_is_converted_once` 与 `test_r7_a_cell_nested_alternate_content_is_converted_once`（单元格内包裹内容转换且只出现一次）、`test_r7_a_numbered_header_stays_skipped`（编号页眉仍跳过并留痕）、`test_r7_a_plain_header_leaves_no_record`。
+
+### B 编号模拟器补 `w:lvlOverride` / `w:startOverride`（FIXED）
+
+`tests/modular_support.simulate_saved_numbering` 原先只读抽象级别的 `w:start`。R5 起渲染会为每个标题边界写出带 `startOverride=1` 的新实例，模拟器若不建模该字段，含 override 的文档就会被算错（例如把重启章节算成续接）。现已建模：`w:lvlOverride` 的级别定义覆盖抽象级别，`w:startOverride` 设定该实例在该级别的起点；无 override 的文档行为不变。
+
+护栏：`test_r7_b_simulator_honours_start_override`、`test_r7_b_simulator_honours_level_override_definition`，以及 `test_r7_b_real_r5_output_restarts_per_chapter_by_markers`。复审澄清：R5 真实输出的两个章节本就各自使用独立实例、抽象起点为 1，因此该用例即使不建模 override 也会通过；**override 建模本身由两项合成用例覆盖**，后者在关闭 override 建模后会从 `a)/b)` 退化为 `c)/d)`。
+
+### C `LIST_END` 定案：保留不发出（RECORDED）
+
+`LIST_END` 保留为枚举成员并在实现中恒不发出。理由：列表段的边界终止已由受保护块与 `OUTSIDE_LIST` 表达；为一个已被裁决为 `OUTSIDE_LIST` 的边界块再发一个同证据类的 `LIST_END` 候选会制造等强平局，把普通可转换文档翻成未解决（T06 复审已就同一形状给出过警告）。冻结 spec 未改动，仅在候选状态枚举后追加一条实现注记说明该状态为保留；`test_r7_c_list_end_stays_reserved` 钉住当前行为。
+
+### 本轮关闭与仍开放
+
+| 残留 | 处置 |
+| --- | --- |
+| 「内容控件与文本框内的编号列表被跳过」（R6 M1 的一半） | 关闭（A：包裹正文转换，含**表格单元格内**的包裹；多 Choice 只读第一个） |
+| 「页眉 / 页脚 / 脚注 / 尾注 / 批注内的编号列表被跳过」 | 保留（A：属另一套文档面，输出用模板自身页眉页脚），由 R6 的非阻断记录命名 |
+| 「测试用编号模拟器不建模 `w:lvlOverride`/`w:startOverride`」（R5 起更要紧） | 关闭（B） |
+| 「`LIST_END` 已枚举未发出」 | 关闭为决定（C：保留不发出，理由与护栏已记录） |
+
+仍未关闭：约束 7 的字面数值阈值；`transaction.py` 的结构创建排序修正仍欠独立工单；同类别相邻新 numId 的嵌套启发式；`ilvl=0` 重启变体与子表不可分；跨类别 `ilvl=0` 子表不自动嵌套；回读审计的两处盲区；缩进细化在编号组之外与不回头运行时不生效；显式容器 `content_blocks` 为 `None` 且不做约束 4；`列项` 子串判定对无关样式名的假阴性；真实 WPS / LibreOffice 与麒麟真机验收为外部门禁。

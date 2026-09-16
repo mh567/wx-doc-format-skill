@@ -12,9 +12,11 @@ This file owns the residual-round decisions for:
   * P4 protected-list precision -- a manually typed dotted marker is a manual
     heading in the text path; the DOCX visible-marker path keeps its
     3+-segment list rule, so the two paths differ by design;
-  * M1 matrix -- a list inside a header, a textbox or a content control is not
-    read by the source parser, and the skipped numbered content is now named by
-    an informational diagnostic instead of disappearing silently;
+  * M1 matrix -- a list inside a header is a different surface and is still not
+    read by the source parser, while a text box and a content control are body
+    content in a wrapper and are converted (the source-parser wrapper policy was
+    completed in round R7); the skipped numbered content is named by an
+    informational diagnostic instead of disappearing silently;
   * M2 matrix -- levels 3 through 8 clamp to the second level and emit the
     clamp diagnostic;
   * M3 matrix -- synthetic WPS / LibreOffice numbering shapes behave gracefully;
@@ -436,10 +438,10 @@ def test_r6_p4_three_segment_marker_is_a_list_marker_end_to_end(tmp_path: Path) 
 def _build_container_docx(path: Path) -> None:
     """Body list plus a numbered list in a header, a textbox and an SDT.
 
-    The source parser iterates only the direct children of ``w:body`` that are
-    ``w:p`` or ``w:tbl`` (``wxdf.parsers.parse``).  A header is a separate part,
-    a textbox lives in ``w:txbxContent`` nested inside a run, and a content
-    control is a body child of kind ``w:sdt`` that the loop does not visit.
+    A header is a separate document part.  A textbox lives in ``w:txbxContent``
+    nested inside a run and a content control is a body child of kind ``w:sdt``;
+    those two shapes are body content in a wrapper, so the source parser converts
+    them in document order (round R7).  Only the header stays skipped.
     """
 
     document = Document()
@@ -479,13 +481,14 @@ def _build_container_docx(path: Path) -> None:
     document.save(str(path))
 
 
-def test_r6_m1_header_textbox_and_sdt_lists_are_not_read(tmp_path: Path) -> None:
-    """A numbered list outside the body is dropped, not converted.
+def test_r6_m1_header_is_skipped_but_wrapped_body_content_is_read(tmp_path: Path) -> None:
+    """A header is skipped; a text box and a content control are converted.
 
-    The finding is recorded in the evidence: the source parser reads only
-    top-level body paragraphs and tables, so a list in a header, a footer, a
-    footnote, a textbox or a content control never reaches the pipeline.  The
-    body list is still recognized, and the dropped content does not corrupt it.
+    The source parser keeps header, footer, footnote, endnote and comment parts
+    out of the converted block set, so a list there never reaches the pipeline.
+    A text box (``w:txbxContent``) and a content control (``w:sdt``) are body
+    content in a wrapper, so they are converted in document order (round R7).
+    The body list is still recognized, and the header content does not leak in.
     """
 
     source = tmp_path / "containers.docx"
@@ -495,15 +498,15 @@ def test_r6_m1_header_textbox_and_sdt_lists_are_not_read(tmp_path: Path) -> None
     body_texts = _body_texts(facts)
 
     assert {"1. 正文项一", "2. 正文项二"} <= body_texts, body_texts
+    # A header is a different surface, so it stays out of the body.
     assert "1. 页眉项" not in body_texts, body_texts
-    assert "1. 文本框项" not in body_texts, body_texts
-    assert "1. 内容控件项" not in body_texts, body_texts
-    # Every unit comes from the body part; a header / footnote would carry a
-    # different part name.
+    # A text box and a content control are body content in a wrapper.
+    assert "1. 文本框项" in body_texts, body_texts
+    assert "1. 内容控件项" in body_texts, body_texts
+    # Every unit still comes from the body part; a header would carry a different
+    # part name.
     assert {unit["source_ref"].get("part") for unit in facts["units"].values()} == {"word/document.xml"}
-
-    result = analyze_lists(facts)
-    assert len(_item_ids(result)) == 2, result["items"]
+    assert "unread_body_content_skipped" not in [item["code"] for item in facts["diagnostics"]]
 
 
 # ===========================================================================
