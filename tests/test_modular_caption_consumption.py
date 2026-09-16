@@ -363,5 +363,5 @@ def test_parenthesized_mixed_figure_caption_is_associated(tmp_path: Path) -> Non
         for paragraph in Document(output).paragraphs
         if "功能简述图" in paragraph.text
     ]
-    assert rendered_caption_texts == ["图  功能简述图"]
-    assert render_result["render_map"][ast_caption_id]["text"] == "图 1 功能简述图"
+    assert rendered_caption_texts == ["图1 功能简述图"]
+    assert render_result["render_map"][ast_caption_id]["text"] == "图1 功能简述图"

@@ -548,7 +548,7 @@ def test_native_generates_one_sequence_caption_per_data_table(tmp_path: Path) ->
         assert siblings[siblings.index(caption_id) + 1] == block["target_id"]
 
     xml = _document_xml(paths["output"])
-    assert xml.count("SEQ Table") == len(captions), xml.count("SEQ Table")
+    assert xml.count("SEQ 表") == len(captions), xml.count("SEQ 表")
     for caption_id in captions:
         assert f"native-caption-" in caption_id
 
@@ -572,14 +572,14 @@ def test_native_caption_output_matches_the_legacy_sequence_contract(tmp_path: Pa
     paragraphs = [
         match.group(0)
         for match in re.finditer(r"<w:p\b.*?</w:p>", xml, re.S)
-        if "SEQ Table" in match.group(0)
+        if "SEQ 表" in match.group(0)
     ]
     assert paragraphs
     for paragraph in paragraphs:
         flattened = re.sub(r"\s+", " ", paragraph)
         assert f'<w:pStyle w:val="{caption_style_id}"/>' in flattened, flattened
-        assert "SEQ Table \\* ARABIC" in flattened
-        assert ">表 <" in flattened
+        assert "SEQ 表 \\* ARABIC" in flattened
+        assert "<w:t>表</w:t>" in flattened
         assert "<w:t>1</w:t>" in flattened.replace(" ", "")
 
     report = json.loads(paths["report"].read_text(encoding="utf-8"))
@@ -666,10 +666,11 @@ def test_authored_caption_text_reaches_the_saved_output(tmp_path: Path) -> None:
     xml = _document_xml(paths["output"])
 
     # One authored caption and one generated caption.
-    assert xml.count("SEQ Table") == 2, xml.count("SEQ Table")
+    assert xml.count("SEQ 表") == 2, xml.count("SEQ 表")
     assert xml.count("服务接口") == 1, xml.count("服务接口")
-    # The authored label is replaced by the prefix run and the sequence field.
+    # The authored label is replaced by the label run and the sequence field.
     assert xml.count("表 1 服务接口") == 0
+    assert re.search(r"<w:t>表</w:t>", xml), "the table label run is missing"
 
     report = json.loads(paths["report"].read_text(encoding="utf-8"))
     assert report["saved_output_audit"]["passed"] is True
@@ -826,12 +827,12 @@ def test_authored_figure_caption_renders_as_a_seq_figure_field(tmp_path: Path) -
     _completed, paths = _blocked_native_cli(tmp_path, source)
     xml = _document_xml(paths["output"])
 
-    assert xml.count("SEQ Figure") == 1, xml.count("SEQ Figure")
-    assert xml.count("SEQ Table") == 1, xml.count("SEQ Table")
+    assert xml.count("SEQ 图") == 1, xml.count("SEQ 图")
+    assert xml.count("SEQ 表") == 1, xml.count("SEQ 表")
     assert xml.count("系统架构") == 1, xml.count("系统架构")
-    # The authored label is replaced by the prefix run and the sequence field.
+    # The authored label is replaced by the label run and the sequence field.
     assert xml.count("图 1 系统架构") == 0
-    assert re.search(r">图 <", xml), "the figure prefix run is missing"
+    assert re.search(r"<w:t>图</w:t>", xml), "the figure label run is missing"
 
     report = json.loads(paths["report"].read_text(encoding="utf-8"))
     assert report["saved_output_audit"]["passed"] is True
@@ -848,9 +849,9 @@ def test_uncaptioned_docx_image_renders_one_seq_figure_field(tmp_path: Path) -> 
     _completed, paths = _blocked_native_cli(tmp_path, source)
     xml = _document_xml(paths["output"])
 
-    assert xml.count("SEQ Figure") == 1, xml.count("SEQ Figure")
-    assert xml.count("SEQ Table") == 1, xml.count("SEQ Table")
-    assert re.search(r">图 <", xml), "the figure prefix run is missing"
+    assert xml.count("SEQ 图") == 1, xml.count("SEQ 图")
+    assert xml.count("SEQ 表") == 1, xml.count("SEQ 表")
+    assert re.search(r"<w:t>图</w:t>", xml), "the figure label run is missing"
 
     report = json.loads(paths["report"].read_text(encoding="utf-8"))
     assert report["saved_output_audit"]["passed"] is True

@@ -231,7 +231,7 @@ def test_modular_cli_preserves_real_template_title_toc_and_table_captions(tmp_pa
     with ZipFile(output) as archive:
         document_xml = archive.read("word/document.xml").decode("utf-8")
     assert document_xml.count("TOC \\o") == 1
-    assert document_xml.count("SEQ Table") == 2
+    assert document_xml.count("SEQ 表") == 2
 
     saved_report = json.loads(report.read_text(encoding="utf-8"))
     assert saved_report["profile"] == "wx-default-v2"

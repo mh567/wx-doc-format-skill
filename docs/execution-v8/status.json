@@ -1,0 +1,97 @@
+{
+  "schema_version": 1,
+  "objective": "caption_sequence_identifier_and_field_form_are_template_owned",
+  "branch": "dev",
+  "baseline_head": "8b11b76",
+  "implementation_started": true,
+  "current_task": "T01",
+  "next_task": null,
+  "user_ruling": {
+    "date": "2026-09-16",
+    "question": "交叉引用对话框列不出图/表题注，是否按模板为准修复",
+    "ruling": "可以（按模板为准）",
+    "conflict_resolved": "AGENTS.md 决策 3 字面写「SEQ Table 和 SEQ Figure 分开编号」，模板用的是 SEQ 表 / SEQ 图；按「模板是格式值的唯一事实源」以模板为准，决策 3 已随本包改写"
+  },
+  "defect_evidence": {
+    "user_report": "转换后的文档插入交叉引用时，引用类型选 图 或 表，引用编号项列表为空",
+    "three_way": "模板与源文档的题注是复杂域 SEQ 表 / SEQ 图，标签 run 紧接 fldChar begin；修复前输出是简单域 w:fldSimple，标签 run 带尾随空格，标识符为 SEQ Table / SEQ Figure",
+    "counts": {
+      "source": {"SEQ 表": 1, "SEQ 图": 3, "SEQ 公式": 3, "SEQ Table": 0, "SEQ Figure": 0},
+      "before": {"SEQ 表": 0, "SEQ 图": 0, "SEQ 公式": 3, "SEQ Table": 1, "SEQ Figure": 3},
+      "after": {"SEQ 表": 1, "SEQ 图": 3, "SEQ 公式": 3, "SEQ Table": 0, "SEQ Figure": 0}
+    },
+    "root_cause": [
+      "scripts/wxdf/rendering.py hardcoded _CAPTION_SEQUENCE = {\"table\": (\"表 \", \"Table\"), \"figure\": (\"图 \", \"Figure\")} and wrote a simple field (w:fldSimple)",
+      "scripts/wxdf/template.py hardcoded captions.table_sequence / figure_sequence as English and never read the template",
+      "Word matches the cross-reference item list by SEQ identifier, so the Chinese 图/表 labels matched no item"
+    ],
+    "not_affected": "formula numbering keeps its identifier because the source SEQ 公式 field is a retained inline atom (decision 9): 3 to 3"
+  },
+  "recommended_order": [
+    "T01"
+  ],
+  "tasks": [
+    {
+      "id": "T01",
+      "subject": "题注序列标识符与域形态改为模板拥有",
+      "status": "done",
+      "depends_on": [],
+      "scope": [
+        "scripts/wxdf/template.py",
+        "scripts/wxdf/rendering.py",
+        "scripts/caption_placement.py",
+        "scripts/text_utils.py",
+        "AGENTS.md decision 3 amendment",
+        "tests/test_modular_caption_sequence.py",
+        "tests/test_native_semantic_ownership.py",
+        "tests/test_modular_fidelity.py",
+        "tests/test_modular_conversion.py",
+        "tests/test_modular_caption_consumption.py",
+        "tests/test_t05_mixed_content.py"
+      ],
+      "proof": {
+        "red": "tests/test_modular_caption_sequence.py 6 failed, 1 passed before the change",
+        "green": "tests/test_modular_caption_sequence.py 11 passed; full suite 1349 passed (baseline 1338 + 11)",
+        "real_document": "技术文件格式及书写要求.docx: SEQ 表 1, SEQ 图 3, SEQ 公式 3, no SEQ Table / SEQ Figure, matching the source and the template; status completed_with_warnings with only the pre-existing source_heading_level_normalized advisory, saved_output_audit passed, unexpected_styles empty",
+        "template_self": "the template converted with itself keeps its status and audits; the SEQ counts move from 表 0 / 图 0 to 表 1 / 图 3 with 公式 3 unchanged",
+        "review_counterexamples": "a 图 caption followed by a table no longer poisons table_sequence; a template without a caption style reads no field from unstyled paragraphs"
+      },
+      "invariants": [
+        "every rebuilt caption uses the identifier the template uses for its kind",
+        "no SEQ identifier the template does not use appears in the output",
+        "caption visible text equals the saved paragraph text, so the readback text comparison still holds",
+        "formula numbering fields are copied by reference, count unchanged",
+        "an appendix caption that preserves its source number gains no field (decision 7)",
+        "three audits passed, unexpected_styles empty, risk_warnings empty for ordinary documents"
+      ],
+      "review": {
+        "rounds": 2,
+        "axis_standards": [
+          "F1 fixed (latent): an unresolved caption style left style_id None, which matched every unstyled paragraph and read its field; the loader now falls back without scanning",
+          "F2 fixed (latent): the neighbouring-block checks outranked the label, so a 图 caption followed by a table poisoned table_sequence; the label now decides and the neighbours are the fallback",
+          "F4 fixed: the SEQ identifier read and the identifier-to-kind vocabulary had two copies; both converged into scripts/text_utils.py (sequence_identifier, CAPTION_SEQUENCE_KINDS, CAPTION_SEQUENCE_FALLBACK)",
+          "F5 fixed: the spec listed tests/test_md_captions.py as a consumer to update, while that test drives the legacy chain and stays correct; the spec now says it is unchanged",
+          "no stable interface renamed; no em dash and no banned construction in the added Chinese prose"
+        ],
+        "axis_spec": [
+          "F3 fixed: the spec and two docstrings overstated the neighbouring-block rule; the template's own 图1 caption is decided by its label (the image sits two note paragraphs earlier), so the spec, T01 and both docstrings now state label-first with the neighbours as fallback",
+          "F6 fixed: the spec's eight test items had only seven tests; a benchmark baseline test and a formula-field test were added (11 tests now), and the real-document statistics are recorded as evidence because that file lives outside the repo",
+          "F7 recorded, not fixed: a caption carrying an opaque_inline atom with a cached_result can drift from the saved paragraph text; reproduced with a simple-field fixture and confirmed identical on HEAD (git stash of scripts/), so it is pre-existing and out of scope"
+        ],
+        "counterexamples": "figure caption above a table, template without a caption style, table caption below its table, simple-field template, repeated captions, authored 图3-1 number, appendix caption, caption in a table cell, unsupported caption_type: all behave as designed; no assertion was weakened"
+      },
+      "residuals": [
+        "the legacy diagnostic writers (scripts/docx_render.py, scripts/word_model_renderer.py) keep the English identifiers and the simple field, and are out of scope",
+        "the Word/WPS cross-reference caption dialog cannot be verified on this machine; it is an external manual gate",
+        "the caption label is taken from the identifier (a Chinese Word caption label and its sequence identifier are the same text, which the template shows); a template whose label differs from its identifier is not covered",
+        "the cached number is always written as 1 and Word recomputes it when the fields refresh",
+        "PRE-EXISTING (found while implementing, confirmed on HEAD): a source paragraph carrying w:fldSimple makes the readback text comparison report paragraph_order_changed, because python-docx's paragraph.text skips simple-field content while the audit walks every w:t"
+      ]
+    }
+  ],
+  "external_gates": [
+    "word_cross_reference_caption_dialog_manual_check",
+    "remote_push_and_release_authorization"
+  ],
+  "note": "Uncommitted: scripts/wxdf/template.py, scripts/wxdf/rendering.py, scripts/caption_placement.py, scripts/text_utils.py, AGENTS.md, tests/test_modular_caption_sequence.py, five updated test files, docs/execution-v8/. Version 0.14.3 is the current candidate."
+}

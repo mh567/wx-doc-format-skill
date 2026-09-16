@@ -17,6 +17,7 @@ from docx.oxml.ns import qn
 from lxml import etree
 
 from template_profile import load_template_profile
+from text_utils import CAPTION_SEQUENCE_FALLBACK, CAPTION_SEQUENCE_KINDS, sequence_identifier
 from toc_contract import TOC_MAX_LEVEL
 
 
@@ -47,6 +48,76 @@ def extract_template_toc_fragment(document: Any) -> list:
                 fragment.append(deepcopy(following))
         return fragment
     return []
+
+
+def _paragraph_style_id(paragraph: Any) -> str | None:
+    properties = paragraph.find(qn("w:pPr"))
+    style = properties.find(qn("w:pStyle")) if properties is not None else None
+    return style.get(qn("w:val")) if style is not None else None
+
+
+def _caption_label(paragraph: Any) -> str:
+    """Return the label the caption paragraph leads with."""
+
+    for node in paragraph.iter(qn("w:t")):
+        text = (node.text or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _has_graphic(element: Any) -> bool:
+    return any(node.tag in {qn("w:drawing"), qn("w:pict"), qn("w:object")} for node in element.iter())
+
+
+def extract_caption_sequences(document: Any, profile: Mapping[str, Any]) -> dict[str, Any]:
+    """Read the sequence identifier the template uses for each caption kind.
+
+    Delivered captions have to look like the template's, and Word matches a
+    cross-reference item by the sequence identifier, so the identifier is the
+    template's own (``SEQ 表`` / ``SEQ 图``) instead of a name this converter
+    invents.  A caption's own label names its kind and is the deciding evidence.
+    When the label is not one the WX convention knows, the object the caption
+    sits next to decides: a caption above a table labels that table and a caption
+    below a graphic labels that graphic.  A kind the template does not show falls
+    back to the WX label, and ``source`` records whether both kinds came from the
+    template.
+    """
+
+    resolved = profile.get("resolved_styles") or {}
+    caption_style = resolved.get("caption")
+    style_id = ((profile.get("styles") or {}).get(caption_style) or {}).get("style_id") if caption_style else None
+    if style_id is None:
+        # Without a caption style there is nothing to identify, and an empty id
+        # would match every paragraph that carries no style at all.
+        return {
+            "table_sequence": CAPTION_SEQUENCE_FALLBACK["table"],
+            "figure_sequence": CAPTION_SEQUENCE_FALLBACK["figure"],
+            "source": "fallback",
+        }
+    children = list(document.element.body)
+    found: dict[str, str] = {}
+    for index, child in enumerate(children):
+        if child.tag != qn("w:p") or _paragraph_style_id(child) != style_id:
+            continue
+        identifier = sequence_identifier(child)
+        if not identifier:
+            continue
+        kind = CAPTION_SEQUENCE_KINDS.get(_caption_label(child))
+        if kind is None:
+            following = children[index + 1] if index + 1 < len(children) else None
+            previous = children[index - 1] if index > 0 else None
+            if following is not None and following.tag == qn("w:tbl"):
+                kind = "table"
+            elif previous is not None and _has_graphic(previous):
+                kind = "figure"
+        if kind and kind not in found:
+            found[kind] = identifier
+    return {
+        "table_sequence": found.get("table", CAPTION_SEQUENCE_FALLBACK["table"]),
+        "figure_sequence": found.get("figure", CAPTION_SEQUENCE_FALLBACK["figure"]),
+        "source": "template" if set(CAPTION_SEQUENCE_FALLBACK) <= set(found) else "fallback",
+    }
 
 
 def _freeze(value: Any) -> Any:
@@ -122,7 +193,7 @@ def load_template_bundle(
             "page_break_before": True,
         },
         "page_layout": {"preserve_template_sections": True},
-        "captions": {"table_sequence": "Table", "figure_sequence": "Figure"},
+        "captions": extract_caption_sequences(document, profile),
     }
     return TemplateBundle(
         schema_version="1.0",

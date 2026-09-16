@@ -243,9 +243,10 @@ def test_body_caption_still_owns_its_sequence_field() -> None:
 
     text = _write_caption(paragraph, block, {})
 
-    fields = [element.get(qn("w:instr")) for element in paragraph._p.iter(qn("w:fldSimple"))]
-    assert fields == ["SEQ Table \\* ARABIC"]
-    assert text == "表 1 说明"
+    # Without a template contract the WX label is the fallback identifier.
+    instructions = [element.text for element in paragraph._p.iter(qn("w:instrText"))]
+    assert instructions == [" SEQ 表 \\* ARABIC "]
+    assert text == "表1 说明"
 
 
 def test_caption_copies_the_anchors_it_carries() -> None:
@@ -268,7 +269,7 @@ def test_caption_copies_the_anchors_it_carries() -> None:
     # The caption rebuilds its number, and copies the anchor a cross reference
     # targets so the reference still resolves after the fields refresh.
     assert [element.get(qn("w:name")) for element in paragraph._p.iter(qn("w:bookmarkStart"))] == ["_Ref1"]
-    assert [element.get(qn("w:instr")) for element in paragraph._p.iter(qn("w:fldSimple"))] == ["SEQ Table \\* ARABIC"]
+    assert [element.text for element in paragraph._p.iter(qn("w:instrText"))] == [" SEQ 表 \\* ARABIC "]
 
 
 def test_paragraph_presentation_carries_only_the_alignment_a_style_cannot() -> None:

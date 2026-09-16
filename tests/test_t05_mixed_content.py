@@ -705,7 +705,7 @@ def test_t05_docx_item_tail_renders_in_source_order_with_caption_above_table(
         ("num", "第二项"),
         ("p", "第二项后的续接正文。"),
         ("p", "表格前的说明。"),
-        ("p", "表 1"),
+        ("p", "表1"),
         ("tbl", ""),
         ("p", "尾部正文。"),
     ], meaningful
@@ -815,7 +815,7 @@ def test_t05_docx_tail_starting_with_table_renders_in_source_order(tmp_path: Pat
     assert meaningful == [
         ("num", "第一项"),
         ("num", "第二项"),
-        ("p", "表 1"),
+        ("p", "表1"),
         ("tbl", ""),
         ("p", "尾部正文。"),
     ], meaningful

@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import hashlib
 from docx.opc.constants import RELATIONSHIP_TYPE as RT
+from docx.oxml.ns import qn
 
 
 HEADING_PATTERNS = [
@@ -79,6 +80,32 @@ def hierarchical_heading_level_from_text(text: str) -> int | None:
     if len(parts) >= 3 and _VERSION_CONTEXT.match(remainder):
         return None
     return min(len(parts), 6)
+
+
+CAPTION_SEQUENCE_KINDS = {"表": "table", "图": "figure", "Table": "table", "Figure": "figure"}
+CAPTION_SEQUENCE_FALLBACK = {"table": "表", "figure": "图"}
+
+
+def sequence_identifier(element) -> str | None:
+    """Return the SEQ identifier a paragraph element's field instruction names.
+
+    One owner for reading a caption's sequence identifier, so the template
+    capability loader and the rendered-document audit cannot disagree about the
+    spelling a caption carries.  Both representations are read, the complex field
+    the template writes and the simple field a retired writer wrote.  The
+    identifier names the caption kind, so the labels the WX template uses and the
+    English names a retired writer wrote are both mapped.
+    """
+
+    instructions = [node.text or "" for node in element.iter(qn("w:instrText"))]
+    instructions.extend(node.get(qn("w:instr")) or "" for node in element.iter(qn("w:fldSimple")))
+    for instruction in instructions:
+        tokens = instruction.split()
+        if "SEQ" in tokens:
+            index = tokens.index("SEQ")
+            if index + 1 < len(tokens):
+                return tokens[index + 1]
+    return None
 
 
 def strip_heading_marker_prefix(text: str) -> str:

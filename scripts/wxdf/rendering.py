@@ -16,7 +16,7 @@ from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from lxml import etree
 
 from table_formatting import normalize_table
-from text_utils import caption_parts
+from text_utils import CAPTION_SEQUENCE_FALLBACK, caption_parts
 
 from .render_plan import build_render_plan
 from .media import MediaEmbedder
@@ -321,13 +321,50 @@ def _write_inline(
                     paragraph.add_run(cached)
 
 
-_CAPTION_SEQUENCE = {"table": ("表 ", "Table"), "figure": ("图 ", "Figure")}
+def _caption_sequences(normalized: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Return the caption identifiers the template supplies for this run."""
+
+    contract = normalized.get("presentation", {}).get("template_contract", {})
+    captions = contract.get("captions", {}) if isinstance(contract, Mapping) else {}
+    return captions if isinstance(captions, Mapping) else {}
+
+
+def _caption_sequence(caption_type: str, sequences: Mapping[str, Any] | None) -> str:
+    """Return the sequence identifier one caption kind is numbered with.
+
+    The identifier is what Word matches a cross-reference item by, so it comes
+    from the template (``SEQ 表`` / ``SEQ 图``) rather than from a name this
+    module invents.  The WX label is the fallback for a template that shows no
+    caption field of that kind.
+    """
+
+    kind = caption_type if caption_type in CAPTION_SEQUENCE_FALLBACK else "table"
+    value = (sequences or {}).get(f"{kind}_sequence")
+    return str(value) if isinstance(value, str) and value else CAPTION_SEQUENCE_FALLBACK[kind]
+
+
+def _append_field_char(paragraph: Any, field_type: str) -> None:
+    run = OxmlElement("w:r")
+    char = OxmlElement("w:fldChar")
+    char.set(qn("w:fldCharType"), field_type)
+    run.append(char)
+    paragraph._p.append(run)
+
+
+def _append_instr_text(paragraph: Any, instruction: str) -> None:
+    run = OxmlElement("w:r")
+    text = OxmlElement("w:instrText")
+    text.set(qn("xml:space"), "preserve")
+    text.text = instruction
+    run.append(text)
+    paragraph._p.append(run)
 
 
 def _write_caption(
     paragraph: Any,
     block: Mapping[str, Any],
     resources: Mapping[str, Any],
+    sequences: Mapping[str, Any] | None = None,
 ) -> str:
     """Write a caption run and return its visible text.
 
@@ -335,6 +372,12 @@ def _write_caption(
     leading label and number are projected away here so that the sequence field
     owns the numbering.  A generated caption carries no content and renders as
     the bare sequence field.
+
+    The field is written the way the template writes it: the label run, then a
+    complex field whose identifier is the template's caption label.  A simple
+    field and an invented identifier would render, but Word lists a
+    cross-reference item by the sequence identifier, so the template's own
+    spelling is what keeps 图 and 表 cross-referenceable.
 
     A caption whose source numbering is preserved, which is what an appendix
     caption carries (``表A.1``), keeps its authored number instead: the sequence
@@ -346,7 +389,7 @@ def _write_caption(
     """
 
     caption_type = str(block.get("caption_type") or "table")
-    prefix, sequence = _CAPTION_SEQUENCE.get(caption_type, _CAPTION_SEQUENCE["table"])
+    sequence = _caption_sequence(caption_type, sequences)
     inline_content = list(block.get("inline_content") or [])
     # A caption carries anchors its text refers to, so the retained markers are
     # copied around the rebuilt run: a cross reference that targets the caption
@@ -364,23 +407,20 @@ def _write_caption(
             for element in _retained_inline_elements(item, resources):
                 paragraph._p.append(element)
         return authored
-    paragraph.add_run(prefix)
+    paragraph.add_run(sequence)
 
-    field = OxmlElement("w:fldSimple")
-    field.set(qn("w:instr"), f"SEQ {sequence} \\* ARABIC")
-    field_run = OxmlElement("w:r")
-    field_text = OxmlElement("w:t")
-    field_text.text = "1"
-    field_run.append(field_text)
-    field.append(field_run)
-    paragraph._p.append(field)
+    _append_field_char(paragraph, "begin")
+    _append_instr_text(paragraph, f" SEQ {sequence} \\* ARABIC ")
+    _append_field_char(paragraph, "separate")
+    paragraph.add_run("1")
+    _append_field_char(paragraph, "end")
 
     _, _, _, body = caption_parts(authored)
     paragraph.add_run(f" {body}")
     for item in ends:
         for element in _retained_inline_elements(item, resources):
             paragraph._p.append(element)
-    return f"{prefix}1 {body}"
+    return f"{sequence}1 {body}"
 
 
 def _style_for_block(
@@ -582,6 +622,7 @@ def render(
     document = ast["document"]
     media = MediaEmbedder(document.get("resources", {}), resources, error_type=RenderError)
     styles = _profile_styles(normalized)
+    caption_sequences = _caption_sequences(normalized)
     presentation_profile = normalized.get("presentation", {}).get("profile", {})
     if not isinstance(presentation_profile, Mapping):
         presentation_profile = {}
@@ -666,7 +707,7 @@ def render(
                     paragraph = parent.add_paragraph()
         caption_text: str | None = None
         if block.get("role") == "caption":
-            caption_text = _write_caption(paragraph, block, resources)
+            caption_text = _write_caption(paragraph, block, resources, caption_sequences)
         else:
             _write_inline(paragraph, block.get("inline_content", []), media, resources)
         if parent is not None and parent._tc in layout_table_cells:

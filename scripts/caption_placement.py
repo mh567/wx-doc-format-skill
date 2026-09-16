@@ -7,6 +7,7 @@ from docx.oxml.ns import qn
 
 from document_model import caption_block
 from table_semantics import table_caption_eligible
+from text_utils import CAPTION_SEQUENCE_KINDS, sequence_identifier
 
 
 def _object_kind(block: dict[str, Any]) -> str | None:
@@ -270,12 +271,17 @@ def _paragraph_has_graphics(paragraph) -> bool:
 
 
 def _rendered_caption_type(paragraph) -> str | None:
+    """Return the caption kind a rendered paragraph carries.
+
+    The sequence identifier names the kind, and the shared vocabulary maps the
+    WX labels the template writes and the English names a retired writer wrote.
+    A caption whose field is missing falls back to the label its text leads with.
+    """
+
     style_name = paragraph.style.name if paragraph.style is not None else ""
-    xml = paragraph._element.xml
-    if "SEQ Table" in xml:
-        return "table"
-    if "SEQ Figure" in xml:
-        return "figure"
+    identifier = sequence_identifier(paragraph._element)
+    if identifier in CAPTION_SEQUENCE_KINDS:
+        return CAPTION_SEQUENCE_KINDS[identifier]
     if "caption" not in style_name.casefold() and "题注" not in style_name:
         return None
     text = paragraph.text.strip()
