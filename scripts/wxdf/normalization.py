@@ -363,6 +363,49 @@ def _body_outline_overrides(ast: Mapping[str, Any]) -> dict[str, dict[str, int]]
     return overrides
 
 
+def _close_dropped_references(document: dict[str, Any], dropped: set[str]) -> None:
+    """Drop the nodes and references a dropped subtree leaves behind.
+
+    The source AST names other nodes in three places: ``document.associations``,
+    a caption's ``target_id`` and an appendix container's ``title_ref``.  An
+    association naming a dropped node has nothing left to describe, a caption
+    whose table or figure the exclusion removed has no meaning, and an appendix
+    whose title left the document has no range to open.  The closure repeats
+    until no remaining node points into the dropped set.
+    """
+
+    while True:
+        dependent = {
+            str(node_id)
+            for node_id, block in document["blocks"].items()
+            if str(node_id) not in dropped
+            and isinstance(block, Mapping)
+            and block.get("role") == "caption"
+            and block.get("target_id") is not None
+            and str(block["target_id"]) in dropped
+        }
+        dependent |= {
+            str(container_id)
+            for container_id, container in document["containers"].items()
+            if str(container_id) not in dropped
+            and isinstance(container, Mapping)
+            and container.get("title_ref") is not None
+            and str(container["title_ref"]) in dropped
+        }
+        if not dependent:
+            break
+        dropped.update(dependent)
+    associations = document.get("associations")
+    if isinstance(associations, list):
+        document["associations"] = [
+            association
+            for association in associations
+            if isinstance(association, Mapping)
+            and str(association.get("source_id")) not in dropped
+            and str(association.get("target_id")) not in dropped
+        ]
+
+
 def _drop_excluded_blocks(ast: dict[str, Any], overlay: Mapping[str, Any] | None) -> None:
     """Remove every block the scope module excluded from the rendered body.
 
@@ -391,6 +434,7 @@ def _drop_excluded_blocks(ast: dict[str, Any], overlay: Mapping[str, Any] | None
             collect(child_id, inside_excluded=drop)
 
     collect(document["root_id"], inside_excluded=False)
+    _close_dropped_references(document, dropped)
     for parent_id in list(children):
         if parent_id in dropped:
             del children[parent_id]

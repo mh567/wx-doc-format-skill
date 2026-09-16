@@ -91,6 +91,7 @@ tests/*
 !tests/test_v6_residuals_r7.py
 !tests/test_fu3_convergence.py
 !tests/test_t09_compiled_acceptance.py
+!tests/test_corpus_defects.py
 !tests/modular_support.py
 !tests/fixtures/
 !tests/fixtures/modular_v3/

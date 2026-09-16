@@ -201,7 +201,13 @@ def build_native_run_result(
         if item in (decision_set.get("unresolved") or [])
         or item in (saved_findings.get("issues") or [])
         or item in (appendix_audit.get("issues") or [])
-        or item.get("severity") in {"error", "warning"}
+        or (
+            item.get("severity") in {"error", "warning"}
+            # A finding whose defect the delivered document already resolved is
+            # reported and repairable without blocking the delivery, so the
+            # severity alone cannot decide when the code is advisory.
+            and not is_advisory_audit_issue(item)
+        )
         or (
             item in (model_findings.get("issues") or [])
             # A model finding whose defect the normalization already resolved in

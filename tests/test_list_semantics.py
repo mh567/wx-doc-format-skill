@@ -279,7 +279,7 @@ def test_infer_docx_role_keeps_graph_component_heading_and_body_text() -> None:
     )
 
 
-def test_invalid_numbering_cannot_be_revived_by_list_style() -> None:
+def test_suppressed_numbering_cannot_be_revived_by_list_style() -> None:
     doc = Document()
     style_name = "1.1一级列项-编号"
     doc.styles.add_style(style_name, WD_STYLE_TYPE.PARAGRAPH)
@@ -295,7 +295,11 @@ def test_invalid_numbering_cannot_be_revived_by_list_style() -> None:
     _, _, role = infer_docx_role(paragraph, True, parse_report, numbering)
 
     assert numbering["status"] == "ignored"
-    assert "invalid_numbering_definition" in numbering["evidence"]
+    # ``w:numId`` 0 detaches the paragraph from numbering, so the evidence names
+    # the suppression rather than a damaged definition, and the list style still
+    # cannot revive it.
+    assert "numbering_suppressed" in numbering["evidence"]
+    assert "invalid_numbering_definition" not in numbering["evidence"]
     assert role == "body"
     assert parse_report["suppressed_list_style_conflicts"]
 

@@ -291,6 +291,47 @@ def _apply_update_node_content(ast: dict[str, Any], decision: Mapping[str, Any])
         block["inline_content"] = copy.deepcopy(inline_content)
 
 
+_SCOPE_METADATA_FIELDS = ("appendix_id", "semantic_scope_id", "source_number_preserved")
+# A created node joins the container's scope, not its content.  Whether the
+# source already numbered a caption is a property of that caption, so inheriting
+# it would make a generated caption render as the empty suffix of a number it
+# never had.
+_CREATED_NODE_SCOPE_FIELDS = ("appendix_id", "semantic_scope_id")
+
+
+def _inherited_scope_metadata(
+    ast: dict[str, Any],
+    parent_id: str,
+    fields: tuple[str, ...] = _SCOPE_METADATA_FIELDS,
+) -> dict[str, Any]:
+    """Return the scope metadata a node takes from the container it joins.
+
+    An appendix owns its range, so a node placed inside an appendix container
+    belongs to that appendix even when the node was created after the range was
+    declared, and a moved subtree keeps the ownership of the appendix it lands
+    in.  The nearest declaration wins, and an ancestor supplies only what the
+    container itself does not declare.
+    """
+
+    nodes = _node_map(ast)
+    parent = _parent_map(ast)
+    metadata: dict[str, Any] = {}
+    destination_node = nodes.get(parent_id)
+    if isinstance(destination_node, Mapping):
+        for field in fields:
+            if field in destination_node:
+                metadata[field] = copy.deepcopy(destination_node[field])
+    destination_parent = parent.get(parent_id)
+    while destination_parent is not None:
+        ancestor = nodes.get(destination_parent)
+        if isinstance(ancestor, Mapping):
+            for field in fields:
+                if field in ancestor and field not in metadata:
+                    metadata[field] = copy.deepcopy(ancestor[field])
+        destination_parent = parent.get(destination_parent)
+    return metadata
+
+
 def _apply_move_node(ast: dict[str, Any], decision: Mapping[str, Any]) -> None:
     target_ids = decision.get("target_node_ids", [])
     value = decision.get("value") or {}
@@ -327,20 +368,7 @@ def _apply_move_node(ast: dict[str, Any], decision: Mapping[str, Any]) -> None:
         destination.insert(max(0, min(index, len(destination))), node_id)
     else:
         destination.append(node_id)
-    metadata: dict[str, Any] = {}
-    destination_node = nodes.get(new_parent_id)
-    if isinstance(destination_node, Mapping):
-        for field in ("appendix_id", "semantic_scope_id", "source_number_preserved"):
-            if field in destination_node:
-                metadata[field] = copy.deepcopy(destination_node[field])
-    destination_parent = parent.get(new_parent_id)
-    while destination_parent is not None:
-        ancestor = nodes.get(destination_parent)
-        if isinstance(ancestor, Mapping):
-            for field in ("appendix_id", "semantic_scope_id", "source_number_preserved"):
-                if field in ancestor and field not in metadata:
-                    metadata[field] = copy.deepcopy(ancestor[field])
-        destination_parent = parent.get(destination_parent)
+    metadata = _inherited_scope_metadata(ast, new_parent_id)
     explicit_metadata = value.get("semantic_metadata")
     if isinstance(explicit_metadata, Mapping):
         metadata.update(copy.deepcopy(dict(explicit_metadata)))
@@ -349,7 +377,7 @@ def _apply_move_node(ast: dict[str, Any], decision: Mapping[str, Any]) -> None:
             descendant = nodes.get(descendant_id)
             if descendant is None:
                 continue
-            for field in ("appendix_id", "semantic_scope_id", "source_number_preserved"):
+            for field in _SCOPE_METADATA_FIELDS:
                 if field in metadata:
                     descendant[field] = copy.deepcopy(metadata[field])
 
@@ -391,7 +419,13 @@ def _apply_create_node(ast: dict[str, Any], decision: Mapping[str, Any]) -> None
             raise TransactionConflict("create_node references an unknown node")
         index = value.get("index")
     if node.get("block_type"):
-        document["blocks"][node_id] = copy.deepcopy(dict(node))
+        created = copy.deepcopy(dict(node))
+        # A created node joins the container it lands in, so it takes that
+        # container's scope.  A node the proposal already scoped keeps its own
+        # declaration.
+        for field, value_ in _inherited_scope_metadata(ast, parent_id, _CREATED_NODE_SCOPE_FIELDS).items():
+            created.setdefault(field, value_)
+        document["blocks"][node_id] = created
     elif node.get("kind"):
         document["containers"][node_id] = copy.deepcopy(dict(node))
     else:

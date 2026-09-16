@@ -1008,6 +1008,7 @@ def _native_reviewer(context: ModuleExecutionContext) -> dict[str, Any]:
 
 
 def _native_publisher(context: ModuleExecutionContext) -> bool:
+    from .auditing import is_advisory_audit_issue
     from .publication import PublicationError, validate_acceptance
 
     review_result = context.require("review_result")
@@ -1031,6 +1032,9 @@ def _native_publisher(context: ModuleExecutionContext) -> bool:
         item
         for item in context.require("list_semantics_result").get("diagnostics", [])
         if item.get("severity") in {"error", "warning"}
+        # A finding whose defect the delivered document already resolved does not
+        # block publication, exactly as it does not block the run result.
+        and not is_advisory_audit_issue(item)
     ]
     if audits_passed and not fatal_diagnostics:
         selected_artifact = Path(review_result["selected_artifact"])

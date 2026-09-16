@@ -24,12 +24,18 @@ _REPAIRABLE_AUDIT_CODES = frozenset({
 # Findings whose defect the normalization already resolved in the rendered
 # model.  They stay reported and repairable, so the review can align the source
 # model with what the template renders, and they do not fail the model audit:
-# the delivered document carries the level the outline allows either way.  The
-# model audit is the only producer, and the code alone identifies them because
-# the publication gate and the CLI diagnostic echo see the issues without an
-# audit name.
+# the delivered document carries the levels the model allows either way.  The
+# model audit is the only producer for the heading code, and the list analysis
+# for the constraint code, so the code alone identifies them because the
+# publication gate and the CLI diagnostic echo see the issues without an audit
+# name.  A list whose level the two-level model cannot express is clamped to the
+# second level and its orphan is flattened to the local list root (AGENTS.md
+# decision 1), so the delivered document conforms while the source depth stays
+# visible here.  A list the materializer cannot resolve at all still blocks
+# through ``unresolved_list_parent``.
 ADVISORY_AUDIT_CODES = frozenset({
     "source_heading_level_normalized",
+    "list_constraint_violation",
 })
 
 

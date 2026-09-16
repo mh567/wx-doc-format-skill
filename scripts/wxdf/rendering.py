@@ -761,7 +761,12 @@ def render(
         render_map[node_id] = {
             "kind": "paragraph",
             "paragraph": paragraph_counter,
-            "text": caption_text if caption_text is not None else paragraph.text,
+            # The saved output audit compares this text against the paragraph a
+            # reader sees.  A retained field or opaque object is copied back as an
+            # element whose cached text ``paragraph.text`` cannot see, so the
+            # module's own inline projection owns the text this render map
+            # reports.
+            "text": caption_text if caption_text is not None else _text(block.get("inline_content", []), resources),
             "inline_content": block.get("inline_content", []),
             "role": block.get("role"),
             "style": actual_style,

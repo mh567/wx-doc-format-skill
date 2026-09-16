@@ -546,6 +546,18 @@ def audit_native_appendix(
         container_id, container = containers[0]
         expected_nodes = set(appendix.get("root_node_ids") or [])
         actual_nodes = set(document["children"].get(container_id, []))
+        # A caption generated for a table or figure inside the range joins the
+        # container after the range was declared, so it is not in the declared
+        # roots.  A generated caption that declares this appendix and anchors to
+        # a target already in the range belongs to it; a container child that
+        # declares nothing is still reported.
+        generated_nodes = {
+            node_id
+            for node_id in actual_nodes - expected_nodes
+            if str((document["blocks"].get(node_id) or {}).get("appendix_id") or "").upper() == appendix_id
+            and str((document["blocks"].get(node_id) or {}).get("target_id") or "") in expected_nodes
+        }
+        expected_nodes |= generated_nodes
         if expected_nodes != actual_nodes:
             issues.append({"code": "appendix_range_mismatch", "appendix_id": appendix_id, "expected": sorted(expected_nodes), "actual": sorted(actual_nodes)})
         if expected_nodes & root_children:

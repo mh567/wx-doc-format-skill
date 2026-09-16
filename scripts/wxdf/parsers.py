@@ -23,10 +23,7 @@ from .validation import validate_source_facts
 
 
 MARKDOWN_PARSER_VERSION = "1.1.0"
-_NUMBERING_LIST_FORMATS = frozenset({
-    "decimal", "decimalZero", "lowerLetter", "upperLetter",
-    "lowerRoman", "upperRoman", "bullet",
-})
+_NUMBERING_MARKERLESS_FORMATS = frozenset({"none", ""})
 _NUMBERING_PROTECTED_STYLES = frozenset({"caption", "题注", "文档标题", "title"})
 _EMU_PER_POINT = 12700
 _EMU_PER_INCH = 914400
@@ -35,6 +32,27 @@ _WP_NS = "{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawin
 _DOCX_VISIBLE_LIST_MARKER_RE = re.compile(
     r"^(?P<indent>[ \t]*)(?P<marker>(?:\d+(?:[.．-]\d+)+(?:[.)])?|\d+[.)]|[A-Za-z][)]|[-+*•▪◦]))(?=[ \t]+)"
 )
+
+
+def _declares_numbering_marker(num_fmt: Any) -> bool:
+    """Return whether a numbering level declares a visible list marker.
+
+    OOXML names every sequence Word can render, including circled numbers and
+    ideographs, so a level is a list level whenever it declares a format.  Only
+    an absent or explicitly suppressed format leaves the level without a marker.
+    """
+
+    return isinstance(num_fmt, str) and num_fmt.strip().casefold() not in _NUMBERING_MARKERLESS_FORMATS
+
+
+def _numbering_is_suppressed(num_id: Any) -> bool:
+    """Return whether a paragraph carries OOXML's "no numbering" sentinel.
+
+    ``w:numId`` 0 detaches a paragraph from numbering instead of naming an
+    instance, so it never refers to a definition that could be missing.
+    """
+
+    return num_id == 0
 
 
 def _docx_visible_list_marker(text: str) -> dict[str, Any] | None:
@@ -550,6 +568,25 @@ def _parse_markdown(source: Path | str, *, store: SourceStore, text: str | None 
     return facts
 
 
+_RUN_SWITCH_OFF_VALUES = frozenset({"0", "false", "off"})
+
+
+def _run_switch_is_on(element: Any) -> bool:
+    """Return whether a ``w:b`` or ``w:i`` run switch is enabled.
+
+    OOXML enables bold and italic with the bare element, and disables them with
+    ``w:val="0"``, ``false`` or ``off``.  Editors write the disabled form on runs
+    whose style would otherwise supply the mark, so the value decides the mark.
+    """
+
+    if element is None:
+        return False
+    value = element.get(qn("w:val"))
+    if value is None:
+        return True
+    return str(value).strip().casefold() not in _RUN_SWITCH_OFF_VALUES
+
+
 def _docx_inline_content(
     paragraph: Any,
     handle: SourceHandle,
@@ -590,9 +627,9 @@ def _docx_inline_content(
         properties = run.find(qn("w:rPr"))
         if properties is None:
             return marks
-        if properties.find(qn("w:b")) is not None:
+        if _run_switch_is_on(properties.find(qn("w:b"))):
             marks.append("strong")
-        if properties.find(qn("w:i")) is not None:
+        if _run_switch_is_on(properties.find(qn("w:i"))):
             marks.append("emphasis")
         return marks
 
@@ -1162,8 +1199,9 @@ def describe_docx_paragraph(
     level.update(override)
     style_name = _style_name(paragraph)
     num_fmt = level.get("num_fmt")
+    numbering_suppressed = _numbering_is_suppressed(num_id)
     marker_only_level = is_marker_only_level(num_fmt, style_name, level.get("lvl_text"))
-    valid = abstract_id is not None and isinstance(num_fmt, str) and num_fmt in _NUMBERING_LIST_FORMATS
+    valid = abstract_id is not None and _declares_numbering_marker(num_fmt)
     valid = valid or marker_only_level
     evidence: list[str] = []
     if valid:
@@ -1188,6 +1226,10 @@ def describe_docx_paragraph(
         confidence = 0.0
         if protected:
             evidence.append("protected_role")
+        elif numbering_suppressed:
+            # ``w:numId`` 0 is OOXML's "no numbering" value: the paragraph is not
+            # attached to a missing instance, so nothing about it is damaged.
+            evidence.append("numbering_suppressed")
         elif not valid:
             evidence.append("invalid_numbering_definition")
     else:
@@ -1224,7 +1266,14 @@ def describe_docx_paragraph(
     }
 
 
-_ORDERED_NUMBERING_FORMATS = _NUMBERING_LIST_FORMATS - {"bullet"}
+def _num_fmt_is_ordered(num_fmt: Any) -> bool:
+    """Return whether a numbering format numbers the items of its level.
+
+    ``bullet`` is the only format OOXML draws without a number, so every other
+    declared format yields one.
+    """
+
+    return _declares_numbering_marker(num_fmt) and str(num_fmt).strip().casefold() != "bullet"
 
 
 def _normalized_marker_template(value: Any) -> str:
@@ -1305,7 +1354,7 @@ def _physical_groups_continue(
     current_format = current_first.get("num_fmt")
     if previous_format == "bullet" or current_format == "bullet":
         return _bullet_groups_continue(previous, current)
-    if previous_format not in _ORDERED_NUMBERING_FORMATS or current_format != previous_format:
+    if not _num_fmt_is_ordered(previous_format) or current_format != previous_format:
         return False
     if _normalized_marker_template(previous[0].get("lvl_text")) != _normalized_marker_template(current_first.get("lvl_text")):
         return False
@@ -1639,7 +1688,7 @@ def analyze_docx_numbering(
             num_fmt = candidate.get("num_fmt")
             p_style = str(candidate.get("p_style") or "").casefold()
             evidence: list[str] = []
-            if candidate.get("abstract_num_id") is not None and num_fmt in _NUMBERING_LIST_FORMATS:
+            if candidate.get("abstract_num_id") is not None and _declares_numbering_marker(num_fmt):
                 evidence.append("valid_numbering_definition")
             if _is_list_style(style_name):
                 evidence.append("list_style")
@@ -1669,7 +1718,7 @@ def analyze_docx_numbering(
                 or p_style.startswith("heading")
                 or note_role is not None
             )
-            valid = candidate.get("abstract_num_id") is not None and num_fmt in _NUMBERING_LIST_FORMATS
+            valid = candidate.get("abstract_num_id") is not None and _declares_numbering_marker(num_fmt)
             marker_only_level = is_marker_only_level(num_fmt, style_name, candidate.get("lvl_text"))
             valid = valid or marker_only_level
             if marker_only_level:
@@ -1684,6 +1733,10 @@ def analyze_docx_numbering(
                 confidence = 0.0
                 if protected:
                     evidence.append("protected_role")
+                elif _numbering_is_suppressed(candidate.get("num_id")):
+                    # ``w:numId`` 0 detaches the paragraph from numbering, so the
+                    # level holds no damaged definition to report.
+                    evidence.append("numbering_suppressed")
                 elif not valid:
                     evidence.append("invalid_numbering_definition")
             elif high:
