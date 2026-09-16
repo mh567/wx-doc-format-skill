@@ -470,7 +470,7 @@ def _native_renderer(context: ModuleExecutionContext) -> Mapping[str, Any]:
     staging_path = context.services["staging_path"]
     options = context.request.options or {}
     render_options = {
-        "table_row_height_cm": float(options.get("table_row_height_cm", 0.69)),
+        "table_row_height_cm": float(options.get("table_row_height_cm", 0.7)),
         "table_row_height_rule": str(options.get("table_row_height_rule", "at-least")),
     }
     with context.stage("render"):

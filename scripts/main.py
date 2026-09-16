@@ -112,7 +112,7 @@ from wxdf.kernel import ConversionKernel, ConversionRequest
 
 
 SKILL_VERSION = "0.7.0"
-DEFAULT_TABLE_ROW_HEIGHT_CM = 0.69
+DEFAULT_TABLE_ROW_HEIGHT_CM = 0.7
 DEFAULT_TABLE_ROW_HEIGHT_RULE = "at-least"
 
 

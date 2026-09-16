@@ -473,7 +473,7 @@ def render(
     template_path: Path | str | None = None,
     template_bundle: TemplateBundle | None = None,
     resources: Mapping[str, Any] | None = None,
-    table_row_height_cm: float = 0.69,
+    table_row_height_cm: float = 0.7,
     table_row_height_rule: str = "at-least",
 ) -> dict[str, Any]:
     """Render normalized nodes in children order and save a DOCX artifact."""
