@@ -67,7 +67,7 @@ wx-doc-format-skill-<version>-kylin-v10-arm64.tar.gz
 
 完整 Nuitka XML 先经过 root、completion、standalone、模块集合、能力合同及 SHA256 检查，保留在私有构建目录。公开离线包排除该 XML；包清单及 runtime 模块清单仅保留可核验模块摘要、XML hash 和源码身份，不复制 XML 中的源码路径。
 
-`smoke_distribution.py` 首先拒绝脚本伪装的运行时。真实入口验收包括普通 Markdown、程序生成的真实 DOCX、外部 command 增强、文件协议多阶段等待及 resume、审计后复核修复、终态恢复幂等、拒绝复核时保护原输出、报告脱敏、ZIP 完整性、AST/legacy 拒绝门禁、离线安装与 ASCII 路径拒绝。外部增强响应由确定性本地适配器提供，不访问模型服务。该适配器属于私有验收工具，公开 runtime 和安装启动器不依赖 Python 源文件。
+`smoke_distribution.py` 首先拒绝脚本伪装的运行时。真实入口验收包括普通 Markdown、程序生成的真实 DOCX、外部 command 增强、文件协议多阶段等待及 resume、审计后复核修复、终态恢复幂等、拒绝复核时保护原输出、报告脱敏、ZIP 完整性、AST 导出拒绝门禁、离线安装与 ASCII 路径拒绝。外部增强响应由确定性本地适配器提供，不访问模型服务。该适配器属于私有验收工具，公开 runtime 和安装启动器不依赖 Python 源文件。
 
 构建脚本保留私有证据目录并打印其路径，摘要另存 `build/nuitka/local-*/acceptance.json`。证据包含命令、返回码、stdout/stderr、请求、checkpoint、报告和输入输出文件，不进入公开安装包。
 

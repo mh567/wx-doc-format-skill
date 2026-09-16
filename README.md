@@ -19,15 +19,14 @@ Markdown / DOCX 转 WX 模板格式 DOCX 的格式转换服务。按八个阶段
 
 LLM 增强以 Capability 插拔方式接入，当前能力：`toc_region_review`、`list_detect`、`caption_gen`、`document_review`。新增能力在 `scripts/wxdf/llm_enhancer.py` 注册 `CapabilityConfig`。
 
-旧的诊断流水线已经删除。`--pipeline legacy` 与 `--list-policy legacy` 在任何构建下都以 `LEGACY_MODE_UNAVAILABLE` 拒绝。
-
 ## 仓库布局
 
 | 路径 | 用途 |
 |------|------|
 | `scripts/main.py` | CLI 入口，开发运行 `scripts/.venv/bin/python3 -m main` |
-| `scripts/wxdf/` | native-v2 核心：kernel、registry、parser、semantics、normalization、rendering、audit、publication |
+| `scripts/wxdf/` | 流水线实现：kernel、registry、parser、semantics、normalization、rendering、audit、publication |
 | `scripts/wxdf/semantics/` | 各语义能力模块：lists、tables、captions、appendices、regions、structure、protected |
+| `scripts/*.py` | 流水线复用的顶层模块：语义词汇、文本工具、模板合同与 LLM 能力注册 |
 | `tests/` | 76 个测试文件 |
 | `packaging/nuitka/` | Nuitka 构建、公开薄 Skill 组装 |
 | `docs/` | 设计文档与执行记录 |
@@ -50,7 +49,6 @@ cd scripts && .venv/bin/python3 -m main \
 - `--llm-enhance all --llm-command <cmd>` 启用 LLM 增强
 - `--strict-normalize / --fail-on-risk`
 - `--table-row-height-cm / --table-row-height-rule`
-- `--pipeline`、`--modular-profile`、`--list-policy` 仅为兼容保留，只接受 `modular`、`native-v2`、`wx-default-v2`
 
 测试：
 

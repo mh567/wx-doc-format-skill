@@ -2,7 +2,7 @@
 
 ## 项目
 
-wx-doc-format：Markdown / DOCX 转 WX 模板格式 DOCX。native-v2 模块化流水线 + LLM Capability 插拔增强。默认入口 `scripts/.venv/bin/python3 -m main`。
+wx-doc-format：Markdown / DOCX 转 WX 模板格式 DOCX。模块化流水线 + LLM Capability 插拔增强。默认入口 `scripts/.venv/bin/python3 -m main`。
 
 ## 架构
 
@@ -28,8 +28,6 @@ LLM 能力：`toc_region_review` / `list_detect` / `caption_gen` / `document_rev
 | `scripts/wxdf/auditing.py` | 审计 |
 | `scripts/wxdf/publication.py` | 交付决定 |
 | `scripts/wxdf/enhancement.py` | LLM 增强执行边界 |
-
-旧的诊断流水线已删除，`--pipeline legacy` 与 `--list-policy legacy` 在任何构建下都以 `LEGACY_MODE_UNAVAILABLE` 拒绝。
 
 ## 注意
 

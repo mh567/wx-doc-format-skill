@@ -25,9 +25,9 @@ LLM 增强为 Capability 插拔架构，当前能力：
 
 入口：`scripts/.venv/bin/python3 -m main`。开发不依赖 `scripts/run.sh`，该脚本只存在于发布包内。
 
-### 旧流水线已删除
+### 顶层模块归属
 
-旧的诊断流水线连同其渲染、规范化、收口、审计入口已经删除，`--pipeline legacy` 与 `--list-policy legacy` 在任何构建下都以 `LEGACY_MODE_UNAVAILABLE` 拒绝。以下顶层模块保留，因为它们被新架构复用：`document_model`、`table_formatting`、`table_semantics`、`appendix_semantics`、`front_matter`、`note_semantics`、`toc_detector`、`toc_contract`、`unordered_lists`、`text_utils`、`template_profile`、`llm_enhancer`、`review_loop`、`reporting`。
+流水线的实现位于 `scripts/wxdf/`。以下顶层模块保留在 `scripts/`，因为它们被流水线复用：`document_model`、`table_formatting`、`table_semantics`、`appendix_semantics`、`front_matter`、`note_semantics`、`toc_detector`、`toc_contract`、`unordered_lists`、`text_utils`、`template_profile`、`llm_enhancer`、`review_loop`、`reporting`。新增语义能力放入 `scripts/wxdf/semantics/`。
 
 ## 关键决策记录
 
