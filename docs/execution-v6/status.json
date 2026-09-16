@@ -203,7 +203,8 @@
         "RESOLVED (residual round R4): now report-visible as saved_output_audit.list_render_clamped and public_summary.diagnostic_codes, still non-blocking",
         "cross-category ilvl=0 sub-list is treated as a same-level kind switch and is not auto-nested (T10)",
         "the ilvl=0 restart variant is indistinguishable from a sub-list (T10)",
-        "restart_scope boundary reset is not implemented; confirmed no policy-layer boundary is needed (T10)"
+        "restart_scope boundary reset is not implemented; confirmed no policy-layer boundary is needed (T10)",
+        "OPEN: the numbering simulator in tests/modular_support.py still does not model w:lvlOverride/w:startOverride; it is a test-support helper, distinct from the audit's own _saved_number_sequence, and round R5 made the gap more relevant by starting to emit w:startOverride"
       ]
     },
     {
