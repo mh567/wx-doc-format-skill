@@ -46,12 +46,11 @@ cd scripts && .venv/bin/python3 -m main \
 ```
 
 常用标志：
-- `--pipeline {legacy,modular}` 默认 `modular`；`legacy` 为开发诊断模式
-- `--modular-profile native-v2` 默认；`--list-policy wx-default-v2` 默认
-- `--source-ast / --ast` 导出源 AST 或归一化 AST（开发诊断）
+- `--source-ast / --ast` 导出源 AST 或归一化 AST
 - `--llm-enhance all --llm-command <cmd>` 启用 LLM 增强
 - `--strict-normalize / --fail-on-risk`
 - `--table-row-height-cm / --table-row-height-rule`
+- `--pipeline`、`--modular-profile`、`--list-policy` 仅为兼容保留，只接受 `modular`、`native-v2`、`wx-default-v2`
 
 测试：
 
