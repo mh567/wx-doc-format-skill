@@ -17,7 +17,7 @@ Markdown / DOCX 转 WX 模板格式 DOCX 的格式转换服务。按八个阶段
 - **审计**校验模型、保存输出、附录保存与样式不变量；产出 `public_summary` 决定交付。
 - **发布**根据审计结果决定是否交付。
 
-LLM 增强以 Capability 插拔方式接入，当前能力：`toc_region_review`、`list_detect`、`caption_gen`、`document_review`。新增能力在 `scripts/wxdf/llm_enhancer.py` 注册 `CapabilityConfig`。
+LLM 增强以 Capability 插拔方式接入，当前能力：`toc_region_review`、`list_detect`、`caption_gen`、`document_review`。新增能力在 `scripts/wxdf/capabilities.py` 注册 `CapabilityConfig`。
 
 ## 仓库布局
 

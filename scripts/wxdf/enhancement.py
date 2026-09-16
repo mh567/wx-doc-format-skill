@@ -10,7 +10,7 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Sequence
 
-from llm_enhancer import (  # noqa: F401  # re-exported compatibility surface
+from .capabilities import (  # noqa: F401  # re-exported public surface
     CAPABILITY_REGISTRY,
     CapabilityConfig,
     _resolve_capability,

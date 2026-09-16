@@ -12,7 +12,7 @@ wx-doc-format：Markdown / DOCX 转 WX 模板格式 DOCX。模块化流水线 + 
 解析 → 范围 → 角色 → 关系 → 规范化 → 渲染 → 审计 → 发布
 ```
 
-LLM 能力：`toc_region_review` / `list_detect` / `caption_gen` / `document_review`，注册在 `scripts/wxdf/llm_enhancer.py`。
+LLM 能力：`toc_region_review` / `list_detect` / `caption_gen` / `document_review`，注册在 `scripts/wxdf/capabilities.py`。
 
 ## 关键文件
 

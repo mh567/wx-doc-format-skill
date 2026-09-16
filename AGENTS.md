@@ -21,13 +21,13 @@ LLM 增强为 Capability 插拔架构，当前能力：
 - `list_detect` — 功能点列表识别
 - `caption_gen` — 表格/图片题注生成
 - `document_review` — 审计后受限复核（带 `review_packet`）
-- 新增能力只需注册 `CapabilityConfig`（`scripts/wxdf/llm_enhancer.py`）
+- 新增能力只需注册 `CapabilityConfig`（`scripts/wxdf/capabilities.py`）
 
 入口：`scripts/.venv/bin/python3 -m main`。开发不依赖 `scripts/run.sh`，该脚本只存在于发布包内。
 
 ### 顶层模块归属
 
-流水线的实现位于 `scripts/wxdf/`。以下顶层模块保留在 `scripts/`，因为它们被流水线复用：`document_model`、`table_formatting`、`table_semantics`、`appendix_semantics`、`front_matter`、`note_semantics`、`toc_detector`、`toc_contract`、`unordered_lists`、`text_utils`、`template_profile`、`llm_enhancer`、`review_loop`、`reporting`。新增语义能力放入 `scripts/wxdf/semantics/`。
+流水线的实现位于 `scripts/wxdf/`。以下顶层模块保留在 `scripts/`，因为它们被流水线复用：`document_model`、`table_formatting`、`table_semantics`、`appendix_semantics`、`front_matter`、`note_semantics`、`toc_detector`、`toc_contract`、`unordered_lists`、`text_utils`、`template_profile`、`reporting`。新增语义能力放入 `scripts/wxdf/semantics/`。LLM 能力的注册与模式选择位于 `scripts/wxdf/capabilities.py`。
 
 ## 关键决策记录
 

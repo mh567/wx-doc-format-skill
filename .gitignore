@@ -54,7 +54,6 @@ progress.md
 tests/
 !tests/
 tests/*
-!tests/test_review_loop.py
 !tests/test_table_formatting.py
 !tests/test_nuitka_distribution.py
 !tests/test_modular_*.py
@@ -82,6 +81,7 @@ tests/*
 !tests/test_t09_compiled_acceptance.py
 !tests/test_corpus_defects.py
 !tests/test_kept_semantics.py
+!tests/test_capabilities.py
 !tests/modular_support.py
 !tests/fixtures/
 !tests/fixtures/modular_v3/

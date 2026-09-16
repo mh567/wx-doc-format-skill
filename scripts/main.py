@@ -7,12 +7,19 @@ import re
 import sys
 from pathlib import Path
 
-from llm_enhancer import normalize_mode
 from reporting import write_markdown_report
+from wxdf.capabilities import normalize_mode
 from wxdf.kernel import ConversionKernel, ConversionRequest
 
 
 SKILL_VERSION = "0.7.0"
+
+# The conversion identity.  It is recorded in the run configuration and the
+# report so a resumed run can prove it continued the same conversion, and it is
+# not selectable: there is one pipeline, one profile and one list policy.
+NATIVE_PIPELINE = "modular"
+NATIVE_PROFILE = "wx-default-v2"
+
 DEFAULT_TABLE_ROW_HEIGHT_CM = 0.7
 DEFAULT_TABLE_ROW_HEIGHT_RULE = "at-least"
 
@@ -311,12 +318,6 @@ def public_report_summary(report: dict) -> dict:
     return {
         "schema_version": "1.0",
         "status": status,
-        "pipeline": _public_summary_scalar(report.get("pipeline")),
-        "profile": _public_summary_scalar(
-            report.get("profile")
-            or (report.get("execution_plan") or {}).get("profile")
-        ),
-        "list_policy": _public_summary_scalar(report.get("list_policy")),
         "audits": audits,
         "unexpected_styles_count": unexpected_styles_count,
         "manual_review_required": manual_review_required,
@@ -356,9 +357,8 @@ def _native_checkpoint_configuration(args, *, output_path: Path) -> dict:
         "strict_normalize": args.strict_normalize,
         "table_row_height_cm": args.table_row_height_cm,
         "table_row_height_rule": args.table_row_height_rule,
-        "pipeline": args.pipeline,
-        "modular_profile": args.modular_profile,
-        "list_policy": args.list_policy,
+        "pipeline": NATIVE_PIPELINE,
+        "list_policy": NATIVE_PROFILE,
     }
 
 
@@ -375,24 +375,6 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
     parser.add_argument("--input", type=Path, help="Source file (optional when --resume is used)")
     parser.add_argument("--output", type=Path, help="Output .docx path (optional when --resume is used)")
     parser.add_argument("--template", type=Path, default=None, help="DOCX template driving styles and numbering.")
-    parser.add_argument(
-        "--pipeline",
-        choices=["legacy", "modular"],
-        default="modular",
-        help="Execution pipeline (default: modular). legacy was removed and is rejected.",
-    )
-    parser.add_argument(
-        "--modular-profile",
-        choices=["legacy-full-v1", "native-v2"],
-        default=None,
-        help="Pipeline profile (default: native-v2; legacy-full-v1 is rejected).",
-    )
-    parser.add_argument(
-        "--list-policy",
-        choices=["legacy", "wx-default-v2"],
-        default=None,
-        help="List policy (default: wx-default-v2; legacy is rejected).",
-    )
     parser.add_argument("--strict-normalize", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--report", type=Path, default=None)
     parser.add_argument("--report-md", type=Path, default=None)
@@ -456,24 +438,6 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
         ),
     )
     args = parser.parse_args(cli_arguments)
-
-    if args.modular_profile is None:
-        args.modular_profile = "native-v2"
-    if args.list_policy is None:
-        args.list_policy = "wx-default-v2"
-
-    # The legacy pipeline and its list policy were removed, so any legacy value
-    # is rejected in every build, before any run mode is entered.
-    retired_values = [
-        value
-        for value in (args.pipeline, args.modular_profile, args.list_policy)
-        if value in {"legacy", "legacy-full-v1"}
-    ]
-    if retired_values:
-        parser.error(
-            "LEGACY_MODE_UNAVAILABLE: the legacy pipeline was removed; "
-            + ", ".join(retired_values)
-        )
 
     import os as _os
 
@@ -589,7 +553,7 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
         and not args.llm_command
         and modular_protocol_mode is None
     ):
-        parser.error("native-v2 enhancement requires an explicit local --llm-command")
+        parser.error("enhancement requires an explicit local --llm-command")
     enhancement_call = None
     if args.llm_enhance != "off":
         local_command = _llm_call_from_command(args.llm_command or "")
@@ -632,8 +596,8 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
             input_path=args.input,
             output_path=modular_output_path,
             template_path=args.template,
-            pipeline=args.pipeline,
-            list_policy=args.list_policy,
+            pipeline=NATIVE_PIPELINE,
+            list_policy=NATIVE_PROFILE,
             options=kernel_options,
         )
     )

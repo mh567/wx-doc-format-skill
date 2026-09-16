@@ -1,4 +1,4 @@
-"""Native lifecycle stages for the native-v2 conversion chain."""
+"""Lifecycle stages for the conversion chain."""
 
 from __future__ import annotations
 
@@ -201,7 +201,7 @@ def _native_enhancement_candidates(
 ) -> tuple[list[Mapping[str, Any]], dict[str, Any]]:
     """Collect validated native candidates from explicitly enabled adapters."""
 
-    from llm_enhancer import CAPABILITY_REGISTRY, normalize_mode, should_enhance
+    from .capabilities import CAPABILITY_REGISTRY, normalize_mode, should_enhance
 
     from .enhancement import EnhancementExecutor, build_native_request, serialize_native_request
 
@@ -625,7 +625,7 @@ def _baseline_acceptance(audits_passed: bool, reason: str) -> Any:
 def _native_reviewer(context: ModuleExecutionContext) -> dict[str, Any]:
     """Run one post-audit candidate revision and retain a rollback baseline."""
 
-    from llm_enhancer import normalize_mode, should_enhance
+    from .capabilities import normalize_mode, should_enhance
 
     from .enhancement import EnhancementExecutor, build_native_request, serialize_native_request
     from .review import (
@@ -653,7 +653,7 @@ def _native_reviewer(context: ModuleExecutionContext) -> dict[str, Any]:
     )
     baseline_path = Path(context.services["staging_path"])
     candidate_path = baseline_path.with_name(
-        f".{request.output_path.name}.native-v2.review-candidate.staging"
+        f".{request.output_path.name}.review-candidate.staging"
     )
     if candidate_path.is_file():
         candidate_path.unlink()
