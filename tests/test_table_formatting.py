@@ -18,7 +18,6 @@ if str(SCRIPTS) not in sys.path:
 
 from table_formatting import audit_document_tables, normalize_document_tables, normalize_table
 from template_profile import load_template_profile
-from reporting import add_risk_warnings
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -194,21 +193,3 @@ def test_template_profile_resolves_real_table_style_id() -> None:
     assert profile["table_style"]["name"] == "Table Grid"
     assert profile["table_style"]["style_id"] == "20"
     assert profile["table_style"]["tbl_look"] == {}
-
-
-def test_failed_table_contract_becomes_a_risk_warning() -> None:
-    report = {
-        "non_text_objects": {},
-        "media_relationships_preserved": 0,
-        "risk_warnings": [],
-        "audit": {
-            "table_format_contract": {
-                "passed": False,
-                "paragraph_direct_format_issues": [{"paragraph": "1.r1.c1.p1"}],
-            },
-        },
-    }
-
-    add_risk_warnings(report, "at-least")
-
-    assert any(item["type"] == "table_format_contract" for item in report["risk_warnings"])

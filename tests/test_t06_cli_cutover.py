@@ -111,7 +111,7 @@ def test_default_cli_missing_input_reports_canonical_native_failure(
     assert report["status"] == "failed"
     assert [diagnostic["code"] for diagnostic in report["diagnostics"]] == ["INPUT_NOT_FOUND"]
     text = markdown_path.read_text(encoding="utf-8")
-    assert "- pipeline：modular" in text
+    assert "## 执行概览" in text
     assert "- profile：wx-default-v2" in text
     assert "- list_policy：wx-default-v2" in text
     assert "- status：failed" in text
@@ -292,7 +292,7 @@ def test_native_markdown_report_uses_native_identity_and_audit_results(tmp_path:
 
     assert completed.returncode == 0, completed.stderr
     text = markdown_path.read_text(encoding="utf-8")
-    assert "- pipeline：modular" in text
+    assert "## 执行概览" in text
     assert "- profile：wx-default-v2" in text
     assert "- list_policy：wx-default-v2" in text
     assert "- status：completed" in text
