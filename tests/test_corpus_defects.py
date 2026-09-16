@@ -20,6 +20,8 @@ match the source:
 """
 from __future__ import annotations
 
+import json
+import subprocess
 import sys
 from pathlib import Path
 from xml.etree import ElementTree
@@ -34,6 +36,7 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
+from wxdf.digest import digest
 from wxdf.kernel import ConversionKernel
 from wxdf.parsers import parse
 from wxdf.run_result import ConversionRequest
@@ -320,6 +323,175 @@ def test_excluded_region_prunes_dependent_captions_and_associations() -> None:
     assert document["associations"] == []
     # The committed Source AST keeps the region it was handed.
     assert ast["document"]["blocks"]["cap1"]["target_id"] == "t1"
+
+
+def test_normalized_digest_describes_the_snapshot_it_stores() -> None:
+    """The published semantic digest is the one a checkpoint recomputes.
+
+    A checkpoint writes this digest beside the normalized snapshot and
+    recomputes it from that snapshot on resume, so a digest taken over the tree
+    ``normalize`` was handed rather than the pruned tree it stores made every
+    document with an excluded region unresumable.
+    """
+
+    ast = _region_ast()
+    overlay = {"toc": {"semantic_scope": "excluded"}}
+
+    normalized = normalize(ast, _profile(), strategy="wx-default-v2", overlay=overlay)
+    # The digest must survive the serialisation a checkpoint performs.
+    stored = json.loads(json.dumps(normalized["source_ast"]))
+
+    assert normalized["semantic_digest"] == digest({
+        "source_revision": normalized["source_revision"],
+        "source_ast": stored,
+        "overlay": normalized["overlay"],
+    })
+    # Pruning happened, so the digest cannot describe the tree handed in.
+    assert normalized["semantic_digest"] != digest({
+        "source_revision": ast["revision"],
+        "source_ast": ast,
+        "overlay": overlay,
+    })
+
+
+# ---------------------------------------------------------------------------
+# Enhancement protocol: a document that carries its own table of contents
+# ---------------------------------------------------------------------------
+
+def _build_source_toc_docx(path: Path) -> None:
+    """Write a DOCX whose own table of contents lives in a ``w:sdt`` control."""
+
+    document = _empty_template_document()
+    body = document.element.body
+    control = OxmlElement("w:sdt")
+    control.append(OxmlElement("w:sdtPr"))
+    content = OxmlElement("w:sdtContent")
+    field_paragraph = OxmlElement("w:p")
+    run = OxmlElement("w:r")
+    instruction = OxmlElement("w:instrText")
+    instruction.set(qn("xml:space"), "preserve")
+    instruction.text = ' TOC \\o "1-3" \\h \\z \\u '
+    run.append(instruction)
+    field_paragraph.append(run)
+    content.append(field_paragraph)
+    for entry in ("概述\t1", "设计说明\t2"):
+        paragraph = OxmlElement("w:p")
+        entry_run = OxmlElement("w:r")
+        text = OxmlElement("w:t")
+        text.set(qn("xml:space"), "preserve")
+        text.text = entry
+        entry_run.append(text)
+        paragraph.append(entry_run)
+        content.append(paragraph)
+    control.append(content)
+    body.insert(0, control)
+    for line in ("演示文档", "概述", "本文说明系统定位与建设必要性。", "设计说明", "按总体架构和业务流程组织。"):
+        document.add_paragraph(line)
+    document.save(str(path))
+
+
+def _answer_pending_requests(run_dir: Path) -> int:
+    """Answer every request without a response, mirroring what an agent does."""
+
+    requests = [
+        json.loads(line)
+        for line in (run_dir / "llm_requests.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    responses_path = run_dir / "llm_responses.jsonl"
+    answered = {
+        json.loads(line)["request_id"]
+        for line in responses_path.read_text().splitlines()
+        if line.strip()
+    } if responses_path.exists() else set()
+    written = 0
+    with responses_path.open("a") as handle:
+        for index, request in enumerate(requests, 1):
+            if request["request_id"] in answered:
+                continue
+            candidates = []
+            packet = request.get("review_packet") or {}
+            for target in packet.get("targets") or []:
+                if "update_role" not in (target.get("allowed_operations") or []):
+                    continue
+                values = target.get("allowed_values") or {}
+                candidates.append({
+                    "candidate_id": f"candidate-{target['block_id']}",
+                    "module_id": request["capability"],
+                    "module_version": "2.0",
+                    "target_source_refs": [target["source_ref"]],
+                    "target_node_ids": [target["block_id"]],
+                    "proposal": {
+                        "operation": "update_role",
+                        "property_scope": list(target.get("property_scope") or ["role", "level"]),
+                        "value": {
+                            "role": (values.get("role") or ["heading"])[0],
+                            "level": int((values.get("level") or [1])[0]),
+                        },
+                    },
+                    "positive_evidence": [{"kind": "source_structure"}],
+                    "negative_evidence": [],
+                    "scope": {"stages": ["role", "normalize", "render", "audit"]},
+                    "constraints": [],
+                    "confidence": 0.95,
+                    "rationale": "source structure supports this level",
+                })
+            handle.write(json.dumps({
+                "request_id": request["request_id"],
+                "response_id": f"response-{request['capability']}-{index}",
+                "candidate_set_version": "2.0",
+                "base_revision": int(request["model_revision"]),
+                "view_sha256": request["view_sha256"],
+                "candidates": candidates,
+            }, ensure_ascii=False) + "\n")
+            written += 1
+    return written
+
+
+def _run_protocol(*arguments: object) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, str(SCRIPTS / "main.py"), *(str(value) for value in arguments)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_enhancement_protocol_resumes_a_document_with_its_own_toc(tmp_path: Path) -> None:
+    """The file protocol round trips for a document that has an excluded region.
+
+    The source table of contents is replaced by the template's, so the
+    normalized view the checkpoint stores has fewer nodes than the tree it was
+    built from.  A digest taken over the tree handed in made every resume of
+    such a document fail its own checkpoint validation.
+    """
+
+    source = tmp_path / "with-toc.docx"
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    _build_source_toc_docx(source)
+    output = tmp_path / "out.docx"
+    report = tmp_path / "report.json"
+
+    started = _run_protocol(
+        "--input", source, "--output", output, "--template", TEMPLATE,
+        "--report", report, "--llm-enhance", "all", "--generate-requests", run_dir,
+    )
+    assert started.returncode == 0, started.stderr
+    assert json.loads((run_dir / "run.json").read_text())["status"] == "waiting_external"
+
+    status = "waiting_external"
+    for _round in range(4):
+        if status != "waiting_external":
+            break
+        assert _answer_pending_requests(run_dir) > 0
+        resumed = _run_protocol("--resume", run_dir / "run.json")
+        assert "invalid_checkpoint" not in resumed.stderr, resumed.stderr
+        status = json.loads((run_dir / "run.json").read_text())["status"]
+
+    final = json.loads(report.read_text())
+    assert final["status"] in {"completed", "completed_with_warnings"}, final.get("diagnostics")
+    assert output.is_file()
 
 
 # ---------------------------------------------------------------------------

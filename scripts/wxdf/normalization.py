@@ -614,7 +614,13 @@ def normalize(
                 item_by_node[node_id][key] = copy.deepcopy(values[key])
 
     generated_nodes = [generated for item_id in item_by_node for generated in _anchor(ast, item_id)[1]]
-    semantic_payload = {"source_revision": source_ast["revision"], "source_ast": source_ast, "overlay": overlay or {}}
+    # The digest describes the snapshot this view stores, so it is taken over the
+    # pruned tree.  A checkpoint recomputes the digest from its own snapshot, and
+    # a view whose digest described a different tree could never be resumed: the
+    # excluded regions a document's own table of contents produced are gone from
+    # the stored tree, so digesting the tree handed in made every such document
+    # unresumable.
+    semantic_payload = {"source_revision": ast["revision"], "source_ast": ast, "overlay": overlay or {}}
     presentation_payload = {
         "strategy": policy.name,
         "profile": {
@@ -634,7 +640,7 @@ def normalize(
     }
     return {
         "schema_version": "1.0",
-        "source_revision": source_ast["revision"],
+        "source_revision": ast["revision"],
         "source_ast": ast,
         "overlay": copy.deepcopy(dict(overlay or {})),
         "presentation_override": copy.deepcopy(dict(presentation_override or {})),
