@@ -94,3 +94,4 @@ scripts/bootstrap_macos_lxml.sh
 scripts/list_semantic_enhancer.py
 requirements.txt
 !requirements.txt
+.commandcode/
