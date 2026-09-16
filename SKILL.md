@@ -14,6 +14,7 @@ metadata:
 1. 确认输入为可读取的 Markdown 或 DOCX。缺少输入时请用户补充。完成条件：已取得一个明确的输入文件。
 2. 用户已指定普通模式或 LLM 增强模式时直接采用。用户未指定时请其二选一，默认建议普通模式。完成条件：运行模式唯一确定。
 3. 普通模式执行本地确定性转换。LLM 增强模式转到“LLM 文件协议”。完成条件：已进入对应命令分支。
+4. LLM 增强模式按能力分批发起请求，当前提供的能力为 `toc_region_review`（目录区域复核）、`list_detect`（列表识别）、`caption_gen`（题注生成）和 `document_review`（审计后受限复核）。`document_review` 请求会附带 `review_packet`，修复范围以其 `targets` 为准。完成条件：能力集与请求契约明确。
 
 ## 平台与启动
 
@@ -42,6 +43,8 @@ metadata:
 
 ## LLM 文件协议
 
+通过外部命令调用 LLM。发布运行时需通过 `--llm-command` 提供该命令，由它读取标准输入的 JSON 请求并把 JSON 响应写到标准输出。
+
 1. 生成请求：
 
 ```bash
@@ -51,14 +54,17 @@ metadata:
   --template "$SKILL_ROOT/assets/wx_template.docx" \
   --report "$REPORT_FILE" \
   --llm-enhance all \
+  --llm-command "$LLM_COMMAND" \
   --generate-requests "$REQUEST_DIR"
 ```
 
-完成条件：`run.json` 与 `llm_requests.jsonl` 已生成，或报告状态已进入失败。
+完成条件：`run.json`（Checkpoint 2.0）与 `llm_requests.jsonl` 已生成，或报告状态已进入失败。
 
-2. 逐行读取 `llm_requests.jsonl`，为尚未响应的请求生成顶层 CandidateSet 2.0 对象。请求包含 `request_id`、`capability`、`phase`、`items`、`model_revision`、`view_sha256`、`contract_versions`、`request_sha256`、`source_refs`、`budget` 和 `timeout_seconds`。依据 `capability/phase` 及 `items[0].source_ast` 中的源证据产生候选；`document_review` 请求另有 `review_packet`，修复范围以其 `targets` 为准。保留请求文件原样。
+2. 逐行读取 `llm_requests.jsonl`，为尚未响应的请求生成顶层响应对象。每条请求包含 `request_id`、`capability`、`phase`、`items`、`model_revision`、`view_sha256`、`contract_versions`、`request_sha256`、`source_refs`、`budget` 和 `timeout_seconds`；`items[0]` 内的源 AST 视图版本为 `view_schema_version: "2.0"`，修订号即 `model_revision`。依据 `capability/phase` 及视图中的源证据产生候选。`document_review` 请求另有 `review_packet`（含 `baseline_revision`、`baseline_semantic_digest`、`targets`），其 `targets[].block_id` 与 `source_ref` 指明待修节点，`allowed_operations` 与 `property_scope`、`allowed_values` 限定可做的修复。保留请求文件原样。
 
-每行响应使用以下 JSON 模板。以对应请求的值替换 `$request.*`，以本次运行中唯一的非空字符串替换 `$response_id`。替换保留原值类型：`base_revision` 最终为整数，不能保留模板中的字符串。将实际候选对象放入 `candidates`；普通增强没有可靠候选时可使用空数组，复核请求需要有证据支持的修复候选才能通过。
+每行响应使用以下任一 JSON 模板。以对应请求的值替换 `$request.*`，以本次运行中唯一的非空字符串替换 `$response_id`。替换保留原值类型：`base_revision` 与 `view_sha256` 必须与请求一致（`base_revision` 为整数）。将实际候选对象放入 `candidates`；普通增强没有可靠候选时可使用空数组，`document_review` 复核请求需要基于 `review_packet.targets` 给出有证据支持的修复候选才能通过。
+
+候选集 2.0 形态（普通增强与复核通用）：
 
 <!-- wxdf:candidate-set-response -->
 ```json
@@ -69,6 +75,20 @@ metadata:
   "base_revision": "$request.model_revision",
   "view_sha256": "$request.view_sha256",
   "candidates": []
+}
+```
+
+补丁 2.0 形态（复核请求可直接回决策）：
+
+<!-- wxdf:patch-response -->
+```json
+{
+  "request_id": "$request.request_id",
+  "response_id": "$response_id",
+  "patch_schema_version": "2.0",
+  "base_revision": "$request.model_revision",
+  "candidates": [],
+  "decisions": []
 }
 ```
 
@@ -104,16 +124,17 @@ metadata:
 "$SKILL_ROOT/scripts/run.sh" --resume "$REQUEST_DIR/run.json"
 ```
 
-状态再次为 `waiting_external` 时重复第 2 步和第 3 步。完成条件：状态进入完成或失败。发布运行时不会自行访问互联网模型服务。
+状态再次为 `waiting_external` 时重复第 2 步和第 3 步。完成条件：状态进入完成、`completed_with_warnings` 或失败。发布运行时不会自行访问互联网模型服务。
 
 ## 审计与交付
 
-仅使用 JSON 报告中的 `public_summary` 判断公开交付结果。该摘要的 `schema_version` 必须为 `1.0`，并包含 `status`、`pipeline`、`profile`、`list_policy`、`audits`、`unexpected_styles_count`、`manual_review_required` 和 `diagnostic_codes`。
+仅使用 JSON 报告中的 `public_summary` 判断公开交付结果。该摘要的 `schema_version` 必须为 `1.0`，并包含 `status`、`pipeline`、`profile`、`list_policy`、`audits`、`unexpected_styles_count`、`manual_review_required` 和 `diagnostic_codes`。`audits` 覆盖 `audit`、`model_audit`、`saved_output_audit` 与 `appendix_preservation_audit` 四项。
 
 1. `status=completed`、已执行审计均为 `passed`、`unexpected_styles_count` 为整数 `0` 且输出文件存在时，可以交付 DOCX。
-2. `status=waiting_external` 时继续 LLM 文件协议，暂不交付。
-3. `status=failed`、摘要缺失、摘要版本错误、审计失败，或 `unexpected_styles_count` 为 `null`、非整数及非零值时停止交付，并报告 `diagnostic_codes`。
-4. `manual_review_required=true` 时，在交付说明中逐项列出人工复核要求。
+2. `status=completed_with_warnings` 时，文档可按带警告交付，但需在交付说明中逐项列出 `audits` 内未通过或带警告的项以及 `diagnostic_codes`。暂不视为发布阻断，除非 `manual_review_required=true`。
+3. `status=waiting_external` 时继续 LLM 文件协议，暂不交付。
+4. `status=failed`、摘要缺失、摘要版本错误，任一审计未通过，或 `unexpected_styles_count` 为 `null`、非整数及非零值时停止交付，并报告 `diagnostic_codes`。
+5. `manual_review_required=true` 时，在交付说明中逐项列出人工复核要求。
 
 完成条件：已交付 DOCX、公开摘要结果与人工复核项，或已停止并给出稳定状态及诊断码。
 

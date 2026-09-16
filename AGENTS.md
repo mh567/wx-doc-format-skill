@@ -8,14 +8,22 @@
 
 ## 项目架构
 
-三段式流水线：解析 → 规范化 → 模板渲染。详见 SKILL.md。
+模块化流水线，默认走 native-v2（`scripts/wxdf/` 下的 `ConversionKernel` + `ModuleRegistry`），legacy 只作为开发诊断模式保留，发布构建中禁用。八个阶段：
 
-缺陷修复优先放在解析和 source AST 生成阶段。规范化、渲染和审计消费明确的 AST 语义并进行验证，finalizer 不承担可以前置的语义修补。
+```
+解析 → 范围 → 角色 → 关系 → 规范化 → 渲染 → 审计 → 发布
+```
 
-LLM 增强为 Capability 插拔架构：
+解析产 SourceFacts 与 source AST；范围/角色/关系产候选并裁决；规范化产不可变语义视图；渲染按模板合同写 DOCX；审计校验模型、保存输出、附录保存与样式不变量；发布决定交付。缺陷修复优先放在解析和 source AST 生成阶段。规范化、渲染和审计消费明确的 AST 语义并进行验证。
+
+LLM 增强为 Capability 插拔架构，当前能力：
+- `toc_region_review` — 目录区域复核
 - `list_detect` — 功能点列表识别
 - `caption_gen` — 表格/图片题注生成
-- 新增能力只需注册 `CapabilityConfig`
+- `document_review` — 审计后受限复核（带 `review_packet`）
+- 新增能力只需注册 `CapabilityConfig`（`scripts/wxdf/llm_enhancer.py`）
+
+入口：`scripts/.venv/bin/python3 -m main`。开发不依赖 `scripts/run.sh`，该脚本只存在于发布包内。
 
 ## 关键决策记录
 

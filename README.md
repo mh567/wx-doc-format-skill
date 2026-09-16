@@ -1,39 +1,72 @@
-# WX 文档格式转换
+# wx-doc-format
 
-将 Markdown 或 DOCX 文档转换为模板驱动的 WX 格式 `.docx` 文件。
+Markdown / DOCX 转 WX 模板格式 DOCX 的格式转换服务。默认走 native-v2 模块化流水线，按八个阶段把源文档经过解析、裁决、规范化、渲染、审计，最终按模板合同输出 DOCX 与 JSON 审计报告。
 
-## 核心功能
+## 架构
 
-- 自动识别并整理文档标题、目录、列表、表格和题注
-- 兼容多级章节号、编号样式残留、碎片化 Word 列表和语义并列内容
-- 无序列表按章节内结构重写为一级横线和二级圆点
-- 目录固定位于文档首部，表题注位于表上方，图题注位于图下方
-- 图片和表格完整保留，输出样式与 WX 模板一致
-- Markdown 使用结构化 token 解析，支持 ATX 与 Setext 标题、标准有序及无序嵌套列表、对齐表格、引用、围栏代码和软换行
-- Markdown 行内代码、强调与链接会保留为 Word run 和超链接，本地图片语法会映射为图片块
-- 报告提供 Markdown 源语义守恒审计，核对标题、列表、表格行列和 Markdown 标记残留
-- HTML、远程图片、任务状态和复杂容器内容会保留可读文本，并在报告中标记风险或未支持 token
-- 可选 LLM 增强：语义识别、题注生成和审计后受限复核
-- 验证默认使用 CLI 审计、JSON 报告和 OOXML 结构检查，不调用 Computer Use 或 Word/WPS 界面自动化
+流水线由 `scripts/wxdf/ConversionKernel` 编排，`ModuleRegistry` 调度注册好的 module。八个阶段：
 
-## 一键安装
+```
+解析 → 范围 → 角色 → 关系 → 规范化 → 渲染 → 审计 → 发布
+```
 
-对任何支持 skill 的 Agent 说：
+- **解析**读源文档（DOCX 或 Markdown），产出 `SourceFacts` 与 source AST。
+- **范围 / 角色 / 关系**产候选并裁决：区域排除、结构角色、列表/表格/题注/附录/受保护内容。
+- **规范化**基于模板合同派生不可变语义视图，承载大纲与呈现。
+- **渲染**按呈现合同写 DOCX。
+- **审计**校验模型、保存输出、附录保存与样式不变量；产出 `public_summary` 决定交付。
+- **发布**根据审计结果决定是否交付。
 
-> 从 GitHub 仓库 mh567/wx-doc-format-skill 安装 wx-doc-format skill
+LLM 增强以 Capability 插拔方式接入，当前能力：`toc_region_review`、`list_detect`、`caption_gen`、`document_review`。新增能力在 `scripts/wxdf/llm_enhancer.py` 注册 `CapabilityConfig`。
 
-更新时重复上述指令即可。
+legacy 流水线（`scripts/docx_render.py` / `scripts/template_finalizer.py`）只作为开发诊断模式保留，发布构建里被禁用；默认入口是 native-v2。
 
-## 使用方法
+## 仓库布局
 
-触发表达：**技术文档格式**、**转换为技术文档格式**、**按技术文档格式排版**、**整理成技术文档**、**wx文档格式**、**WX 格式转换**。
+| 路径 | 用途 |
+|------|------|
+| `scripts/main.py` | CLI 入口，开发运行 `scripts/.venv/bin/python3 -m main` |
+| `scripts/wxdf/` | native-v2 核心：kernel、registry、parser、semantics、normalization、rendering、audit、publication |
+| `scripts/wxdf/semantics/` | 各语义能力模块：lists、tables、captions、appendices、regions、structure、protected |
+| `tests/` | 92 个测试文件 |
+| `packaging/nuitka/` | Nuitka 构建、公开薄 Skill 组装 |
+| `docs/` | 设计文档与执行记录 |
+| `assets/wx_template.docx` | WX 格式模板 |
 
-发送文档后 Agent 会自动提供两个模式选择：
-1. 普通模式：纯规则转换
-2. LLM 增强模式：增加语义识别、题注生成和审计后受限复核
+文档分工：`SKILL.md` 与公开 README 是发布到公开仓库的薄 Skill 内容；本文件（README.md）、`AGENTS.md`、`CLAUDE.md` 是私有开发仓库的内部文档。
 
-详细架构见 `SKILL.md`。
+## 开发与运行
 
-## 开发与发布
+```bash
+cd scripts && .venv/bin/python3 -m main \
+  --input ../input/xxx.docx \
+  --output ../outputs/xxx.docx \
+  --template ../assets/wx_template.docx \
+  --report ../outputs/report.json
+```
 
-本仓库是私有源码仓库。分支边界、本地构建、公开薄 Skill 生成、验证门禁和发布流程见 [`docs/development-workflow.md`](docs/development-workflow.md)。
+常用标志：
+- `--pipeline {legacy,modular}` 默认 `modular`；`legacy` 为开发诊断模式
+- `--modular-profile native-v2` 默认；`--list-policy wx-default-v2` 默认
+- `--source-ast / --ast` 导出源 AST 或归一化 AST（开发诊断）
+- `--llm-enhance all --llm-command <cmd>` 启用 LLM 增强
+- `--strict-normalize / --fail-on-risk`
+- `--table-row-height-cm / --table-row-height-rule`
+
+测试：
+
+```bash
+cd scripts && .venv/bin/python3 -m pytest ../tests/ -q
+```
+
+不要修改 `scripts/main.py` 与 `scripts/document_model.py` 的公开接口。
+
+## 双仓库与分支模型
+
+私有 `mh577/wx-doc-format-skill-dev`（远程名 `dev`）是源码与构建规则的唯一事实源，本地 `dev` 推送到远程 `dev/main`。公开 `mh577/wx-doc-format-skill`（远程名 `origin`）只保留生成的薄 Skill，本地 `main` 跟踪 `origin/main`。详见 [`docs/development-workflow.md`](docs/development-workflow.md)。
+
+- 所有功能、修复、测试和构建工具变更只在本地 `dev` 开发并推送到 `dev/main`。
+- 本地 `main` 只跟踪公开 `origin/main`，不承担源码开发。
+- 公开发布只复制已验证的 `dist/public-skill/` 生成树。
+- 公开分支禁止 merge 或 cherry-pick 私有分支；公开历史中不能出现 `.py` / `.pyc` / `.pyo`。
+- 执行分支操作、构建、公开 Skill 生成、标签或 Release 前，必须完整读取 `docs/development-workflow.md`。
