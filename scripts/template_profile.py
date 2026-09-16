@@ -160,6 +160,33 @@ def style_numbering(profile: dict, style_name: str | None) -> dict | None:
     return {"num_id": int(num_id), "abstract_id": int(abstract_id) if abstract_id is not None else None, "ilvl": style.get("ilvl")}
 
 
+def _plain_decimal_numbering(profile: dict, *, claimed: set[int]) -> dict | None:
+    """Return the template's plain decimal numbering instance (1, 2, 3).
+
+    A table's numbering column uses the plain form, and no list style owns it:
+    the template keeps the instance for table cells that carry their own
+    numbering.  Instances already claimed by a heading or list role are skipped,
+    so a heading numbering that also starts at ``%1`` is not mistaken for it.
+    """
+
+    numbering = profile.get("numbering", {})
+    abstract_levels = numbering.get("abstract_levels", {})
+    candidates: list[tuple[int, str]] = []
+    for num_id, abstract_id in numbering.get("num_to_abstract", {}).items():
+        if not str(num_id).lstrip("-").isdigit():
+            continue
+        if int(num_id) in claimed:
+            continue
+        candidates.append((int(num_id), str(abstract_id)))
+    for num_id, abstract_id in sorted(candidates):
+        for level in abstract_levels.get(abstract_id) or []:
+            if str(level.get("ilvl")) != "0":
+                continue
+            if level.get("numFmt") == "decimal" and level.get("lvlText") == "%1":
+                return {"num_id": num_id, "abstract_id": int(abstract_id)}
+    return None
+
+
 def template_numbering_ids(profile: dict) -> dict:
     heading = style_numbering(profile, resolve_style(profile, "heading_1") or "heading 1")
     letter = style_numbering(profile, resolve_style(profile, "list_letter"))
@@ -181,6 +208,15 @@ def template_numbering_ids(profile: dict) -> dict:
     if bullet:
         result["list_bullet"] = bullet["num_id"]
         result["list_bullet_abstract"] = bullet["abstract_id"]
+    claimed = {
+        int(value)
+        for key, value in result.items()
+        if not key.endswith("_abstract") and isinstance(value, int)
+    }
+    plain = _plain_decimal_numbering(profile, claimed=claimed)
+    if plain:
+        result["table_number"] = plain["num_id"]
+        result["table_number_abstract"] = plain["abstract_id"]
     return {key: value for key, value in result.items() if value is not None}
 
 

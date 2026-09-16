@@ -109,4 +109,10 @@ def inline_text_projection(inline_content: list[Mapping[str, Any]]) -> str:
             visible.append("\t")
         elif kind == "link":
             visible.append(inline_text_projection(item.get("children", [])))
+        elif kind in {"field", "opaque_inline"}:
+            # A retained field shows the result it last carried, so its cached
+            # text is visible text like any other.
+            cached = item.get("cached_result")
+            if isinstance(cached, str):
+                visible.append(cached)
     return "".join(visible)

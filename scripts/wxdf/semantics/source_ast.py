@@ -11,6 +11,8 @@ from __future__ import annotations
 import copy
 from typing import Any, Mapping
 
+from ..model import inline_text_projection
+
 
 def _image_alt_text(
     item: Mapping[str, Any],
@@ -118,6 +120,8 @@ def build_source_ast(facts: Mapping[str, Any]) -> dict[str, Any]:
             }
             if role == "heading":
                 block["level"] = int(unit.get("level") or 1)
+            if facts["evidence"].get(unit_id, {}).get("formula_number") is True:
+                block["semantic_role"] = "formula_number"
             if isinstance(unit.get("source_paragraph_format"), Mapping):
                 block["source_paragraph_format"] = copy.deepcopy(
                     dict(unit["source_paragraph_format"])
@@ -320,7 +324,7 @@ def materialize_list_semantics(
         return parent_id, original_positions.get((parent_id, first_source_id), len(children.get(parent_id, [])))
 
     candidates: list[dict[str, Any]] = []
-    from .lists import strip_visible_list_marker
+    from .lists import strip_visible_list_marker, table_numbering_role
 
     for relation in list_result.get("items", []):
         source_item_id = str(relation["item_id"])
@@ -398,6 +402,16 @@ def materialize_list_semantics(
                     "source_ordinal": relation.get("source_ordinal") or evidence.get("ordinal"),
                     "source_sequence_id": relation.get("source_sequence_id") or source_item_id,
                 }
+                numbering_role = table_numbering_role(
+                    facts,
+                    original_parents.get(source_item_id),
+                    source_list_type=str(relation.get("source_list_type") or evidence.get("source_list_type") or ""),
+                    text=inline_text_projection(unit.get("inline_content", [])),
+                )
+                if numbering_role:
+                    # The cell owns the table's own numbering, so it keeps the
+                    # cell style instead of taking a WX list style.
+                    item_node["numbering_role"] = numbering_role
                 if isinstance(unit.get("source_ref"), Mapping):
                     item_node["source_ref"] = copy.deepcopy(dict(unit["source_ref"]))
                 # List items may own heterogeneous content blocks (paragraph /

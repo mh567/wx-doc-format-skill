@@ -179,6 +179,21 @@ def looks_like_list_item(text: str) -> bool:
     return False
 
 
+_FORMULA_NUMBER_RE = re.compile(r"^\s*[\(（]\d+[\)）]\s*$")
+
+
+def is_formula_number(text: str) -> bool:
+    """Return whether a paragraph is a formula number such as ``(3)``.
+
+    A formula number is a paragraph of its own in the WX layout, and it is the
+    one place the source alignment (right aligned) is authored rather than
+    styled.  The rule has one owner here, so the reader and the presentation
+    mapping agree on what a formula number is.
+    """
+
+    return bool(_FORMULA_NUMBER_RE.match(text or ""))
+
+
 def list_style_for_text(text: str) -> str:
     kind = list_kind_for_text(text)
     if kind in {"letter", "decimal"}:

@@ -144,6 +144,10 @@ def _text(inline_content: list[Mapping[str, Any]], resources: Mapping[str, Any])
             resource_id = item.get("resource_id")
             if resource_id not in resources:
                 raise RenderError(f"resource {resource_id!r} is unavailable for rendering")
+        elif kind in {"field", "opaque_inline"}:
+            cached = item.get("cached_result")
+            if isinstance(cached, str):
+                parts.append(cached)
     return "".join(parts)
 
 
@@ -208,7 +212,12 @@ def _move_run_to_hyperlink(paragraph: Any, hyperlink: Any, run: Any) -> None:
     hyperlink.append(run._r)
 
 
-def _write_link(paragraph: Any, item: Mapping[str, Any], media: MediaEmbedder) -> None:
+def _write_link(
+    paragraph: Any,
+    item: Mapping[str, Any],
+    media: MediaEmbedder,
+    resources: Mapping[str, Any] | None = None,
+) -> None:
     target = str(item.get("target") or "")
     hyperlink = OxmlElement("w:hyperlink")
     if target.startswith("#"):
@@ -234,9 +243,61 @@ def _write_link(paragraph: Any, item: Mapping[str, Any], media: MediaEmbedder) -
         elif kind == "image":
             run = _write_image(paragraph, child, media)
             _move_run_to_hyperlink(paragraph, hyperlink, run)
+        elif kind in {"field", "math", "bookmark", "opaque_inline"}:
+            for element in _retained_inline_elements(child, resources or {}):
+                hyperlink.append(element)
 
 
-def _write_inline(paragraph: Any, inline_content: list[Mapping[str, Any]], media: MediaEmbedder) -> None:
+def _retained_inline_elements(
+    item: Mapping[str, Any],
+    resources: Mapping[str, Any],
+) -> list[Any]:
+    """Parse a retained source element back into the elements to insert.
+
+    A formula, a field and a bookmark cannot be rebuilt from semantics, so the
+    reader retained the source element and this returns it verbatim.  The payload
+    is one element or a run sequence, so it is parsed inside a wrapper and the
+    wrapper's children are returned.
+    """
+
+    resource_id = item.get("resource_id")
+    payload = resources.get(resource_id) if resource_id is not None else None
+    if not isinstance(payload, (bytes, bytearray)):
+        return []
+    try:
+        wrapper = etree.fromstring(b"<wx-inline-fragment>" + bytes(payload) + b"</wx-inline-fragment>")
+    except etree.XMLSyntaxError:
+        return []
+    return [child for child in list(wrapper)]
+
+
+def _apply_paragraph_alignment(paragraph: Any, record: Mapping[str, Any] | None) -> None:
+    """Write the alignment a paragraph's presentation owns.
+
+    A paragraph the template styles carries no record, so nothing is written and
+    the style keeps deciding.  A record means the source authored an alignment
+    the style cannot express, such as a centred image paragraph or a right
+    aligned formula number.
+    """
+
+    alignment = str((record or {}).get("alignment") or "")
+    if not alignment:
+        return
+    properties = paragraph._p.get_or_add_pPr()
+    for existing in properties.findall(qn("w:jc")):
+        properties.remove(existing)
+    element = OxmlElement("w:jc")
+    element.set(qn("w:val"), alignment)
+    properties.append(element)
+
+
+def _write_inline(
+    paragraph: Any,
+    inline_content: list[Mapping[str, Any]],
+    media: MediaEmbedder,
+    resources: Mapping[str, Any] | None = None,
+) -> None:
+    retained = resources or {}
     for item in inline_content:
         kind = item.get("kind")
         if kind == "text":
@@ -247,9 +308,17 @@ def _write_inline(paragraph: Any, inline_content: list[Mapping[str, Any]], media
         elif kind == "tab":
             paragraph.add_run("\t")
         elif kind == "link":
-            _write_link(paragraph, item, media)
+            _write_link(paragraph, item, media, retained)
         elif kind == "image":
             _write_image(paragraph, item, media)
+        elif kind in {"field", "math", "bookmark", "opaque_inline"}:
+            elements = _retained_inline_elements(item, retained)
+            for element in elements:
+                paragraph._p.append(element)
+            if not elements:
+                cached = str(item.get("cached_result") or "")
+                if cached:
+                    paragraph.add_run(cached)
 
 
 _CAPTION_SEQUENCE = {"table": ("表 ", "Table"), "figure": ("图 ", "Figure")}
@@ -260,12 +329,16 @@ def _write_caption(
     block: Mapping[str, Any],
     resources: Mapping[str, Any],
 ) -> str:
-    """Write a caption run with a Word SEQ field and return its visible text.
+    """Write a caption run and return its visible text.
 
-    An authored caption keeps its full visible content in the Source AST, and
-    its leading label and number are projected away here so that the sequence
-    field owns the numbering.  A generated caption carries no content and
-    renders as the bare sequence field.
+    An authored caption keeps its full visible content in the Source AST, and its
+    leading label and number are projected away here so that the sequence field
+    owns the numbering.  A generated caption carries no content and renders as
+    the bare sequence field.
+
+    A caption whose source numbering is preserved, which is what an appendix
+    caption carries (``表A.1``), keeps its authored number instead: the sequence
+    field numbers the document body and cannot express an appendix number.
 
     The returned text matches what a reader sees for the paragraph, including
     the placeholder digit of the sequence field, so the saved output audit can
@@ -274,6 +347,23 @@ def _write_caption(
 
     caption_type = str(block.get("caption_type") or "table")
     prefix, sequence = _CAPTION_SEQUENCE.get(caption_type, _CAPTION_SEQUENCE["table"])
+    inline_content = list(block.get("inline_content") or [])
+    # A caption carries anchors its text refers to, so the retained markers are
+    # copied around the rebuilt run: a cross reference that targets the caption
+    # still resolves after the fields refresh.  A retained field keeps its text
+    # in the rebuilt run instead, so the visible text is written once.
+    starts = [item for item in inline_content if str(item.get("kind") or "") in {"bookmark", "math", "opaque_inline"} and str(item.get("role") or "") != "end"]
+    ends = [item for item in inline_content if str(item.get("kind") or "") in {"bookmark", "math", "opaque_inline"} and str(item.get("role") or "") == "end"]
+    for item in starts:
+        for element in _retained_inline_elements(item, resources):
+            paragraph._p.append(element)
+    authored = _text([item for item in inline_content if str(item.get("kind") or "") != "bookmark"], resources)
+    if block.get("source_number_preserved") and block.get("appendix_id"):
+        paragraph.add_run(authored)
+        for item in ends:
+            for element in _retained_inline_elements(item, resources):
+                paragraph._p.append(element)
+        return authored
     paragraph.add_run(prefix)
 
     field = OxmlElement("w:fldSimple")
@@ -285,9 +375,11 @@ def _write_caption(
     field.append(field_run)
     paragraph._p.append(field)
 
-    inline_content = list(block.get("inline_content") or [])
-    _, _, _, body = caption_parts(_text(inline_content, resources))
+    _, _, _, body = caption_parts(authored)
     paragraph.add_run(f" {body}")
+    for item in ends:
+        for element in _retained_inline_elements(item, resources):
+            paragraph._p.append(element)
     return f"{prefix}1 {body}"
 
 
@@ -529,6 +621,7 @@ def render(
     render_map: dict[str, dict[str, Any]] = {}
     diagnostics: list[dict[str, Any]] = []
     presentation_outline = normalized.get("presentation", {}).get("outline", {})
+    presentation_paragraphs = normalized.get("presentation", {}).get("paragraphs", {})
     paragraph_counter = 0
     table_counter = 0
     initial_cell_paragraphs: set[Any] = set()
@@ -575,12 +668,17 @@ def render(
         if block.get("role") == "caption":
             caption_text = _write_caption(paragraph, block, resources)
         else:
-            _write_inline(paragraph, block.get("inline_content", []), media)
+            _write_inline(paragraph, block.get("inline_content", []), media, resources)
         if parent is not None and parent._tc in layout_table_cells:
             _apply_layout_paragraph_format(
                 paragraph,
                 block.get("source_paragraph_format"),
             )
+        if parent is None or parent._tc not in semantic_table_cells:
+            # A semantic table cell is owned by the table format contract, which
+            # sets the cell alignment itself, so the paragraph presentation must
+            # not override it.
+            _apply_paragraph_alignment(paragraph, presentation_paragraphs.get(node_id))
         if numbering and numbering.get("num_id") is not None:
             _write_direct_numbering(
                 paragraph,
@@ -714,6 +812,8 @@ def render(
                 else:
                     paragraph = parent.add_paragraph()
             media.embed(paragraph.add_run(), block)
+            if parent is None or parent._tc not in semantic_table_cells:
+                _apply_paragraph_alignment(paragraph, presentation_paragraphs.get(block_id))
             paragraph_counter += 1
             render_map[block_id] = {
                 "kind": "image",
@@ -758,12 +858,18 @@ def render(
         # level.  The fallback keeps a hand-built normalized view (a caller that
         # supplies its own presentation nodes) rendering as before.
         style_role = presentation.get("style_role")
-        if not isinstance(style_role, str) or not style_role:
+        numbering_only = bool(presentation.get("numbering_only"))
+        if numbering_only:
+            # A table's own numbering column keeps the cell style: the template's
+            # plain decimal instance numbers it and no WX list style applies.
+            list_style = None
+        elif not isinstance(style_role, str) or not style_role:
             if marker_kind == "ordered":
                 style_role = "list_letter" if target_level == 0 else "list_decimal"
             else:
                 style_role = "list_dash" if target_level == 0 else "list_bullet"
-        list_style = styles.get(style_role, "List Number" if marker_kind == "ordered" else "List Bullet")
+        if not numbering_only:
+            list_style = styles.get(style_role, "List Number" if marker_kind == "ordered" else "List Bullet")
         # A per-chapter ordered item carries the concrete numbering instance the
         # normalizer assigned (the template instance for the first chapter, a
         # synthesized restart instance for a later one); every other item falls

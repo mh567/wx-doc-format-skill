@@ -11,7 +11,7 @@ from xml.etree import ElementTree
 
 from docx import Document
 
-from .model import effective_outline_level, is_body_outline_heading
+from .model import effective_outline_level, inline_text_projection, is_body_outline_heading
 from .render_plan import build_render_plan
 from .validation import validate_ast
 
@@ -134,18 +134,13 @@ def _paragraph_text(element: Any) -> str:
 
 
 def _inline_plain_text(items: list[Mapping[str, Any]]) -> str:
-    parts: list[str] = []
-    for item in items:
-        kind = item.get("kind")
-        if kind == "text":
-            parts.append(str(item.get("text") or ""))
-        elif kind == "break":
-            parts.append("\n")
-        elif kind == "tab":
-            parts.append("\t")
-        elif kind == "link":
-            parts.append(_inline_plain_text(list(item.get("children") or [])))
-    return "".join(parts)
+    """Return the visible text projection of inline content.
+
+    The projection has one owner, so the audit reads the same text as every other
+    consumer instead of keeping a second copy of the rule.
+    """
+
+    return inline_text_projection(list(items))
 
 
 def _node_visible_text(document: Mapping[str, Any], node_id: str) -> str:

@@ -7,7 +7,7 @@ import hashlib
 import json
 from typing import Any, Mapping, Sequence
 
-from .contracts import AST_BLOCK_TYPES, AST_CONTAINER_KINDS, AST_ROLES, LIST_KINDS, PATCH_OPERATIONS, TABLE_TYPES
+from .contracts import AST_BLOCK_TYPES, AST_CONTAINER_KINDS, AST_ROLES, INLINE_KINDS, LIST_KINDS, PATCH_OPERATIONS, TABLE_TYPES
 from .digest import digest
 from .response_identity import _APPLICATION_FIELDS as APPLICATION_FIELDS
 from .transaction import (
@@ -146,7 +146,7 @@ def _validate_created_node(revision_id: str, node: Mapping[str, Any]) -> None:
     if block_type == "paragraph":
         if node.get("role") not in AST_ROLES or not isinstance(node.get("inline_content"), list):
             raise _invalid_create_node(revision_id, "has incomplete paragraph fields")
-        valid_inline_kinds = {"text", "break", "tab", "image", "link", "field", "bookmark", "opaque_inline"}
+        valid_inline_kinds = frozenset(INLINE_KINDS)
         if any(not isinstance(item, Mapping) or item.get("kind") not in valid_inline_kinds for item in node["inline_content"]):
             raise _invalid_create_node(revision_id, "has invalid paragraph inline content")
         if node.get("role") == "heading" and node.get("level") not in {1, 2, 3, 4, 5, 6}:

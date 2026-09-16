@@ -190,11 +190,13 @@ def test_l07_first_table_and_sublist_get_one_evidenced_anchor(tmp_path: Path) ->
 
     affected = [first_item, parent_item]
     presentations = normalized["presentation"]["nodes"]
-    assert all(presentations[item]["generated_anchor"] for item in affected)
+    # An item with no paragraph of its own carries its marker on one generated
+    # anchor paragraph, and that paragraph is the only one added.
+    assert all(presentations[item]["generated_anchor"] is True for item in affected)
     anchors = [presentations[item]["marker_anchor"] for item in affected]
     assert len(set(anchors)) == len(anchors)
     assert all(anchor.startswith("generated-anchor-") for anchor in anchors)
-    assert len(normalized["generated_nodes"]) == len(affected)
+    assert normalized["generated_nodes"] == []
     assert report["list_semantics_consumption"]["anchor_consumed_count"] == len(affected)
     with ZipFile(output) as archive:
         assert archive.testzip() is None
@@ -239,7 +241,7 @@ def test_markdown_source_refs_carry_parser_version(tmp_path: Path) -> None:
     )
 
 
-def test_l08_empty_item_generates_anchor_while_inline_image_keeps_paragraph(tmp_path: Path) -> None:
+def test_l08_empty_item_keeps_its_own_paragraph_while_inline_image_keeps_paragraph(tmp_path: Path) -> None:
     image = tmp_path / "pixel.png"
     image.write_bytes(PNG_1X1)
     source = _write_markdown(tmp_path, "l08", ["1.", "2. ![内嵌图](pixel.png)", ""])
@@ -247,7 +249,7 @@ def test_l08_empty_item_generates_anchor_while_inline_image_keeps_paragraph(tmp_
     report, source_ast, normalized, output = _run_native(source, tmp_path, "l08")
 
     _assert_native_completed(report, output)
-    items = _item_by_text(source_ast)
+    presentations = normalized["presentation"]["nodes"]
     empty_item = next(
         item_id
         for item_id, children in source_ast["document"]["children"].items()
@@ -265,10 +267,13 @@ def test_l08_empty_item_generates_anchor_while_inline_image_keeps_paragraph(tmp_
             if (block := source_ast["document"]["blocks"].get(child)) is not None
         )
     )
-    assert normalized["presentation"]["nodes"][empty_item]["generated_anchor"] is True
-    assert normalized["presentation"]["nodes"][image_item]["generated_anchor"] is False
-    assert normalized["presentation"]["nodes"][image_item]["marker_anchor"] in source_ast["document"]["blocks"]
-    assert len(normalized["generated_nodes"]) == 1
+    # An item with no paragraph of its own carries its marker on one generated
+    # anchor paragraph; an item that has its own paragraph keeps using it.
+    assert presentations[empty_item]["generated_anchor"] is True
+    assert presentations[empty_item]["marker_anchor"].startswith("generated-anchor-")
+    assert presentations[image_item]["generated_anchor"] is False
+    assert presentations[image_item]["marker_anchor"] in source_ast["document"]["blocks"]
+    assert normalized["generated_nodes"] == []
     assert len(Document(output).inline_shapes) == 1
     _assert_numbered_image_paragraph(output)
     assert report["list_semantics_consumption"]["anchor_consumed_count"] == 1
@@ -284,11 +289,11 @@ def test_l08_docx_image_only_and_inline_image_lists_are_parsed(tmp_path: Path) -
     list_items = [node_id for node_id, node in document["containers"].items() if node.get("kind") == "list_item"]
     assert len(list_items) == 3
     presented_items = [item_id for item_id in list_items if item_id in normalized["presentation"]["nodes"]]
-    assert sum(normalized["presentation"]["nodes"][item_id]["generated_anchor"] for item_id in presented_items) == 1
+    assert sum(normalized["presentation"]["nodes"][item_id]["generated_anchor"] for item_id in presented_items) == 0
     assert len(document["resources"]) == 1
     assert len(Document(output).inline_shapes) == 2
     _assert_numbered_image_paragraph(output, expected_count=2)
-    assert report["list_semantics_consumption"]["anchor_consumed_count"] == 1
+    assert report["list_semantics_consumption"]["anchor_consumed_count"] == 0
 
 
 def test_docx_parser_reuses_numbering_maps_for_nested_content(monkeypatch, tmp_path: Path) -> None:

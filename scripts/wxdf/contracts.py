@@ -34,6 +34,17 @@ AST_CONTAINER_KINDS = (
     "table_cell",
 )
 AST_ROLES = ("title", "body", "heading", "caption", "note", "numbered_note", "unknown")
+INLINE_KINDS = (
+    "text",
+    "break",
+    "tab",
+    "image",
+    "link",
+    "field",
+    "bookmark",
+    "math",
+    "opaque_inline",
+)
 TABLE_TYPES = ("data", "code_sample", "callout", "layout", "unknown")
 LIST_KINDS = ("ordered", "unordered")
 CAPTION_TYPES = ("figure", "table")

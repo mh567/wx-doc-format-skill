@@ -136,11 +136,34 @@ _ROLE_STYLES = {
 }
 
 
+def is_marker_only_level(num_fmt: str | None, style_name: str | None, lvl_text: str | None) -> bool:
+    """Return whether a list level carries its marker in the level text alone.
+
+    The WX 一级列项-无编号 form is authored as a list style whose level has
+    ``numFmt=none`` and a dash ``lvlText``: the level numbers nothing but it
+    still marks the paragraph as a list item.  One owner for the rule, so the
+    per-paragraph view and the group view classify it the same way.
+    """
+
+    if num_fmt != "none":
+        return False
+    if "列项" not in str(style_name or ""):
+        return False
+    return bool(str(lvl_text or "").strip())
+
+
 def source_list_type(num_fmt: str | None, lvl_text: str | None) -> str:
     """Describe the source marker without assigning a WX hierarchy level."""
     marker = (lvl_text or "").strip()
     if num_fmt == "bullet":
         return "dash" if marker.startswith(("—", "-")) else "bullet_dot"
+    if num_fmt == "none":
+        # An unnumbered list level carries its marker in the level text alone:
+        # the WX 一级列项-无编号 form is a dash, the second level is a dot.
+        if marker.startswith(("—", "-")):
+            return "dash"
+        if marker.startswith("·") or not marker:
+            return "bullet_dot"
     if num_fmt in {"lowerLetter", "upperLetter"}:
         return "lower_letter_paren"
     return "decimal_paren"

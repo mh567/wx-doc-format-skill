@@ -12,6 +12,46 @@ from .protected import protected_code_style, protected_style_reason, protected_t
 from note_semantics import source_note_role
 
 
+def table_numbering_role(
+    facts: Mapping[str, Any],
+    parent_id: str | None,
+    *,
+    source_list_type: str | None,
+    text: str,
+) -> str | None:
+    """Return ``"table_number"`` for a numbered cell of a table's number column.
+
+    A plain table carries its own numbering column, and that column is the
+    table's own numbering rather than a WX list: the leftmost cell of a data
+    table row holds no text and is numbered ``1, 2, 3``.  Every other numbered
+    cell keeps the list policy, which is what a case table with a numbered list
+    inside its cells wants.
+    """
+
+    if not parent_id:
+        return None
+    cell = facts["containers"].get(parent_id)
+    if not isinstance(cell, Mapping) or cell.get("kind") != "table_cell":
+        return None
+    if int(cell.get("col") or 0) != 0:
+        return None
+    if text.strip():
+        return None
+    if not str(source_list_type or "").startswith("decimal"):
+        return None
+    parents = _parent_map(facts)
+    row_id = parents.get(parent_id)
+    table_id = parents.get(row_id) if row_id else None
+    table = facts["containers"].get(table_id) if table_id else None
+    if not isinstance(table, Mapping) or table.get("kind") != "table":
+        return None
+    semantics = table.get("table_semantics")
+    table_type = str(semantics.get("table_type") or "") if isinstance(semantics, Mapping) else ""
+    if table_type != "data":
+        return None
+    return "table_number"
+
+
 def _node_kind(facts: Mapping[str, Any], node_id: str) -> str:
     if node_id in facts["units"]:
         return str(facts["units"][node_id].get("kind") or "")
@@ -246,7 +286,10 @@ def _anchor_info(item_id: str, facts: Mapping[str, Any]) -> tuple[bool, str]:
             has_inline_image = any(item.get("kind") == "image" for item in unit.get("inline_content", []))
             if _unit_text(unit).strip() or has_inline_image:
                 return False, "paragraph_first"
-            return True, "empty_first_paragraph"
+            # An empty paragraph is still the item's own marker paragraph: the
+            # numbering is written on it, so no extra anchor paragraph is
+            # generated and the item keeps exactly the paragraphs the source had.
+            return False, "empty_first_paragraph"
         return True, f"unit_{unit.get('kind') or 'unknown'}"
     children = facts["children"].get(item_id, [])
     if not children:
@@ -259,7 +302,8 @@ def _anchor_info(item_id: str, facts: Mapping[str, Any]) -> tuple[bool, str]:
         unit = facts["units"][first]
         has_inline_image = any(item.get("kind") == "image" for item in unit.get("inline_content", []))
         if not _unit_text(unit).strip() and not has_inline_image:
-            return True, "empty_first_paragraph"
+            # As above: the empty paragraph is the marker paragraph itself.
+            return False, "empty_first_paragraph"
     return False, "paragraph_first"
 
 

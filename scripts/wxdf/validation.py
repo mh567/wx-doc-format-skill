@@ -15,6 +15,7 @@ from .contracts import (
     CHECKPOINT_SCHEMA_VERSION,
     CHECKPOINT_STATUSES,
     ContractError,
+    INLINE_KINDS,
     LIST_KINDS,
     PATCH_OPERATIONS,
     PATCH_SCHEMA_VERSION,
@@ -29,7 +30,7 @@ from .digest import digest
 
 _HASH_PREFIX = "sha256:"
 _SOURCE_REF_REQUIRED = ("source_id", "part", "content_sha256")
-_INLINE_KINDS = {"text", "break", "tab", "image", "link", "field", "bookmark", "opaque_inline"}
+_INLINE_KINDS = frozenset(INLINE_KINDS)
 _ASSOCIATION_KINDS = {"caption_target", "sequence_continuation", "source_relation"}
 _LIST_EVIDENCE_UNITS = {
     "unicode_code_point",
@@ -178,7 +179,7 @@ def _validate_inline_content(value: Any, path: str, contract: str, resources: Ma
             _non_empty_string(target, f"{item_path}.target", contract)
             children = _require(item, "children", item_path, contract)
             visible.append(_validate_inline_content(children, f"{item_path}.children", contract, resources, in_link=True))
-        elif kind in {"field", "bookmark", "opaque_inline"}:
+        elif kind in {"field", "bookmark", "math", "opaque_inline"}:
             _require(item, "source_ref", item_path, contract)
             _validate_source_ref(item["source_ref"], f"{item_path}.source_ref", contract)
             if kind == "opaque_inline":

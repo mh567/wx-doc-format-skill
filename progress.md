@@ -440,3 +440,31 @@
 - 审查轴二（规格）：确认派生规则与审计规则逐行一致（`min(6, previous + 1)`、附录跳过不推进游标、游标跟随派生值），并判定 advisory 无法用来掩盖真实的渲染大纲违规（两者码不同且阻断规则按码判定）。
 - 审查轴二指出的既成事实，记为残留：`heading_level_jump` 现在只由 `presentation.outline` 被改写时触发，真实输入与发布冒烟都不再产生它，它退化为回归护栏；复核修复写的是源 `level`（沿用既有跳级授权），因此源语义层级在复核被接受时会被对齐到渲染层级，这是全流程中唯一改写源层级的地方。
 - 复审：全量测试 `1309 passed, 0 failed`（新增 `test_the_derivation_leaves_the_source_model_untouched` 与 `test_cli_diagnostic_echo_prefers_a_finding_that_still_describes_the_document`）。复审后的 VERSION 为 `0.14.1`。
+
+## 2026-09-16 首次真实模板转换的保真修复（组一、二、三、五）
+
+- 起因：用 `技术文件格式及书写要求.docx` 同时作为输入与模板，0.14.1 转换后逐项比对得到 11 处不符合预期。目录那一条按定案处理：转换器只识别源目录区间并整体替换为模板的目录部分，不重写域指令。
+- 根因（第一性原理）：AST 早已有 `field`、`bookmark`、`opaque_inline` 三种行内原子，Markdown 解析器对未识别行内对象会保留成 `opaque_inline`，而 DOCX 的行内扫描器没有兜底，公式、域指令与书签被静默丢弃。行内扫描器同时不认 `m:oMath`、`w:fldChar`、`w:instrText`、`w:bookmarkStart`。
+- 组一（行内物理对象保真）：DOCX 行内扫描识别公式、复杂域与简单域、书签与未识别对象，登记为原子并保留源引用；载荷以 `inline_fragment` 资源形式落盘，解析器把分片绑定到 `SourceStore`，渲染器按引用复制。题注自己的编号域在题注语义中被丢弃，避免与重建的 SEQ 重复。文本投影统一到 `model.inline_text_projection`，域原子贡献其缓存结果。
+- 附带修正（既有缺陷，被组一放大）：源文档自带目录所在的 `w:sdt` 只被解析但未被排除，输出里出现第二份目录（组一之后还带活域与重复书签）。解析阶段为控件内每个段落登记 `source_toc` 证据，范围模块整段排除，规范化阶段从渲染视图剪掉该子树，模板目录成为唯一一份。同时把图片段落与正文段落的对齐收敛到 `presentation.paragraphs`，图片段落恢复 `jc=center`，公式编号段落保留右对齐。
+- 组二（证据优先级）：`source_note_role` 的文本分支不再把「整段文本就是光秃秃的注标记」的标题降级为注，带序号的注（`注2 说明`）仍按 L11 验收保持 `numbered_note`。
+- 组三（无序列项与层级）：列项样式层级的 `numFmt=none` 且 `lvlText` 非空时仍判为列项，`marker_kind` 由 `source_list_type` 决定，不由 `numFmt` 决定；一级无编号列项恢复为一级破折号列项，二级无编号列项按 T04 的子表裁决落到二级点标记列项。
+- 组五（附录题注）：`source_number_preserved` 且属于附录范围的题注保留源编号形态 `表A.1`，不注入只覆盖正文的 `SEQ Table`。
+- 验证：全量测试 `1318 passed, 0 failed`（新增 `tests/test_modular_fidelity.py` 11 项，E1/E3 收口后为 1320 项）。真实文档复核：`oMath` 6 加 `oMathPara` 2 对齐、`REF` 7 到 7、`SEQ 公式` 3 到 3、书签 88 到 86（丢弃 `_GoBack` 编辑器标记）、目录域 1 份、题注 `表A.1` 保真、图片段落居中、公式编号右对齐，三项审计 passed、`unexpected_styles` 空、ZIP 完整。
+- 待裁定：E1 表内序号列编号被列项策略改写成 a) b) c)，E2 表内注行按「普通语义表格单元格全部为 表正文」不变量落成 表正文 且丢失 `注%1：` 编号（legacy 行为与不变量一致，故未擅改），E3 空列项单元格多出一个生成锚点段落。三项在方案第五节记录，等裁定后再动。
+
+### 裁定后的收口（E1、E3）
+
+- E1 定案：表内编号分场景。普通语义表格最左列的编号列是表格自身的编号，使用模板的普通十进制实例（1、2、3），不套用一二级列项样式；其他类型的表格（测试用例表格等）单元格内的列表仍是有序列表，每章重启。实现：`template_profile` 新增 `table_number` 编号 id（跳过已被标题与列项角色占用的实例），`semantics/lists.py` 新增 `table_numbering_role` 判定（data 表 + 第 0 列 + 单元格无文字 + 源格式为十进制），物化时给该列项写 `numbering_role=table_number`，规范化据此产出 `numbering_only` 呈现，渲染器对该项不套列项样式、只写直接编号。
+- E3 定案：空列项不触发承载锚点机制。`_anchor_info` 对「首块是空段落」的列项不再要求生成锚点，`_anchor` 也接受空段落作为标记段落；只有列项自身没有段落时才生成一个承载锚点。`generated_anchor` 改为按承载段落的来源判定，物化锚点同样计入。
+- 验收同步：`docs/execution-v3/acceptance.md` 的 L07、L08 期望按上述行为改写（改为「列项自身没有段落时用一个承载锚点承载标记」与「只含行内图片的列项使用自身段落」），`tests/test_issue3_acceptance.py` 的三条用例随行为更新，其余断言（编号文本、行内图形数、审计）保持不变。
+- 真实文档复核：数据表第 0 列单元格 1 个段落、样式 表正文、编号 `decimal %1`（模板实例），与源一致；不再多出空段落；三项审计 passed。
+- 仍未动：E2 表内注行（本次裁定未涉及），维持 表正文 与编号丢弃，与 legacy 行为和现有不变量一致。
+
+### 独立审查与复审（保真轮）
+
+- 审查轴二（规格）指出三处，已核实并修：题注重建时没有写回保留的锚点，导致 4 个 `_Ref*` 题注书签丢失、5 条交叉引用刷新后悬空（修后实测源 88 到输出 88，全部 REF 目标在位）；带序号的注与裸标记的边界过窄（`注 说明` 这类无序号标题仍被降级），改为标题样式下只认带序号的注为注；`docs/execution-v3/acceptance.md` 的 L08 表述与实现不符，按实际行为改写。
+- 审查轴一（规范）指出六处，已修：规范化里自写的 `_FORMULA_NUMBER_RE` 越阶段且与解析阶段已有的 `formula_number` 概念重复，改为解析阶段登记证据、source AST 携带 `semantic_role=formula_number`、规范化消费；`note_semantics.is_heading_style` 与 `semantics/structure.py` 的样式规则重复，收敛为 `note_semantics.heading_style_level` 单一所有者；`marker_only_level` 在解析器两处重复，收敛为 `list_policy.is_marker_only_level`；行内 kind 集合在 `validation`、`decision_ledger`、`migration` 各写一份，收敛为 `contracts.INLINE_KINDS`；`_write_caption` 先复制全部保留原子会把书签首尾贴在一起并让非 SEQ 域的文本重复渲染，改为只复制锚点类原子并把结束标记放在重建文本之后；图片分支漏了语义单元格守卫，与段落分支对齐。
+- 审查轴一确认合理的解释：一个保留对象携带两个引用（原子指向真实部件与节点路径，资源指向可解析的分片部件）符合决策 9；`presentation.paragraphs` 只被渲染器消费且已接线；`_drop_excluded_blocks` 在规范化阶段消费显式 `semantic_scope` 证据，不越阶段。
+- 复审：全量测试 `1321 passed, 0 failed`。真实文档 release 形态：`oMath` 6、`oMathPara` 2、`REF` 7、`SEQ 公式` 3、书签 88 对 88、题注 `SEQ Table` 1，三项审计 passed、`unexpected_styles` 空，公式编号保持右对齐。16 份探针 16/16 退出码 0。
+- 残留：附录题注若把编号放在域里（而非源文本的字面 `A.1`），题注语义会先丢弃该 SEQ 域，保留态题注将拿不到编号。

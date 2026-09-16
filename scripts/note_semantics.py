@@ -6,6 +6,7 @@ from collections import defaultdict, deque
 
 _NOTE_STYLE_TOKEN = "注-无编号注"
 _NUMBERED_NOTE_STYLE_TOKEN = "注-有编号注"
+_HEADING_STYLE_RE = re.compile(r"^(?:heading|标题)(\d+)$")
 _ORDERED_FORMATS = {
     "decimal", "decimalZero", "lowerLetter", "upperLetter",
     "lowerRoman", "upperRoman",
@@ -14,6 +15,29 @@ _ORDERED_FORMATS = {
 
 def _normalized(value: str | None) -> str:
     return (value or "").casefold().replace(" ", "")
+
+
+def heading_style_level(style_name: str | None) -> int | None:
+    """Return the heading level a source style names, or ``None``.
+
+    One owner for the rule, so the reader and every semantic module agree on
+    which styles are headings.
+    """
+
+    match = _HEADING_STYLE_RE.match(_normalized(style_name))
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def is_heading_style(style_name: str | None) -> bool:
+    """Return whether a source style names a heading level.
+
+    An explicit heading style is stronger evidence than a text prefix, so a
+    heading whose whole text is 注 stays a heading.
+    """
+
+    return heading_style_level(style_name) is not None
 
 
 def source_note_role(
@@ -36,6 +60,11 @@ def source_note_role(
     if re.fullmatch(r"注%\d+[：:]", level_text) and num_fmt in _ORDERED_FORMATS:
         return "numbered_note"
 
+    if is_heading_style(style_name) and not re.match(r"^注\s*\d", (text or "").strip()):
+        # A heading whose text carries the bare note marker stays a heading: the
+        # marker names a section as often as it introduces a note, so the style
+        # decides.  A note carrying an ordinal stays a note whatever style it has.
+        return None
     source_text = (text or "").strip()
     if re.match(r"^注\s*\d+(?:\s*[：:]|\s+|$)", source_text):
         return "numbered_note"

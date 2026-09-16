@@ -64,7 +64,12 @@ def classify_regions(
         line_start = evidence.get("line_start")
         probe_position = position if isinstance(position, int) else line_start
         text = _node_text(unit)
-        if isinstance(probe_position, int) and probe_position == canonical_title_position:
+        if evidence.get("source_toc") is True:
+            # The reader marked every paragraph of the source's own table of
+            # contents, so the whole control is excluded whatever style its
+            # paragraphs use.
+            kind, scope, reason = "toc", "excluded", "source_toc_content"
+        elif isinstance(probe_position, int) and probe_position == canonical_title_position:
             kind, scope, reason = "front_matter", "canonical_title", "document_title"
         elif isinstance(probe_position, int) and probe_position in front_positions:
             kind, scope, reason = "front_matter", "excluded", "front_matter"

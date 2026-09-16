@@ -12,9 +12,9 @@ from typing import Any, Iterable, Mapping
 
 from docx.oxml.ns import qn
 
-from .list_policy import normalize_wx_list_type, source_list_type
+from .list_policy import UNORDERED_LIST_TYPES, is_marker_only_level, normalize_wx_list_type, source_list_type
 from note_semantics import source_note_role
-from text_utils import looks_like_list_item
+from text_utils import is_formula_number, looks_like_list_item
 from unordered_lists import paragraph_layout_evidence
 
 from .contracts import SOURCE_FACTS_SCHEMA_VERSION
@@ -91,6 +91,43 @@ def _digest(value: bytes | str) -> str:
 def _stable_id(prefix: str, *parts: object) -> str:
     payload = "|".join(str(part) for part in parts)
     return f"{prefix}-{hashlib.sha256(payload.encode('utf-8')).hexdigest()[:16]}"
+
+
+def _element_bytes(element: Any) -> bytes:
+    """Serialize one source element, carrying the namespaces it needs.
+
+    The elements come from both python-docx's own classes and plain lxml nodes
+    nested inside them, so the serializer has to accept either one.
+    """
+
+    from lxml import etree
+
+    return etree.tostring(element, encoding="utf-8")
+
+
+def _docx_source_toc_paragraphs(body: Any) -> list[Any]:
+    """Return the paragraphs that live in a content control holding a TOC field.
+
+    A document keeps its own table of contents in a ``w:sdt`` whose first
+    paragraph carries the ``TOC`` field instruction.  The whole control is the
+    source's table of contents, and the template supplies the replacement, so
+    every paragraph inside it is one region.  The wrapper is read here because
+    the reader is the only stage that still sees which control an element came
+    from.  The elements themselves are returned, not their ids: an lxml proxy is
+    only stable while a reference to it is alive.
+    """
+
+    from docx.oxml.ns import qn
+
+    members: list[Any] = []
+    for control in body.iter(qn("w:sdt")):
+        if not any(
+            "TOC" in str(instruction.text or "")
+            for instruction in control.iter(qn("w:instrText"))
+        ):
+            continue
+        members.extend(control.iter(qn("w:p")))
+    return members
 
 
 def _empty_facts(handle: SourceHandle, parser_id: str, parser_config: str, *, parser_version: str = "1.0.0") -> dict[str, Any]:
@@ -462,9 +499,38 @@ def _parse_markdown(source: Path | str, *, store: SourceStore, text: str | None 
     return facts
 
 
-def _docx_inline_content(paragraph: Any, handle: SourceHandle, node_path: list[str | int], resources: dict[str, Any], parser_version: str) -> list[dict[str, Any]]:
+def _docx_inline_content(
+    paragraph: Any,
+    handle: SourceHandle,
+    node_path: list[str | int],
+    resources: dict[str, Any],
+    parser_version: str,
+    store: SourceStore | None = None,
+    diagnostics: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Read one paragraph's inline content, keeping objects the reader cannot rebuild.
+
+    Text, tabs, breaks, links and images are rebuilt from their evidence.  A
+    formula, a field and a bookmark cannot be rebuilt from semantics, so each one
+    is registered as an inline atom that references the source element, and the
+    renderer copies that element back instead of inventing one.  Nothing is
+    dropped in silence: an inline object this reader does not understand becomes
+    an ``opaque_inline`` atom, exactly as the Markdown reader keeps an unknown
+    inline token.
+    """
+
     from docx.oxml.ns import qn
 
+    math_namespace = "{http://schemas.openxmlformats.org/officeDocument/2006/math}"
+    math_tags = (f"{math_namespace}oMath", f"{math_namespace}oMathPara")
+    opaque_tags = {
+        qn("w:object"),
+        qn("w:drawing"),
+        qn("w:pict"),
+        qn("w:txbxContent"),
+        qn("w:sym"),
+        "{http://schemas.openxmlformats.org/markup-compatibility/2006}AlternateContent",
+    }
     content: list[dict[str, Any]] = []
     image_tags = {qn("a:blip"), "{urn:schemas-microsoft-com:vml}imagedata"}
 
@@ -505,12 +571,145 @@ def _docx_inline_content(paragraph: Any, handle: SourceHandle, node_path: list[s
             token["display_size"] = display_size
         target.append(token)
 
+    def fragment_token(
+        kind: str,
+        element: Any,
+        path: list[str | int],
+        *,
+        payload: bytes | None = None,
+        diagnostic: str | None = None,
+        extra: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Return one inline atom that references a source element verbatim.
+
+        The atom's own reference names the real part and element path, which is
+        the fact an audit reads.  The element bytes are retained under a derived
+        part name so the store resolves them like any other resource, which is
+        what the renderer copies.
+        """
+
+        if payload is None:
+            payload = _element_bytes(element)
+        resource_id = _stable_id("res", handle.source_id, kind, *[str(part) for part in path])
+        part = f"inline-fragment/{resource_id}.xml"
+        if resource_id not in resources:
+            resources[resource_id] = {
+                "kind": "inline_fragment",
+                "source_ref": _source_ref(handle, part, node_path=list(path), content=payload, parser_version=parser_version),
+                "content_sha256": _digest(payload),
+                "dependencies": [],
+            }
+            if store is not None:
+                store.bind_part(part, payload)
+        token: dict[str, Any] = {
+            "kind": kind,
+            "resource_id": resource_id,
+            "source_ref": _source_ref(handle, "word/document.xml", node_path=list(path), content=payload, parser_version=parser_version),
+        }
+        if diagnostic is not None:
+            token["diagnostic"] = diagnostic
+        if extra:
+            token.update(extra)
+        return token
+
+    def note_unsupported(element: Any, path: list[str | int]) -> None:
+        if diagnostics is None:
+            return
+        tag = str(element.tag).rsplit("}", 1)[-1]
+        diagnostics.append({
+            "code": "unsupported_inline_object",
+            "severity": "info",
+            "message": f"inline object {tag} is retained by source reference",
+        })
+
+    def field_instruction(elements: list[Any]) -> str:
+        parts = [
+            str(instr.text or "")
+            for element in elements
+            for instr in element.iter(qn("w:instrText"))
+        ]
+        return "".join(parts).strip()
+
+    def field_cached_result(elements: list[Any]) -> str:
+        """Return the text the source field last showed, as the render fallback."""
+
+        return "".join(
+            str(text.text or "")
+            for element in elements
+            for text in element.iter(qn("w:t"))
+        ).strip()
+
+    def field_span(children: list[Any], start: int) -> int:
+        """Return the index after the field that begins at ``start``."""
+
+        depth = 0
+        for index in range(start, len(children)):
+            child = children[index]
+            for marker in child.iter(qn("w:fldChar")):
+                kind = marker.get(qn("w:fldCharType"))
+                if kind == "begin":
+                    depth += 1
+                elif kind == "end":
+                    depth -= 1
+                    if depth == 0:
+                        return index + 1
+        return len(children)
+
     def parse_children(parent: Any, target: list[dict[str, Any]], path: list[str | int]) -> None:
-        for index, child in enumerate(list(parent)):
+        children = list(parent)
+        index = 0
+        while index < len(children):
+            child = children[index]
             tag = child.tag
             child_path = [*path, index]
+            if tag == qn("w:r") and child.find(qn("w:fldChar")) is not None:
+                # A complex field spans runs, so the whole span is kept as one
+                # atom and the renderer writes it back unchanged.
+                end = field_span(children, index)
+                span = children[index:end]
+                target.append(fragment_token(
+                    "field",
+                    None,
+                    [*path, index],
+                    payload=b"".join(_element_bytes(element) for element in span),
+                    extra={
+                        "instruction": field_instruction(span),
+                        "field_kind": "complex",
+                        "cached_result": field_cached_result(span),
+                    },
+                ))
+                index = end
+                continue
+            if tag == qn("w:fldSimple"):
+                target.append(fragment_token(
+                    "field",
+                    child,
+                    child_path,
+                    extra={
+                        "instruction": str(child.get(qn("w:instr")) or "").strip(),
+                        "field_kind": "simple",
+                        "cached_result": field_cached_result([child]),
+                    },
+                ))
+                index += 1
+                continue
+            if tag in math_tags:
+                target.append(fragment_token("math", child, child_path))
+                index += 1
+                continue
+            if tag == qn("w:bookmarkStart"):
+                name = str(child.get(qn("w:name")) or "")
+                if name and not name.startswith("_GoBack"):
+                    target.append(fragment_token("bookmark", child, child_path, extra={"name": name, "role": "start"}))
+                index += 1
+                continue
+            if tag == qn("w:bookmarkEnd"):
+                target.append(fragment_token("bookmark", child, child_path, extra={"role": "end"}))
+                index += 1
+                continue
             if tag == qn("w:r"):
                 marks = run_marks(child)
+                appended = len(target)
                 for run_child in list(child):
                     run_tag = run_child.tag
                     if run_tag == qn("w:rPr"):
@@ -521,27 +720,66 @@ def _docx_inline_content(paragraph: Any, handle: SourceHandle, node_path: list[s
                         target.append({"kind": "tab"})
                     elif run_tag in {qn("w:br"), qn("w:cr")}:
                         target.append({"kind": "break"})
+                    elif run_tag == qn("w:noBreakHyphen"):
+                        target.append({"kind": "text", "text": "\u2011", "marks": list(marks)})
                     elif run_tag in {qn("w:drawing"), qn("w:pict")} or any(
                         element.tag in image_tags for element in run_child.iter()
                     ):
                         for image_ref in run_child.iter():
                             if image_ref.tag in image_tags:
                                 append_image(image_ref, child_path, target)
-            elif tag == qn("w:hyperlink"):
+                        if len(target) == appended and run_child.tag in opaque_tags:
+                            target.append(fragment_token(
+                                "opaque_inline",
+                                run_child,
+                                [*child_path, run_child.tag.rsplit("}", 1)[-1]],
+                                diagnostic=f"unsupported inline object: {run_child.tag.rsplit('}', 1)[-1]}",
+                            ))
+                            note_unsupported(run_child, child_path)
+                    elif run_tag in math_tags:
+                        target.append(fragment_token("math", run_child, [*child_path, run_child.tag.rsplit("}", 1)[-1]]))
+                    elif run_tag in opaque_tags:
+                        target.append(fragment_token(
+                            "opaque_inline",
+                            run_child,
+                            [*child_path, run_child.tag.rsplit("}", 1)[-1]],
+                            diagnostic=f"unsupported inline object: {run_child.tag.rsplit('}', 1)[-1]}",
+                        ))
+                        note_unsupported(run_child, child_path)
+                index += 1
+                continue
+            if tag == qn("w:hyperlink"):
                 relationship_id = child.get(qn("r:id"))
                 relationship = paragraph.part.rels.get(relationship_id) if relationship_id else None
                 target_url = getattr(relationship, "target_ref", None) if relationship is not None else None
                 if not target_url:
                     anchor = child.get(qn("w:anchor"))
                     target_url = f"#{anchor}" if anchor else None
-                children: list[dict[str, Any]] = []
-                parse_children(child, children, child_path)
-                if target_url and children:
-                    target.append({"kind": "link", "target": str(target_url), "children": children})
+                nested: list[dict[str, Any]] = []
+                parse_children(child, nested, child_path)
+                if target_url and nested:
+                    target.append({"kind": "link", "target": str(target_url), "children": nested})
                 else:
-                    target.extend(children)
-            elif tag != qn("w:pPr"):
+                    target.extend(nested)
+                index += 1
+                continue
+            if tag in math_tags:
+                target.append(fragment_token("math", child, child_path))
+                index += 1
+                continue
+            if tag in opaque_tags:
+                target.append(fragment_token(
+                    "opaque_inline",
+                    child,
+                    child_path,
+                    diagnostic=f"unsupported inline object: {tag.rsplit('}', 1)[-1]}",
+                ))
+                note_unsupported(child, child_path)
+                index += 1
+                continue
+            if tag != qn("w:pPr"):
                 parse_children(child, target, child_path)
+            index += 1
 
     parse_children(paragraph._p, content, node_path)
     return content
@@ -873,10 +1111,14 @@ def describe_docx_paragraph(
     level.update(override)
     style_name = _style_name(paragraph)
     num_fmt = level.get("num_fmt")
+    marker_only_level = is_marker_only_level(num_fmt, style_name, level.get("lvl_text"))
     valid = abstract_id is not None and isinstance(num_fmt, str) and num_fmt in _NUMBERING_LIST_FORMATS
+    valid = valid or marker_only_level
     evidence: list[str] = []
     if valid:
         evidence.append("valid_numbering_definition")
+    if marker_only_level:
+        evidence.append("marker_only_numbering_definition")
     if _is_list_style(style_name):
         evidence.append("list_style")
     if looks_like_list_item(paragraph.text.strip()):
@@ -890,7 +1132,7 @@ def describe_docx_paragraph(
     has_content = bool(paragraph.text.strip() or has_drawing)
     if not has_content and valid and ("list_style" in evidence or numbering_source == "direct"):
         evidence.append("empty_list_item")
-    if protected or num_fmt == "none" or not valid or (not has_content and "empty_list_item" not in evidence):
+    if protected or (num_fmt == "none" and not marker_only_level) or not valid or (not has_content and "empty_list_item" not in evidence):
         status = "ignored"
         confidence = 0.0
         if protected:
@@ -1377,12 +1619,16 @@ def analyze_docx_numbering(
                 or note_role is not None
             )
             valid = candidate.get("abstract_num_id") is not None and num_fmt in _NUMBERING_LIST_FORMATS
+            marker_only_level = is_marker_only_level(num_fmt, style_name, candidate.get("lvl_text"))
+            valid = valid or marker_only_level
+            if marker_only_level:
+                evidence.append("marker_only_numbering_definition")
             if not has_content and valid and ("list_style" in evidence or candidate.get("numbering_source") == "direct"):
                 evidence.append("empty_list_item")
             high = valid and bool({
                 "list_style", "consecutive_numbering_sequence", "visible_list_marker", "empty_list_item",
             } & set(evidence))
-            if protected or num_fmt == "none" or not valid or (not has_content and "empty_list_item" not in evidence):
+            if protected or (num_fmt == "none" and not marker_only_level) or not valid or (not has_content and "empty_list_item" not in evidence):
                 status = "ignored"
                 confidence = 0.0
                 if protected:
@@ -1530,6 +1776,7 @@ def _parse_docx(source: Path | str, *, store: SourceStore) -> dict[str, Any]:
         document, report, catalog=numbering_catalog, descend_wrappers=True
     )
     body = document.element.body
+    source_toc_paragraphs = _docx_source_toc_paragraphs(body)
     position = 0
     nested_list_ordinals: dict[tuple[str, int, int, str | None], int] = {}
 
@@ -1539,7 +1786,15 @@ def _parse_docx(source: Path | str, *, store: SourceStore) -> dict[str, Any]:
         facts["units"][unit_id] = {
             "kind": "paragraph",
             "source_ref": ref,
-            "inline_content": _docx_inline_content(paragraph, handle, node_path, facts["resources"], parser_version),
+            "inline_content": _docx_inline_content(
+                paragraph,
+                handle,
+                node_path,
+                facts["resources"],
+                parser_version,
+                store=store,
+                diagnostics=facts["diagnostics"],
+            ),
             "style": paragraph.style.name if paragraph.style is not None else None,
         }
         source_paragraph_format = _docx_source_paragraph_format(paragraph)
@@ -1547,6 +1802,14 @@ def _parse_docx(source: Path | str, *, store: SourceStore) -> dict[str, Any]:
             facts["units"][unit_id]["source_paragraph_format"] = source_paragraph_format
         facts["children"].setdefault(parent_id, []).append(unit_id)
         evidence = {"source_position": source_position, "style": paragraph.style.name if paragraph.style is not None else None}
+        if is_formula_number(paragraph.text):
+            # A formula number is a source semantic the presentation mapping
+            # consumes, so the reader records it here.
+            evidence["formula_number"] = True
+        if any(member is paragraph._p for member in source_toc_paragraphs):
+            # The template supplies the table of contents, so the source's own
+            # control is one region and the scope module excludes it.
+            evidence["source_toc"] = True
         if descriptor is not None:
             evidence.update({
                 "numbering_status": descriptor.get("status"),
@@ -1564,8 +1827,12 @@ def _parse_docx(source: Path | str, *, store: SourceStore) -> dict[str, Any]:
                 "continuation_hint": False,
             })
             if descriptor.get("status") == "detected":
+                # The marker the level actually carries decides the family: a level
+                # with no numbering format still shows the dash or dot its level
+                # text holds, so ``num_fmt`` alone cannot tell ordered from
+                # unordered.
                 evidence.update({
-                    "marker_kind": "ordered" if descriptor.get("num_fmt") != "bullet" else "unordered",
+                    "marker_kind": "unordered" if descriptor.get("source_list_type") in UNORDERED_LIST_TYPES else "ordered",
                 })
             if catalogue is not None:
                 evidence.update(_numbering_catalogue_evidence(catalogue))

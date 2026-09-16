@@ -7,14 +7,13 @@ import re
 from typing import Any, Mapping
 
 from appendix_semantics import parse_appendix_title
-from text_utils import caption_parts
+from text_utils import caption_parts, is_formula_number
 
 from ..model import inline_text_projection
 from ..validation import validate_ast, validate_source_facts
 from .protected import protected_unit_semantics
 
 
-_FORMULA_NUMBER_RE = re.compile(r"^\s*[\(（]\d+[\)）]\s*$")
 _APPENDIX_HINT_RE = re.compile(r"(?:^|\n)\s*附录(?:\s+[A-Z])?(?:\s|$)")
 _CLASSIFICATION_RE = re.compile(r"(?:^|\n)\s*[（(](?:规范性|资料性)[）)]\s*(?:\n|$)")
 
@@ -150,7 +149,7 @@ def project_source_facts(
             "caption" if caption is not None
             else "appendix" if appendix is not None
             else str(protected["role"]) if protected is not None and protected.get("role")
-            else "formula_number" if _FORMULA_NUMBER_RE.match(text)
+            else "formula_number" if is_formula_number(text)
             else "paragraph"
         )
         inline_runs = _legacy_inline_runs(inline_content) if text == raw_text else [{"text": text}]
@@ -242,7 +241,7 @@ def project_source_facts(
         for unit_id, unit in facts["units"].items()
         if unit_id not in excluded
         and unit.get("kind") == "paragraph"
-        and _FORMULA_NUMBER_RE.match(inline_text_projection(unit.get("inline_content", [])).strip())
+        and is_formula_number(inline_text_projection(unit.get("inline_content", [])).strip())
         and not facts.get("evidence", {}).get(unit_id, {}).get("marker_kind")
     ]
     return {

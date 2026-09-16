@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import copy
-import re
 from typing import Any, Mapping
 
 from ..model import inline_text_projection
 from ..validation import validate_source_facts
+from note_semantics import heading_style_level
+
 from .protected import protected_unit_semantics
 
 
@@ -33,9 +34,9 @@ def _docx_style_role(style_name: str) -> tuple[str | None, int | None]:
     normalized = style_name.strip().casefold()
     if normalized in {"title", "document title", "documenttitle", "文档标题", "文件标题", "主标题"}:
         return "title", None
-    heading = re.match(r"^(?:heading|标题)\s*(\d+)$", normalized, re.IGNORECASE)
-    if heading:
-        return "heading", min(int(heading.group(1)), 6)
+    level = heading_style_level(style_name)
+    if level is not None:
+        return "heading", min(level, 6)
     if (
         normalized in {"caption", "题注", "附录标题"}
         or "列项" in style_name

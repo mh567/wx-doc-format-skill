@@ -264,11 +264,20 @@ def _authored_caption_role_candidates(ast: Mapping[str, Any]) -> list[dict[str, 
 
 
 def _without_images(inline_content: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """Remove image tokens while preserving the authored caption inlines."""
+    """Keep the authored caption inlines without images or its own numbering field.
+
+    The caption owns its numbering, so the run that produced the source's label
+    and number is dropped here and written back as this module's own sequence
+    field at render time.  Any other retained field, a cross reference for
+    example, stays with the caption text.
+    """
 
     result: list[dict[str, Any]] = []
     for item in inline_content:
-        if item.get("kind") == "image":
+        kind = item.get("kind")
+        if kind == "image":
+            continue
+        if kind == "field" and str(item.get("instruction") or "").upper().startswith("SEQ "):
             continue
         copied = copy.deepcopy(dict(item))
         if copied.get("kind") == "link":

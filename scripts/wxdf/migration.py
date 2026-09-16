@@ -405,7 +405,7 @@ def _legacy_inline_runs(inline_content: list[Mapping[str, Any]]) -> list[dict[st
             for child in _legacy_inline_runs(item.get("children", [])):
                 child["href"] = item.get("target", "")
                 runs.append(child)
-        elif kind in {"field", "bookmark", "opaque_inline"}:
+        elif kind in {"field", "bookmark", "math", "opaque_inline"}:
             raise MigrationError(f"{kind} inline node cannot be represented by the legacy view")
         elif kind == "image":
             raise MigrationError("inline image cannot be represented by the legacy view")

@@ -7,7 +7,7 @@ from typing import Any, Mapping
 
 from .digest import digest
 from .list_policy import LIST_POLICIES, ListPolicy, ListProjection
-from .model import build_indexes, inline_text_projection, is_body_outline_heading
+from .model import build_indexes, is_body_outline_heading
 from .template import TemplateBundle, materialize_profile, preflight_template, presentation_contract_from
 from .validation import validate_ast
 
@@ -174,9 +174,10 @@ def _anchor(ast: Mapping[str, Any], item_id: str) -> tuple[str, list[dict[str, A
         first = children[0]
         block = document["blocks"].get(first)
         if block and block.get("block_type") == "paragraph" and block.get("role") == "body":
-            visible = inline_text_projection(block.get("inline_content", []))
-            if visible or any(item.get("kind") == "image" for item in block.get("inline_content", [])):
-                return first, []
+            # The item's own paragraph carries the marker, empty or not.  An empty
+            # numbered cell is still that paragraph, so generating a second one
+            # would add a stray paragraph to the cell.
+            return first, []
     source_ref = document["containers"].get(item_id, {}).get("source_ref")
     generated_id = f"generated-anchor-{item_id}"
     generated = {
@@ -201,6 +202,34 @@ def _reading_order(ast: Mapping[str, Any]) -> list[str]:
 
     walk(document["root_id"])
     return order
+
+
+def _paragraph_presentation(ast: Mapping[str, Any]) -> dict[str, dict[str, str]]:
+    """Return the presentation each non-list paragraph owns.
+
+    An image paragraph inherits no style, so its centred alignment is the whole
+    of its presentation (AGENTS.md decision 2).  A formula number is right
+    aligned in the source and no style says so, so that alignment is recorded
+    too.  Any other alignment belongs to the template style, not to the source.
+    """
+
+    document = ast["document"]
+    result: dict[str, dict[str, str]] = {}
+    for node_id, block in document["blocks"].items():
+        if not isinstance(block, Mapping):
+            continue
+        if block.get("block_type") == "image":
+            result[str(node_id)] = {"alignment": "center"}
+            continue
+        if block.get("block_type") != "paragraph" or block.get("role") != "body":
+            continue
+        if block.get("semantic_role") != "formula_number":
+            continue
+        source_format = block.get("source_paragraph_format")
+        alignment = source_format.get("alignment") if isinstance(source_format, Mapping) else None
+        if isinstance(alignment, str) and alignment:
+            result[str(node_id)] = {"alignment": alignment}
+    return result
 
 
 def _body_outline_overrides(ast: Mapping[str, Any]) -> dict[str, dict[str, int]]:
@@ -241,6 +270,44 @@ def _body_outline_overrides(ast: Mapping[str, Any]) -> dict[str, dict[str, int]]
     return overrides
 
 
+def _drop_excluded_blocks(ast: dict[str, Any], overlay: Mapping[str, Any] | None) -> None:
+    """Remove every block the scope module excluded from the rendered body.
+
+    A source region such as the document's own table of contents is identified
+    so the template's replacement is the only one that renders.  The scope
+    module records that as an overlay, so the normalized view drops the subtree
+    and the committed Source AST keeps it untouched.
+    """
+
+    excluded = {
+        str(node_id)
+        for node_id, values in (overlay or {}).items()
+        if isinstance(values, Mapping) and values.get("semantic_scope") == "excluded"
+    }
+    if not excluded:
+        return
+    document = ast["document"]
+    children = document["children"]
+    dropped: set[str] = set()
+
+    def collect(node_id: str, *, inside_excluded: bool) -> None:
+        drop = inside_excluded or node_id in excluded
+        if drop:
+            dropped.add(node_id)
+        for child_id in children.get(node_id, []):
+            collect(child_id, inside_excluded=drop)
+
+    collect(document["root_id"], inside_excluded=False)
+    for parent_id in list(children):
+        if parent_id in dropped:
+            del children[parent_id]
+            continue
+        children[parent_id] = [child_id for child_id in children[parent_id] if child_id not in dropped]
+    for node_id in dropped:
+        document["blocks"].pop(node_id, None)
+        document["containers"].pop(node_id, None)
+
+
 def normalize(
     source_ast: Mapping[str, Any],
     profile: Mapping[str, Any] | TemplateBundle,
@@ -269,6 +336,9 @@ def normalize(
     # instance and visible marker rather than by a deeper ``w:ilvl``.
     numbering_ids: dict[str, Any] = dict(template_profile.get("numbering_ids") or {})
     ast = copy.deepcopy(dict(source_ast))
+    # The scope module decides which source regions the template replaces, so the
+    # rendered body drops them before anything else reads the model.
+    _drop_excluded_blocks(ast, overlay)
     indexes = build_indexes(ast, validate=False)
     list_contexts = _list_contexts(ast, indexes, _stored_list_levels(context))
     required_roles = sorted(
@@ -287,10 +357,18 @@ def normalize(
         list_info = list_contexts[list_id]
         projection = policy.project(list_info["list_kind"], list_info["depth"])
         marker_anchor, generated = _anchor(ast, item_id)
+        # The marker paragraph may already exist as a generated anchor the list
+        # semantics materialized, so the flag reports the paragraph's origin
+        # rather than only the node this stage created.
+        marker_block = (ast["document"].get("blocks") or {}).get(marker_anchor) or {}
+        marker_generated = bool(generated) or str(marker_block.get("generated_by") or "").endswith("marker_anchor")
+        # A table's own numbering column keeps the cell style and the template's
+        # plain decimal instance (1, 2, 3) instead of a WX list style.
+        numbering_only = str(container.get("numbering_role") or "") == "table_number"
         item_by_node[item_id] = {
             "marker_anchor": marker_anchor,
             "target_sequence": list_info["numbering_scope_id"] if policy.chapter_scoped_sequence else list_info["source_sequence_id"],
-            "target_level": projection.render_level,
+            "target_level": 0 if numbering_only else projection.render_level,
             "semantic_level": list_info["depth"],
             "render_level_clamped": projection.clamped,
             "marker_kind": list_info["list_kind"],
@@ -299,12 +377,15 @@ def normalize(
             "source_start": list_info["source_start"],
             "target_ordinal": None if list_info["list_kind"] == "unordered" else (None if policy.chapter_scoped_sequence else container.get("source_ordinal")),
             "restart": False,
-            "style_role": projection.style_role,
+            "style_role": None if numbering_only else projection.style_role,
             "scope_id": list_info["scope_id"],
             "numbering_scope_id": list_info["numbering_scope_id"],
             "semantic_scope_id": list_info["semantic_scope_id"],
-            "generated_anchor": bool(generated),
+            "generated_anchor": marker_generated,
         }
+        if numbering_only:
+            item_by_node[item_id]["numbering_only"] = True
+            item_by_node[item_id]["numbering_instance"] = numbering_ids.get("table_number")
 
     counters: dict[str, int] = {}
 
@@ -410,6 +491,7 @@ def normalize(
         # separate mapping of heading node id to the level it renders at.
         "nodes": item_by_node,
         "outline": _body_outline_overrides(ast),
+        "paragraphs": _paragraph_presentation(ast),
         "overrides": override,
         "numbering_instances": synthesized_instances,
     }
