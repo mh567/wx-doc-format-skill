@@ -11,13 +11,32 @@ from xml.etree import ElementTree
 
 from docx import Document
 
+from .model import effective_outline_level, is_body_outline_heading
 from .render_plan import build_render_plan
 from .validation import validate_ast
 
 
 _REPAIRABLE_AUDIT_CODES = frozenset({
     ("model", "heading_level_jump"),
+    ("model", "source_heading_level_normalized"),
 })
+
+# Findings whose defect the normalization already resolved in the rendered
+# model.  They stay reported and repairable, so the review can align the source
+# model with what the template renders, and they do not fail the model audit:
+# the delivered document carries the level the outline allows either way.  The
+# model audit is the only producer, and the code alone identifies them because
+# the publication gate and the CLI diagnostic echo see the issues without an
+# audit name.
+ADVISORY_AUDIT_CODES = frozenset({
+    "source_heading_level_normalized",
+})
+
+
+def is_advisory_audit_issue(issue: Mapping[str, Any]) -> bool:
+    """Return whether an audit issue reports a divergence normalization resolved."""
+
+    return str(issue.get("code") or "") in ADVISORY_AUDIT_CODES
 
 
 def collect_audit_findings(
@@ -997,14 +1016,13 @@ def check_model(normalized: Mapping[str, Any]) -> dict[str, Any]:
     for operation in plan["operations"]:
         node_id = str(operation.get("node_id") or "")
         block = blocks.get(node_id) if isinstance(blocks, Mapping) else None
-        if not isinstance(block, Mapping) or block.get("block_type") != "paragraph":
+        if not isinstance(block, Mapping) or not is_body_outline_heading(block):
             continue
-        if block.get("role") != "heading":
-            continue
-        if block.get("appendix_id") or block.get("appendix_role"):
-            continue
-        level = block.get("level")
-        if not isinstance(level, int):
+        # The outline contract governs what the template renders, so the check
+        # reads the presentation level normalization derived and falls back to
+        # the source semantic level for a block without a presentation record.
+        level = effective_outline_level(block, operation.get("presentation"))
+        if level is None:
             continue
         expected_level = min(6, previous_heading_level + 1)
         if level > expected_level:
@@ -1015,6 +1033,21 @@ def check_model(normalized: Mapping[str, Any]) -> dict[str, Any]:
                 "expected_level": expected_level,
                 "actual_level": level,
             })
+        source_level = block.get("level")
+        if isinstance(source_level, int) and not isinstance(source_level, bool) and source_level != level:
+            # The source declared a level the outline does not allow and the
+            # normalization rendered it at the level it does allow, so the
+            # delivered document satisfies the contract.  Report the divergence
+            # so a reader sees the source declaration, and let the review align
+            # the source model with the rendered level; the finding disappears
+            # once it does.
+            issues.append({
+                "code": "source_heading_level_normalized",
+                "node_id": node_id,
+                "severity": "high",
+                "expected_level": level,
+                "actual_level": source_level,
+            })
         previous_heading_level = level
     presentation = normalized.get("presentation", {}).get("nodes", {})
     for node_id, node in presentation.items():
@@ -1023,7 +1056,8 @@ def check_model(normalized: Mapping[str, Any]) -> dict[str, Any]:
     listed = [item["node_id"] for item in plan["operations"] if item.get("kind") == "list_item"]
     if set(listed) != set(presentation):
         issues.append({"code": "render_plan_list_mismatch", "expected": sorted(presentation), "actual": sorted(listed)})
-    return {"passed": not issues, "issues": issues, "render_plan": plan}
+    blocking = [issue for issue in issues if not is_advisory_audit_issue(issue)]
+    return {"passed": not blocking, "issues": issues, "render_plan": plan}
 
 
 def _expected_paragraph_texts(expected: Mapping[str, Any], render_map: Mapping[str, Any]) -> list[str]:

@@ -420,3 +420,23 @@
 - 全量测试（仓库根，`scripts/.venv/bin/python3 -m pytest tests/ -q`）为 `1283 passed, 0 failed`（基线 1261 加新增 22 项），连跑两次一致。
 - 真实转换复核 12 份样例（两个基准、两级嵌套、两级无序、两种交叉嵌套、三级、列表后注、两项之间表格、两章、T07 章标题与 IP 地址样例）全部 `completed`、`saved_output_audit.passed=true`、`unexpected_styles` 空、`risk_warnings` 空。
 - 证据写入 `docs/execution-v6/evidence/residuals.md` 的 R6 节（P1-P4、M1-M4、关闭与重归属、红灯与绿灯、真实转换复核）；`docs/execution-v6/status.json` 新增 `follow_up_residuals_r6` 并更新 T07 与 T10 的残留条目。本轮未提交、未推送、未执行远程操作。
+
+## 2026-09-16 正文大纲契约前置（标题跳级不再阻断交付）
+
+- 起因：用 `技术文件格式及书写要求.docx` 同时作为输入和模板转换，默认 modular 模式退出码 1 且不产出 DOCX，唯一阻断项是模型审计 `heading_level_jump`（「其他说明」源样式 heading 2 之后直接是 heading 5）。换 `assets/wx_template.docx` 诊断相同，同一输入走 legacy 退出码 0，确认与模板无关。
+- 根因：`semantics/structure.py` 把源样式序号直接写进 `level`，`rendering.py` 用同一字段选模板标题样式，`auditing.check_model` 又用同一字段判输出大纲单调性。标准化阶段从未确定输出大纲，审计成了第一个发现契约被违反的地方。
+- 定案：`level` 保持源语义层级（解析等价、决策账本、迁移合同不动），新增 `presentation.outline[node_id].outline_level` 作为渲染与审计唯一消费的大纲层级，按阅读顺序取 `min(6, previous + 1)`，游标跟随派生值，附录标题跳过且不推进游标。渲染与审计读派生值，缺失时回退源层级。
+- 上报与交付：源层级与渲染层级的分歧报 `source_heading_level_normalized`，登记为可修复项并进入复核授权，但不阻断交付，因为交付文档已满足大纲合同；渲染大纲本身违反合同仍报 `heading_level_jump` 并阻断。
+- 复核链路保持可用：`source_heading_level_normalized` 的修复把源模型层级对齐到渲染层级，修复后该项消失，`native_review` 依 `target_audit_improved` 接受。发布验收要求的「复核提交与拒绝保护」步骤因此继续由真实文档驱动。
+- 附带修正：`reporting.py` 对无 `message` 字段的审计项不再渲染空行，改回退展示结构化证据；`main.py` 的 stderr 回显从 `diagnostics[0]` 改为按严重度取首条，避免把 info 级记录当成失败码。
+- 验证：全量测试 `1307 passed, 0 failed`（新增 `tests/test_modular_outline.py` 10 项）。真实转换 `技术文件格式及书写要求.docx` 自模板与 bundled 模板均退出码 0、三项审计 passed、`unexpected_styles` 空、输出 ZIP 完整，报告在「大纲归一」列出源层级 5 与渲染层级 3，输出中该段落落到 Heading 3；两个真实 Markdown 基准仍为 `completed` 且无诊断。
+- 发布形态复核：`WX_DOC_FORMAT_RELEASE=1` 下 `public_summary` 三项审计 passed、`unexpected_styles_count` 为 0、`manual_review_required` 为 true、诊断码含 `source_heading_level_normalized`。该文档本就有两条 `invalid_numbering_definition` info 降级，状态标签为 `completed_with_warnings`，交付时按 SKILL.md 第 4 步列出复核项。
+- 残留：`presentation` 目前只为列表项与正文大纲承载呈现属性，正文标题没有独立的呈现节点（设计文档第五节的源语义与呈现属性分离在标题上仍由 AST 派生字段承担）。本轮改动提交并推送到私有 `dev/main`；未执行 Nuitka 构建、公开 Skill 生成或发布。
+
+### 独立审查与复审
+
+- 审查轴一（规范）：无硬性违规。确认 `presentation.outline` 必须与 `presentation.nodes` 分开，因为后者的四处消费方都把它当作已渲染列表项集合；确认 `effective_outline_level` 作为渲染与审计的共用判定是 AGENTS.md 决策 8 要求的单一规则。
+- 审查轴一提出的三点已修：标题参与判定在两处重复，抽到 `model.is_body_outline_heading` 由派生与审计共用；advisory 分类的语义收敛为 `auditing.is_advisory_audit_issue` 一个谓词供审计结论、发布放行和 CLI 回显共用；`main._DIAGNOSTIC_SEVERITY_RANK` 补齐 `critical` 与 `low`，并让回显优先选择仍在描述交付文档的诊断，advisory 排在后面。
+- 审查轴二（规格）：确认派生规则与审计规则逐行一致（`min(6, previous + 1)`、附录跳过不推进游标、游标跟随派生值），并判定 advisory 无法用来掩盖真实的渲染大纲违规（两者码不同且阻断规则按码判定）。
+- 审查轴二指出的既成事实，记为残留：`heading_level_jump` 现在只由 `presentation.outline` 被改写时触发，真实输入与发布冒烟都不再产生它，它退化为回归护栏；复核修复写的是源 `level`（沿用既有跳级授权），因此源语义层级在复核被接受时会被对齐到渲染层级，这是全流程中唯一改写源层级的地方。
+- 复审：全量测试 `1309 passed, 0 failed`（新增 `test_the_derivation_leaves_the_source_model_untouched` 与 `test_cli_diagnostic_echo_prefers_a_finding_that_still_describes_the_document`）。复审后的 VERSION 为 `0.14.1`。

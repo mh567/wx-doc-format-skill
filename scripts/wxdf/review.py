@@ -18,16 +18,21 @@ MODE_MANIFEST: dict[str, dict[str, Any]] = {
 }
 
 
-_REPAIR_AUTHORITIES: dict[str, dict[str, Any]] = {
-    "heading_level_jump": {
-        "allowed_operations": ("update_role",),
-        "property_scope": ("role", "level"),
-        "required_value_fields": ("role", "level"),
-        "allowed_values": {
-            "role": ("heading",),
-            "level": "expected_level",
-        },
+_HEADING_LEVEL_AUTHORITY: dict[str, Any] = {
+    "allowed_operations": ("update_role",),
+    "property_scope": ("role", "level"),
+    "required_value_fields": ("role", "level"),
+    "allowed_values": {
+        "role": ("heading",),
+        "level": "expected_level",
     },
+}
+
+_REPAIR_AUTHORITIES: dict[str, dict[str, Any]] = {
+    "heading_level_jump": copy.deepcopy(_HEADING_LEVEL_AUTHORITY),
+    # The source declared a level the outline does not allow, so the repair
+    # writes the level the template renders onto the source model.
+    "source_heading_level_normalized": copy.deepcopy(_HEADING_LEVEL_AUTHORITY),
 }
 
 _PROPERTY_AST_FIELDS: dict[str, tuple[str, ...]] = {

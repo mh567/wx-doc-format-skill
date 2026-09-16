@@ -612,6 +612,44 @@ def _public_diagnostic_codes(report: dict) -> list[str]:
     return sorted(codes)
 
 
+_DIAGNOSTIC_SEVERITY_RANK = {
+    "critical": 0,
+    "error": 1,
+    "high": 2,
+    "medium": 3,
+    "warning": 4,
+    "low": 5,
+    "info": 6,
+}
+
+
+def _reported_diagnostic_code(diagnostics: list) -> str:
+    """Return the code worth echoing on stderr.
+
+    The list leads with the pipeline's own records, which are informational, so
+    reporting the first entry can name a harmless record while the run actually
+    failed on a later one.  Rank by severity and keep the advisory findings,
+    whose defect normalization already resolved, behind the ones that still
+    describe the delivered document.
+    """
+
+    from wxdf.auditing import is_advisory_audit_issue
+
+    ranked: list[tuple[int, int, str]] = []
+    for diagnostic in diagnostics:
+        if not isinstance(diagnostic, dict):
+            continue
+        severity = str(diagnostic.get("severity") or "")
+        rank = _DIAGNOSTIC_SEVERITY_RANK.get(severity, len(_DIAGNOSTIC_SEVERITY_RANK))
+        advisory = 1 if is_advisory_audit_issue(diagnostic) else 0
+        ranked.append((advisory, rank, str(diagnostic.get("code") or "")))
+    if not ranked:
+        return "MODULAR_CONVERSION_FAILED"
+    # The sort is stable, so equal ranks keep the pipeline's own order.
+    ranked.sort(key=lambda item: item[:2])
+    return ranked[0][2] or "MODULAR_CONVERSION_FAILED"
+
+
 def public_report_summary(report: dict) -> dict:
     audits = {
         public_name: _public_audit_status(report.get(source_key))
@@ -1683,8 +1721,7 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
         if args.report_md is not None:
             write_markdown_report(output_report, args.report_md)
         if result.diagnostics:
-            diagnostic = result.diagnostics[0]
-            print(diagnostic.get("code", "MODULAR_CONVERSION_FAILED"), file=sys.stderr)
+            print(_reported_diagnostic_code(result.diagnostics), file=sys.stderr)
         raise SystemExit(result.exit_code)
 
     maybe_reexec_with_skill_venv()

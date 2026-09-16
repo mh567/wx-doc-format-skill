@@ -20,6 +20,7 @@ from text_utils import caption_parts
 
 from .render_plan import build_render_plan
 from .media import MediaEmbedder
+from .model import effective_outline_level
 from .template import TemplateBundle
 
 
@@ -290,7 +291,11 @@ def _write_caption(
     return f"{prefix}1 {body}"
 
 
-def _style_for_block(block: Mapping[str, Any], styles: Mapping[str, str]) -> str | None:
+def _style_for_block(
+    block: Mapping[str, Any],
+    styles: Mapping[str, str],
+    presentation: Mapping[str, Any] | None = None,
+) -> str | None:
     appendix_role = block.get("appendix_role")
     if appendix_role == "title":
         return styles.get("appendix_title", "附录标题")
@@ -301,7 +306,8 @@ def _style_for_block(block: Mapping[str, Any], styles: Mapping[str, str]) -> str
     if role == "title":
         return styles.get("title", "文档标题")
     if role == "heading":
-        return styles.get(f"heading_{block.get('level', 1)}", "Heading 1")
+        level = effective_outline_level(block, presentation) or 1
+        return styles.get(f"heading_{level}", "Heading 1")
     if role == "caption":
         return styles.get("caption", "Caption")
     if role in {"note", "numbered_note"}:
@@ -522,6 +528,7 @@ def render(
             update_fields.set(qn("w:val"), "true")
     render_map: dict[str, dict[str, Any]] = {}
     diagnostics: list[dict[str, Any]] = []
+    presentation_outline = normalized.get("presentation", {}).get("outline", {})
     paragraph_counter = 0
     table_counter = 0
     initial_cell_paragraphs: set[Any] = set()
@@ -538,7 +545,7 @@ def render(
         parent: Any | None = None,
     ) -> Any:
         nonlocal paragraph_counter, pending_page_break
-        style = list_style or _style_for_block(block, styles)
+        style = list_style or _style_for_block(block, styles, presentation_outline.get(node_id))
         if parent is not None and parent._tc in semantic_table_cells:
             style = styles.get("table_body", "表正文")
         if parent is None:

@@ -387,6 +387,29 @@ def _native_audit_status(report: dict, key: str) -> str:
     return "passed" if audit.get("passed") is True else "failed"
 
 
+# An audit issue carries structured evidence instead of a message.  These are
+# the fields worth printing for one, in the order a reader wants them.
+_DIAGNOSTIC_DETAIL_FIELDS = ("node_id", "expected_level", "actual_level", "severity")
+
+
+def _diagnostic_summary(diagnostic: dict) -> str:
+    """Return a printable summary for a diagnostic, including evidence-only ones.
+
+    An audit issue carries structured fields instead of a message, so a report
+    that printed the message alone would show an empty line.
+    """
+
+    message = diagnostic.get("message")
+    if message:
+        return str(message)
+    details = [
+        f"{key}={diagnostic[key]}"
+        for key in _DIAGNOSTIC_DETAIL_FIELDS
+        if key in diagnostic
+    ]
+    return ", ".join(details) if details else "无附加说明"
+
+
 def _write_native_markdown_report(report: dict, path: Path) -> None:
     saved_output_audit = report.get("saved_output_audit")
     unexpected_styles = (
@@ -413,12 +436,20 @@ def _write_native_markdown_report(report: dict, path: Path) -> None:
         for diagnostic in diagnostics:
             if isinstance(diagnostic, dict):
                 lines.append(
-                    f"- {diagnostic.get('code', 'UNKNOWN')}：{diagnostic.get('message', '')}"
+                    f"- {diagnostic.get('code', 'UNKNOWN')}：{_diagnostic_summary(diagnostic)}"
                 )
             else:
                 lines.append(f"- {diagnostic}")
     else:
         lines.append("- 无")
+    heading_outline = report.get("heading_outline")
+    entries = heading_outline.get("entries", []) if isinstance(heading_outline, dict) else []
+    if entries:
+        lines.extend(["", "## 大纲归一"])
+        for entry in entries:
+            lines.append(
+                f"- {entry.get('node_id')}：源层级 {entry.get('source_level')} → 渲染层级 {entry.get('outline_level')}"
+            )
     lines.extend([
         "",
         "## 风险提示",

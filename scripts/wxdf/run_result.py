@@ -6,7 +6,7 @@ import copy
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from .registry import capability_migration_report, execution_plan_report
 
@@ -64,6 +64,30 @@ class RunResult:
         return payload
 
 
+def heading_outline_report(normalized: Mapping[str, Any]) -> dict[str, Any]:
+    """Report the body headings normalization mapped onto the outline contract.
+
+    The entry records the source semantic level next to the level the template
+    renders, so a reader can tell a heading that kept its source level from one
+    that was pulled up to keep the outline descending one level at a time.  The
+    records live in the presentation outline, which the presentation digest
+    covers.
+    """
+
+    presentation = normalized.get("presentation")
+    outline = presentation.get("outline") if isinstance(presentation, Mapping) else None
+    entries = [
+        {
+            "node_id": str(node_id),
+            "source_level": record.get("source_level"),
+            "outline_level": record.get("outline_level"),
+        }
+        for node_id, record in (outline or {}).items()
+        if isinstance(record, Mapping) and isinstance(record.get("outline_level"), int)
+    ]
+    return {"normalized_count": len(entries), "entries": entries}
+
+
 def build_native_run_result(
     request: Any,
     options: dict[str, Any],
@@ -81,6 +105,7 @@ def build_native_run_result(
     result that must not publish.
     """
 
+    from .auditing import is_advisory_audit_issue
     from .decision_ledger import ledger_replay_report
 
     candidates = list(context.require("candidate_set"))
@@ -174,10 +199,17 @@ def build_native_run_result(
         item
         for item in diagnostics
         if item in (decision_set.get("unresolved") or [])
-        or item in (model_findings.get("issues") or [])
         or item in (saved_findings.get("issues") or [])
         or item in (appendix_audit.get("issues") or [])
         or item.get("severity") in {"error", "warning"}
+        or (
+            item in (model_findings.get("issues") or [])
+            # A model finding whose defect the normalization already resolved in
+            # the rendered model is reported and repairable without blocking the
+            # delivery: the document carries the contract-conforming level
+            # either way.
+            and not is_advisory_audit_issue(item)
+        )
     ]
     if published is None or not audits_passed or blocking_diagnostics:
         report.update({
@@ -249,6 +281,7 @@ def build_native_run_result(
         "source_ast_revision": snapshot.ast["revision"],
         "semantic_digest": normalized["semantic_digest"],
         "presentation_digest": normalized["presentation_digest"],
+        "heading_outline": heading_outline_report(normalized),
         "source_ast_hierarchy": context.require("source_ast_hierarchy"),
         "list_semantics": {
             "list_count": len(list_result["lists"]),

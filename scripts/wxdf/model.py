@@ -58,6 +58,43 @@ def build_indexes(ast: Mapping[str, Any], *, validate: bool = True) -> AstIndexe
     )
 
 
+def is_body_outline_heading(block: Mapping[str, Any]) -> bool:
+    """Return whether a block takes part in the body outline contract.
+
+    Appendix headings render through their own relative level and are owned by
+    appendix semantics, so they stay out of the body outline.  The same predicate
+    decides which headings the normalization derives a level for and which ones
+    the model audit checks, so the two rules cannot drift apart.
+    """
+
+    if block.get("block_type") != "paragraph" or block.get("role") != "heading":
+        return False
+    return not (block.get("appendix_id") or block.get("appendix_role"))
+
+
+def effective_outline_level(
+    block: Mapping[str, Any],
+    presentation: Mapping[str, Any] | None = None,
+) -> int | None:
+    """Return the outline level a heading renders at.
+
+    ``block["level"]`` carries the source semantic level, which a source
+    document may declare freely.  When the caller also has the presentation
+    record, its derived ``outline_level`` is the level normalization mapped onto
+    the WX outline contract, so the renderer writes it and the auditor checks
+    it.  A block without either value carries no outline level.
+    """
+
+    if isinstance(presentation, Mapping):
+        derived = presentation.get("outline_level")
+        if isinstance(derived, int) and not isinstance(derived, bool):
+            return derived
+    level = block.get("level")
+    if isinstance(level, int) and not isinstance(level, bool):
+        return level
+    return None
+
+
 def inline_text_projection(inline_content: list[Mapping[str, Any]]) -> str:
     """Return the visible text projection of inline content."""
 

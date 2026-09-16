@@ -7,7 +7,7 @@ from typing import Any, Mapping
 
 from .digest import digest
 from .list_policy import LIST_POLICIES, ListPolicy, ListProjection
-from .model import build_indexes, inline_text_projection
+from .model import build_indexes, inline_text_projection, is_body_outline_heading
 from .template import TemplateBundle, materialize_profile, preflight_template, presentation_contract_from
 from .validation import validate_ast
 
@@ -203,6 +203,44 @@ def _reading_order(ast: Mapping[str, Any]) -> list[str]:
     return order
 
 
+def _body_outline_overrides(ast: Mapping[str, Any]) -> dict[str, dict[str, int]]:
+    """Derive the outline level each body heading renders at.
+
+    The WX outline descends one level at a time, while a source document may
+    declare any heading level it likes, so a paragraph styled ``heading 5`` can
+    follow one styled ``heading 2`` directly.  ``level`` keeps that source
+    semantic level and the presentation record carries the derived level the
+    template renders, which is how appendix semantics already separates a
+    source heading level from its rendered one.
+
+    The deepest derivable level is ``min(6, previous + 1)``, and the cursor
+    follows the derived level, so one correction cascades instead of being
+    re-derived from the source value.  Appendix headings render through their
+    own relative level, so they are skipped and leave the cursor untouched,
+    exactly like ``auditing.check_model``.  Only headings whose derived level
+    differs from the source level get a record, so a document whose outline is
+    already well formed keeps its previous presentation nodes byte for byte.
+    """
+
+    document = ast["document"]
+    blocks = document["blocks"]
+    overrides: dict[str, dict[str, int]] = {}
+    previous = 0
+    for node_id in _reading_order(ast):
+        block = blocks.get(node_id)
+        if not isinstance(block, Mapping) or not is_body_outline_heading(block):
+            continue
+        level = block.get("level")
+        if not isinstance(level, int) or isinstance(level, bool):
+            continue
+        derived = min(6, previous + 1)
+        outline_level = derived if level > derived else level
+        if outline_level != level:
+            overrides[str(node_id)] = {"outline_level": outline_level, "source_level": level}
+        previous = outline_level
+    return overrides
+
+
 def normalize(
     source_ast: Mapping[str, Any],
     profile: Mapping[str, Any] | TemplateBundle,
@@ -367,7 +405,11 @@ def normalize(
             "table_style": dict(template_profile.get("table_style") or {}),
         },
         "template_contract": presentation_contract_from(profile),
+        # ``nodes`` stays the list-item presentation: several audits read it as
+        # the set of rendered list items.  The body outline normalization is a
+        # separate mapping of heading node id to the level it renders at.
         "nodes": item_by_node,
+        "outline": _body_outline_overrides(ast),
         "overrides": override,
         "numbering_instances": synthesized_instances,
     }
