@@ -21,6 +21,7 @@ SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
+from main import DEFAULT_TABLE_ROW_HEIGHT_CM
 from wxdf.checkpoint_store import save_checkpoint
 from wxdf.response_store import content_digest
 
@@ -193,7 +194,7 @@ def test_default_cli_keeps_default_table_row_contract(tmp_path: Path) -> None:
     assert completed.returncode == 0, completed.stderr
     rows = [row for table in Document(output).tables for row in table.rows]
     assert rows
-    assert all(row.height is not None and row.height.cm == pytest.approx(0.69, abs=0.02) for row in rows)
+    assert all(row.height is not None and row.height.cm == pytest.approx(DEFAULT_TABLE_ROW_HEIGHT_CM, abs=0.001) for row in rows)
     assert all(row.height_rule == WD_ROW_HEIGHT_RULE.AT_LEAST for row in rows)
     report = json.loads(report_path.read_text(encoding="utf-8"))
     assert report["saved_output_audit"]["unexpected_styles"] == []
