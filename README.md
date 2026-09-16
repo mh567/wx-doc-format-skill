@@ -1,6 +1,6 @@
 # wx-doc-format
 
-Markdown / DOCX 转 WX 模板格式 DOCX 的格式转换服务。默认走 native-v2 模块化流水线，按八个阶段把源文档经过解析、裁决、规范化、渲染、审计，最终按模板合同输出 DOCX 与 JSON 审计报告。
+Markdown / DOCX 转 WX 模板格式 DOCX 的格式转换服务。按八个阶段把源文档经过解析、裁决、规范化、渲染、审计，最终按模板合同输出 DOCX 与 JSON 审计报告。
 
 ## 架构
 
@@ -19,7 +19,7 @@ Markdown / DOCX 转 WX 模板格式 DOCX 的格式转换服务。默认走 nativ
 
 LLM 增强以 Capability 插拔方式接入，当前能力：`toc_region_review`、`list_detect`、`caption_gen`、`document_review`。新增能力在 `scripts/wxdf/llm_enhancer.py` 注册 `CapabilityConfig`。
 
-legacy 流水线（`scripts/docx_render.py` / `scripts/template_finalizer.py`）只作为开发诊断模式保留，发布构建里被禁用；默认入口是 native-v2。
+旧的诊断流水线已经删除。`--pipeline legacy` 与 `--list-policy legacy` 在任何构建下都以 `LEGACY_MODE_UNAVAILABLE` 拒绝。
 
 ## 仓库布局
 
@@ -28,7 +28,7 @@ legacy 流水线（`scripts/docx_render.py` / `scripts/template_finalizer.py`）
 | `scripts/main.py` | CLI 入口，开发运行 `scripts/.venv/bin/python3 -m main` |
 | `scripts/wxdf/` | native-v2 核心：kernel、registry、parser、semantics、normalization、rendering、audit、publication |
 | `scripts/wxdf/semantics/` | 各语义能力模块：lists、tables、captions、appendices、regions、structure、protected |
-| `tests/` | 92 个测试文件 |
+| `tests/` | 75 个测试文件 |
 | `packaging/nuitka/` | Nuitka 构建、公开薄 Skill 组装 |
 | `docs/` | 设计文档与执行记录 |
 | `assets/wx_template.docx` | WX 格式模板 |

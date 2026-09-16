@@ -268,14 +268,13 @@ def test_default_cli_preserves_layout_paragraph_format_and_normalizes_data_table
     assert report["saved_output_audit"]["passed"] is True
 
 
-def test_help_names_native_defaults_and_development_diagnostic_mode() -> None:
+def test_help_names_native_defaults() -> None:
     completed = _run("--help")
 
     assert completed.returncode == 0
     assert "default: modular" in completed.stdout
     assert "default: native-v2" in completed.stdout
     assert "default: wx-default-v2" in completed.stdout
-    assert "diagnostic" in completed.stdout.lower()
 
 
 def test_native_markdown_report_uses_native_identity_and_audit_results(tmp_path: Path) -> None:
@@ -324,34 +323,19 @@ def test_default_file_mode_waiting_report_records_list_policy(tmp_path: Path) ->
 
 
 @pytest.mark.parametrize(
-    ("arguments", "message"),
+    "arguments",
     [
-        (
-            ("--pipeline", "legacy", "--modular-profile", "native-v2", "--list-policy", "legacy"),
-            "legacy diagnostic pipeline requires --modular-profile legacy-full-v1",
-        ),
-        (
-            ("--pipeline", "legacy", "--modular-profile", "legacy-full-v1", "--list-policy", "wx-default-v2"),
-            "legacy diagnostic pipeline requires --list-policy legacy",
-        ),
-        (
-            ("--pipeline", "modular", "--modular-profile", "legacy-full-v1", "--list-policy", "wx-default-v2"),
-            "modular pipeline requires --modular-profile native-v2",
-        ),
-        (
-            ("--pipeline", "modular", "--modular-profile", "native-v2", "--list-policy", "legacy"),
-            "modular pipeline requires --list-policy wx-default-v2",
-        ),
+        ("--pipeline", "legacy", "--modular-profile", "native-v2", "--list-policy", "legacy"),
+        ("--pipeline", "legacy", "--modular-profile", "legacy-full-v1", "--list-policy", "wx-default-v2"),
+        ("--pipeline", "modular", "--modular-profile", "legacy-full-v1", "--list-policy", "wx-default-v2"),
+        ("--pipeline", "modular", "--modular-profile", "native-v2", "--list-policy", "legacy"),
     ],
 )
-def test_illegal_pipeline_identity_combinations_are_argparse_errors(
-    arguments: tuple[str, ...],
-    message: str,
-) -> None:
+def test_retired_pipeline_values_are_argparse_errors(arguments: tuple[str, ...]) -> None:
     completed = _run(*arguments, "--input", SOURCE, "--output", "ignored.docx")
 
     assert completed.returncode == 2
-    assert message in completed.stderr
+    assert "LEGACY_MODE_UNAVAILABLE" in completed.stderr
 
 
 @pytest.mark.parametrize(

@@ -63,7 +63,9 @@ def test_release_cli_rejects_retired_execution_choices_at_argument_boundary(
     assert retired_value in completed.stderr
 
 
-def test_development_cli_keeps_complete_legacy_diagnostic_tuple(tmp_path: Path) -> None:
+def test_development_cli_rejects_the_retired_legacy_tuple(tmp_path: Path) -> None:
+    """The legacy diagnostic tuple is gone, so development rejects it too."""
+
     source = tmp_path / "legacy-diagnostic.md"
     source.write_text("# 诊断入口\n\n正文\n", encoding="utf-8")
     output = tmp_path / "legacy-diagnostic.docx"
@@ -89,9 +91,8 @@ def test_development_cli_keeps_complete_legacy_diagnostic_tuple(tmp_path: Path) 
         text=True,
     )
 
-    assert completed.returncode == 0, completed.stderr
-    assert output.is_file()
-    assert json.loads(report.read_text(encoding="utf-8")).get("pipeline") != "modular"
+    assert completed.returncode == 2, completed.stderr
+    assert not output.is_file()
 
 
 def test_kernel_default_request_uses_native_v2_only(tmp_path: Path) -> None:

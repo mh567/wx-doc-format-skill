@@ -378,8 +378,8 @@ def test_main_imports_while_the_legacy_seams_are_blocked() -> None:
     assert summary["leaked"] == [], summary["leaked"]
 
 
-def test_legacy_helpers_stay_available_through_deferred_binding() -> None:
-    """The stable legacy entry points still resolve after import."""
+def test_retired_legacy_helpers_are_gone_from_the_cli() -> None:
+    """The legacy entry points were deleted, not deferred."""
 
     import main
 
@@ -392,13 +392,9 @@ def test_legacy_helpers_stay_available_through_deferred_binding() -> None:
         "render_docx_direct",
         "apply_template_finalizer",
         "extract_template_toc_fragment",
+        "_deferred_legacy_callable",
     ):
-        assert callable(getattr(main, name)), name
-
-    import md_pipeline
-
-    assert main.parse_md_to_model.__name__ == "parse_md_to_model"
-    assert "md_pipeline" in sys.modules
+        assert not hasattr(main, name), name
 
 
 # ---------------------------------------------------------------------------

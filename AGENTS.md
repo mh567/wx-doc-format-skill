@@ -8,7 +8,7 @@
 
 ## 项目架构
 
-模块化流水线，默认走 native-v2（`scripts/wxdf/` 下的 `ConversionKernel` + `ModuleRegistry`），legacy 只作为开发诊断模式保留，发布构建中禁用。八个阶段：
+流水线由 `scripts/wxdf/` 下的 `ConversionKernel` 与 `ModuleRegistry` 编排，共八个阶段：
 
 ```
 解析 → 范围 → 角色 → 关系 → 规范化 → 渲染 → 审计 → 发布
@@ -24,6 +24,10 @@ LLM 增强为 Capability 插拔架构，当前能力：
 - 新增能力只需注册 `CapabilityConfig`（`scripts/wxdf/llm_enhancer.py`）
 
 入口：`scripts/.venv/bin/python3 -m main`。开发不依赖 `scripts/run.sh`，该脚本只存在于发布包内。
+
+### 旧流水线已删除
+
+旧的诊断流水线连同其渲染、规范化、收口、审计入口已经删除，`--pipeline legacy` 与 `--list-policy legacy` 在任何构建下都以 `LEGACY_MODE_UNAVAILABLE` 拒绝。以下顶层模块保留，因为它们被新架构复用：`document_model`、`table_formatting`、`table_semantics`、`appendix_semantics`、`front_matter`、`note_semantics`、`toc_detector`、`toc_contract`、`unordered_lists`、`text_utils`、`template_profile`、`llm_enhancer`、`review_loop`、`reporting`，以及被 `text_utils` 引用的旧解析链 `docx_pipeline`、`md_pipeline`、`markdown_recognition`。
 
 ## 关键决策记录
 

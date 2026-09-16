@@ -103,8 +103,9 @@ def test_offline_backend_allows_command_and_blocks_cloud_auto_detection(monkeypa
     monkeypatch.setenv("WX_DOC_FORMAT_OFFLINE", "1")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "secret")
     monkeypatch.setenv("OPENAI_API_KEY", "secret")
-    assert main._resolve_llm_call(SimpleNamespace(llm_command=None)) is None
-    assert callable(main._resolve_llm_call(SimpleNamespace(llm_command="printf ok")))
+    # Only an explicit local command is honoured; no cloud or API-key path exists.
+    assert main._llm_call_from_command("") is None
+    assert callable(main._llm_call_from_command("printf ok"))
 
 
 def test_platform_identifiers_cover_supported_build_matrix():
@@ -266,16 +267,21 @@ def test_release_rejects_ast_exports(monkeypatch):
     assert exc_info.value.code == 2
 
 
-def test_release_resume_cannot_restore_ast_export_paths(monkeypatch):
+def test_release_resume_cannot_restore_ast_export_paths(monkeypatch, tmp_path):
     monkeypatch.setenv("WX_DOC_FORMAT_RELEASE", "1")
-    monkeypatch.setattr(sys, "argv", ["wx-doc-format", "--resume", "run.json"])
-    monkeypatch.setattr(main, "read_run_info", lambda _path: {
-        "args": {
-            "input": "source.docx",
-            "output": "output.docx",
-            "ast": "private.json",
-        }
-    })
+    checkpoint = tmp_path / "run.json"
+    checkpoint.write_text(
+        json.dumps({
+            "checkpoint_schema_version": "2.0",
+            "configuration": {
+                "input": "source.docx",
+                "output": "output.docx",
+                "ast": "private.json",
+            },
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(sys, "argv", ["wx-doc-format", "--resume", str(checkpoint)])
     with pytest.raises(SystemExit) as exc_info:
         main.main()
     assert exc_info.value.code == 2

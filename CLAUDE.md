@@ -29,7 +29,7 @@ LLM 能力：`toc_region_review` / `list_detect` / `caption_gen` / `document_rev
 | `scripts/wxdf/publication.py` | 交付决定 |
 | `scripts/wxdf/enhancement.py` | LLM 增强执行边界 |
 
-legacy 流水线（`scripts/docx_render.py`、`scripts/template_finalizer.py`、`scripts/model_normalization.py`）只作开发诊断，默认禁用。
+旧的诊断流水线已删除，`--pipeline legacy` 与 `--list-policy legacy` 在任何构建下都以 `LEGACY_MODE_UNAVAILABLE` 拒绝。
 
 ## 注意
 

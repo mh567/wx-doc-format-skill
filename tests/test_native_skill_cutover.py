@@ -859,27 +859,26 @@ def test_t06_default_cli_invocation_uses_native_pipeline_and_policy(tmp_path: Pa
     assert report.get("profile") in NATIVE_PROFILE_LITERALS, report.get("profile")
     assert report.get("migration_adapter") is None, report.get("migration_adapter")
 
-    explicit_output = tmp_path / "explicit-legacy.docx"
-    explicit_report = tmp_path / "explicit-legacy-report.json"
-    explicit = subprocess.run(
+    retired_output = tmp_path / "explicit-legacy.docx"
+    retired_report = tmp_path / "explicit-legacy-report.json"
+    retired = subprocess.run(
         [
             str(_venv_python()),
             str(SCRIPTS / "main.py"),
             "--input", str(BENCHMARK_MARKDOWN),
-            "--output", str(explicit_output),
+            "--output", str(retired_output),
             "--template", str(TEMPLATE),
             "--pipeline", "legacy",
             "--list-policy", "legacy",
-            "--report", str(explicit_report),
+            "--report", str(retired_report),
         ],
         cwd=ROOT,
         env=_cli_environment(),
         capture_output=True,
         text=True,
     )
-    assert explicit.returncode == 0, explicit.stderr.strip()[-400:]
-    assert explicit_output.is_file()
-    assert json.loads(explicit_report.read_text(encoding="utf-8")).get("pipeline") != "modular"
+    assert retired.returncode == 2, retired.stderr.strip()[-400:]
+    assert not retired_output.is_file()
 
 
 # ---------------------------------------------------------------------------

@@ -17,14 +17,6 @@ from review_loop import (
     validate_review_patch,
 )
 from llm_enhancer import enhance_document_model, normalize_mode, should_enhance
-from llm_file_protocol import (
-    ProtocolError,
-    build_llm_request,
-    collect_phase_requests,
-    replay_phase_responses,
-    verify_response,
-    verify_source_snapshot,
-)
 
 
 def _model():
@@ -242,77 +234,6 @@ def test_legacy_abc_modes_keep_their_original_ab_scope():
     assert should_enhance({}, "C", "abc") is False
     assert should_enhance({}, "C", "force-abc") is False
     assert should_enhance({}, "C", normalize_mode("all")) is True
-
-
-def test_file_protocol_replays_document_review_with_integrity_hash():
-    model = _model()
-    report = _report()
-    collected = collect_phase_requests(model, report, phase="document_review")
-    assert collected[0]["phase"] == "C"
-    assert collected[0]["capability"] == "document_review"
-    request = build_llm_request(run_id="run-1", **collected[0])
-    patch = {
-        "schema_version": "1.0",
-        "phase": "C",
-        "decisions": [{
-            "block_id": "t1",
-            "operation": "set_table_type",
-            "from": {"table_type": "unknown"},
-            "to": {"table_type": "data"},
-            "confidence": 0.91,
-            "reason": "relational_table",
-        }],
-    }
-    response = {
-        "protocol_version": request["protocol_version"],
-        "request_id": request["request_id"],
-        "input_hash": request["input_hash"],
-        "raw_response": __import__("json").dumps(patch),
-    }
-    replay_phase_responses(
-        model, report, phase="document_review",
-        requests=[request], responses=[response],
-    )
-    assert model["document"]["blocks"][2]["table_type"] == "data"
-
-
-def test_file_protocol_requires_hash_and_recomputes_request_integrity():
-    request = build_llm_request("run-1", "A-0000", "A", "list_detect", "prompt")
-    response = {
-        "protocol_version": request["protocol_version"],
-        "request_id": request["request_id"],
-        "raw_response": "{}",
-    }
-    try:
-        verify_response(request, response)
-    except ProtocolError as exc:
-        assert "Missing input_hash" in str(exc)
-    else:
-        raise AssertionError("response without input_hash was accepted")
-
-    response["input_hash"] = request["input_hash"]
-    request["prompt"] = "tampered"
-    try:
-        verify_response(request, response)
-    except ProtocolError as exc:
-        assert "request input_hash mismatch" in str(exc)
-    else:
-        raise AssertionError("tampered request was accepted")
-
-
-def test_resume_source_snapshot_must_match(tmp_path):
-    source = tmp_path / "source.docx"
-    source.write_bytes(b"first")
-    from llm_file_protocol import compute_source_sha256
-    expected = compute_source_sha256(source)
-    verify_source_snapshot(source, expected)
-    source.write_bytes(b"second")
-    try:
-        verify_source_snapshot(source, expected)
-    except ProtocolError as exc:
-        assert "source file changed" in str(exc)
-    else:
-        raise AssertionError("changed source was accepted")
 
 
 def test_unknown_pattern_packet_includes_repairable_remaining_findings():

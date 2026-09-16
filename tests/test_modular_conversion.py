@@ -83,7 +83,7 @@ def test_cli_rejects_transitional_modular_legacy_adapter_combination(tmp_path: P
     completed = subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
 
     assert completed.returncode == 2
-    assert "modular pipeline requires --list-policy wx-default-v2" in completed.stderr
+    assert "LEGACY_MODE_UNAVAILABLE" in completed.stderr
     assert not output.exists()
     assert not report.exists()
 
