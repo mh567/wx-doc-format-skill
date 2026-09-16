@@ -173,10 +173,6 @@ def test_cli_modular_selection_uses_native_v2_defaults(tmp_path: Path) -> None:
         str(output),
         "--template",
         str(ROOT / "assets" / "wx_template.docx"),
-        "--pipeline",
-        "modular",
-        "--list-policy",
-        "wx-default-v2",
         "--report",
         str(report),
     ]
@@ -217,9 +213,6 @@ def test_cli_native_v2_explicit_enhancement_off_ignores_retired_env_toggle(tmp_p
             "--input", str(ROOT / "input" / "test_baseline.md"),
             "--output", str(output),
             "--template", str(ROOT / "assets" / "wx_template.docx"),
-            "--pipeline", "modular",
-            "--modular-profile", "native-v2",
-            "--list-policy", "wx-default-v2",
             "--llm-enhance", "off",
             "--llm-command", llm_command,
             "--report", str(report),
@@ -254,7 +247,7 @@ def test_native_v2_enabled_enhancement_requires_programmatic_adapter_before_publ
     assert result.diagnostics == [{
         "code": "NATIVE_ENHANCEMENT_ADAPTER_MISSING",
         "severity": "error",
-        "message": "native-v2 enhancement requires an explicitly injected adapter",
+        "message": "enhancement requires an explicitly injected adapter",
     }]
     assert result.report["enhancement"]["status"] == "missing_adapter"
     assert not output.exists()

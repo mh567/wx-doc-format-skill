@@ -2220,7 +2220,7 @@ def parse(source: Path | str, context: dict[str, Any] | None = None) -> dict[str
     text = context.get("text")
     # A caller that already knows the container can pass a ``source_type`` hint.
     # The saved-output readback re-parses a staging artifact whose name
-    # (``.<name>.native-v2.staging``) carries no usable suffix, so without the
+    # (``.<name>.staging``) carries no usable suffix, so without the
     # hint the dispatch would take the Markdown branch and decode the DOCX zip as
     # UTF-8.
     hinted = context.get("source_type")

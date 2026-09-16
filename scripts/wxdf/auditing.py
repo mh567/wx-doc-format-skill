@@ -694,7 +694,7 @@ def _rebuild_readback_lists(
     can act on.
 
     The saved artifact is always a DOCX written to a staging path whose name
-    (``.<name>.native-v2.staging``) has no ``.docx`` suffix, so the DOCX
+    (``.<name>.staging``) has no ``.docx`` suffix, so the DOCX
     container is passed to ``parse`` as an explicit ``source_type`` hint.  A
     suffix-based dispatch would take the Markdown branch and read the zip as
     UTF-8, which fails and silently skips every semantic invariant.

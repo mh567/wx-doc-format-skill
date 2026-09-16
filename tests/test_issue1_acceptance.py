@@ -42,9 +42,6 @@ def _run_cli(
     tmp_path: Path,
     name: str,
     *,
-    pipeline: str | None = "modular",
-    modular_profile: str | None = "native-v2",
-    list_policy: str | None = "wx-default-v2",
     write_ast: bool = True,
 ) -> tuple[subprocess.CompletedProcess[str], Path, Path, Path, Path]:
     output = tmp_path / f"{name}.output.docx"
@@ -58,12 +55,6 @@ def _run_cli(
         "--output", str(output),
         "--template", str(TEMPLATE),
     ]
-    if pipeline is not None:
-        command.extend(["--pipeline", pipeline])
-    if modular_profile is not None:
-        command.extend(["--modular-profile", modular_profile])
-    if list_policy is not None:
-        command.extend(["--list-policy", list_policy])
     command.extend(["--llm-enhance", "off", "--report", str(report)])
     if write_ast:
         command.extend(["--source-ast", str(source_ast), "--ast", str(normalized_ast)])

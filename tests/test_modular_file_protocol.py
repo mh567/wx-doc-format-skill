@@ -132,9 +132,6 @@ def _generate(tmp_path: Path, *, mode: str = "force-a") -> tuple[Path, Path, Pat
         "--input", SOURCE,
         "--output", output,
         "--template", TEMPLATE,
-        "--pipeline", "modular",
-        "--modular-profile", "native-v2",
-        "--list-policy", "wx-default-v2",
         "--llm-enhance", mode,
         "--source-ast", source_ast,
         "--report", report,
@@ -359,9 +356,6 @@ def test_native_resume_rejects_identity_drift_before_recording(tmp_path: Path, d
         "--input", source,
         "--output", output,
         "--template", template,
-        "--pipeline", "modular",
-        "--modular-profile", "native-v2",
-        "--list-policy", "wx-default-v2",
         "--llm-enhance", "force-a",
         "--generate-requests", request_dir,
     )
@@ -745,9 +739,6 @@ def test_native_cli_preserves_kernel_published_terminal_report(
         cli_main.main([
             "--input", str(source),
             "--output", str(output),
-            "--pipeline", "modular",
-            "--modular-profile", "native-v2",
-            "--list-policy", "wx-default-v2",
             "--report", str(report),
         ])
 
@@ -791,9 +782,6 @@ def test_native_cli_supplies_release_report_transform_to_kernel(
         cli_main.main([
             "--input", str(source),
             "--output", str(output),
-            "--pipeline", "modular",
-            "--modular-profile", "native-v2",
-            "--list-policy", "wx-default-v2",
             "--report", str(report),
         ])
 
@@ -1384,7 +1372,7 @@ def test_native_resume_restores_saved_ast_ledger_overlays_and_transactions(tmp_p
 
 @pytest.mark.parametrize(
     "configuration_field",
-    ["input", "output", "template", "modular_profile", "list_policy", "llm_enhance"],
+    ["input", "output", "template", "llm_enhance"],
 )
 def test_native_resume_rejects_explicit_cli_configuration_drift_before_recording(
     tmp_path: Path,
@@ -1403,8 +1391,6 @@ def test_native_resume_rejects_explicit_cli_configuration_drift_before_recording
         "input": ("--input", alternate_input),
         "output": ("--output", alternate_output),
         "template": ("--template", alternate_template),
-        "modular_profile": ("--modular-profile", "legacy-full-v1"),
-        "list_policy": ("--list-policy", "legacy"),
         "llm_enhance": ("--llm-enhance", "force-b"),
     }[configuration_field]
 
@@ -1452,9 +1438,6 @@ def test_native_resume_rejects_external_resource_drift_before_recording(tmp_path
         "--input", source,
         "--output", output,
         "--template", TEMPLATE,
-        "--pipeline", "modular",
-        "--modular-profile", "native-v2",
-        "--list-policy", "wx-default-v2",
         "--llm-enhance", "force-a",
         "--generate-requests", request_dir,
     )
@@ -1492,9 +1475,6 @@ def test_native_resume_rejects_resource_disappearance_between_parse_and_binding(
         "--input", source,
         "--output", output,
         "--template", TEMPLATE,
-        "--pipeline", "modular",
-        "--modular-profile", "native-v2",
-        "--list-policy", "wx-default-v2",
         "--llm-enhance", "force-a",
         "--generate-requests", request_dir,
     )
@@ -1539,9 +1519,6 @@ def test_native_resume_renders_verified_resource_bytes_after_source_path_changes
         "--input", source,
         "--output", output,
         "--template", TEMPLATE,
-        "--pipeline", "modular",
-        "--modular-profile", "native-v2",
-        "--list-policy", "wx-default-v2",
         "--llm-enhance", "force-a",
         "--generate-requests", request_dir,
     )
@@ -1577,9 +1554,6 @@ def test_native_resume_renders_verified_template_bytes_after_template_path_chang
         "--input", source,
         "--output", output,
         "--template", template,
-        "--pipeline", "modular",
-        "--modular-profile", "native-v2",
-        "--list-policy", "wx-default-v2",
         "--llm-enhance", "force-a",
         "--generate-requests", request_dir,
     )
@@ -1644,9 +1618,6 @@ def test_multi_stage_resume_matches_single_process_native_execution(tmp_path: Pa
         "--input", SOURCE,
         "--output", online_output,
         "--template", TEMPLATE,
-        "--pipeline", "modular",
-        "--modular-profile", "native-v2",
-        "--list-policy", "wx-default-v2",
         "--llm-enhance", "force-ab",
         "--llm-command", command,
         "--source-ast", online_source_ast,

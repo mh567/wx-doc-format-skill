@@ -486,140 +486,13 @@ def test_t09_ordinary_document_stays_completed_with_empty_risk_warnings(tmp_path
 
 
 # ---------------------------------------------------------------------------
-# Work item 2: the list_detect capability is bounded to ambiguous fragments
-# ---------------------------------------------------------------------------
-
-def _legacy_model() -> dict:
-    return {
-        "schema_version": "1.0",
-        "document": {
-            "blocks": [
-                {"id": "clean1", "block_type": "body", "text": "普通正文第一段。"},
-                {
-                    "id": "amb1",
-                    "block_type": "body",
-                    "text": "◆ 指纹认证",
-                    "source": {
-                        "layout": {"left_twips": 0},
-                        "unordered_candidate": {"marker": "◆", "content_text": "指纹认证"},
-                    },
-                },
-                {"id": "clean2", "block_type": "body", "text": "普通正文第二段。"},
-            ],
-        },
-    }
-
-
-def test_t09_list_detect_targets_only_fragments_with_multiple_candidates() -> None:
-    from llm_enhancer import _collect_list_detect_batches
-
-    model = _legacy_model()
-    report = {"parse_report": {"ambiguous_unordered_paragraphs": 1}}
-
-    batches = _collect_list_detect_batches(model, report)
-    assert batches, batches
-    shown = batches[0]["blocks_override"]
-    assert shown is not None
-    assert [block["id"] for block in shown] == ["amb1"], shown
-
-
-def test_t09_list_detect_is_a_noop_when_no_fragment_has_multiple_candidates() -> None:
-    from llm_enhancer import _collect_list_detect_batches
-
-    model = {"document": {"blocks": [{"id": "b1", "block_type": "body", "text": "普通正文。"}]}}
-    assert _collect_list_detect_batches(model, {"parse_report": {}}) == []
-
-
-def test_t09_list_detect_validator_rejects_a_clean_block_rewrite() -> None:
-    from llm_enhancer import _validate_list_detect_patch
-
-    model = _legacy_model()
-    report = {"parse_report": {"ambiguous_unordered_paragraphs": 1}}
-    patch = {
-        "schema_version": "1.0",
-        "phase": "A",
-        "decisions": [
-            {"block_id": "amb1", "operation": "retype",
-             "to": {"block_type": "list_item", "level": 0, "list_type": "dash"}},
-            {"block_id": "clean1", "operation": "retype",
-             "to": {"block_type": "list_item", "level": 0, "list_type": "dash"}},
-        ],
-    }
-    errors = _validate_list_detect_patch(patch, model, report)
-    assert any(error.get("block_id") == "clean1" for error in errors), errors
-
-
-def test_t09_list_detect_validator_accepts_a_bound_ambiguous_decisions_patch() -> None:
-    from llm_enhancer import _validate_list_detect_patch
-
-    model = _legacy_model()
-    report = {"parse_report": {"ambiguous_unordered_paragraphs": 1}}
-    patch = {
-        "schema_version": "1.0",
-        "phase": "A",
-        "decisions": [
-            {"block_id": "amb1", "operation": "retype",
-             "to": {"block_type": "list_item", "level": 0, "list_type": "dash"}},
-        ],
-    }
-    assert _validate_list_detect_patch(patch, model, report) == []
-
-
-def test_t09_list_detect_makes_no_llm_call_on_a_clean_model() -> None:
-    """The gate must stop the model, not merely return an empty collector list.
-
-    Before the fix ``_make_phase_batches`` returned ``[[]]`` for the single-batch
-    ``list_detect`` capability, which is truthy, so the loop ran once and the
-    whole document was sent to the model.  This drives the real
-    ``enhance_document_model`` entry point and counts the calls.
-    """
-
-    from llm_enhancer import enhance_document_model
-
-    model = {"document": {"blocks": [{"id": "b1", "block_type": "body", "text": "普通正文。"}]}}
-    calls: list[str] = []
-
-    enhance_document_model(
-        model,
-        {},
-        phase="list_detect",
-        llm_call=lambda prompt: calls.append(prompt) or "{}",
-    )
-
-    assert calls == []
-
-
-def test_t09_list_detect_makes_exactly_one_call_scoped_to_the_ambiguous_fragments() -> None:
-    from llm_enhancer import _collect_list_detect_batches, enhance_document_model
-
-    model = _legacy_model()
-    batches = _collect_list_detect_batches(model, {"parse_report": {}})
-    assert len(batches) == 1, batches
-    assert [block["id"] for block in batches[0]["blocks_override"]] == ["amb1"]
-
-    calls: list[str] = []
-    enhance_document_model(
-        model,
-        {},
-        phase="list_detect",
-        llm_call=lambda prompt: calls.append(prompt) or "{}",
-    )
-
-    assert len(calls) == 1, calls
-    # The prompt lists only the ambiguous fragment, never the clean blocks.
-    assert "amb1" in calls[0]
-    assert "clean1" not in calls[0]
-    assert "clean2" not in calls[0]
-
-
-# ---------------------------------------------------------------------------
 # T10 F1: the semantic rebuild must run on the real staging artifact
 # ---------------------------------------------------------------------------
 
 def test_t09_readback_semantic_rebuild_runs_in_production(tmp_path: Path) -> None:
     """A real conversion must actually run the semantic readback rebuild.
 
-    The kernel stages the output as ``.<name>.native-v2.staging``.  A
+    The kernel stages the output as ``.<name>.staging``.  A
     suffix-dispatched re-parse read that DOCX as UTF-8, failed, and reported every
     semantic invariant as ``None`` (skipped) behind a passing readback, so the
     invariants were unenforced in every conversion.  The production report now
@@ -645,7 +518,7 @@ def test_t09_readback_rebuild_still_flags_a_tampered_staging_document(
     ``deep_items_have_parent`` is not hardwired true: pointing a child at a
     valid multi-level instance at ``w:ilvl 2`` while no level-1 item exists makes
     the rebuild report a deep item without a parent.  The check runs against the
-    real ``.<name>.native-v2.staging`` artifact, so it fails on the tree where the
+    real ``.<name>.staging`` artifact, so it fails on the tree where the
     rebuild never ran.
     """
     from wxdf.auditing import audit_list_readback
@@ -655,7 +528,7 @@ def test_t09_readback_rebuild_still_flags_a_tampered_staging_document(
         "# 文档\n\n## 两级列表\n\n1. 一级一\n   1. 二级一\n   2. 二级二\n2. 一级二\n",
     )
     assert result.status == "completed", result.diagnostics
-    staging = output.with_name(f".{output.name}.native-v2.staging")
+    staging = output.with_name(f".{output.name}.staging")
     os.replace(output, staging)
 
     def push_a_child_to_depth_two(root):

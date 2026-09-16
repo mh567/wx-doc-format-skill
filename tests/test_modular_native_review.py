@@ -500,7 +500,6 @@ def test_all_file_mode_waits_for_relation_then_review_and_publishes_accepted_rev
         "template": str(TEMPLATE),
         "llm_enhance": "all",
         "pipeline": "modular",
-        "modular_profile": "native-v2",
         "list_policy": "wx-default-v2",
     }
     real_check = auditing.check_model
@@ -655,7 +654,6 @@ def test_rejected_file_review_persists_terminal_rollback_and_replays_idempotentl
         "template": str(TEMPLATE),
         "llm_enhance": "all",
         "pipeline": "modular",
-        "modular_profile": "native-v2",
         "list_policy": "wx-default-v2",
     }
     real_check = auditing.check_model

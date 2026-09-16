@@ -310,7 +310,7 @@ def build_native_v2_registry(
     *,
     semantic_modules: Iterable[RegisteredModule] | None = None,
 ) -> ModuleRegistry:
-    """Return the registered contract for the direct native-v2 conversion chain.
+    """Return the registered contract for the direct conversion chain.
 
     The factory has a single shape: the semantic Modules that own parsing,
     regions, structure, protected content, lists, tables, captions and

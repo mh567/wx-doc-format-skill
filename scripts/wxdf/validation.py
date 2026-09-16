@@ -819,11 +819,7 @@ def validate_checkpoint(checkpoint: Mapping[str, Any]) -> None:
     if applied_digests != dict(digests):
         _fail("transaction_state_mismatch", "applied_transactions", "transaction IDs and content digests must match exactly", contract)
     configuration = checkpoint.get("configuration")
-    native_file_checkpoint = (
-        checkpoint.get("profile") == "wx_full_rules-native-v2"
-        or isinstance(configuration, Mapping)
-        and configuration.get("modular_profile") == "native-v2"
-    )
+    native_file_checkpoint = isinstance(configuration, Mapping) and configuration.get("pipeline") == "modular"
     if native_file_checkpoint and status in {"waiting_external", "completed", "completed_with_warnings"}:
         bindings = _mapping(
             checkpoint.get("response_transaction_bindings"),

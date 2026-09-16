@@ -31,6 +31,8 @@ RETIRED_RUNTIME_IMPORTS = (
     "template_finalizer",
     "docx_render",
     "word_model_renderer",
+    "llm_enhancer",
+    "review_loop",
     "wxdf.legacy_pipeline",
     "wxdf.legacy_capability",
 )
@@ -40,8 +42,9 @@ RETIRED_RUNTIME_IMPORTS = (
     ("option", "retired_value"),
     [
         ("--pipeline", "legacy"),
-        ("--modular-profile", "legacy-full-v1"),
-        ("--list-policy", "legacy"),
+        ("--pipeline", "modular"),
+        ("--modular-profile", "native-v2"),
+        ("--list-policy", "wx-default-v2"),
     ],
 )
 def test_release_cli_rejects_retired_execution_choices_at_argument_boundary(
@@ -59,8 +62,7 @@ def test_release_cli_rejects_retired_execution_choices_at_argument_boundary(
     )
 
     assert completed.returncode == 2
-    assert "LEGACY_MODE_UNAVAILABLE" in completed.stderr
-    assert retired_value in completed.stderr
+    assert option in completed.stderr
 
 
 def test_development_cli_rejects_the_retired_legacy_tuple(tmp_path: Path) -> None:

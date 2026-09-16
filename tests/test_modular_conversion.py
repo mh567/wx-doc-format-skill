@@ -65,7 +65,7 @@ def test_modular_preflight_rejects_online_enhancement_without_adapter(tmp_path: 
     assert not output.exists()
 
 
-def test_cli_rejects_transitional_modular_legacy_adapter_combination(tmp_path: Path) -> None:
+def test_cli_rejects_the_retired_pipeline_flags(tmp_path: Path) -> None:
     output = tmp_path / "candidate.docx"
     report = tmp_path / "report.json"
     command = [
@@ -74,8 +74,7 @@ def test_cli_rejects_transitional_modular_legacy_adapter_combination(tmp_path: P
         "--input", str(ROOT / "input" / "test_baseline.md"),
         "--output", str(output),
         "--template", str(ROOT / "assets" / "wx_template.docx"),
-        "--pipeline", "modular",
-        "--list-policy", "legacy",
+        "--pipeline", "legacy",
         "--llm-enhance", "off",
         "--report", str(report),
     ]
@@ -83,7 +82,7 @@ def test_cli_rejects_transitional_modular_legacy_adapter_combination(tmp_path: P
     completed = subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
 
     assert completed.returncode == 2
-    assert "LEGACY_MODE_UNAVAILABLE" in completed.stderr
+    assert "--pipeline" in completed.stderr
     assert not output.exists()
     assert not report.exists()
 
@@ -98,8 +97,6 @@ def test_modular_cli_exports_ast2_with_title_headers_and_caption_relations(tmp_p
         "--input", str(ROOT / "input" / "benchmark_report.md"),
         "--output", str(output),
         "--template", str(ROOT / "assets" / "wx_template.docx"),
-        "--pipeline", "modular",
-        "--list-policy", "wx-default-v2",
         "--llm-enhance", "off",
         "--source-ast", str(source_ast_path),
         "--ast", str(normalized_ast_path),
@@ -157,8 +154,6 @@ def test_modular_cli_generates_native_file_protocol_requests(tmp_path: Path) -> 
         str(ROOT / "scripts" / "main.py"),
         "--input", str(ROOT / "input" / "benchmark_report.md"),
         "--template", str(ROOT / "assets" / "wx_template.docx"),
-        "--pipeline", "modular",
-        "--list-policy", "wx-default-v2",
         "--llm-enhance", "force-a",
         "--generate-requests", str(request_dir),
     ]
@@ -199,8 +194,6 @@ def test_modular_cli_preserves_real_template_title_toc_and_table_captions(tmp_pa
         "--input", str(ROOT / "input" / "benchmark_report.md"),
         "--output", str(output),
         "--template", str(ROOT / "assets" / "wx_template.docx"),
-        "--pipeline", "modular",
-        "--list-policy", "wx-default-v2",
         "--llm-enhance", "off",
         "--report", str(report),
     ]

@@ -1,4 +1,4 @@
-"""Conversion lifecycle data types for the native-v2 pipeline."""
+"""Conversion lifecycle data types."""
 
 from __future__ import annotations
 

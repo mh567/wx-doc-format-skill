@@ -1,4 +1,4 @@
-"""Conversion lifecycle primitives for the native-v2 pipeline."""
+"""Conversion lifecycle primitives."""
 
 from __future__ import annotations
 
@@ -106,7 +106,7 @@ class ConversionKernel:
             diagnostic = {
                 "code": "NATIVE_ENHANCEMENT_ADAPTER_MISSING",
                 "severity": "error",
-                "message": "native-v2 enhancement requires an explicitly injected adapter",
+                "message": "enhancement requires an explicitly injected adapter",
             }
             report.update({
                 "status": "failed",
@@ -125,9 +125,9 @@ class ConversionKernel:
                 report=report,
                 diagnostics=[diagnostic],
             )
-        staging_path = request.output_path.with_name(f".{request.output_path.name}.native-v2.staging")
+        staging_path = request.output_path.with_name(f".{request.output_path.name}.staging")
         review_candidate_path = request.output_path.with_name(
-            f".{request.output_path.name}.native-v2.review-candidate.staging"
+            f".{request.output_path.name}.review-candidate.staging"
         )
         store = SourceStore()
         context: Any = None

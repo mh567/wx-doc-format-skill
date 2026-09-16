@@ -126,8 +126,8 @@ def _validate_public_report(path: Path, *, status: str = "completed") -> dict:
     if forbidden:
         raise RuntimeError(f"Release report exposes sensitive fields: {sorted(forbidden)}")
     summary = report.get("public_summary") or {}
-    if summary.get("status") != status or summary.get("pipeline") != "modular" or summary.get("profile") != "wx-default-v2" or summary.get("list_policy") != "wx-default-v2":
-        raise RuntimeError(f"Release report has unexpected native identity: {summary}")
+    if summary.get("status") != status:
+        raise RuntimeError(f"Release report has unexpected status: {summary}")
     if status == "completed":
         if summary.get("unexpected_styles_count") != 0 or summary.get("manual_review_required") is not False:
             raise RuntimeError(f"Release report did not pass public audits: {summary}")
@@ -322,8 +322,8 @@ def run_runtime_contracts(command: list[str], template: Path, evidence_dir: Path
         if forbidden.exists():
             raise RuntimeError("Release runtime exported a private AST")
     retired = _execute([*command, "--pipeline", "legacy", "--version"], evidence_dir, "guard-legacy", expected=2)
-    if "LEGACY_MODE_UNAVAILABLE" not in retired.stderr:
-        raise RuntimeError("Release runtime did not reject legacy mode with its stable code")
+    if "--pipeline" not in retired.stderr:
+        raise RuntimeError("Release runtime did not reject the retired pipeline flag")
     legacy_checkpoint = evidence_dir / "legacy-run.json"
     _write_json(legacy_checkpoint, {"protocol_version": "1.0", "args": {}})
     legacy = _execute([*command, "--resume", str(legacy_checkpoint)], evidence_dir, "guard-legacy-checkpoint", expected=2)

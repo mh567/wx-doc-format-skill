@@ -268,13 +268,13 @@ def test_default_cli_preserves_layout_paragraph_format_and_normalizes_data_table
     assert report["saved_output_audit"]["passed"] is True
 
 
-def test_help_names_native_defaults() -> None:
+def test_help_names_the_supported_surfaces() -> None:
     completed = _run("--help")
 
     assert completed.returncode == 0
-    assert "default: modular" in completed.stdout
-    assert "default: native-v2" in completed.stdout
-    assert "default: wx-default-v2" in completed.stdout
+    assert "--llm-enhance" in completed.stdout
+    for retired in ("--pipeline", "--modular-profile", "--list-policy", "legacy", "native-v2", "wx-default-v2"):
+        assert retired not in completed.stdout
 
 
 def test_native_markdown_report_uses_native_identity_and_audit_results(tmp_path: Path) -> None:
@@ -325,17 +325,17 @@ def test_default_file_mode_waiting_report_records_list_policy(tmp_path: Path) ->
 @pytest.mark.parametrize(
     "arguments",
     [
-        ("--pipeline", "legacy", "--modular-profile", "native-v2", "--list-policy", "legacy"),
-        ("--pipeline", "legacy", "--modular-profile", "legacy-full-v1", "--list-policy", "wx-default-v2"),
-        ("--pipeline", "modular", "--modular-profile", "legacy-full-v1", "--list-policy", "wx-default-v2"),
-        ("--pipeline", "modular", "--modular-profile", "native-v2", "--list-policy", "legacy"),
+        ("--pipeline", "legacy"),
+        ("--pipeline", "modular"),
+        ("--modular-profile", "native-v2"),
+        ("--list-policy", "wx-default-v2"),
     ],
 )
-def test_retired_pipeline_values_are_argparse_errors(arguments: tuple[str, ...]) -> None:
+def test_retired_execution_flags_are_rejected_at_the_argument_boundary(arguments: tuple[str, ...]) -> None:
     completed = _run(*arguments, "--input", SOURCE, "--output", "ignored.docx")
 
     assert completed.returncode == 2
-    assert "LEGACY_MODE_UNAVAILABLE" in completed.stderr
+    assert arguments[0] in completed.stderr
 
 
 @pytest.mark.parametrize(
@@ -368,7 +368,6 @@ def test_native_resume_rejects_checkpoint_identity_drift_before_response_recordi
     ("field", "value", "error_code"),
     [
         ("pipeline", "legacy", "checkpoint_pipeline_mismatch"),
-        ("modular_profile", "legacy-full-v1", "checkpoint_profile_mismatch"),
         ("list_policy", "legacy", "checkpoint_list_policy_mismatch"),
     ],
 )
@@ -407,7 +406,6 @@ def test_native_resume_migrates_transitional_profile_literal_before_use(tmp_path
     assert migrated["checkpoint_schema_version"] == "2.0"
     assert migrated["profile"] == "wx-default-v2"
     assert migrated["configuration"]["pipeline"] == "modular"
-    assert migrated["configuration"]["modular_profile"] == "native-v2"
     assert migrated["list_policy"] == "wx-default-v2"
 
 
@@ -533,5 +531,4 @@ def test_default_file_mode_writes_canonical_native_checkpoint(tmp_path: Path) ->
     assert checkpoint["checkpoint_schema_version"] == "2.0"
     assert checkpoint["profile"] == "wx-default-v2"
     assert checkpoint["configuration"]["pipeline"] == "modular"
-    assert checkpoint["configuration"]["modular_profile"] == "native-v2"
     assert checkpoint["list_policy"] == "wx-default-v2"

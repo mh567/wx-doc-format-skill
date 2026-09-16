@@ -71,6 +71,8 @@ RETIRED_RUNTIME_IMPORTS = frozenset({
     "template_finalizer",
     "docx_render",
     "word_model_renderer",
+    "llm_enhancer",
+    "review_loop",
 })
 
 PUBLIC_REPORT_SUMMARY_CONTRACT = {
@@ -78,9 +80,6 @@ PUBLIC_REPORT_SUMMARY_CONTRACT = {
     "field": "public_summary",
     "required_fields": [
         "status",
-        "pipeline",
-        "profile",
-        "list_policy",
         "audits",
         "unexpected_styles_count",
         "manual_review_required",

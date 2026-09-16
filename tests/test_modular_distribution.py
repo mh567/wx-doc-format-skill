@@ -344,7 +344,8 @@ def test_programmatic_request_defaults_to_native_identity() -> None:
     assert request_defaults.pipeline == "modular"
     assert request_defaults.list_policy == "wx-default-v2"
     cli_source = (ROOT / "scripts" / "main.py").read_text(encoding="utf-8")
-    assert 'default="modular"' in cli_source
+    for retired_flag in ("--pipeline", "--modular-profile", "--list-policy"):
+        assert retired_flag not in cli_source
 
 
 def test_release_module_set_excludes_development_and_retired_bridges() -> None:

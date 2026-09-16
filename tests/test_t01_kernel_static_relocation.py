@@ -218,7 +218,6 @@ def test_checkpoint_store_migrates_the_legacy_native_profile(
     checkpoint = {
         "configuration": {
             "pipeline": "modular",
-            "modular_profile": "native-v2",
             "list_policy": "wx-default-v2",
         },
         "list_policy": "wx-default-v2",
@@ -248,7 +247,6 @@ def test_checkpoint_store_rejects_a_non_modular_pipeline(
     checkpoint = {
         "configuration": {
             "pipeline": "legacy",
-            "modular_profile": "native-v2",
             "list_policy": "wx-default-v2",
         },
         "list_policy": "wx-default-v2",

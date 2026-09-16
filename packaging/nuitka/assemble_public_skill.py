@@ -36,9 +36,6 @@ PUBLIC_REPORT_SUMMARY_CONTRACT = {
     "field": "public_summary",
     "required_fields": [
         "status",
-        "pipeline",
-        "profile",
-        "list_policy",
         "audits",
         "unexpected_styles_count",
         "manual_review_required",

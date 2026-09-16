@@ -37,7 +37,7 @@ from .request_append import (
 )
 
 
-# The native conversion profile stored by a valid native-v2 checkpoint.
+# The conversion profile recorded by a valid checkpoint.
 _NATIVE_PROFILE = "wx-default-v2"
 
 
@@ -303,11 +303,6 @@ def lock_native_checkpoint_identity(checkpoint_path: Path) -> dict[str, Any]:
         raise CheckpointError(
             "native checkpoint pipeline is not modular",
             code="checkpoint_pipeline_mismatch",
-        )
-    if configuration.get("modular_profile") != "native-v2":
-        raise CheckpointError(
-            "native checkpoint modular profile is not native-v2",
-            code="checkpoint_profile_mismatch",
         )
     if configuration.get("list_policy") != _NATIVE_PROFILE:
         raise CheckpointError(

@@ -286,9 +286,6 @@ def test_release_report_adds_a_stable_path_free_public_summary(
     assert list(summary) == [
         "schema_version",
         "status",
-        "pipeline",
-        "profile",
-        "list_policy",
         "audits",
         "unexpected_styles_count",
         "manual_review_required",
@@ -296,9 +293,6 @@ def test_release_report_adds_a_stable_path_free_public_summary(
     ]
     assert summary["schema_version"] == "1.0"
     assert summary["status"] == status
-    assert summary["pipeline"] == "modular"
-    assert summary["profile"] == "wx-default-v2"
-    assert summary["list_policy"] == "wx-default-v2"
     assert summary["unexpected_styles_count"] == unexpected_styles_count
     assert summary["manual_review_required"] is manual_review
     assert summary["diagnostic_codes"] == expected_diagnostic_codes
@@ -362,9 +356,6 @@ def test_public_manifests_declare_the_summary_contract(tmp_path: Path) -> None:
         "field": "public_summary",
         "required_fields": [
             "status",
-            "pipeline",
-            "profile",
-            "list_policy",
             "audits",
             "unexpected_styles_count",
             "manual_review_required",
