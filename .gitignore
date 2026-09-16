@@ -89,3 +89,6 @@ tests/*
 requirements.txt
 !requirements.txt
 .commandcode/
+# Local validation output and tool markers stay on disk but never enter the tree.
+_build/
+paseo.json
