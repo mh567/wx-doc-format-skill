@@ -1611,6 +1611,44 @@ def _parse_docx(source: Path | str, *, store: SourceStore) -> dict[str, Any]:
             add_table("root", Table(child, document), ["body", child_index, "w:tbl"])
             position += 1
 
+    # Numbering that lives outside the converted block set is reported instead
+    # of being dropped silently.  The adapter reads the document body, so a
+    # numbered list inside a header, footer, footnote, endnote, text box or
+    # content control would otherwise disappear without a trace.  The record is
+    # informational: it names the skipped content and does not change the run
+    # status.
+    def _has_numbering(element: Any) -> bool:
+        return element is not None and element.find(".//" + qn("w:numPr")) is not None
+
+    reported_parts: set[str] = set()
+    for part in document.part.package.parts:
+        part_name = str(part.partname)
+        # Only the parts that carry body-like content.  The style, numbering and
+        # settings parts hold w:numPr as definitions rather than as content.
+        if not re.fullmatch(r"/word/(header|footer|footnotes|endnotes|comments)\d*\.xml", part_name):
+            continue
+        try:
+            part_element = part.element
+        except Exception:
+            continue
+        if _has_numbering(part_element) and part_name not in reported_parts:
+            reported_parts.add(part_name)
+            facts["diagnostics"].append({
+                "code": "unread_part_numbering_skipped",
+                "severity": "info",
+                "message": f"numbered content in {part_name} is outside the converted document body and was skipped",
+            })
+    for child in body.iterchildren():
+        if child.tag in {qn("w:p"), qn("w:tbl")}:
+            continue
+        if child.find(".//" + qn("w:numPr")) is not None or child.find(".//" + qn("w:txbxContent")) is not None:
+            kind = child.tag.rsplit("}", 1)[-1]
+            facts["diagnostics"].append({
+                "code": "unread_body_content_skipped",
+                "severity": "info",
+                "message": f"body content of kind {kind} is outside the converted block set and was skipped",
+            })
+
     facts["extensions"]["docx_numbering_report"] = {"source_lists": report.get("source_lists", {})}
     validate_source_facts(facts)
     return facts

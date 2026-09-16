@@ -81,6 +81,7 @@ tests/*
 !tests/test_t09_readback_audit.py
 !tests/test_v6_residuals.py
 !tests/test_v6_residuals_r5.py
+!tests/test_v6_residuals_r6.py
 !tests/test_fu3_convergence.py
 !tests/test_t09_compiled_acceptance.py
 !tests/modular_support.py

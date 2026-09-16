@@ -182,9 +182,9 @@
         "PARTIALLY RESOLVED (R3 follow-up): low-confidence numbering stays body text but is now indexed in list_semantics_result.ambiguity_records as well as the low_confidence_list_marker info downgrade (tests/test_v6_residuals.py::test_v6_r3_low_confidence_decision_is_indexed_and_non_blocking) (T10)",
         "PARTIALLY RESOLVED (residual round R3): ambiguity_records indexes every low-confidence and conflict decision; the literal numeric score threshold is not judgeable after T04 removed score, recorded as a spec note",
         "scripts/wxdf/resolver.py was declared in T07's scope but needed no additive change and was not modified",
-        "a style whose name contains both a list token and 标题 (for example 列项标题) is treated as a protected heading; no style in the reference template hits this (T10)",
-        "a detected block whose text starts with a literal N.N marker (for example 1.2 需求分析) is now protected as a manual heading instead of becoming a list item; documented trade-off, no real list content contains the marker in its text (T10)",
-        "protected-list precision: a valid low-octet IPv4 such as 1.2.3.4 falls through to manual_heading_marker rather than ip_address, and the formula symbol branch does not apply the CJK guard (T10)"
+        "RESOLVED (round R6 P3): protected_style_reason narrows the 标题 token so a clearly list-style name (列项标题) is not swallowed; 章标题 stays a protected heading",
+        "RESOLVED (round R6 P4, keep-and-record): a block whose text starts with a two-segment N.N marker stays a manual heading; the trade-off is accepted because README constraint 6 and T07 make a heading never become a list item, and the block keeps its text",
+        "RESOLVED (round R6 P1/P2, keep-and-record): the low-octet IPv4 gate is kept (deferred to the manual-heading rule) and the formula symbol branch stays CJK-independent; both are documented and pinned in tests/test_v6_residuals_r6.py"
       ]
     },
     {
@@ -242,7 +242,7 @@
         "the structural create-ordering fix in scripts/wxdf/transaction.py still lacks its own ticket; T10 did not touch that file",
         "RESOLVED (residual round R2): top-level num_id is the single owner and numbering_definition_ref is a derived view",
         "the README field definition says effective_ilvl synthesizes w:ind, but _resolve_effective_ilvl only synthesizes source_ilvl and pStyle inheritance; the w:ind semantics gap remains",
-        "full-matrix gaps: input sources cover Markdown and Word-generated samples only (WPS and LibreOffice uncovered); containers cover body and table only (header, footer, footnote and textbox uncovered); levels cover 0-2 only (levels 3-8 uncovered)",
+        "PARTIALLY RESOLVED (round R6 M1-M4): levels 3-8 are covered by a table-driven clamp test (M2); same indent different level and different indent same level are pinned (M4); synthetic WPS / LibreOffice numbering shapes (missing abstract, mismatched style ilvl, run split across numIds, omitted ilvl) are covered and degrade gracefully (M3); containers remain an owned gap because the source parser reads only top-level body paragraphs and tables, so a numbered list in a header, footer, footnote, endnote, textbox or SDT is silently dropped (M1, owner: later full-matrix round); real WPS / LibreOffice acceptance remains an external gap (owner: kylin_v10_arm64_real_machine_acceptance)",
         "same-category contiguous new-numId nesting remains a heuristic; the ilvl=0 restart variant is indistinguishable from a sub-list",
         "cross-category ilvl=0 sub-list is treated as a same-level kind switch and is not auto-nested"
       ]
@@ -254,11 +254,80 @@
   ],
   "follow_up_round": {
     "date": "2026-09-16",
-    "scope": "residual closure R1-R4 plus a review-driven R1 correction",
+    "scope": "residual closure R1-R4 plus a review-driven R1 correction, R5 (note / in-run table / per-chapter restart), R6 (protected-list precision and test-matrix gaps)",
     "evidence": "docs/execution-v6/evidence/residuals.md",
     "rounds": [
       "R1-R4",
-      "R5 (A: note ownership, B: in-run table ownership, C: per-chapter restart)"
+      "R5 (A/B/C)",
+      "R6 (P1-P4, M1-M4) + M1 diagnostic"
+    ]
+  },
+  "follow_up_residuals_r6": {
+    "date": "2026-09-16",
+    "evidence": "docs/execution-v6/evidence/residuals.md",
+    "note": "No commit; each closed residual cites the guard test that proves it. scripts/wxdf/transaction.py and scripts/wxdf/run_result.py untouched.",
+    "items": [
+      {
+        "id": "P1",
+        "subject": "low-octet IPv4 gate",
+        "status": "resolved_keep",
+        "decision": "keep the octet > 9 gate; the low-octet dotted quad is deferred to the manual-heading rule",
+        "proof": "tests/test_v6_residuals_r6.py::test_r6_p1_low_octet_quad_is_deferred_to_a_manual_heading, ::test_r6_p1_real_addresses_are_caught_and_invalid_shapes_are_rejected",
+        "detail": "The shape is identical to a level-4 section number and the task warns against reclassifying section-numbered prose as an address, so the gate is deliberate. The deferred block stays protected in the text path. Consequence recorded: in the DOCX visible-marker path a typed low-octet quad is a dotted list marker like 4.2.1 (pinned by test_r6_p1_deferred_quad_in_the_visible_marker_path_is_a_dotted_list_marker). 999.1.1.1 / 256.0.0.1 / 1.2.3 / 1.2.3.4.5 stay rejected and 1.2 需求分析 stays manual_heading_marker."
+      },
+      {
+        "id": "P2",
+        "subject": "formula symbol branch and the CJK guard",
+        "status": "resolved_keep",
+        "decision": "keep the CJK-independent symbol branch; a CJK equation with an explicit math symbol is a formula",
+        "proof": "tests/test_v6_residuals_r6.py::test_r6_p2_cjk_equation_with_a_math_symbol_is_a_formula, ::test_r6_p2_cjk_prose_with_only_an_equals_sign_is_not_a_formula",
+        "detail": "evidence/T07.md already records the design; the docstring now states it and tests pin both the symbol branch and the text-only branch that the CJK guard governs."
+      },
+      {
+        "id": "P3",
+        "subject": "a clearly list-style name is not swallowed by the 标题 token",
+        "status": "resolved_fixed",
+        "proof": "tests/test_v6_residuals_r6.py::test_r6_p3_list_item_title_style_is_not_a_protected_heading",
+        "detail": "The style protection moved to the single owner protected_style_reason; the 标题 branch skips a name that is clearly a list style (列项 / List*), so 列项标题 stays a list style while 章标题 stays protected. Red before the change: 1 failed, 21 passed."
+      },
+      {
+        "id": "P4",
+        "subject": "a manually typed dotted marker is a manual heading",
+        "status": "resolved_keep",
+        "decision": "keep the two-segment manual-heading rule; the segment count is a deliberate decision input",
+        "proof": "tests/test_v6_residuals_r6.py::test_r6_p4_two_segment_dotted_marker_stays_a_manual_heading, ::test_r6_p4_three_segment_marker_follows_the_dotted_list_rule",
+        "detail": "A two-segment dotted prefix is the section-number shape; README constraint 6 and T07 make a heading never become a list item. The trade-off (a genuine 1.2 需求分析 list item loses numbering) is recorded and accepted; the block keeps its text. A three-segment or deeper marker stays a dotted list marker in the DOCX path (tests/test_modular_lists.py). A proposed generalization to all segment counts was reverted because it turned that file red."
+      },
+      {
+        "id": "M1",
+        "subject": "containers outside the body",
+        "status": "recorded_owned_gap",
+        "owner": "later full-matrix round",
+        "proof": "tests/test_v6_residuals_r6.py::test_r6_m1_header_textbox_and_sdt_lists_are_not_read",
+        "detail": "The source parser reads only top-level body w:p and w:tbl (plus table cells). A numbered list in a header, footer, footnote, endnote, textbox or SDT is silently dropped. Fixing it needs extra parts and nested elements, so it is recorded as an owned gap. README 不在范围 still covers content-control lists and multi-level lists in merged cells; table cells (including horizontally merged cells) are read."
+      },
+      {
+        "id": "M2",
+        "subject": "levels 3 to 8 clamp",
+        "status": "covered",
+        "proof": "tests/test_v6_residuals_r6.py::test_r6_m2_levels_three_to_eight_clamp_to_the_second_level, ::test_r6_m2_two_level_list_emits_no_clamp",
+        "detail": "Table-driven over depths 3 to 8: completed, saved_output_audit passed, empty risk_warnings, one clamp record per level >= 2 with render_level 1."
+      },
+      {
+        "id": "M3",
+        "subject": "synthetic WPS / LibreOffice shapes",
+        "status": "covered_external_gap",
+        "owner": "kylin_v10_arm64_real_machine_acceptance and later manual acceptance",
+        "proof": "tests/test_v6_residuals_r6.py::test_r6_m3_missing_abstract_num_is_graceful, ::test_r6_m3_style_numpr_with_mismatched_ilvl_is_graceful, ::test_r6_m3_run_split_across_num_ids_is_graceful, ::test_r6_m3_omitted_ilvl_defaults_to_level_zero",
+        "detail": "Missing abstract, mismatched style ilvl, a run split across numIds and an omitted ilvl all degrade gracefully. Real WPS / LibreOffice acceptance remains an external gap."
+      },
+      {
+        "id": "M4",
+        "subject": "same indent different level / different indent same level",
+        "status": "covered",
+        "proof": "tests/test_v6_residuals_r6.py::test_r6_m4_same_indent_different_level_keeps_the_declared_levels, ::test_r6_m4_different_indent_same_level_resolves_deeper",
+        "detail": "Under the R1 rule, same indent keeps the declared levels and different indent with the same declared level resolves one level deeper."
+      }
     ]
   }
 }

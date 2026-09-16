@@ -402,3 +402,12 @@
 - 结构模块已将 `Heading 7` 及以上样式映射到模板可支持的六级标题。
 - 定向测试 42 项通过。真实奇安信 DOCX 转换成功，退出码 0，模型、保存输出、附录审计均通过。输出抽查确认手工列表前缀已去除，题注文本进入 Caption 样式，深层标题进入 Heading 6。
 - 当前待办为独立代码审查、全量测试、修复复审和提交。
+
+## 2026-09-16 execution-v6 残留收口 R6（受保护名单精度与全矩阵缺口）
+
+- 受保护名单四个 P 项定案。P1 低八位 IPv4 门限保留，四级章节号同形故延迟到手工标题规则，纯文本路径仍受保护，DOCX visible_marker 路径的后果记录在案；`999.1.1.1`、`256.0.0.1`、`1.2.3`、`1.2.3.4.5` 保持拒绝，`1.2 需求分析` 保持手工标题。P2 公式符号分支保留 CJK 无关，含数学符号的 CJK 等式判为公式，只含等号的 CJK 句子不判公式，docstring 与测试与 `evidence/T07.md` 一致。P3 修复，样式保护收敛到单一所有者 `protected_style_reason`，`列项标题` 不再被标题吞掉而仍是列表样式，`章标题` 仍受保护。P4 两段点号标记保留为手工标题，取舍记录在案，段数是刻意的判定输入。
+- 唯一行为改动是 P3。改动前 `tests/test_v6_residuals_r6.py` 为 `1 failed, 21 passed`，失败项即 P3 的守卫；改动后 `22 passed`。
+- 矩阵四项。M1 确立源码解析器只读 body 的直接 `w:p` 与 `w:tbl`（表格单元格可读），页眉、页脚、脚注、尾注、文本框与 SDT 内的编号列表被静默丢弃，记录为有主缺口；M2 表驱动覆盖深度 3 至 8，逐级夹到二级并产出 `list_render_level_clamped`；M3 合成 WPS 与 LibreOffice 形态（缺 abstract、样式 numPr 的 ilvl 越界、一段列表拆到多个 numId、ilvl 省略）覆盖并断言优雅，真实生产者验收仍为外部缺口；M4 相同缩进不同层级与不同缩进相同层级均有测试钉住。
+- 全量测试（仓库根，`scripts/.venv/bin/python3 -m pytest tests/ -q`）为 `1283 passed, 0 failed`（基线 1261 加新增 22 项），连跑两次一致。
+- 真实转换复核 12 份样例（两个基准、两级嵌套、两级无序、两种交叉嵌套、三级、列表后注、两项之间表格、两章、T07 章标题与 IP 地址样例）全部 `completed`、`saved_output_audit.passed=true`、`unexpected_styles` 空、`risk_warnings` 空。
+- 证据写入 `docs/execution-v6/evidence/residuals.md` 的 R6 节（P1-P4、M1-M4、关闭与重归属、红灯与绿灯、真实转换复核）；`docs/execution-v6/status.json` 新增 `follow_up_residuals_r6` 并更新 T07 与 T10 的残留条目。本轮未提交、未推送、未执行远程操作。

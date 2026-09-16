@@ -52,8 +52,12 @@ def _is_ipv4(text: str) -> bool:
     """Return whether ``text`` starts with a valid IPv4 address.
 
     The octets are validated (0-255) and at least one octet must be larger than
-    9, so ordinary multi-level numbering such as ``1.2.3.4`` or ``4.2.1.3`` is
-    not mistaken for a network address.
+    9, so a low-octet dotted quad such as ``1.2.3.4`` or ``4.2.1.3`` is deferred
+    to the manual-heading rule instead.  The shape is identical to a level-4
+    section number, the deferred block is still protected as a manual heading, so
+    the deferral changes only the recorded reason and never promotes the block to
+    a list.  An address with an octet above 9 (the ordinary network shape) is
+    still classified as an address.
     """
 
     match = _IPV4_RE.match(text)
@@ -64,7 +68,13 @@ def _is_ipv4(text: str) -> bool:
 
 
 def _looks_like_formula(text: str) -> bool:
-    """Return whether ``text`` is a formula rather than a prose sentence."""
+    """Return whether ``text`` is a formula rather than a prose sentence.
+
+    The explicit-symbol branch is CJK-independent by design: an equation written
+    with CJK names still uses math symbols, so ``面积 = 长 × 宽`` is a formula.
+    The CJK guard governs only the text-only equation heuristic, which keeps an
+    ordinary sentence that happens to contain ``=`` from being misread.
+    """
 
     if _FORMULA_TEXT_RE.search(text):
         return True
@@ -77,6 +87,44 @@ def protected_code_style(style: str) -> bool:
     """Return whether a style name marks the unit as an opaque code block."""
 
     return _CODE_STYLE_RE.match(str(style).strip()) is not None
+
+
+def _looks_like_list_style_name(style: str) -> bool:
+    """Return whether a style name is clearly a list-entry style.
+
+    Mirrors the parser's list-style vocabulary (``列项`` plus the ``List*``
+    family) so the style protection and the list recognition agree on which style
+    names name a list entry.
+    """
+
+    text = str(style or "")
+    normalized = text.casefold().replace(" ", "")
+    return (
+        normalized.startswith(("listnumber", "listbullet"))
+        or normalized == "listparagraph"
+        or "列项" in text
+    )
+
+
+def protected_style_reason(style: str) -> str | None:
+    """Return the style-based protection reason, or ``None``.
+
+    A heading style or a protected container style must never become a list item.
+    The ``标题`` token is the broadened T07 signal, so it is narrowed here: a
+    style that is clearly a list style keeps the list token's meaning, so a
+    template style such as ``列项标题`` is not swallowed as a heading and can
+    still be a list item.
+    """
+
+    text = str(style or "")
+    normalized = text.casefold().replace(" ", "")
+    if normalized.startswith(("heading", "toc")):
+        return "protected_style"
+    if "目录" in text or "题注" in text:
+        return "protected_style"
+    if "标题" in text and not _looks_like_list_style_name(text):
+        return "protected_style"
+    return None
 
 
 def protected_text_reason(text: str, evidence: Mapping[str, Any]) -> str | None:
@@ -110,6 +158,12 @@ def protected_text_reason(text: str, evidence: Mapping[str, Any]) -> str | None:
         if remainder.casefold().startswith(("版本", "version", "release", "build")):
             return "date_or_version"
         if evidence.get("source_list_type") == "decimal_chain":
+            # A two-segment dotted marker (``1.2``) is the section-number shape
+            # and is protected as a manual heading.  A three-segment or deeper
+            # marker stays a dotted list marker and is stripped when the list
+            # materializes (see
+            # ``tests/test_modular_lists.py::test_docx_visible_list_markers_are_removed_when_list_semantics_materialize``),
+            # so the segment count is deliberately part of the decision.
             segments = re.split(r"[.．-]", marker_text.rstrip(".)"))
             if len([segment for segment in segments if segment]) < 3:
                 return "manual_heading_marker"
@@ -223,6 +277,7 @@ def collect_protected_candidates(facts: Mapping[str, Any]) -> list[dict[str, Any
 __all__ = [
     "collect_protected_candidates",
     "protected_code_style",
+    "protected_style_reason",
     "protected_text_reason",
     "protected_unit_semantics",
 ]

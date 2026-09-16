@@ -192,4 +192,158 @@ T07 章标题与 IP 地址样例：`tests/test_t07_heading_body_anti_ambiguity.p
 | 约束 5 的「列表项内容」一半对注记与运行内表格 | 关闭（A/B）；表内嵌套列表与页眉页脚等容器仍归后续 |
 | `tests/test_v6_residuals_r5.py` 初版未放行 `.gitignore`，fresh checkout 会丢失 | 已修正（放行并复核可见） |
 
+复审另更正三处口径：`tests/test_v6_residuals_r6.py` 的 P4 说明原先写成「两种路径都不论段数」，与代码不符（DOCX 可见标记路径保留 3+ 段列表规则），已改；M3 的「样式 numPr 层级不匹配」用例原先只断言 `semantic_level <= 1`，在 `items` 为空时恒真，已改为断言「不产生列表项且留下编号诊断」；P1/P4 的护栏清单已补全。
+
 仍未关闭：`tests/modular_support.py` 的编号模拟器仍不建模 `w:lvlOverride`/`w:startOverride`（R5 开始写出 `w:startOverride` 后这条更相关）、`LIST_END` 未发出、约束 7 的字面数值阈值、矩阵空白格（WPS/LibreOffice、页眉页脚/脚注/文本框、3 级以上层级）、`transaction.py` 独立工单、同类别相邻新 numId 的嵌套启发式、跨类别 `ilvl=0` 子表不自动嵌套、缩进细化在编号组之外与不回头运行时不生效。
+
+追加轮 R6 见下节，本节对应的矩阵空白格在 R6 中重新处置。
+
+## R6 受保护名单精度与全矩阵缺口（P/M）
+
+本节承接 R1-R5 与 `status.json` 的开放残留，记录受保护名单四项精度（P1-P4）与 README 测试矩阵四处空白（M1-M4）的定案、实现与证明。按时间增量补全。
+
+### 路径声明
+
+按 AGENTS.md「改 .py 前必须先声明路径」。
+
+架构定案（来源 `docs/execution-v6/README.md` 补充说明）：
+
+- `scripts/wxdf/semantics/protected.py`（受保护名单单一所有者）
+- `scripts/wxdf/semantics/lists.py`（`_is_protected` 消费方）
+
+实施实现（本智能体实现）：
+
+- `scripts/wxdf/semantics/protected.py`（新增 `protected_style_reason` 与 `_looks_like_list_style_name`；`_is_ipv4`、`_looks_like_formula` 与 `decimal_chain` 分支补记本轮口径）
+- `scripts/wxdf/semantics/lists.py`（`_is_protected` 的样式保护改接 `protected_style_reason`）
+- `tests/test_v6_residuals_r6.py`（本轮新增 22 项）
+- `.gitignore`（放行新增测试文件）
+
+`scripts/wxdf/transaction.py` 与 `scripts/wxdf/run_result.py` 未改动（禁改范围）。
+
+独立审查：本轮由实施智能体单独完成，未在本轮内执行独立审查，作为剩余步骤保留。
+
+### P1 低八位 IPv4 门限（KEEP，口径记录）
+
+`_is_ipv4` 要求至少一段大于 9，因此 `1.2.3.4` / `4.2.1.3` 不作为地址，纯文本路径落到 `protected_text_reason` 的 `manual_heading_marker`。
+
+定案：保留门限（任务允许「在证据中说明门限有意延迟该形态并给出理由」）。理由：
+
+1. 该形态与四级章节号完全同形，任务原文与 `evidence/T07.md` 都把 `1.2.3.4` 记作 section number；
+2. 任务明确要求不要把 `1.2 需求分析` 一类章节号文本保护为地址；
+3. 延迟不丢内容：纯文本路径仍判为手工标题（受保护），块保持正文；
+4. 矩阵依赖三段落以上的点号标记作为点号列表标记，`tests/test_modular_lists.py::test_docx_visible_list_markers_are_removed_when_list_semantics_materialize` 把 `4.2.1 复合编号需求` 计为列表项并剥离标记。
+
+已记录的门限后果：DOCX visible_marker 路径下文本以低八位点号开头的段落（例如 `1.2.3.4 地址规划`）在段数小于 3 之外的情形下物化为列表项。`test_r6_p1_deferred_quad_in_the_visible_marker_path_is_a_dotted_list_marker` 锁定该行为，本轮记录为已知取舍（与 `4.2.1` 的处理一致）。
+
+守卫测试（KEEP，钉住）：`test_r6_p1_low_octet_quad_is_deferred_to_a_manual_heading`、`test_r6_p1_real_addresses_are_caught_and_invalid_shapes_are_rejected`、`test_r6_p1_deferred_quad_in_the_visible_marker_path_is_a_dotted_list_marker`。`999.1.1.1`、`256.0.0.1`、`1.2.3`、`1.2.3.4.5` 保持拒绝，`1.2 需求分析` 保持 `manual_heading_marker`。
+
+### P2 公式符号分支与 CJK 守卫（KEEP，口径记录）
+
+`_looks_like_formula` 的显式符号分支不套 CJK 守卫，因此 `面积 = 长 × 宽` 判为 `formula`。`evidence/T07.md` 工作项 3 的表格已把这条记作有意设计（CJK 守卫只作用于纯等式分支）。本轮据此定案保留，并用 docstring 与测试让代码和证据一致：
+
+- 含显式数学符号的 CJK 等式判为 `formula`；
+- 只含 `=` 而无数学符号的 CJK 句子不判为公式。
+
+守卫测试（KEEP，钉住）：`test_r6_p2_cjk_equation_with_a_math_symbol_is_a_formula`、`test_r6_p2_cjk_prose_with_only_an_equals_sign_is_not_a_formula`。
+
+### P3 列表样式名不被标题吞掉（FIXED）
+
+`lists.py._is_protected` 的 `"标题" in style` 把名字同时含列表词的样式 `列项标题` 也判为受保护标题，因此它不再是列表样式。定案：把样式保护收敛回单一所有者，在 `protected.py` 新增 `protected_style_reason`（含 `_looks_like_list_style_name`），其中标题分支跳过明显为列表样式的名字（`列项` 与 `List*` 族）。`章标题` 一类标题样式仍受保护。
+
+红灯：改动前 `tests/test_v6_residuals_r6.py` 为 `1 failed, 21 passed`，失败项 `test_r6_p3_list_item_title_style_is_not_a_protected_heading`（样式 `列项标题` 的块没有成为列表项）。
+
+守卫测试：`test_r6_p3_list_item_title_style_is_not_a_protected_heading` 与回归护栏 `test_r6_p3_chapter_heading_style_stays_protected`。参考模板无任何样式同时含列表词与标题（已核），故真实模板无行为变化。
+
+### P4 手写点号标记视作手工标题（KEEP，取舍记录）
+
+visible_marker 路径下 `decimal_chain` 且段数小于 3 的标记判为手工标题，`1.2 需求分析` 因此保持正文。取舍：真正的两段嵌套列表项若文本为 `1.2 需求分析` 会丢失编号。定案：保留。理由：两段点号是章节号的规范形态；README 约束 6 与 T07 把「标题永不成为列表项」定为硬不变量；块保留源文本，丢失的只是列表容器。段数是刻意的判定输入：三段落以上的点号标记在 DOCX 路径下作为点号列表标记剥离（`tests/test_modular_lists.py`），文本路径仍判为手工标题。本轮初版曾把规则统一为任意段数均为手工标题，`tests/test_modular_lists.py` 随即变红，故此路撤回，取舍按事实保留。
+
+守卫测试（KEEP，钉住）：`test_r6_p4_two_segment_dotted_marker_stays_a_manual_heading`、`test_r6_p4_two_segment_dotted_marker_is_a_manual_heading_in_the_visible_marker_path`、`test_r6_p4_three_segment_marker_follows_the_dotted_list_rule`、`test_r6_p4_three_segment_marker_is_a_list_marker_end_to_end`、`test_r6_p4_single_level_markers_still_form_a_list`。
+
+### M1 页眉 / 页脚 / 脚注 / 文本框 / 内容控件容器（RECORDED AS AN OWNED GAP）
+
+源码事实：`wxdf.parsers.parse` 只遍历 `document.element.body.iterchildren()` 中的 `w:p` 与 `w:tbl`（`add_table` 再递归读单元格段落）。因此：
+
+- 页眉、页脚、脚注、尾注：各自独立 part，源码解析器不读取；
+- 文本框：内容在 `w:txbxContent` 内嵌于段落 run，不作为 body 直接子节点；
+- 内容控件 SDT：`w:sdt` 是 body 直接子节点，但遍历只处理 `w:p` 与 `w:tbl`，`w:sdt` 被跳过。
+
+后果：这些容器里的编号列表被静默丢弃（既不转换，也不产出诊断）。测试 `test_r6_m1_header_textbox_and_sdt_lists_are_not_read` 实测头部、文本框、SDT 三段文本均不在 facts 中，且每个 unit 的 `part` 都是 `word/document.xml`；正文列表仍被识别。修复需要读取额外 part 与嵌套元素，超出可安全容纳的范围，故记录为有主缺口（属主：后续全矩阵收口）。
+
+矩阵命名复核：正文与表格单元格属于已读容器；表格单元格（含水平合并格）内的编号列表可被读为列表项（实测 2 项）。README「不在范围」继续覆盖「合并单元格内多级列表」与「内容控件内列表」，该注记保持不变。
+
+### M2 三至八级夹层（COVERED）
+
+两级策略把 `semantic_level >= 2` 夹到 `render_level = 1` 并产出 `list_render_level_clamped`。`test_r6_m2_levels_three_to_eight_clamp_to_the_second_level` 表驱动覆盖深度 3 至 8，逐深度断言 `status=completed`、`saved_output_audit.passed=true`、无 `risk_warnings`、夹层记录的 `semantic_level` 集合等于 `{2..depth-1}` 且 `render_level` 全为 1、`item_count` 等于深度。`test_r6_m2_two_level_list_emits_no_clamp` 为回归护栏。
+
+### M3 合成 WPS / LibreOffice 形态（COVERED，真实验收仍为外部缺口）
+
+按已知生产者形态构造合成 DOCX 并断言优雅行为：
+
+- `w:num` 的 `abstractNumId` 指向缺失的 abstract：`test_r6_m3_missing_abstract_num_is_graceful`，记录 `invalid_numbering_definition`，块保持正文，端到端转换 `saved_output_audit.passed=true`；
+- 段落样式 numPr 带越界 `w:ilvl`：`test_r6_m3_style_numpr_with_mismatched_ilvl_is_graceful`，块保持正文且不产生失控深层列表项；
+- 一段列表被拆到多个 `numId`（带 `w:startOverride`）：`test_r6_m3_run_split_across_num_ids_is_graceful`，`status=completed`、5 项齐备、层级有界；
+- `w:ilvl` 完全省略：`test_r6_m3_omitted_ilvl_defaults_to_level_zero`，读作 0 级列表。
+
+真实 WPS 与 LibreOffice 文件不可得，真实生产者验收仍为外部缺口（属主：`kylin_v10_arm64_real_machine_acceptance` 与后续人工验收）。
+
+### M4 相同缩进不同层级 / 不同缩进相同层级（COVERED）
+
+在 R1 缩进规则下：
+
+- 相同缩进、不同声明层级：声明层级成立（缩进簇只在前一更浅簇出现后才加深），`test_r6_m4_same_indent_different_level_keeps_the_declared_levels` 钉住 `effective_ilvl` 为 0/1/2 且逐级挂父；
+- 不同缩进、相同声明层级：回到更浅簇时加深一级，`test_r6_m4_different_indent_same_level_resolves_deeper` 重新钉住（专门覆盖在 `tests/test_v6_residuals.py` 的 R1 三项内）。
+
+### 关闭与重归属的残留
+
+| 残留（来源） | 处置 |
+| --- | --- |
+| 「名字同时含列表词与标题的样式被当作受保护标题」（T07/T10） | 关闭（P3：样式保护收敛到 `protected_style_reason`，列表样式不再被标题吞掉） |
+| 「文本以手写点号标记开头的块被判为手工标题」取舍（T07/T10） | 关闭（P4：按事实保留，段数作为判定输入，测试与证据记录取舍） |
+| 「低八位 IPv4 落到 `manual_heading_marker` 而非 `ip_address`；公式符号分支未套 CJK 守卫」（T07/T10） | 关闭（P1 有意延迟并记录理由与后果；P2 保留并把意图写进 docstring 与测试） |
+| 矩阵空白格：层级只覆盖 0 至 2 级 | 关闭（M2：表驱动覆盖 3 至 8 级） |
+| 矩阵空白格：容器只覆盖正文与表格 | 部分关闭（M1：确立源码解析器只读 body 段落与表格，页眉/页脚/脚注/尾注/文本框/SDT 内的列表被静默丢弃，记录为有主缺口） |
+| 矩阵空白格：WPS 与 LibreOffice 输入未覆盖 | 部分关闭（M3：合成生产者形态已覆盖并断言优雅；真实 WPS/LibreOffice 验收仍为外部缺口，属主 `kylin_v10_arm64_real_machine_acceptance`） |
+| 矩阵项「相同缩进不同层级 / 不同缩进相同层级」 | 关闭（M4：两项都有测试钉住） |
+
+### 红灯与绿灯
+
+红灯（把 `lists.py._is_protected` 的样式判定临时还原为旧行后运行 `tests/test_v6_residuals_r6.py`）：
+
+```
+1 failed, 21 passed
+FAILED tests/test_v6_residuals_r6.py::test_r6_p3_list_item_title_style_is_not_a_protected_heading
+```
+
+本轮唯一行为改动是 P3（P1/P2/P4 为保留口径，配钉住测试），故红灯只此一项。
+
+绿灯：
+
+- 聚焦：`tests/test_v6_residuals_r6.py` 为 `22 passed`；连同列表相关文件保持通过。
+- 全量（仓库根，`scripts/.venv/bin/python3 -m pytest tests/ -q`）：`1283 passed, 0 failed`（基线 1261 加新增 22 项），连跑两次一致。
+
+### 真实转换复核
+
+| 输入 | status | saved_output_audit | unexpected_styles | risk_warnings |
+| --- | --- | --- | --- | --- |
+| `input/test_baseline.md` | completed | passed | 空 | 空 |
+| `input/benchmark_report.md` | completed | passed | 空 | 空 |
+| 两级嵌套（有序包子） | completed | passed | 空 | 空 |
+| 两级无序 | completed | passed | 空 | 空 |
+| 交叉嵌套（有序包无序） | completed | passed | 空 | 空 |
+| 交叉嵌套（无序包有序） | completed | passed | 空 | 空 |
+| 三级 | completed | passed | 空 | 空 |
+| 列表后注 | completed | passed | 空 | 空 |
+| 两项之间表格 | completed | passed | 空 | 空 |
+| 两章各自重启 | completed | passed | 空 | 空 |
+| T07 章标题样例（`章标题` 样式加 `w:numPr`） | completed | passed | 空 | 空 |
+| T07 IP 地址样例（`192.168.1.1` 正文段） | completed | passed | 空 | 空 |
+
+普通可转换文档保持 `completed`、`saved_output_audit.passed=true`、`unexpected_styles` 空、`risk_warnings` 空。
+
+### 未做
+
+- 未读取额外 part（页眉、页脚、脚注、尾注）与嵌套文本框、SDT 内的内容，故这些容器的列表仍被静默丢弃（M1，有主缺口）。
+- 真实 WPS 与 LibreOffice 验收不可执行（M3，外部缺口）。
+- 独立的审查轮未在本轮内执行。
+- 本轮未提交、未推送、未执行任何远程操作。

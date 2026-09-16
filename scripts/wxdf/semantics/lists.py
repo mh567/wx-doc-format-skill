@@ -8,7 +8,7 @@ from typing import Any, Mapping
 
 from ..list_policy import default_projection
 from ..validation import validate_source_facts
-from .protected import protected_code_style, protected_text_reason
+from .protected import protected_code_style, protected_style_reason, protected_text_reason
 from note_semantics import source_note_role
 
 
@@ -106,8 +106,7 @@ def _is_protected(unit: Mapping[str, Any], evidence: Mapping[str, Any]) -> tuple
         return True, "opaque_code"
     if evidence.get("protected") is True:
         return True, "source_protected"
-    normalized = style.casefold().replace(" ", "")
-    if normalized.startswith(("heading", "toc")) or "目录" in style or "题注" in style or "标题" in style:
+    if protected_style_reason(style) is not None:
         return True, "protected_style"
     # Heading structure is a stronger signal than a confirmed numbering instance:
     # a heading (by role, by style, or by a manually typed chapter number) must
