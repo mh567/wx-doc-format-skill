@@ -266,7 +266,7 @@ def _table_owned_nodes(document: Mapping[str, Any]) -> set[str]:
     return owned
 
 
-def _paragraph_presentation(ast: Mapping[str, Any]) -> dict[str, dict[str, str]]:
+def _paragraph_presentation(ast: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
     """Return the presentation each non-list paragraph owns.
 
     An image paragraph inherits no style, so its centred alignment is the whole
@@ -275,13 +275,29 @@ def _paragraph_presentation(ast: Mapping[str, Any]) -> dict[str, dict[str, str]]
     reproduces.  A formula number is right aligned in the source and no style
     says so, so that alignment is recorded too.  Any other alignment belongs to
     the template style, not to the source.
+
+    An appendix title carries the outline level the appendix itself has.  The
+    template's appendix title style sits at outline level 1, which the template's
+    ``TOC \\o "1-3"`` field renders as a second-level entry, while both the
+    template's and the source's cached tables of contents show it at level 1, so
+    the record states the level the delivered title needs (decision 7, ruling of
+    2026-09-16).
+
+    ``outline_level`` here is a direct paragraph attribute the renderer writes,
+    while ``presentation.outline[*].outline_level`` selects a heading style.  The
+    two maps are consumed by different paths and no block carries both, because
+    appendix blocks stay outside the body outline contract
+    (``model.is_body_outline_heading``).
     """
 
     document = ast["document"]
     table_owned = _table_owned_nodes(document)
-    result: dict[str, dict[str, str]] = {}
+    result: dict[str, dict[str, Any]] = {}
     for node_id, block in document["blocks"].items():
         if not isinstance(block, Mapping):
+            continue
+        if block.get("appendix_role") == "title" and str(node_id) not in table_owned:
+            result[str(node_id)] = {"outline_level": 0}
             continue
         if block.get("block_type") == "image":
             result[str(node_id)] = {"alignment": "center"}

@@ -412,6 +412,17 @@ def collect_native_appendix_candidates(
         ]
         if not root_node_ids:
             continue
+        # The create index is a position in the parent's children list, so it is
+        # read from the AST.  ``start_order`` counts SourceFacts root children and
+        # the AST adds nodes of its own (a materialized inline image node, a list
+        # container), so handing it to the transaction places the container ahead
+        # of the blocks that precede the range.
+        parent_children = document["children"].get(document["root_id"], [])
+        range_index = (
+            parent_children.index(root_node_ids[0])
+            if root_node_ids[0] in parent_children
+            else len(parent_children)
+        )
         source_classification = _appendix_classification(appendix.get("classification"))
         container = {
             "kind": "appendix",
@@ -437,7 +448,7 @@ def collect_native_appendix_candidates(
                 "value": {
                     "node_id": container_id,
                     "parent_id": document["root_id"],
-                    "index": start_order,
+                    "index": range_index,
                     "node": container,
                 },
             },

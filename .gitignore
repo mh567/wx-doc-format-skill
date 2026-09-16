@@ -34,6 +34,8 @@ docs/*
 !docs/execution-v7/**
 !docs/execution-v8/
 !docs/execution-v8/**
+!docs/execution-v9/
+!docs/execution-v9/**
 !docs/contracts/
 !docs/contracts/modular-v3/
 !docs/contracts/modular-v3/**

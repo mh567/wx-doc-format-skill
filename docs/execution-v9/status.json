@@ -1,0 +1,123 @@
+{
+  "schema_version": 1,
+  "objective": "appendix_range_placement_and_appendix_title_toc_level",
+  "branch": "dev",
+  "baseline_head": "5530ca5",
+  "implementation_started": true,
+  "current_task": "T02",
+  "next_task": null,
+  "user_ruling": {
+    "date": "2026-09-16",
+    "question": "附录标题在目录里的层级取值来源冲突",
+    "ruling": "A: 给附录标题写直接大纲级别 0，使模板的目录域把它排在第 1 级",
+    "rejected": [
+      "B: 维持第 2 级并改写预期与决策 7",
+      "C: 重写目录域为 \\t 自定义样式映射（此前已裁定不重写模板域指令）"
+    ]
+  },
+  "defect_evidence": {
+    "placement": {
+      "symptom": "其他说明 之后的三段正文（正文段、heading 5、空段）出现在全文最后，附录被插到它们之前",
+      "create_request_before": "create_node native-appendix-a parent=root index=127",
+      "ast_root_length_at_create": 138,
+      "appendix_title_ast_index": 130,
+      "appendix_title_facts_index": 127,
+      "offset_cause": "build_source_ast materialises 3 extra *-image nodes before the appendix range, so the SourceFacts position (127) is 3 slots earlier than the AST position (130)",
+      "producer": "scripts/wxdf/semantics/appendices.py:440 used start_order (a SourceFacts root position) as the create_node index, which transaction._apply_create_node reads as a parent-children index",
+      "create_request_after": "index=130 (the range's first node in the AST root)"
+    },
+    "toc_level": {
+      "symptom": "附录大标题在目录里是第 2 级",
+      "template_style": "附录标题 outlineLvl=1 (heading 2), 附录一级标题 1, 附录二级标题 2, 附录三级标题 3",
+      "template_cache": "the last three cached entries are toc 1 / toc 2 / toc 3, i.e. the appendix title, its first level and its second level",
+      "source_cache": "附录A（资料性） 附录示例 -> toc 1; A.1 ... -> toc 2; A.1.1 ... -> toc 3",
+      "cause": "the output copies the template TOC field (\\o \"1-3\" \\h \\u), which builds entries from outline levels, so the template style level 1 put the appendix title at TOC level 2"
+    }
+  },
+  "recommended_order": [
+    "T01",
+    "T02"
+  ],
+  "tasks": [
+    {
+      "id": "T01",
+      "subject": "附录容器按 AST 位置落位",
+      "status": "done",
+      "depends_on": [],
+      "scope": [
+        "scripts/wxdf/semantics/appendices.py",
+        "tests/test_modular_appendix_placement.py"
+      ],
+      "proof": {
+        "red": "tests/test_modular_appendix_placement.py 6 failed, 1 passed against HEAD scripts/ (the passing one is the audit guard)",
+        "green": "7 passed; full suite 1356 passed (baseline 1349 + 7, one test replaced the earlier fixture)",
+        "real_document": "the reported document now renders 其他说明, 此模板还设置了页码…, 正文的一章设置。, the empty paragraph, then the appendix title, matching the source order; model/saved/appendix audits passed, unexpected_styles empty, risk_warnings empty"
+      },
+      "invariants": [
+        "the appendix container never sits before a block that precedes the range in source order",
+        "range ownership and container membership stay as the appendix audit defines them",
+        "content before the range keeps its role, style and text",
+        "three audits passed, unexpected_styles empty, risk_warnings empty"
+      ],
+      "review": {
+        "rounds": 2,
+        "findings": [
+          "F1 fixed: the evidence claimed all six tests were red, but the first fixture lacked the appendix styles and the container test passed pre-fix; the red measurement is now 6 failed / 1 passed against HEAD scripts/, and the container test gained the assertion that makes it red",
+          "F2 fixed: invariants 2, 4, 5 and 6 had no or partial assertions; coverage added (roles of the preceding blocks, all four appendix styles, a clean-audit test)",
+          "F3 recorded: a materialized *-image node inside the range stays in root after the container (pre-existing, invisible to audit_native_appendix)",
+          "F4 recorded: outline_level means two different things in presentation.outline and presentation.paragraphs; documented in the docstring",
+          "F5 fixed: the appendix title record bypassed the table-ownership suppression",
+          "verified correct: CT_PPr element order for w:outlineLvl, duplicate handling, bool rejection, range_index across appendix shapes"
+        ]
+      },
+      "residuals": [
+        "no gate compares the AST order with the source order, so this class of order defect stays invisible to the audits; adding a structural order audit needs its own ruling",
+        "a materialized image node inside an appendix range is not moved into the container (pre-existing)"
+      ]
+    },
+    {
+      "id": "T02",
+      "subject": "附录标题的直接大纲级别",
+      "status": "done",
+      "depends_on": [],
+      "scope": [
+        "scripts/wxdf/normalization.py",
+        "scripts/wxdf/rendering.py",
+        "AGENTS.md decision 7 amendment",
+        "tests/test_modular_appendix_placement.py"
+      ],
+      "proof": {
+        "red": "the appendix title carried no direct outline level and no presentation record",
+        "green": "the title carries direct outline level 0 while the three sub-levels carry none, on the synthetic document and on the reported document",
+        "self_conversion": "the template converted with itself keeps completed_with_warnings with only the pre-existing source_heading_level_normalized advisory, audits passed, and the appendix title carries outlineLvl 0"
+      },
+      "invariants": [
+        "the appendix title carries exactly direct outline level 0",
+        "appendix level one to three headings carry no direct outline level"
+      ],
+      "review": {
+        "rounds": 2,
+        "findings": [
+          "F2 fixed for this ticket: the title test now asserts all four appendix styles and the element order",
+          "F5 fixed: the title record respects table ownership",
+          "F4 recorded: the outline_level key is overloaded across two presentation maps",
+          "verified correct: the appendix title of two appendices, a source title already carrying a direct level, duplicate handling"
+        ]
+      },
+      "residuals": [
+        "the legacy \\t mapping and toc_contract.TOC_CUSTOM_STYLE_LEVELS keep the appendix title at level 2 for the diagnostic chain",
+        "appendix level one to three headings still rely on the template styles' outline levels"
+      ]
+    }
+  ],
+  "residuals": [
+    "the legacy diagnostic chain keeps its own \\t mapping; if legacy is ever used for delivery the mapping needs its own ruling",
+    "the Word/WPS TOC and appendix pagination cannot be verified on this machine; it is an external manual gate",
+    "no audit compares the AST block order with the source order"
+  ],
+  "external_gates": [
+    "word_toc_and_appendix_page_manual_check",
+    "remote_push_and_release_authorization"
+  ],
+  "note": "Uncommitted: scripts/wxdf/semantics/appendices.py, scripts/wxdf/normalization.py, scripts/wxdf/rendering.py, AGENTS.md, tests/test_modular_appendix_placement.py, .gitignore, docs/execution-v9/. Version 0.14.4 is the current candidate."
+}

@@ -271,6 +271,31 @@ def _retained_inline_elements(
     return [child for child in list(wrapper)]
 
 
+def _apply_paragraph_outline_level(paragraph: Any, record: Mapping[str, Any] | None) -> None:
+    """Write the direct outline level a paragraph's presentation asks for.
+
+    The template's TOC field builds its entries from outline levels, so a
+    paragraph whose delivered level differs from its style's level states that
+    level directly.  ``w:outlineLvl`` sits after ``w:jc`` and before ``w:rPr`` in
+    the CT_PPr sequence, so it is inserted before the run properties when the
+    paragraph carries any.
+    """
+
+    level = (record or {}).get("outline_level")
+    if not isinstance(level, int) or isinstance(level, bool):
+        return
+    properties = paragraph._p.get_or_add_pPr()
+    for existing in properties.findall(qn("w:outlineLvl")):
+        properties.remove(existing)
+    element = OxmlElement("w:outlineLvl")
+    element.set(qn("w:val"), str(level))
+    run_properties = properties.find(qn("w:rPr"))
+    if run_properties is not None:
+        run_properties.addprevious(element)
+    else:
+        properties.append(element)
+
+
 def _apply_paragraph_alignment(paragraph: Any, record: Mapping[str, Any] | None) -> None:
     """Write the alignment a paragraph's presentation owns.
 
@@ -719,7 +744,9 @@ def render(
             # A semantic table cell is owned by the table format contract, which
             # sets the cell alignment itself, so the paragraph presentation must
             # not override it.
-            _apply_paragraph_alignment(paragraph, presentation_paragraphs.get(node_id))
+            paragraph_presentation = presentation_paragraphs.get(node_id)
+            _apply_paragraph_alignment(paragraph, paragraph_presentation)
+            _apply_paragraph_outline_level(paragraph, paragraph_presentation)
         if numbering and numbering.get("num_id") is not None:
             _write_direct_numbering(
                 paragraph,
