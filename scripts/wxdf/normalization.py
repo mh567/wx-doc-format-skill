@@ -273,6 +273,31 @@ def normalize(
     def heading_scope(node_id: str) -> str | None:
         return _scope_for_node(document, indexes, node_id, stop_at_list_item=True)
 
+    # Per-chapter ordered numbering.  AGENTS.md decision 1 requires the ordered
+    # numbering to restart after each heading.  A single ``w:num`` instance holds
+    # one counter for the whole document, so the restart is realised by binding
+    # each later chapter's ordered items to their own ``w:num`` instance that
+    # references the same abstract definition as the style role's template
+    # instance.  The first chapter that uses a role keeps the template's own
+    # instance, so a single-chapter document (or one with no ordered list) writes
+    # exactly the numbering it wrote before; only a later chapter gets a
+    # synthesized instance.  ``numbering_instances`` publishes the synthesized
+    # instances so the renderer materializes them and the readback audit expects
+    # the same ids.
+    numbering_catalog = template_profile.get("numbering") if isinstance(template_profile, Mapping) else None
+    template_num_to_abstract: dict[str, Any] = {}
+    if isinstance(numbering_catalog, Mapping) and isinstance(numbering_catalog.get("num_to_abstract"), Mapping):
+        template_num_to_abstract = {str(key): value for key, value in numbering_catalog["num_to_abstract"].items()}
+    known_num_ids = [
+        int(value) for value in numbering_ids.values() if isinstance(value, int) and not isinstance(value, bool)
+    ]
+    known_num_ids += [int(key) for key in template_num_to_abstract if str(key).lstrip("-").isdigit()]
+    next_num_id = (max(known_num_ids) + 1) if known_num_ids else 1
+    synthesized_instances: list[dict[str, Any]] = []
+    role_first_chapter: dict[str, int] = {}
+    role_chapter_instance: dict[tuple[str, int], int] = {}
+    chapter_index = 0
+
     for node_id in _reading_order(ast):
         block = document["blocks"].get(node_id)
         if block is not None and (
@@ -283,6 +308,7 @@ def normalize(
             scope_id = heading_scope(node_id)
             if scope_id is not None:
                 counters[scope_id] = 0
+            chapter_index += 1
             continue
         node = item_by_node.get(node_id)
         if node is None or not policy.chapter_scoped_sequence or node["marker_kind"] != "ordered":
@@ -291,6 +317,31 @@ def normalize(
         counters[scope_id] = counters.get(scope_id, 0) + 1
         node["target_ordinal"] = counters[scope_id]
         node["restart"] = node["target_ordinal"] == 1
+        role = str(node.get("style_role") or "")
+        template_num = numbering_ids.get(role)
+        if not isinstance(template_num, int) or isinstance(template_num, bool):
+            continue
+        first_chapter = role_first_chapter.get(role)
+        if first_chapter is None:
+            role_first_chapter[role] = chapter_index
+            node["numbering_instance"] = template_num
+        elif first_chapter == chapter_index:
+            node["numbering_instance"] = template_num
+        else:
+            key = (role, chapter_index)
+            instance = role_chapter_instance.get(key)
+            if instance is None:
+                instance = next_num_id
+                next_num_id += 1
+                role_chapter_instance[key] = instance
+                abstract = numbering_ids.get(f"{role}_abstract")
+                synthesized_instances.append({
+                    "num_id": instance,
+                    "template_num_id": template_num,
+                    "abstract_num_id": int(abstract) if isinstance(abstract, int) and not isinstance(abstract, bool) else None,
+                    "style_role": role,
+                })
+            node["numbering_instance"] = instance
 
     for node in item_by_node.values():
         if node["marker_kind"] == "unordered":
@@ -318,6 +369,7 @@ def normalize(
         "template_contract": presentation_contract_from(profile),
         "nodes": item_by_node,
         "overrides": override,
+        "numbering_instances": synthesized_instances,
     }
     return {
         "schema_version": "1.0",

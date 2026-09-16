@@ -9,6 +9,7 @@ from typing import Any, Mapping
 from ..list_policy import default_projection
 from ..validation import validate_source_facts
 from .protected import protected_code_style, protected_text_reason
+from note_semantics import source_note_role
 
 
 def _node_kind(facts: Mapping[str, Any], node_id: str) -> str:
@@ -129,6 +130,32 @@ def _is_protected(unit: Mapping[str, Any], evidence: Mapping[str, Any]) -> tuple
     if evidence.get("numbering_status") == "detected" and evidence.get("marker_kind"):
         return False, None
     return False, None
+
+
+_NOTE_ROLES = frozenset({"note", "numbered_note"})
+
+
+def _is_note(unit: Mapping[str, Any], evidence: Mapping[str, Any]) -> bool:
+    """Return whether a paragraph carries a note role.
+
+    A note is a protected role (``_is_protected`` returns True for it when the
+    role is exposed on the unit or its evidence), but README's candidate-state
+    enum lists 注 (note) together with table / image / quote / code / formula as
+    an ``ITEM_CHILD_BLOCK``, so a note that a list run owns is attributed to the
+    item as a child block.  The role is read from the unit role, from the
+    evidence role / ``semantic_role`` the DOCX adapter may carry, and from the
+    note style / numbering / text via ``source_note_role``, which is the same
+    single owner the protected-content module resolves a note through.
+    """
+
+    role = str(unit.get("role") or evidence.get("role") or evidence.get("semantic_role") or "")
+    if role in _NOTE_ROLES:
+        return True
+    style = str(unit.get("style") or evidence.get("style") or "")
+    if not style:
+        return False
+    numbering = evidence.get("numbering") if isinstance(evidence.get("numbering"), Mapping) else None
+    return source_note_role(style, numbering, _unit_text(unit).strip()) in _NOTE_ROLES
 
 
 def _scope_id(ancestors: list[str], facts: Mapping[str, Any]) -> str:
@@ -849,34 +876,62 @@ def _tail_content_owner(
     return owner
 
 
-def _implicit_tail_content(
+def _implicit_run_content(
     facts: Mapping[str, Any],
     parent_id: str,
     run: list[str],
     item_levels: Mapping[str, Any],
     decided_states: Mapping[str, str],
-) -> tuple[str | None, list[tuple[str, str]]]:
-    """Return ``(owner_item_id, [(node_id, state)])`` for a run's tail blocks.
+) -> list[tuple[str, str, str]]:
+    """Return ``[(node_id, owner_item_id, state)]`` for the content a run owns.
 
-    The tail is the contiguous block of non-list children that follows an
-    implicit list run inside the same parent, up to the next list item, a list
-    container, a heading or other protected block, or the end of the parent's
-    children.  A paragraph is an ``ITEM_CONTINUATION``; any other block (table /
-    image / quote / code / note) is an ``ITEM_CHILD_BLOCK``.  The scan stops at a
-    protected or low-confidence block, so a heading or an unconfirmed numbering
-    marker still ends the list instead of being absorbed (README constraint 6).
+    Two kinds of block are content of a list item instead of parent siblings:
+
+    * a container (table / quote) that sits between two items of the run.  A
+      container does not close the run (``_implicit_list_runs_for_parent`` skips
+      a non-unit child), so ``[item][table][item]`` is one run with the table in
+      its interior.  Source adjacency is the only evidence a table carries: it
+      directly follows one item and precedes the next, so the immediately
+      preceding item owns it, exactly as a tail block after the last item is
+      owned by the last item.  README constraint 5 is why the table does not
+      terminate the outer list.
+    * the trailing block after the run's last item (the T05 tail).  A paragraph
+      is an ``ITEM_CONTINUATION``; any other block (table / quote / code /
+      image / note) is an ``ITEM_CHILD_BLOCK``.  The tail's owner is the item at
+      the block's level (``_tail_content_owner``), so a paragraph after
+      ``[parent][child]`` is a continuation of the parent.
+
+    A note is a protected role, but README lists 注 under ``ITEM_CHILD_BLOCK``,
+    so a note the run owns is attributed as a child block instead of stopping
+    the scan (work item A).  The scan still stops at a heading, an unconfirmed
+    numbering marker or any other protected block, so a heading still ends the
+    list instead of being absorbed (README constraint 6).
     """
 
     children = facts["children"].get(parent_id, [])
     run_set = {str(item_id) for item_id in run}
-    last_run_index = -1
+    run_positions = [index for index, child_id in enumerate(children) if str(child_id) in run_set]
+    if not run_positions:
+        return []
+    last_run_index = run_positions[-1]
+    tail_owner = _tail_content_owner(run, item_levels)
+    owned: list[tuple[str, str, str]] = []
+    preceding: str | None = None
     for index, child_id in enumerate(children):
-        if str(child_id) in run_set:
-            last_run_index = index
-    if last_run_index < 0:
-        return None, []
-    owner = _tail_content_owner(run, item_levels)
-    tails: list[tuple[str, str]] = []
+        child_key = str(child_id)
+        if child_key in run_set:
+            preceding = child_key
+            continue
+        if preceding is None or index > last_run_index:
+            # Content before the run start, and the trailing tail, are handled
+            # by their own branches below or left as parent siblings.
+            continue
+        # Interior content, between two items of the same run.  Only a container
+        # reaches here: any unit that is not a list item closes the run.
+        kind = str(facts["containers"].get(child_id, {}).get("kind") or "")
+        if kind not in {"table", "quote"}:
+            continue
+        owned.append((child_key, preceding, "ITEM_CHILD_BLOCK"))
     for child_id in children[last_run_index + 1:]:
         child_key = str(child_id)
         if child_id in facts["units"]:
@@ -885,9 +940,16 @@ def _implicit_tail_content(
                 break
             if kind != "paragraph":
                 # A code block or other non-paragraph unit is content of the item.
-                tails.append((child_key, "ITEM_CHILD_BLOCK"))
+                owned.append((child_key, tail_owner, "ITEM_CHILD_BLOCK"))
                 continue
             evidence = facts["evidence"].get(child_id, {})
+            if _is_note(facts["units"][child_id], evidence):
+                # A note keeps its protected role and styling; it is attributed
+                # as a child block instead of stopping the scan.  This runs
+                # before the marker test because a numbered note can carry a
+                # marker and is still note content, not a list item.
+                owned.append((child_key, tail_owner, "ITEM_CHILD_BLOCK"))
+                continue
             if evidence.get("marker_kind"):
                 # A block with its own marker is a candidate list item, not the
                 # content of the preceding one.
@@ -897,14 +959,13 @@ def _implicit_tail_content(
             protected, _reason = _is_protected(facts["units"][child_id], evidence)
             if protected:
                 break
-            state = "ITEM_CONTINUATION"
+            owned.append((child_key, tail_owner, "ITEM_CONTINUATION"))
         else:
             kind = str(facts["containers"].get(child_id, {}).get("kind") or "")
             if kind not in {"table", "quote"}:
                 break
-            state = "ITEM_CHILD_BLOCK"
-        tails.append((child_key, state))
-    return owner, tails
+            owned.append((child_key, tail_owner, "ITEM_CHILD_BLOCK"))
+    return [(node_id, owner, state) for node_id, owner, state in owned if owner is not None]
 
 
 def _numbering_sequence(evidence: Mapping[str, Any]) -> str | None:
@@ -1650,12 +1711,13 @@ def analyze_lists(facts: Mapping[str, Any], *, context: Mapping[str, Any] | None
                     sequence_split_index=group.get("sequence_split_index", 0),
                 )
 
-    # Tail content of implicit runs.  A body paragraph, table, image, quote,
-    # code or note block that follows an implicit list run is content of a list
-    # item instead of an independent body block (README constraint 5).  The
-    # ownership is a candidate state offered to the same Resolver, so the block
-    # carries an explicit ITEM_CONTINUATION / ITEM_CHILD_BLOCK decision and the
-    # materializer reads one ownership seam for both implicit and explicit items.
+    # Content owned by implicit runs.  A body paragraph, table, image, quote,
+    # code or note block that follows an implicit list run, and a table / quote
+    # that sits between two items of the same run, are content of a list item
+    # instead of an independent body block (README constraint 5).  The ownership
+    # is a candidate state offered to the same Resolver, so the block carries an
+    # explicit ITEM_CONTINUATION / ITEM_CHILD_BLOCK decision and the materializer
+    # reads one ownership seam for both implicit and explicit items.
     item_by_id = {str(item["item_id"]): item for item in result["items"]}
     item_levels = {item_id: item.get("semantic_level") for item_id, item in item_by_id.items()}
     tail_candidates: list[dict[str, Any]] = []
@@ -1663,11 +1725,10 @@ def analyze_lists(facts: Mapping[str, Any], *, context: Mapping[str, Any] | None
         if _node_kind(facts, parent_id) in {"list", "list_item"}:
             continue
         for run in _implicit_list_runs_for_parent(facts, parent_id, decided_states):
-            owner, tails = _implicit_tail_content(facts, parent_id, run, item_levels, decided_states)
-            if owner is None or owner not in item_by_id:
-                continue
-            owner_relation = item_by_id[owner]
-            for node_id, state in tails:
+            for node_id, owner, state in _implicit_run_content(facts, parent_id, run, item_levels, decided_states):
+                if owner not in item_by_id:
+                    continue
+                owner_relation = item_by_id[owner]
                 tail_candidates.append(
                     _state_candidate(
                         node_id,
@@ -1690,23 +1751,24 @@ def analyze_lists(facts: Mapping[str, Any], *, context: Mapping[str, Any] | None
                     result["child_blocks"].append(entry)
 
     if tail_candidates:
-        # A non-paragraph unit that is the tail of an implicit run is owned by
-        # the item, so its own protected ``OUTSIDE_LIST`` candidate would tie
-        # with the ownership state at equal evidence strength.  Suppress the
-        # competing candidate only for those tail blocks.  A non-paragraph block
-        # that is not a run tail keeps the protected ``OUTSIDE_LIST`` state it
-        # was offered, so the removal stays scoped to the tie it fixes.
+        # A non-paragraph unit that a run owns, and a note (a protected role the
+        # run owns as a child block), would tie with their own protected
+        # ``OUTSIDE_LIST`` candidate at equal evidence strength, so the competing
+        # candidate is suppressed for exactly those blocks.  A non-paragraph or
+        # note block that no run owns keeps the protected ``OUTSIDE_LIST`` state
+        # it was offered, so the removal stays scoped to the tie it fixes.
         tail_node_ids = {str(candidate["node_id"]) for candidate in tail_candidates}
-        non_paragraph_tails = {
+        suppressed_tails = {
             node_id
             for node_id in tail_node_ids
             if str(facts["units"].get(node_id, {}).get("kind") or "") != "paragraph"
+            or _is_note(facts["units"].get(node_id, {}), facts["evidence"].get(node_id, {}))
         }
         state_candidates = [
             candidate
             for candidate in state_candidates
             if not (
-                str(candidate["node_id"]) in non_paragraph_tails
+                str(candidate["node_id"]) in suppressed_tails
                 and candidate["state"] == "OUTSIDE_LIST"
             )
         ]

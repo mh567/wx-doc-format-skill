@@ -88,6 +88,45 @@ def _profile_styles(normalized: Mapping[str, Any]) -> Mapping[str, str]:
     return normalized.get("presentation", {}).get("profile", {}).get("resolved_styles", {})
 
 
+def _materialize_synthesized_numbering(doc: Any, instances: Any) -> None:
+    """Append the per-chapter list numbering instances the policy requested.
+
+    Each entry is a ``w:num`` that references the same abstract definition as the
+    style role's template instance, so it is a fresh counter that restarts the
+    ordered sequence (one counter per ``w:num``).  Normalization allocates the
+    ids and the readback audit expects them, so the renderer writes exactly those
+    ids instead of allocating its own.
+    """
+
+    if not isinstance(instances, (list, tuple)) or not instances:
+        return
+    try:
+        numbering = doc.part.numbering_part.element
+    except (KeyError, NotImplementedError, AttributeError, ValueError):
+        return
+    existing = {num.get(qn("w:numId")) for num in numbering.findall(qn("w:num"))}
+    for entry in instances:
+        if not isinstance(entry, Mapping):
+            continue
+        num_id = entry.get("num_id")
+        abstract_id = entry.get("abstract_num_id")
+        if num_id is None or abstract_id is None or str(num_id) in existing:
+            continue
+        num_element = OxmlElement("w:num")
+        num_element.set(qn("w:numId"), str(int(num_id)))
+        reference = OxmlElement("w:abstractNumId")
+        reference.set(qn("w:val"), str(int(abstract_id)))
+        num_element.append(reference)
+        override = OxmlElement("w:lvlOverride")
+        override.set(qn("w:ilvl"), "0")
+        start = OxmlElement("w:startOverride")
+        start.set(qn("w:val"), "1")
+        override.append(start)
+        num_element.append(override)
+        numbering.append(num_element)
+        existing.add(str(num_id))
+
+
 def _text(inline_content: list[Mapping[str, Any]], resources: Mapping[str, Any]) -> str:
     parts: list[str] = []
     for item in inline_content:
@@ -457,6 +496,10 @@ def render(
         if template_bundle is not None
         else Document(str(selected_template)) if selected_template else Document()
     )
+    # A per-chapter ordered restart binds each later chapter to its own
+    # ``w:num`` instance.  The instances are materialized before the level
+    # catalog is read, so the emitted-level clamp sees them.
+    _materialize_synthesized_numbering(doc, normalized.get("presentation", {}).get("numbering_instances"))
     # Every list style role binds a numbering instance the template already
     # provides, so the produced document needs no synthesized numbering part.
     # The level catalog is read from the template-backed part the document
@@ -714,7 +757,13 @@ def render(
             else:
                 style_role = "list_dash" if target_level == 0 else "list_bullet"
         list_style = styles.get(style_role, "List Number" if marker_kind == "ordered" else "List Bullet")
-        raw_num_id = numbering_ids.get(style_role)
+        # A per-chapter ordered item carries the concrete numbering instance the
+        # normalizer assigned (the template instance for the first chapter, a
+        # synthesized restart instance for a later one); every other item falls
+        # back to the style role's template instance.
+        raw_num_id = presentation.get("numbering_instance")
+        if not isinstance(raw_num_id, int) or isinstance(raw_num_id, bool):
+            raw_num_id = numbering_ids.get(style_role)
         num_id: int | None = None
         if raw_num_id is not None:
             try:

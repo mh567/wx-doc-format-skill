@@ -163,3 +163,33 @@ T07 章标题与 IP 地址样例：`tests/test_t07_heading_body_anti_ambiguity.p
 - 未关闭约束 7 的「更广歧义来源」（父项竞争等仍不可从真实输入达到），仍作为开放残留。
 - `LIST_END`、回读审计盲区、全矩阵缺口、`transaction.py` 独立工单未纳入本轮。
 - 本轮未提交、未推送、未执行任何远程操作。
+
+## R5 归属缺口与每章节重启（A/B/C）
+
+### A 运行后的注记归入列表项（FIXED）
+
+`scripts/wxdf/semantics/lists.py` 的尾部扫描不再把 `note` / `numbered_note` 当作终止块：运行之后的注记归最后一个列表项，状态为 `ITEM_CHILD_BLOCK`（README 候选状态枚举把「注」列在该状态下），注记自身的受保护角色、样式与文本都不变（真实 DOCX 实测仍为注记样式、无 `w:numPr`）。注记是原先**完全无归属**的那一类；七类里 `formula` 仍作为段落续接（`ITEM_CONTINUATION`），因此「七类齐备」的说法已更正为「注记落地」。副作用：注记不再终止尾部扫描，因此注记**之后**的正文也会归入同一列表项（约束 5 要求注释不独立终止外层列表，故这是预期行为，此前未记录，现已记录）。复审判定该副作用与约束 5 一致。
+护栏：`test_r5_note_after_implicit_run_is_owned_by_the_item`、`test_r5_note_not_after_a_run_stays_protected_outside_list`（不在运行之后的注记不受影响）、`test_r5_docx_note_after_run_renders_with_note_style_under_the_item`（真实 DOCX 端到端，注记仍为注记样式且挂在最后一个列表项下）。
+
+### B 两个列表项之间的表格归前一项（FIXED）
+
+`[列表项][表格][列表项]` 原先表格留在根节点无人归属，因为尾部扫描只覆盖运行**最后一项之后**的内容。现在运行内部的表格归属**前一个列表项**：表格不携带编号或层级证据，唯一可用证据是源相邻性，且 README 约束 5 要求表格不独立终止外层列表。运行本身的拆分/合并行为未变。复审补充两点：归属「前一项」是一致性约定而非相邻性强制（表格同样直接邻接后一项），本实现沿用了既有的尾部规则；另外**运行内**表格归前一项，而**作为运行尾部**的表格归该运行所属层级的父项，同一物理位置在两种情形下归属不同，此不对称已记录为已知行为。
+护栏：`test_r5_table_between_two_items_is_owned_by_the_preceding_item`、`test_r5_body_between_items_keeps_two_runs_unchanged`（T05 的 `[项][正文][项]` 行为不变）、`test_r5_docx_table_between_items_hangs_under_the_preceding_item`（真实 DOCX 端到端）。
+
+### C 每章节从 a) 重新开始（FIXED）
+
+`normalization` 在**每个标题边界**为**每个有序角色**选择**新的编号实例**（同一抽象定义、独立计数器，写入 `w:startOverride=1`），`rendering` 把该实例写进 `w:numPr`。因此每章各自的列表都从 `a)` 开始，而不再全文档连续。复审更正：边界是**任意标题**（二级标题同样触发），作用对象是**任意有序角色**（深层的 `list_decimal` 也会拿到新实例），不是「章节边界 + 仅顶层」；代价是编号实例随「有有序列表的标题」线性增长（实测 150 章 / 900 项为 170 个 `w:num`，抽象定义不重复、id 不与模板冲突）。这也意味着跨标题的同 `numId` 续接会被重启，这是决策 1 与约束 6 的意图，但确实覆盖了约束 8 的同序列续接。
+实测：`# 章一 / 1. 甲一 / 2. 甲二 / ## 章二 / 1. 乙一 / 2. 乙二` 保存后，第一章列表用 `numId=3`，第二章列表用新实例 `numId=22`（`abstract 4`，`startOverride=1`），两者计数器独立。
+护栏：`test_r5_two_chapters_restart_top_level_ordered_numbering`（断言两章使用**不相交**的编号实例，且可见标记 `甲一`=`乙一`、`甲二`=`乙二`、`甲一`!=`甲二`）。该断言在 C 之前会失败：两章共用一个实例时集合不相交不成立。
+
+### 本轮关闭与新增
+
+| 残留 | 处置 |
+| --- | --- |
+| 「运行之后的注记不作为列表项内容」（T05/T06/T10） | 关闭（A） |
+| 「两个列表项之间的表格无归属」（T05/T06/T10） | 关闭（B） |
+| 「顶层有序编号全文档连续，未写 `w:startOverride`，决策 1 的每章节重启未落地」（T08/T10） | 关闭（C） |
+| 约束 5 的「列表项内容」一半对注记与运行内表格 | 关闭（A/B）；表内嵌套列表与页眉页脚等容器仍归后续 |
+| `tests/test_v6_residuals_r5.py` 初版未放行 `.gitignore`，fresh checkout 会丢失 | 已修正（放行并复核可见） |
+
+仍未关闭：`tests/modular_support.py` 的编号模拟器仍不建模 `w:lvlOverride`/`w:startOverride`（R5 开始写出 `w:startOverride` 后这条更相关）、`LIST_END` 未发出、约束 7 的字面数值阈值、矩阵空白格（WPS/LibreOffice、页眉页脚/脚注/文本框、3 级以上层级）、`transaction.py` 独立工单、同类别相邻新 numId 的嵌套启发式、跨类别 `ilvl=0` 子表不自动嵌套、缩进细化在编号组之外与不回头运行时不生效。

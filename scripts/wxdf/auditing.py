@@ -187,6 +187,12 @@ def _expected_list_tree(
                     raw_level = 0
                 style_role = node.get("style_role")
                 num_id = numbering_ids.get(str(style_role)) if isinstance(numbering_ids, Mapping) and style_role else None
+                # A per-chapter restart binds the item to a concrete numbering
+                # instance the normalizer assigned, which is a synthesized
+                # ``w:num`` for a chapter after the first.
+                instance_num_id = node.get("numbering_instance")
+                if isinstance(instance_num_id, int) and not isinstance(instance_num_id, bool):
+                    num_id = instance_num_id
                 level = _clamp_expected_level(raw_level, num_id, formats)
                 owner_index = owners[-1][0] if owners else None
                 owner_level = owners[-1][1] if owners else None

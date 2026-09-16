@@ -1,5 +1,14 @@
 # 当前架构收敛进度
 
+## 2026-09-16 execution-v6 残留收口第二轮（R5：归属缺口与每章节重启）
+
+- **A 注记归属**：尾部扫描不再把 `note`/`numbered_note` 当终止块，运行之后的注记归最后一个列表项（`ITEM_CHILD_BLOCK`），注记的角色、样式与文本不变；T05 工作项 1 的七类内容里有六类归为 `ITEM_CHILD_BLOCK`，`formula` 仍走 `ITEM_CONTINUATION`；注记是最后一类原先完全无归属的类型。
+- **B 运行内表格归属**：`[列表项][表格][列表项]` 的表格归**前一个列表项**（唯一可用证据是源相邻性，且约束 5 要求表格不独立终止外层列表）；`[项][正文][项]` 的两段行为不变。
+- **C 每章节重启**：**每个标题边界**为每个有序角色选择新的编号实例（同一抽象定义、独立计数器、`startOverride=1`），两章各自的列表都从 `a)` 开始。实测第一章节列表 `numId=3`、第二章 `numId=22`（`abstract 4`，`startOverride=1`），计数器独立。
+- 新增 `tests/test_v6_residuals_r5.py`（7 项）。该文件初版未放行 `.gitignore`，fresh checkout 会丢失，已修正并复核可见（上一轮同类问题重演，已两次记录）。
+- 全量测试 `1261 passed, 0 failed`。真实转换全部 `completed`、`saved_output_audit.passed=true`、`unexpected_styles=[]`、无风险。
+- 仍未关闭：`LIST_END` 未发出、约束 7 的字面数值阈值、矩阵空白格（WPS/LibreOffice、页眉页脚/脚注/文本框、3 级以上层级）、`transaction.py` 独立工单、同类别相邻新 numId 的嵌套启发式、跨类别 `ilvl=0` 子表不自动嵌套、缩进细化在编号组之外与不回头运行时不生效。证据见 `docs/execution-v6/evidence/residuals.md`。
+
 ## 2026-09-16 execution-v6 残留收口轮（R1-R4）
 
 - 独立审查在收口轮自身也发现了问题，本轮按审查结论修正后再定案。

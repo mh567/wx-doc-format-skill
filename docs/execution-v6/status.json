@@ -141,9 +141,9 @@
         "RESOLVED (residual round R4): now report-visible as saved_output_audit.list_render_clamped and public_summary.diagnostic_codes, still non-blocking",
         "transaction._order_stage_decisions gained an additive path in the T05 fix round (anchored creates applied after moves; same-parent moves ordered by source_index) without changing the two T04 create-ordering rules, but the file still has no ticket of its own and should be folded into T10 or get its own ticket (T10)",
         "the anchored-create applied predicate for a before-anchor was off by one and reported a committed caption as not applied, breaking ledger replay; fixed with guard tests test_t05_anchored_create_applied_predicate_matches_a_before_anchor/_an_after_anchor (latent, no current caller reaches it)",
-        "note / numbered_note are protected roles, so a note after a list run is not attributed to the item and content_blocks does not carry note; 工作项 1's seven-type list is not met for note (T06/T10)",
+        "RESOLVED (round R5 A): a note after a run is attributed to the last item as an ITEM_CHILD_BLOCK while keeping its protected role",
         "a non-paragraph unit directly after an implicit run gets both ITEM_CHILD_BLOCK and protected OUTSIDE_LIST with equal structural evidence, resolving to a spurious ambiguous_list_state tie (latent, no current adapter produces it) (T06)",
-        "a table between two list items is not attributed to any item; the tail scan only covers content after the run's last item (T06/T10)",
+        "RESOLVED (round R5 B): a table between two items of a run is owned by the preceding item",
         "scripts/wxdf/transaction.py has now been changed by two out-of-scope tickets and carries core idempotency logic; it should get its own ticket with focused ordering and applied-predicate tests (T10)"
       ]
     },
@@ -162,7 +162,7 @@
         "PARTIALLY RESOLVED (R3 follow-up, tests/test_v6_residuals.py::test_v6_r3_low_confidence_decision_is_indexed_and_non_blocking): the literal threshold semantics cannot apply after T04 removed numeric scores; low-confidence numbering still stays body text but is now indexed in list_semantics_result.ambiguity_records as well as the info low_confidence_list_marker downgrade (T10)",
         "LIST_END is still enumerated but not emitted; emitting it as a candidate for a boundary block that is already arbitrated OUTSIDE_LIST would create an equal-strength tie, so boundary termination stays expressed by protected blocks and OUTSIDE_LIST (T07)",
         "cross-category ilvl=0 sub-list is still treated as a same-level kind switch (README constraint 9), because the shape is indistinguishable from the switch (T08)",
-        "a table between two list items is not attributed to any item, and a note after a run is a protected block that is not attributed either; the tail scan only covers content after a run's last item (T10)",
+        "RESOLVED (round R5 A): a note after a run is attributed to the last item as an ITEM_CHILD_BLOCK while keeping its protected role; the same row also carried the in-run table clause, which is resolved separately as round R5 B",
         "RESOLVED BY T08: the product path no longer pins ordered target_level to 0; wx-default-v2 projects the two recognised levels and clamps deeper levels (T08)",
         "RESOLVED BY T09: the readback audit now also compares the per-level numbering sequence values (_saved_number_sequence / list_numbering_sequence_mismatch) and the style-derived render-level parent chain, on top of list_parent_chain_mismatch's implied w:ilvl chain (T09)",
         "pStyle level inheritance still inert end-to-end (T10)",
@@ -199,13 +199,11 @@
         "RESOLVED BY USER RULING (2026-09-15): AGENTS.md 关键决策记录 1 now recognises at most two list levels. wx-default-v2 caps render_level at 1 and binds each role to the template's own instance (list_letter=3, list_decimal=8, list_dash=5, list_bullet=4), so the second ordered level shows the designed 1) form; the synthesized multi-level instance (numId 22/abstract 10) and the outline a.1 marker are removed (T10/user)",
         "RESOLVED (residual round R4): now report-visible as saved_output_audit.list_render_clamped and public_summary.diagnostic_codes, still non-blocking",
         "the template's second-level instances are single-level, so every list item emits w:ilvl 0 and the two levels are distinguished by style and instance rather than by the level attribute; a second-level item does not restart per parent because it shares numId 8 (T10/template)",
-        "top-level ordered numbering is document-continuous; the saved output writes no w:startOverride, so decision 1's per-chapter restart is not implemented (T10)",
+        "RESOLVED (round R5 C): each heading boundary selects a new numbering instance for every ordered role, so a chapter's ordered list restarts at a)",
         "RESOLVED (residual round R4): now report-visible as saved_output_audit.list_render_clamped and public_summary.diagnostic_codes, still non-blocking",
         "cross-category ilvl=0 sub-list is treated as a same-level kind switch and is not auto-nested (T10)",
         "the ilvl=0 restart variant is indistinguishable from a sub-list (T10)",
-        "restart_scope boundary reset is not implemented; confirmed no policy-layer boundary is needed (T10)",
-        "ordered and unordered items share one template numbering instance per level per document; no per-container w:num or w:startOverride is generated (T10)",
-        "the independent numbering simulator in tests/modular_support.py still does not model w:lvlOverride/w:startOverride; this is a test-support helper, distinct from the audit's own _saved_number_sequence, which does read a pure w:startOverride without w:lvl (T10)"
+        "restart_scope boundary reset is not implemented; confirmed no policy-layer boundary is needed (T10)"
       ]
     },
     {
@@ -221,7 +219,7 @@
         "LIST_END is enumerated but not emitted; boundary termination stays expressed by protected blocks and OUTSIDE_LIST (T10)",
         "RESOLVED (residual round R4): now report-visible as saved_output_audit.list_render_clamped and public_summary.diagnostic_codes, still non-blocking",
         "FIXED (F6): a saved list paragraph whose style does not map back to a projected role no longer disables the render-level chain; it now fails with list_render_style_unmapped, so a permitted style change (for example to Normal) cannot turn the comparison off. The chain is still skipped as a whole only when a role legitimately identifies more than one projected level (the legacy multi-level policy reuses list_decimal for levels 1 and 2), where the style genuinely cannot carry the level; within that skip only the flat (kind, numId, ilvl) sequence and the numbering sequence comparison guard, so a tamper that is indistinguishable from the reused-role policy is not caught by this chain (T10)",
-        "the numbering sequence simulation reads w:startOverride from w:lvlOverride directly, so a pure w:startOverride without w:lvl is covered (test_t09_readback_detects_a_tampered_numbering_sequence builds exactly that); the remaining uncovered edge is the interaction of several w:num instances that share one abstract definition with per-instance overrides (T10)"
+        "RESOLVED (round R5 C): each heading boundary selects a new numbering instance for every ordered role, so a chapter's ordered list restarts at a)"
       ]
     },
     {
@@ -256,6 +254,10 @@
   "follow_up_round": {
     "date": "2026-09-16",
     "scope": "residual closure R1-R4 plus a review-driven R1 correction",
-    "evidence": "docs/execution-v6/evidence/residuals.md"
+    "evidence": "docs/execution-v6/evidence/residuals.md",
+    "rounds": [
+      "R1-R4",
+      "R5 (A: note ownership, B: in-run table ownership, C: per-chapter restart)"
+    ]
   }
 }
