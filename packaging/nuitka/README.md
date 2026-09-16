@@ -8,7 +8,7 @@
 
 直接依赖版本来自 `requirements-runtime.txt` 和 `requirements-build.txt`。每个平台另存 `dependency-versions.txt` 记录实际解析的完整环境。全量测试使用构建解释器，结果保存在对应 `build/nuitka/local-*/tests.log`。只纳入 `input/test_baseline.md` 和 `input/benchmark_report.md` 两个 Markdown 基线；真实 DOCX 和协议输入由验收程序在临时证据目录中生成。
 
-公开版本 `0.12.19` 已有标签，本轮候选使用 `0.15.2`。上一轮 `0.13.0` 已从候选 `85c73b4` 构建但未发布，不再复用；`0.14.0` 至 `0.15.1` 均未构建，其源码已由本轮候选取代。已发布版本的标签移动及资产替换仍需单独授权。若真实构建暴露代码问题，修复后创建新 C，并重建两个平台。构建完成后的证据提交仅允许修改文档，不与候选源码身份混用。
+公开版本 `0.12.19` 已有标签，本轮候选使用 `0.16.0`。上一轮 `0.13.0` 已从候选 `85c73b4` 构建但未发布，不再复用；`0.14.0` 至 `0.15.2` 均未构建，其源码已由本轮候选取代。已发布版本的标签移动及资产替换仍需单独授权。若真实构建暴露代码问题，修复后创建新 C，并重建两个平台。构建完成后的证据提交仅允许修改文档，不与候选源码身份混用。
 
 ## macOS ARM64
 
@@ -90,7 +90,7 @@ build/nuitka/local-macos-arm64/venv/bin/python3 packaging/nuitka/assemble_public
 
 ```bash
 build/nuitka/local-macos-arm64/venv/bin/python3 packaging/nuitka/smoke_distribution.py \
-  dist/local/wx-doc-format-skill-0.15.2-macos-arm64 \
+  dist/local/wx-doc-format-skill-0.16.0-macos-arm64 \
   --public-skill dist/public-skill \
   --evidence-dir /tmp/wxdf-t09-public-acceptance
 ```
