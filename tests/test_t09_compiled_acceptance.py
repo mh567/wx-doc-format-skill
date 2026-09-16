@@ -17,6 +17,7 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+PACKAGE_VERSION = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
 
 
 def _load(name: str, filename: str):
@@ -35,7 +36,7 @@ smoke = _load("wx_t09_smoke", "smoke_distribution.py")
 def _clean_source(tmp_path: Path) -> Path:
     root = tmp_path / "source"
     root.mkdir()
-    (root / "VERSION").write_text("0.13.0\n", encoding="ascii")
+    (root / "VERSION").write_text(f"{PACKAGE_VERSION}\n", encoding="ascii")
     (root / "source.txt").write_text("frozen source\n", encoding="ascii")
     for args in (
         ["init", "-q"],
@@ -61,7 +62,7 @@ def write_runtime_fixture(runtime: Path, *, identity: dict | None = None) -> dic
     runtime.mkdir(parents=True, exist_ok=True)
     identity = identity or fixture_source_identity(runtime.parent)
     executable = runtime / "wx-doc-format"
-    executable.write_text('#!/bin/sh\nprintf "%s\\n" "0.13.0"\n', encoding="ascii")
+    executable.write_text(f'#!/bin/sh\nprintf "%s\\n" "{PACKAGE_VERSION}"\n', encoding="ascii")
     executable.chmod(0o755)
     report = runtime.parent / "private-compilation-report.xml"
     modules = "".join(f'<module name="{name}" filename="/private/source/{name}.py"/>' for name in build.release_module_names())
@@ -84,14 +85,14 @@ def write_archive_fixture(
             f"#!/bin/sh\nprintf '%s\\n' '{marker}'\n", encoding="ascii",
         )
         manifest = json.loads((package / "manifest.json").read_text(encoding="utf-8"))
-        build._write_integrity_files(package, platform_id, "0.13.0", manifest["modular"])
+        build._write_integrity_files(package, platform_id, PACKAGE_VERSION, manifest["modular"])
     return build.create_archive(package, platform_id)
 
 
 def test_build_identity_pins_clean_git_source_and_rejects_drift(tmp_path: Path) -> None:
     root = _clean_source(tmp_path)
     identity = build.capture_source_identity(root)
-    assert identity["version"] == "0.13.0"
+    assert identity["version"] == PACKAGE_VERSION
     assert identity["commit"] == subprocess.check_output(
         ["git", "-C", str(root), "rev-parse", "HEAD"], text=True,
     ).strip()
@@ -135,7 +136,7 @@ def test_package_keeps_source_identity_and_excludes_private_compilation_xml(tmp_
 def test_public_assembly_rejects_a_filename_only_artifact_before_output(tmp_path: Path) -> None:
     artifacts = tmp_path / "artifacts"
     artifacts.mkdir()
-    (artifacts / "wx-doc-format-skill-0.13.0-macos-arm64.tar.gz").write_bytes(b"not an archive")
+    (artifacts / f"wx-doc-format-skill-{PACKAGE_VERSION}-macos-arm64.tar.gz").write_bytes(b"not an archive")
     with pytest.raises(ValueError, match="ARTIFACT_INVALID"):
         public.assemble_public_skill(artifacts, tmp_path / "public", ("macos-arm64",), "26.0")
     assert not (tmp_path / "public").exists()
@@ -158,7 +159,7 @@ def test_public_assembly_rejects_tampered_or_unsafe_archive_payload(tmp_path: Pa
     artifacts = tmp_path / "artifacts"
     artifacts.mkdir()
     path = write_archive_fixture(artifacts, "macos-arm64")
-    root = "wx-doc-format-skill-0.13.0-macos-arm64"
+    root = f"wx-doc-format-skill-{PACKAGE_VERSION}-macos-arm64"
     with tarfile.open(path, "r:gz") as archive:
         entries = [(member, archive.extractfile(member).read() if member.isfile() else None) for member in archive.getmembers()]
     with tarfile.open(path, "w:gz") as archive:
@@ -445,7 +446,7 @@ def test_public_assembly_rejects_ambiguous_tar_paths_before_creating_output(
     artifacts = tmp_path / "artifacts"
     artifacts.mkdir()
     path = write_archive_fixture(artifacts, "macos-arm64")
-    root = "wx-doc-format-skill-0.13.0-macos-arm64"
+    root = f"wx-doc-format-skill-{PACKAGE_VERSION}-macos-arm64"
     with tarfile.open(path, "r:gz") as archive:
         entries = [(member, archive.extractfile(member).read() if member.isfile() else None) for member in archive.getmembers()]
         payload = archive.extractfile(f"{root}/runtime/wx-doc-format").read()
@@ -469,7 +470,7 @@ def test_public_assembly_rejects_non_executable_required_archive_files(tmp_path:
     artifacts = tmp_path / "artifacts"
     artifacts.mkdir()
     path = write_archive_fixture(artifacts, "macos-arm64")
-    root = "wx-doc-format-skill-0.13.0-macos-arm64"
+    root = f"wx-doc-format-skill-{PACKAGE_VERSION}-macos-arm64"
     with tarfile.open(path, "r:gz") as archive:
         entries = [(member, archive.extractfile(member).read() if member.isfile() else None) for member in archive.getmembers()]
     with tarfile.open(path, "w:gz") as archive:
@@ -497,7 +498,7 @@ def test_public_assembly_applies_target_filesystem_collision_keys(
     artifacts = tmp_path / "artifacts"
     artifacts.mkdir()
     path = write_archive_fixture(artifacts, target)
-    root = f"wx-doc-format-skill-0.13.0-{target}"
+    root = f"wx-doc-format-skill-{PACKAGE_VERSION}-{target}"
     with tarfile.open(path, "r:gz") as archive:
         entries = [(member, archive.extractfile(member).read() if member.isfile() else None) for member in archive.getmembers()]
     extra = []
@@ -536,7 +537,7 @@ def test_public_assembly_validates_implicit_ancestor_spellings_independent_of_or
     artifacts = tmp_path / "artifacts"
     artifacts.mkdir()
     path = write_archive_fixture(artifacts, target)
-    root = f"wx-doc-format-skill-0.13.0-{target}"
+    root = f"wx-doc-format-skill-{PACKAGE_VERSION}-{target}"
     with tarfile.open(path, "r:gz") as archive:
         entries = [(member, archive.extractfile(member).read() if member.isfile() else None) for member in archive.getmembers()]
         manifest = json.load(archive.extractfile(f"{root}/manifest.json"))
@@ -595,7 +596,7 @@ def test_public_assembly_rejects_owner_unreadable_or_unsearchable_members(
     artifacts = tmp_path / "artifacts"
     artifacts.mkdir()
     path = write_archive_fixture(artifacts, target)
-    root = f"wx-doc-format-skill-0.13.0-{target}"
+    root = f"wx-doc-format-skill-{PACKAGE_VERSION}-{target}"
     member_name = f"{root}/{relative}" if relative else root
     with tarfile.open(path, "r:gz") as archive:
         entries = [(member, archive.extractfile(member).read() if member.isfile() else None) for member in archive.getmembers()]
@@ -615,7 +616,7 @@ def test_public_assembly_accepts_minimal_owner_read_and_search_permissions(tmp_p
     artifacts = tmp_path / "artifacts"
     artifacts.mkdir()
     path = write_archive_fixture(artifacts, target)
-    root = f"wx-doc-format-skill-0.13.0-{target}"
+    root = f"wx-doc-format-skill-{PACKAGE_VERSION}-{target}"
     entrypoints = {f"{root}/{relative}" for relative in ("scripts/install.sh", "scripts/run.sh", "runtime/wx-doc-format")}
     with tarfile.open(path, "r:gz") as archive:
         entries = [(member, archive.extractfile(member).read() if member.isfile() else None) for member in archive.getmembers()]
@@ -659,8 +660,8 @@ if any(value.endswith("build_distribution.py") for value in arguments):
     if status == 0:
         output = Path(arguments[arguments.index("--output-dir") + 1])
         target = arguments[arguments.index("--platform-id") + 1]
-        (output / ("wx-doc-format-skill-0.13.0-" + target)).mkdir(parents=True)
-        (output / ("wx-doc-format-skill-0.13.0-" + target + ".tar.gz")).touch()
+        (output / ("wx-doc-format-skill-" + os.environ["T09_PACKAGE_VERSION"] + "-" + target)).mkdir(parents=True)
+        (output / ("wx-doc-format-skill-" + os.environ["T09_PACKAGE_VERSION"] + "-" + target + ".tar.gz")).touch()
     sys.exit(status)
 if any(value.endswith("smoke_distribution.py") for value in arguments):
     evidence = Path(arguments[arguments.index("--evidence-dir") + 1])
@@ -713,6 +714,7 @@ sys.exit(subprocess.run(["/bin/bash", "-c", body], cwd=mounts["/workspace"], env
         **os.environ, "PATH": str(tools) + os.pathsep + os.environ["PATH"],
         "WXDF_BOOTSTRAP_PYTHON": str(fake_python), "T09_FAKE_PYTHON": str(fake_python),
         "T09_COMPILE_STATUS": str(compile_status), "T09_SMOKE_MARKER": str(marker),
+        "T09_PACKAGE_VERSION": PACKAGE_VERSION,
         "T09_ABSENT_INTERNAL": str(tmp_path / "absent-internal"),
         "TMPDIR": str(tmp_path),
     }
