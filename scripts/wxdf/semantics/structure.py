@@ -15,12 +15,19 @@ from .protected import protected_unit_semantics
 
 
 _GRADED_HEADING_ROLES = frozenset({"heading", "title"})
-# A manually numbered heading keeps its heading role (ruling of 2026-09-16): the
-# marker is text the converter removes, so the style decides the role and the
-# cleanup removes the marker.  Every other protection reason names content the
-# document keeps as it stands (an API label, a date, a legal clause, a formula),
-# so it keeps its precedence and its protected role, which L11 pins.
-_PROTECTION_REASONS_A_HEADING_OUTWEIGHS = frozenset({"manual_heading_marker"})
+# A heading the source itself declares, through a heading style or a Markdown
+# marker, outweighs the text protections named here: the paragraph is styled as a
+# section title, so its text alone does not demote it.  ``manual_heading_marker``
+# is the ruling of 2026-09-16, ``api_label`` the ruling of 2026-09-17 (an
+# interface document styles ``接口说明`` and ``请求参数`` as ``Heading 3``, so the
+# exact-text label rule must not take the role away).  Both reasons still ride on
+# the role candidate as evidence and still govern everywhere else: the label text
+# keeps an unstyled paragraph out of a list, and an unstyled label gets no
+# heading role because the style, not the text, is what a heading is graded on.
+# Every other protection reason names content the document keeps as it stands (a
+# date, a legal clause, a formula), so it keeps its precedence and its protected
+# role, which L11 pins.
+_PROTECTION_REASONS_A_HEADING_OUTWEIGHS = frozenset({"manual_heading_marker", "api_label"})
 
 
 def _candidate(node_id: str, unit: Mapping[str, Any], value: dict[str, Any], evidence: list[dict[str, Any]]) -> dict[str, Any]:
@@ -240,17 +247,18 @@ def collect_structure_candidates(
             source_style = str(unit.get("style") or evidence.get("style") or "")
             style_role, style_level = _docx_style_role(source_style)
         # A heading the source itself declares, through a heading style or a
-        # Markdown marker, outweighs the manual-marker protection (decision 10).
-        # The reason still rides on the role candidate as evidence.  A protection
-        # that names a role of its own keeps its precedence, so a numbered note
-        # stays a note and a code block keeps its role.
-        marker_evidence: list[dict[str, Any]] = []
+        # Markdown marker, outweighs the text protections a heading can carry
+        # (rulings of 2026-09-16 and 2026-09-17).  The reason still rides on the
+        # role candidate as evidence.  A protection that names a role of its own
+        # keeps its precedence, so a numbered note stays a note and a code block
+        # keeps its role.
+        outweighed_evidence: list[dict[str, Any]] = []
         if protect_semantics and protected is not None:
             explicit_heading = style_role in _GRADED_HEADING_ROLES or (is_markdown and role == "heading")
             if explicit_heading and protected.get("reason") in _PROTECTION_REASONS_A_HEADING_OUTWEIGHS:
-                marker_evidence = [{
+                outweighed_evidence = [{
                     "kind": "structural",
-                    "source": "manual_heading_marker",
+                    "source": str(protected.get("reason")),
                     "reason": protected.get("reason"),
                 }]
             else:
@@ -276,7 +284,7 @@ def collect_structure_candidates(
                     {"role": "title"},
                     [
                         {"kind": "structural", "source": "docx_style", "style": source_style},
-                        *marker_evidence,
+                        *outweighed_evidence,
                     ],
                 ))
                 title_seen = True
@@ -290,7 +298,7 @@ def collect_structure_candidates(
                     {"role": "heading", "level": style_level},
                     [
                         {"kind": "structural", "source": "docx_style", "style": source_style},
-                        *marker_evidence,
+                        *outweighed_evidence,
                     ],
                 ))
                 semantic_content_seen = True
@@ -304,7 +312,7 @@ def collect_structure_candidates(
                     unit,
                     text,
                     {"role": "title"},
-                    [{"kind": "structural", "source": "markdown_leading_h1"}, *marker_evidence],
+                    [{"kind": "structural", "source": "markdown_leading_h1"}, *outweighed_evidence],
                 ))
                 title_seen = True
             else:
@@ -314,7 +322,7 @@ def collect_structure_candidates(
                     unit,
                     text,
                     {"role": "heading", "level": max(1, min(normalized_level, 6))},
-                    [{"kind": "structural", "source": "source_facts", "level": level}, *marker_evidence],
+                    [{"kind": "structural", "source": "source_facts", "level": level}, *outweighed_evidence],
                 ))
             semantic_content_seen = True
         elif text.strip():

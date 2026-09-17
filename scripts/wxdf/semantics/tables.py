@@ -62,6 +62,26 @@ def capture_docx_table_layout(table: Any) -> dict[str, Any]:
         }
     if table.autofit is not None:
         result["autofit"] = bool(table.autofit)
+    fills: dict[str, Any] = {}
+    table_fill = tbl_pr.find(qn("w:shd")) if tbl_pr is not None else None
+    if table_fill is not None and table_fill.get(qn("w:fill")):
+        fills["table"] = table_fill.get(qn("w:fill"))
+    cell_fills: list[str | None] = []
+    seen_cells: set[Any] = set()
+    for row in table.rows:
+        for cell in row.cells:
+            if cell._tc in seen_cells:
+                continue
+            seen_cells.add(cell._tc)
+            shading = cell._tc.find(qn("w:tcPr") + "/" + qn("w:shd"))
+            cell_fills.append(shading.get(qn("w:fill")) if shading is not None else None)
+    if any(cell_fills):
+        fills["cells"] = cell_fills
+    if fills:
+        # A source marks a code sample with a grey cell fill.  It is source layout
+        # evidence like the width and the borders, so it is captured here and the
+        # renderer decides which table roles get it back.
+        result["fills"] = fills
     return result
 
 
@@ -104,7 +124,7 @@ def _layout_contract(block: Mapping[str, Any]) -> dict[str, Any]:
     layout = block.get("layout") if isinstance(block.get("layout"), Mapping) else {}
     return {
         key: copy.deepcopy(layout[key])
-        for key in ("source_width", "source_margins", "row_heights", "borders", "autofit")
+        for key in ("source_width", "source_margins", "row_heights", "borders", "autofit", "fills")
         if key in layout
     }
 

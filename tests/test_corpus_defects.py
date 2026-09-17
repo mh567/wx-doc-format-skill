@@ -16,7 +16,16 @@ match the source:
   * a created node joins the scope of the container it lands in, so a caption
     generated for a table inside an appendix is appendix-owned;
   * the render map reports the text a retained inline object shows, so the saved
-    output audit compares like with like.
+    output audit compares like with like;
+  * the cover heuristic does not treat the body ahead of the first ``Heading 1``
+    as a cover, so an interface document that opens with level-2 sections keeps
+    them (D7);
+  * an explicitly styled heading keeps its role although its text matches the
+    API-label protection, which still governs an unstyled label (D8);
+  * the table format contract reaches every rendered cell paragraph, so a code
+    sample is left aligned on every line and not only on its first (D9);
+  * a non-``data`` table keeps the source fill that marks it as code, while a
+    data table takes the template look (D10).
 """
 from __future__ import annotations
 
@@ -41,6 +50,7 @@ from wxdf.kernel import ConversionKernel
 from wxdf.parsers import parse
 from wxdf.run_result import ConversionRequest
 from wxdf.semantics.lists import analyze_lists
+from wxdf.semantics.regions import resolve_source_regions
 from wxdf.transaction import _apply_create_node
 from wxdf.normalization import normalize
 from wxdf.validation import validate_ast
@@ -659,6 +669,80 @@ def test_generated_caption_inside_an_appendix_keeps_its_label(tmp_path: Path) ->
 
 
 # ---------------------------------------------------------------------------
+# Shared end-to-end helpers
+# ---------------------------------------------------------------------------
+
+def _convert(source: Path, output: Path) -> dict:
+    """Convert one synthetic source and return its report."""
+
+    result = ConversionKernel().convert(ConversionRequest(
+        input_path=source,
+        output_path=output,
+        template_path=TEMPLATE,
+        pipeline="modular",
+        list_policy="wx-default-v2",
+        options={"llm_enhance": "off"},
+    ))
+    return result.as_report()
+
+
+def _body_paragraphs(document: Document) -> list:
+    from docx.text.paragraph import Paragraph
+
+    return [
+        Paragraph(child, document)
+        for child in document.element.body.iterchildren()
+        if child.tag == qn("w:p")
+    ]
+
+
+def _paragraph_texts(document: Document) -> list[str]:
+    return [paragraph.text.strip() for paragraph in _body_paragraphs(document)]
+
+
+_SHADING_SUCCESSORS = {
+    qn("w:tblPr"): ("w:tblLayout", "w:tblCellMar", "w:tblLook"),
+    qn("w:tcPr"): ("w:noWrap", "w:tcMar", "w:textDirection", "w:tcFitText", "w:vAlign", "w:hideMark"),
+}
+
+
+def _set_fill(properties, fill: str) -> None:
+    """Shade an element the way OOXML orders it, so the fixture is schema-faithful."""
+
+    parent = properties.getparent()
+    shading = OxmlElement("w:shd")
+    shading.set(qn("w:val"), "clear")
+    shading.set(qn("w:color"), "auto")
+    shading.set(qn("w:fill"), fill)
+    for tag in _SHADING_SUCCESSORS.get(parent.tag, ()):
+        anchor = properties.find(qn(tag))
+        if anchor is not None:
+            anchor.addprevious(shading)
+            return
+    properties.append(shading)
+
+
+def _code_sample_source(tmp_path: Path, *, fill: str | None = "D8D8D8") -> Path:
+    """Write a document whose request example is a single-cell code table."""
+
+    source = tmp_path / "code.docx"
+    document = _empty_template_document()
+    document.add_paragraph("演示文档", style="Heading 1")
+    document.add_paragraph("请求示例", style="Heading 2")
+    table = document.add_table(rows=1, cols=1, style="Table Grid")
+    cell = table.cell(0, 0)
+    lines = ["<<Header>>", "POST /api/v1/items", '{"a": 1}', "}", "]"]
+    cell.paragraphs[0].text = lines[0]
+    for line in lines[1:]:
+        cell.add_paragraph(line)
+    if fill is not None:
+        _set_fill(table._tbl.tblPr, fill)
+        _set_fill(cell._tc.get_or_add_tcPr(), fill)
+    document.save(str(source))
+    return source
+
+
+# ---------------------------------------------------------------------------
 # D5: render map text for retained inline objects
 # ---------------------------------------------------------------------------
 
@@ -696,3 +780,272 @@ def test_retained_field_text_matches_the_saved_output(tmp_path: Path) -> None:
     assert "paragraph_order_changed" not in {
         issue["code"] for issue in report["saved_output_audit"]["issues"]
     }
+
+
+# ---------------------------------------------------------------------------
+# D7: the cover heuristic must not swallow the document body
+# ---------------------------------------------------------------------------
+
+def test_body_ahead_of_the_first_heading_one_is_not_a_cover(tmp_path: Path) -> None:
+    """A source that opens with level-2 headings keeps those sections.
+
+    The defect this pins: the corpus document's first ``Heading 1`` sits far
+    down the file, so the whole prefix before it was scored as a cover and
+    excluded.  Two weak signals reached the threshold (a small content table
+    counted as cover metadata, and the section title ``接口说明`` scored as a
+    cover title), and the no-page-break fallback had no structural guard.
+    """
+
+    source = tmp_path / "prefix.docx"
+    document = _empty_template_document()
+    document.add_paragraph("策略下发", style="Heading 2")
+    document.add_paragraph("接口说明", style="Heading 3")
+    document.add_paragraph("外部系统通过该接口向IAM禁用用户状态")
+    document.add_paragraph("请求参数说明")
+    table = document.add_table(rows=2, cols=4, style="Table Grid")
+    for index, value in enumerate(("协议", "URL", "方法", "参数类型")):
+        table.cell(0, index).text = value
+    for index, value in enumerate(("HTTPS", "<host>/api/v1", "POST", "application/json")):
+        table.cell(1, index).text = value
+    document.add_paragraph("TAC", style="Heading 1")
+    document.add_paragraph("TAC限制应用访问", style="Heading 2")
+    document.add_paragraph("正文内容")
+    document.save(str(source))
+
+    output = tmp_path / "prefix.out.docx"
+    report = _convert(source, output)
+
+    assert report["status"] in {"completed", "completed_with_warnings"}, report.get("diagnostics")
+    delivered = Document(str(output))
+    texts = _paragraph_texts(delivered)
+
+    assert "策略下发" in texts, texts
+    assert "请求参数说明" in texts, texts
+    assert len(delivered.tables) == 1, "the body table must not be excluded"
+
+
+# ---------------------------------------------------------------------------
+# D8: an explicit heading style outweighs the API-label protection
+# ---------------------------------------------------------------------------
+
+def test_api_label_with_a_heading_style_keeps_its_heading_role(tmp_path: Path) -> None:
+    """``接口说明`` declared as ``Heading 3`` stays a heading.
+
+    The defect this pins: the API-label protection matched the section titles by
+    exact text and forced ``role=body``, so interface documents lost the ``接口说明``
+    and ``请求参数`` entries from both the body and the table of contents.
+    """
+
+    source = tmp_path / "api-label.docx"
+    document = _empty_template_document()
+    document.add_paragraph("TAC", style="Heading 1")
+    document.add_paragraph("TAC限制应用访问", style="Heading 2")
+    document.add_paragraph("接口说明", style="Heading 3")
+    document.add_paragraph("外部系统可调用该接口。")
+    document.add_paragraph("请求参数", style="Heading 3")
+    document.add_paragraph("参数见下表。")
+    document.save(str(source))
+
+    output = tmp_path / "api-label.out.docx"
+    report = _convert(source, output)
+
+    assert report["status"] in {"completed", "completed_with_warnings"}, report.get("diagnostics")
+    styles = {
+        paragraph.text.strip(): paragraph.style.name
+        for paragraph in _body_paragraphs(Document(str(output)))
+    }
+
+    assert styles.get("接口说明") == "Heading 3", styles
+    assert styles.get("请求参数") == "Heading 3", styles
+
+
+def test_api_label_without_a_heading_style_stays_body(tmp_path: Path) -> None:
+    """A plain ``请求参数`` label is still not promoted to a heading.
+
+    A precedence guard for the ruling above: only an explicit heading style wins,
+    so the protection keeps governing an unstyled label.
+    """
+
+    source = tmp_path / "api-plain.docx"
+    document = _empty_template_document()
+    document.add_paragraph("TAC", style="Heading 1")
+    document.add_paragraph("请求参数", style="Normal")
+    document.add_paragraph("参数见下表。")
+    document.save(str(source))
+
+    output = tmp_path / "api-plain.out.docx"
+    report = _convert(source, output)
+
+    assert report["status"] in {"completed", "completed_with_warnings"}, report.get("diagnostics")
+    styles = {
+        paragraph.text.strip(): paragraph.style.name
+        for paragraph in _body_paragraphs(Document(str(output)))
+    }
+
+    assert styles.get("请求参数") == "Normal", styles
+
+
+# ---------------------------------------------------------------------------
+# D9: every code-sample paragraph carries the left alignment
+# ---------------------------------------------------------------------------
+
+def test_code_sample_cell_paragraphs_are_all_left_aligned(tmp_path: Path) -> None:
+    """The whole code block is left aligned, not only its first line.
+
+    The defect this pins: the table contract ran before the cell content was
+    rendered, so the policy alignment reached one placeholder paragraph per cell.
+    Every later line inherited ``表正文``'s centered alignment, which is invisible
+    for a data table but turns a request example into a centered code block.
+    """
+
+    source = _code_sample_source(tmp_path)
+    output = tmp_path / "code.out.docx"
+    report = _convert(source, output)
+
+    assert report["status"] in {"completed", "completed_with_warnings"}, report.get("diagnostics")
+    delivered = Document(str(output))
+    code_table = next(
+        table for table in delivered.tables
+        if len(table.rows) == 1 and len(table.rows[0].cells) == 1
+    )
+    cell = code_table.rows[0].cells[0]
+
+    assert len(cell.paragraphs) == 5
+    assert [paragraph.alignment for paragraph in cell.paragraphs] == [0, 0, 0, 0, 0]
+
+
+# ---------------------------------------------------------------------------
+# D10: a code-sample table keeps the source fill
+# ---------------------------------------------------------------------------
+
+def test_code_sample_table_keeps_the_source_fill(tmp_path: Path) -> None:
+    """The grey box the source uses to mark code survives the conversion."""
+
+    source = _code_sample_source(tmp_path, fill="D8D8D8")
+    output = tmp_path / "code-fill.out.docx"
+    report = _convert(source, output)
+
+    assert report["status"] in {"completed", "completed_with_warnings"}, report.get("diagnostics")
+    delivered = Document(str(output))
+    code_table = next(
+        table for table in delivered.tables
+        if len(table.rows) == 1 and len(table.rows[0].cells) == 1
+    )
+    cell = code_table.rows[0].cells[0]
+    shading = cell._tc.get_or_add_tcPr().find(qn("w:shd"))
+
+    assert shading is not None, "the code sample keeps the fill that marks it as code"
+    assert shading.get(qn("w:fill")) == "D8D8D8"
+
+
+def test_a_genuine_cover_is_still_detected(tmp_path: Path) -> None:
+    """The cover guard must not cost a real cover page.
+
+    The guard reads only in the no-page-break fallback, so a page break alone
+    still detects a cover, and a cover whose prefix carries one subtitle or a
+    single-field metadata table is still cover-like.  A page break is not needed
+    for the third shape either: what separates it from the defect above is that
+    the prefix holds no section heading of the body and no content table.
+    """
+
+    def build(name: str, *, subtitle: bool, page_break: bool, labelled_fields: int) -> Path:
+        from docx.enum.text import WD_BREAK
+
+        source = tmp_path / f"{name}.docx"
+        document = _empty_template_document()
+        document.add_paragraph("系统建设方案", style="文档标题")
+        if subtitle:
+            document.add_paragraph("技术方案分册", style="Heading 2")
+        table = document.add_table(rows=labelled_fields, cols=2, style="Table Grid")
+        for index, label in enumerate(("版本", "日期", "密级")[:labelled_fields]):
+            table.cell(index, 0).text = label
+            table.cell(index, 1).text = "V1.0"
+        if page_break:
+            document.add_paragraph().add_run().add_break(WD_BREAK.PAGE)
+        document.add_paragraph("概述", style="Heading 1")
+        document.add_paragraph("正文内容。")
+        document.save(str(source))
+        return source
+
+    cases = {
+        # (subtitle, page break, labelled metadata fields, excluded, body start)
+        "cover-page-break": (False, True, 3, {0, 1, 2}, 3),
+        "cover-subtitle": (True, False, 2, {0, 1, 2}, 3),
+        "cover-single-field": (False, False, 1, {0, 1}, 2),
+    }
+
+    for name, (subtitle, page_break, fields, excluded, body_start) in cases.items():
+        source = build("cover-" + name, subtitle=subtitle, page_break=page_break, labelled_fields=fields)
+        resolution = resolve_source_regions(source, parse(source))
+        context = resolution["front_matter_context"] or {}
+
+        assert context.get("status") == "cover_detected", (name, context)
+        # The title paragraph, the subtitle and the metadata table stay out of the
+        # body; the document starts at its first structural heading.
+        assert set(resolution["excluded_source_positions"]) == excluded, (name, resolution)
+        assert context.get("body_start_source_position") == body_start, (name, context)
+
+
+def test_a_content_table_in_the_prefix_keeps_the_body(tmp_path: Path) -> None:
+    """An unlabelled table ahead of the first heading is body, not cover metadata.
+
+    The deliberate boundary of the guard above: a small table that names no
+    metadata field is document content, which is what the protocol/URL table of an
+    interface document is.  Treating it as cover metadata is the defect that cost
+    the two IAM sections.
+    """
+
+    source = tmp_path / "prefix-table.docx"
+    document = _empty_template_document()
+    document.add_paragraph("系统建设方案", style="文档标题")
+    table = document.add_table(rows=2, cols=4, style="Table Grid")
+    for index, value in enumerate(("协议", "URL", "方法", "参数类型")):
+        table.cell(0, index).text = value
+    for index, value in enumerate(("HTTPS", "<host>/api/v1", "POST", "application/json")):
+        table.cell(1, index).text = value
+    document.add_paragraph("TAC", style="Heading 1")
+    document.add_paragraph("正文内容。")
+    document.save(str(source))
+
+    output = tmp_path / "prefix-table.out.docx"
+    report = _convert(source, output)
+
+    assert report["status"] in {"completed", "completed_with_warnings"}, report.get("diagnostics")
+    resolution = resolve_source_regions(source, parse(source))
+    context = resolution["front_matter_context"] or {}
+    assert context.get("status") != "cover_detected", context
+    # Only the title paragraph leaves the body; the content table stays.
+    assert set(resolution["excluded_source_positions"]) == {0}, resolution["excluded_source_positions"]
+    delivered = Document(str(output))
+    assert len(delivered.tables) == 1, "the prefix table must not be excluded"
+    assert any(
+        "协议" in cell.text for row in delivered.tables[0].rows for cell in row.cells
+    )
+
+
+def test_data_table_does_not_keep_a_source_fill(tmp_path: Path) -> None:
+    """A data table takes the template look, so a source fill is not carried over."""
+
+    source = tmp_path / "data-fill.docx"
+    document = _empty_template_document()
+    document.add_paragraph("演示文档", style="Heading 1")
+    table = document.add_table(rows=2, cols=2, style="Table Grid")
+    table.cell(0, 0).text = "参数"
+    table.cell(0, 1).text = "说明"
+    table.cell(1, 0).text = "标识"
+    table.cell(1, 1).text = "资源标识"
+    _set_fill(table.cell(0, 0)._tc.get_or_add_tcPr(), "D8D8D8")
+    document.save(str(source))
+
+    output = tmp_path / "data-fill.out.docx"
+    report = _convert(source, output)
+
+    assert report["status"] in {"completed", "completed_with_warnings"}, report.get("diagnostics")
+    delivered = Document(str(output))
+    filled = [
+        cell for table in delivered.tables
+        for row in table.rows for cell in row.cells
+        if cell._tc.get_or_add_tcPr().find(qn("w:shd")) is not None
+    ]
+
+    assert filled == []

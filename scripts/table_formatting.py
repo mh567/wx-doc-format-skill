@@ -151,7 +151,7 @@ def _normalize_row(row, policy: TableFormatPolicy, path: str) -> list[dict]:
     return corrections
 
 
-def _normalize_cell(cell, policy: TableFormatPolicy, path: str) -> list[dict]:
+def _normalize_cell(cell, policy: TableFormatPolicy, path: str, *, strip_direct_format: bool) -> list[dict]:
     corrections: list[dict] = []
     tc_pr = cell._tc.get_or_add_tcPr()
     tc_mar = tc_pr.find(qn("w:tcMar"))
@@ -165,11 +165,19 @@ def _normalize_cell(cell, policy: TableFormatPolicy, path: str) -> list[dict]:
 
     for paragraph_index, paragraph in enumerate(cell.paragraphs, 1):
         paragraph_path = f"{path}.p{paragraph_index}"
-        corrections.extend(_normalize_paragraph(paragraph, policy, paragraph_path))
+        corrections.extend(_normalize_paragraph(
+            paragraph, policy, paragraph_path, strip_direct_format=strip_direct_format,
+        ))
     return corrections
 
 
-def _normalize_paragraph(paragraph, policy: TableFormatPolicy, path: str) -> list[dict]:
+def _normalize_paragraph(
+    paragraph,
+    policy: TableFormatPolicy,
+    path: str,
+    *,
+    strip_direct_format: bool,
+) -> list[dict]:
     corrections: list[dict] = []
     current_style = paragraph.style.name if paragraph.style is not None else ""
     if current_style != policy.paragraph_style:
@@ -178,10 +186,11 @@ def _normalize_paragraph(paragraph, policy: TableFormatPolicy, path: str) -> lis
 
     p_pr = paragraph._p.get_or_add_pPr()
     removed = []
-    for child in list(p_pr):
-        if child.tag not in PARAGRAPH_ALLOWED_TAGS:
-            removed.append(child.tag.rsplit("}", 1)[-1])
-            p_pr.remove(child)
+    if strip_direct_format:
+        for child in list(p_pr):
+            if child.tag not in PARAGRAPH_ALLOWED_TAGS:
+                removed.append(child.tag.rsplit("}", 1)[-1])
+                p_pr.remove(child)
     if removed:
         corrections.append({
             "type": "table_paragraph_direct_format_removed",
@@ -194,14 +203,15 @@ def _normalize_paragraph(paragraph, policy: TableFormatPolicy, path: str) -> lis
         corrections.append({"type": "table_paragraph_alignment_normalized", "paragraph": path})
 
     run_changes = 0
-    for run_element in paragraph._p.iter(qn("w:r")):
-        r_pr = run_element.find(qn("w:rPr"))
-        if r_pr is None:
-            continue
-        for child in list(r_pr):
-            if child.tag not in RUN_ALLOWED_TAGS:
-                r_pr.remove(child)
-                run_changes += 1
+    if strip_direct_format:
+        for run_element in paragraph._p.iter(qn("w:r")):
+            r_pr = run_element.find(qn("w:rPr"))
+            if r_pr is None:
+                continue
+            for child in list(r_pr):
+                if child.tag not in RUN_ALLOWED_TAGS:
+                    r_pr.remove(child)
+                    run_changes += 1
     if run_changes:
         corrections.append({
             "type": "table_run_direct_format_removed",
@@ -219,7 +229,20 @@ def normalize_table(
     *,
     role: str = "data",
     path: str = "1",
+    strip_direct_format: bool = True,
 ) -> list[dict]:
+    """Apply the table format contract to one table.
+
+    The contract does two things: it writes the cell paragraph style and the
+    alignment the table's role asks for, and it strips the direct formatting that
+    is neither.  ``strip_direct_format`` gates the second half.  The renderer
+    turns it off because it owns the content it has just written: a list item
+    inside a cell carries the numbering the renderer wrote and a source table
+    header carries its own marks, so stripping them would undo the renderer's own
+    work.  The style and the alignment still reach every rendered paragraph, which
+    is what the table's look is made of.
+    """
+
     if table_role(role) == "layout":
         return []
     policy = build_table_policy(
@@ -238,7 +261,9 @@ def normalize_table(
                 continue
             seen_cells.add(cell_key)
             cell_path = f"{path}.r{row_index}.c{cell_index}"
-            corrections.extend(_normalize_cell(cell, policy, cell_path))
+            corrections.extend(_normalize_cell(
+                cell, policy, cell_path, strip_direct_format=strip_direct_format,
+            ))
             for nested_index, nested in enumerate(cell.tables, 1):
                 corrections.extend(normalize_table(
                     nested,
@@ -247,6 +272,7 @@ def normalize_table(
                     row_height_rule,
                     role=role,
                     path=f"{cell_path}.t{nested_index}",
+                    strip_direct_format=strip_direct_format,
                 ))
     return corrections
 

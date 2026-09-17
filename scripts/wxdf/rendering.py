@@ -15,7 +15,7 @@ from docx.oxml.ns import qn
 from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from lxml import etree
 
-from table_formatting import normalize_table
+from table_formatting import normalize_table, table_role
 from text_utils import CAPTION_SEQUENCE_FALLBACK, caption_parts
 
 from .render_plan import build_render_plan
@@ -569,6 +569,68 @@ def _apply_layout_table_contract(table: Any, layout: Any) -> None:
             tr_pr.append(height)
 
 
+_TC_PR_AFTER_SHADING = (
+    "w:noWrap", "w:tcMar", "w:textDirection", "w:tcFitText", "w:vAlign", "w:hideMark",
+)
+_TBL_PR_AFTER_SHADING = ("w:tblLayout", "w:tblCellMar", "w:tblLook")
+
+
+def _write_shading(properties: Any, fill: str, successors: tuple[str, ...]) -> None:
+    """Write a solid-fill ``w:shd`` at the place the OOXML sequence allows.
+
+    ``w:shd`` sits between the borders and the cell margins in both ``w:tcPr`` and
+    ``w:tblPr``, so it is inserted before the first successor the element already
+    has rather than appended.
+    """
+
+    existing = properties.find(qn("w:shd"))
+    if existing is not None:
+        properties.remove(existing)
+    shading = OxmlElement("w:shd")
+    shading.set(qn("w:val"), "clear")
+    shading.set(qn("w:color"), "auto")
+    shading.set(qn("w:fill"), fill)
+    for tag in successors:
+        anchor = properties.find(qn(tag))
+        if anchor is not None:
+            anchor.addprevious(shading)
+            return
+    properties.append(shading)
+
+
+def _apply_source_table_fills(table: Any, table_type: str, layout: Any) -> None:
+    """Restore the source fill a table carries when the template does not own its look.
+
+    A grey fill is how a source marks a code sample or a callout, and the captured
+    fills are part of the table's layout evidence.  Only a data table loses its
+    source fill, because the template owns how a data table looks; the role
+    predicate is the one the rest of the table contract reads.
+    """
+
+    if table_role(table_type) == "data" or not isinstance(layout, Mapping):
+        return
+    fills = layout.get("fills")
+    if not isinstance(fills, Mapping):
+        return
+    table_fill = fills.get("table")
+    if isinstance(table_fill, str) and table_fill:
+        _write_shading(table._tbl.tblPr, table_fill, _TBL_PR_AFTER_SHADING)
+    cell_fills = fills.get("cells")
+    if not isinstance(cell_fills, list):
+        return
+    index = 0
+    seen_cells: set[Any] = set()
+    for row in table.rows:
+        for cell in row.cells:
+            if cell._tc in seen_cells:
+                continue
+            seen_cells.add(cell._tc)
+            fill = cell_fills[index] if index < len(cell_fills) else None
+            if isinstance(fill, str) and fill:
+                _write_shading(cell._tc.get_or_add_tcPr(), fill, _TC_PR_AFTER_SHADING)
+            index += 1
+
+
 def _apply_layout_paragraph_format(paragraph: Any, contract: Any) -> None:
     """Restore only the approved direct paragraph properties for layout cells."""
 
@@ -818,15 +880,6 @@ def render(
         if parent is not None:
             initial_cell_paragraphs.add(parent._tc)
         table_body_style = styles.get("table_body")
-        if table_body_style and table_body_style in doc.styles:
-            normalize_table(
-                table,
-                {"resolved_styles": dict(styles)},
-                table_row_height_cm,
-                table_row_height_rule,
-                role=table_type,
-                path=str(len(doc.tables)),
-            )
         occupied: set[tuple[int, int]] = set()
         for row_index, row_id in enumerate(row_ids):
             column_cursor = 0
@@ -851,6 +904,27 @@ def render(
                         occupied.add((occupied_row, occupied_col))
                 render_children(cell_id, parent=cell)
                 column_cursor += col_span
+        _apply_source_table_fills(table, table_type, block.get("layout"))
+        if table_body_style and table_body_style in doc.styles:
+            # The contract runs once the cells hold their content.  The paragraph
+            # half of it (style and alignment) has to reach every rendered line,
+            # and a cell only had one placeholder paragraph when the table was
+            # created: running it there left every later line to inherit the
+            # table body style's own alignment.  That is invisible for a data
+            # table, whose policy alignment is the style's, and it centered a
+            # code sample whose policy is left.  The renderer owns the content it
+            # has just written, so the contract does not strip direct formatting
+            # here: that would drop a list item's numbering and a source header's
+            # marks.
+            normalize_table(
+                table,
+                {"resolved_styles": dict(styles)},
+                table_row_height_cm,
+                table_row_height_rule,
+                role=table_type,
+                path=str(len(doc.tables)),
+                strip_direct_format=False,
+            )
         render_map[node_id] = {"kind": "table", "table": table_index, "rows": row_count, "cols": column_count}
 
     def render_block(block_id: str, *, parent: Any | None = None) -> None:

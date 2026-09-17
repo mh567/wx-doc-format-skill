@@ -200,7 +200,11 @@ def test_l11_docx_protection_uses_the_same_public_semantics(tmp_path: Path) -> N
         for node_id, block in source_ast["document"]["blocks"].items()
         if block.get("inline_content")
     }
-    assert text_by_block["API 用户详情"]["role"] == "body"
+    # A heading the source styles is a heading whatever its text says (ruling of
+    # 2026-09-17, decision 4).  The label reason still rides on the role
+    # candidate as evidence, and a protection with a role of its own keeps its
+    # precedence, so the numbered note below stays a note.
+    assert text_by_block["API 用户详情"]["role"] == "heading"
     assert text_by_block["注2 无冒号说明"]["role"] == "numbered_note"
 
 
@@ -316,7 +320,15 @@ GET /users
     assert normalized["semantic_digest"]
 
 
-def test_l11_protected_heading_like_labels_keep_their_roles_in_native_ast(tmp_path: Path) -> None:
+def test_l11_heading_like_labels_follow_the_style_the_source_declares(tmp_path: Path) -> None:
+    """An explicitly styled heading keeps its role; a protected role keeps its own.
+
+    The ruling of 2026-09-17 (decision 4) puts ``api_label`` in the reasons an
+    explicit heading style outweighs, so ``# API 用户查询`` is a heading again.  A
+    protection that names a role of its own is unaffected, which is what keeps the
+    numbered note a note.
+    """
+
     markdown = tmp_path / "issue4-heading-like.md"
     markdown.write_text("# 文档\n\n# API 用户查询\n\n# 注2 无冒号说明\n", encoding="utf-8")
     report, source_ast, _, output = _run_native(markdown, tmp_path, "l11-heading-like-md")
@@ -327,7 +339,7 @@ def test_l11_protected_heading_like_labels_keep_their_roles_in_native_ast(tmp_pa
         for node_id, block in source_ast["document"]["blocks"].items()
         if block.get("inline_content")
     }
-    assert text_by_block["API 用户查询"]["role"] == "body"
+    assert text_by_block["API 用户查询"]["role"] == "heading"
     assert text_by_block["注2 无冒号说明"]["role"] == "numbered_note"
     operations = report["model_audit"]["render_plan"]["operations"]
     operation_by_text = {
@@ -335,5 +347,5 @@ def test_l11_protected_heading_like_labels_keep_their_roles_in_native_ast(tmp_pa
         for operation in operations
         if operation["kind"] == "paragraph"
     }
-    assert operation_by_text["API 用户查询"]["role"] == "body"
+    assert operation_by_text["API 用户查询"]["role"] == "heading"
     assert operation_by_text["注2 无冒号说明"]["role"] == "numbered_note"

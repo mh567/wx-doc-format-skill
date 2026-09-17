@@ -137,11 +137,52 @@ def _is_metadata_text(text: str) -> bool:
 
 
 def _is_metadata_table(record: dict[str, Any]) -> bool:
+    """Return whether a table is cover metadata rather than document content.
+
+    A cover's metadata table names its own fields (``版本``, ``文件编号``,
+    ``日期``, ...) in short cells.  Counting any small table as metadata let an
+    ordinary content table reach the cover threshold: the protocol/URL table of an
+    interface document holds eight short cells and qualified on its size alone,
+    which was half of the score a cover needs.  The labels are what makes a table
+    cover metadata, so they are what the predicate asks for.  The size cap keeps a
+    large content table that happens to hold one such word out of the cover.
+    """
+
     if record.get("kind") != "table":
         return False
-    items = record.get("items", [])
-    matches = sum(bool(_METADATA_RE.match(item.strip())) for item in items)
-    return matches >= 1 or (len(items) >= 4 and all(len(item) <= 40 for item in items))
+    items = [item.strip() for item in record.get("items", []) if item.strip()]
+    if not items or len(items) > 12:
+        return False
+    return any(
+        bool(_METADATA_RE.match(item) or _DATE_RE.match(item))
+        for item in items
+    )
+
+
+def _prefix_is_document_body(records: list[dict[str, Any]]) -> bool:
+    """Return whether a prefix holds document content rather than a cover.
+
+    ``_cover_score`` is read without a page break in the fallback scan, which is
+    the weakest evidence a cover can rest on, so the prefix is also asked to look
+    like a cover: one title, at most one subtitle, and metadata tables.  A prefix
+    that carries several section headings, or a table that is not cover metadata,
+    holds the document's own content.  Without this guard a source whose first
+    ``Heading 1`` sits late (an interface document that opens with level-2
+    sections) lost every block before that heading.  A page break alone stays
+    sufficient evidence, so the guard is read only in the fallback scan: a genuine
+    cover page often carries a heading of its own, such as a revision record.
+    """
+
+    section_headings = [
+        record for record in records
+        if record.get("is_heading_style") and not record.get("is_title_style")
+    ]
+    if len(section_headings) > 1:
+        return True
+    return any(
+        record.get("kind") == "table" and not _is_metadata_table(record)
+        for record in records
+    )
 
 
 def _title_score(record: dict[str, Any]) -> tuple[float, list[str]]:
@@ -270,10 +311,11 @@ def analyze_front_matter(
                 cover_evidence = evidence
         if cover_end is None and structural_start is not None and structural_start > 0:
             prefix = [record for record in records if record["position"] < structural_start]
-            score, evidence = _cover_score(prefix)
-            if score >= 4:
-                cover_end = structural_start - 1
-                cover_evidence = evidence + ["before_first_structural_heading"]
+            if not _prefix_is_document_body(prefix):
+                score, evidence = _cover_score(prefix)
+                if score >= 4:
+                    cover_end = structural_start - 1
+                    cover_evidence = evidence + ["before_first_structural_heading"]
 
     if toc_start is not None:
         cover_evidence.append("source_toc_boundary")
