@@ -467,8 +467,24 @@ def _run_review_mode(args: argparse.Namespace, parser: argparse.ArgumentParser) 
     raise SystemExit(0)
 
 
+def _ensure_utf8_console() -> None:
+    """Standalone runtime starts without a locale and defaults stdout to ASCII."""
+    for stream in (sys.stdout, sys.stderr):
+        encoding = (getattr(stream, "encoding", "") or "").replace("-", "").lower()
+        if encoding == "utf8":
+            continue
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            continue
+
+
 def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) -> None:
     global SKILL_VERSION
+    _ensure_utf8_console()
     cli_arguments = list(sys.argv[1:] if argv is None else argv)
     explicit_options = {
         argument.split("=", 1)[0]

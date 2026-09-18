@@ -21,6 +21,7 @@ formatting is then compared with that role's expectation.  These tests pin:
 """
 from __future__ import annotations
 
+import io
 import sys
 from pathlib import Path
 
@@ -496,6 +497,35 @@ def test_review_refuses_an_input_it_cannot_audit(tmp_path: Path) -> None:
     with pytest.raises(SystemExit) as failed:
         main(["--review", "--input", str(broken), "--template", str(TEMPLATE)])
     assert failed.value.code == 1
+
+
+def test_review_summary_survives_a_console_that_is_not_utf8(tmp_path: Path) -> None:
+    """The standalone runtime starts without a locale and defaults stdout to ASCII.
+
+    Printing the summary used to raise UnicodeEncodeError there, and the release
+    boundary turned that into an unexpected exit after the reports were written.
+    """
+
+    from main import main
+
+    source = tmp_path / "body.docx"
+    document = Document()
+    document.add_paragraph("一段正文。")
+    document.save(source)
+
+    buffer = io.BytesIO()
+    stream = io.TextIOWrapper(buffer, encoding="ascii")
+    original = sys.stdout
+    sys.stdout = stream
+    try:
+        with pytest.raises(SystemExit) as exit_code:
+            main(["--review", "--input", str(source), "--template", str(TEMPLATE)])
+        stream.flush()
+    finally:
+        sys.stdout = original
+
+    assert exit_code.value.code == 0
+    assert "Review complete" in buffer.getvalue().decode("utf-8")
 
 
 def test_a_template_requirement_is_not_softened_by_any_later_step(tmp_path: Path) -> None:
