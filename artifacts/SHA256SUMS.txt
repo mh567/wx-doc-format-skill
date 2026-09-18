@@ -1,2 +1,2 @@
-6184f86ac39a85df69e4220a7e71eb90f2550f851813f03a4deb5b4b49dfe9f1  wx-doc-format-skill-0.16.1-kylin-v10-arm64.tar.gz
-e3d0896b9029ca2a87c68591c5824deceffeb18640fee3f1d329bc5021f53864  wx-doc-format-skill-0.16.1-macos-arm64.tar.gz
+1a02fe0006db2120f45a6d53abf8f62271e25280d8f8f86f738daa38a3d0f208  wx-doc-format-skill-0.17.0-kylin-v10-arm64.tar.gz
+7bea8e4568230477573236a117e574734d237f4353fce87c0a696571bdabe3c2  wx-doc-format-skill-0.17.0-macos-arm64.tar.gz
