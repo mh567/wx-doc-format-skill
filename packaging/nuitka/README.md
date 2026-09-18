@@ -8,7 +8,7 @@
 
 直接依赖版本来自 `requirements-runtime.txt` 和 `requirements-build.txt`。每个平台另存 `dependency-versions.txt` 记录实际解析的完整环境。全量测试使用构建解释器，结果保存在对应 `build/nuitka/local-*/tests.log`。只纳入 `input/test_baseline.md` 和 `input/benchmark_report.md` 两个 Markdown 基线；真实 DOCX 和协议输入由验收程序在临时证据目录中生成。
 
-公开版本 `0.12.19` 与 `0.16.0` 已有标签，本轮候选使用 `0.16.1`。上一轮 `0.13.0` 已从候选 `85c73b4` 构建但未发布，不再复用；`0.14.0` 至 `0.15.2` 均未构建，其源码已由本轮候选取代。已发布版本的标签移动及资产替换仍需单独授权。若真实构建暴露代码问题，修复后创建新 C，并重建两个平台。构建完成后的证据提交仅允许修改文档，不与候选源码身份混用。
+公开版本 `0.12.19`、`0.16.0`、`0.16.1`、`0.17.0` 和 `0.17.1` 已有标签。`0.13.0` 已从候选 `85c73b4` 构建但未发布，不再复用；`0.14.0` 至 `0.15.2` 均未构建。`0.17.0` 的审查入口在发布包内不可用（编译运行时的 stdout 无 locale 时为 ASCII，打印中文摘要抛异常），保留其标签与资产但不要使用，改用 `0.17.1`。已发布版本的标签移动及资产替换仍需单独授权。若真实构建暴露代码问题，修复后创建新 C，并重建两个平台。构建完成后的证据提交仅允许修改文档，不与候选源码身份混用。
 
 ## macOS ARM64
 
@@ -90,10 +90,12 @@ build/nuitka/local-macos-arm64/venv/bin/python3 packaging/nuitka/assemble_public
 
 ```bash
 build/nuitka/local-macos-arm64/venv/bin/python3 packaging/nuitka/smoke_distribution.py \
-  dist/local/wx-doc-format-skill-0.16.1-macos-arm64 \
+  dist/local/wx-doc-format-skill-0.17.1-macos-arm64 \
   --public-skill dist/public-skill \
   --evidence-dir /tmp/wxdf-t09-public-acceptance
 ```
+
+包目录、`--public-skill` 目录和证据目录都必须位于可打印 ASCII 路径下：`run.sh` 拒绝非 ASCII 安装路径，而且包路径含非 ASCII 字符时编译运行时会在解释器初始化阶段中止，验收停在版本探针上。仓库路径含非 ASCII 字符时，先把包、同目录的 `.tar.gz` 和公开树复制到 ASCII 临时目录再运行，归档必须与包目录同级（在线验收的临时服务只应答 `/<归档文件名>`）。
 
 证据目录必须为新的 ASCII 路径。上述在线测试通过临时 `127.0.0.1` HTTP 服务验证薄 Skill 空缓存下载、归档校验、安装和缓存复用，结束后关闭监听。Linux 平台使用对应候选目录在 ARM64 容器内执行。该本地验证不替代远程 GitHub 下载、真实用户环境或 Kylin 真机验收。
 
