@@ -1,8 +1,8 @@
 ---
 name: wx-doc-format
-description: 将 Markdown 或 DOCX 转换为模板化技术文档 DOCX。当用户要求技术文档格式、WX 格式转换，或要求按模板整理标题、目录、列表、表格、题注和附录时使用。
+description: 将 Markdown 或 DOCX 转换为模板化技术文档 DOCX，或审查文档是否符合模板要求并给出评分与整改报告。当用户要求技术文档格式、WX 格式转换、按模板整理标题、目录、列表、表格、题注与附录，或要求格式审查、格式检查、格式评分与整改建议时使用。
 metadata:
-  short-description: 转换为模板化技术文档 DOCX
+  short-description: 技术文档格式转换与审查
 ---
 
 # WX 文档格式

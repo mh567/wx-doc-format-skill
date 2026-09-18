@@ -25,21 +25,31 @@ scripts/install.sh /path/to/agent/skills/wx-doc-format
 
 ## 使用
 
-上传 Markdown 或 DOCX 文档，在对话中说“技术文档格式”、“转换为技术文档格式”、“按技术文档格式排版”、“整理成技术文档”、“wx文档格式”或“WX 格式转换”。例如：
+上传文档，并在对话里说明要做哪一种。Agent 未确定时请用户四选一，用户已说明时直接执行。
+
+| 选项 | 触发说法 | 产物 |
+|------|----------|------|
+| 普通格式转换 | 技术文档格式、转换为技术文档格式、按技术文档格式排版、整理成技术文档、wx文档格式、WX 格式转换 | 模板化 DOCX 与审计报告 |
+| AI 增强格式转换 | 以上任一说法，另加“LLM 增强模式” | 同上，转换前用 LLM 复核目录区域、列表识别与题注 |
+| 普通格式审查 | 审查这个文档的格式、检查文档是否符合模板要求、格式审查、文档格式检查、给这个文档的格式打分、生成格式整改报告 | 百分制评分与整改报告，完全离线 |
+| AI 增强格式审查 | 以上任一说法，另加“AI 增强” | 同上，另加引用文件排序、术语与缩略语、列项用法的语义检查 |
+
+转换接受 Markdown 或 DOCX，审查只接受 DOCX。示例：
 
 > 技术文档格式，请处理这个附件。
 
-> 请将这个 DOCX 转换为技术文档格式。
-
 > wx文档格式，请把附件转换成标准格式。
 
-Agent 会请用户选择普通模式或 LLM 增强模式。用户已指定模式时会直接执行。
+> 审查这个 DOCX 是否符合模板要求，给出评分和整改建议。
+
+普通模式与普通审查不需要任何模型；两个 AI 模式需要 Agent 提供模型响应，离线文件协议见 `SKILL.md`。
 
 以下命令仅用于手工检查：
 
 ```bash
 scripts/run.sh --version
 scripts/run.sh --input source.docx --output output.docx --template assets/wx_template.docx
+scripts/run.sh --review --input source.docx --template assets/wx_template.docx --report-md review.md
 ```
 
 详细模式、文件协议、公开报告摘要和验证要求见 `SKILL.md`。
