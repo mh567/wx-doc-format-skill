@@ -6,6 +6,7 @@ import json
 import re
 import sys
 from pathlib import Path
+from zipfile import BadZipFile
 
 from reporting import write_markdown_report
 from wxdf.capabilities import normalize_mode
@@ -362,6 +363,110 @@ def _native_checkpoint_configuration(args, *, output_path: Path) -> dict:
     }
 
 
+def _run_review_mode(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    from review_report import write_review_report, write_review_report_html
+    from wxdf.input_reviewer import plan_review_requests, review_input_document
+    from wxdf.review_enhancement import (
+        ReviewEnhancement,
+        ReviewProtocolError,
+        load_protocol,
+        verify_protocol_sources,
+        write_protocol,
+    )
+
+    if args.output:
+        parser.error("--review does not use --output; use --report / --report-md / --report-html")
+    if args.resume and args.generate_requests:
+        parser.error("--generate-requests and --resume are mutually exclusive")
+
+    mode = normalize_mode(args.llm_enhance)
+    enhancement = None
+    if args.resume:
+        # The run file records the input and template the requests were built
+        # from, so a resume can restore them and prove the document has not
+        # changed under the responses that answer it.
+        try:
+            run, responses = load_protocol(args.resume)
+            args.input = args.input or Path(str(run["input"]["path"]))
+            args.template = args.template or Path(str(run["template"]["path"]))
+            verify_protocol_sources(run, args.input, args.template)
+        except ReviewProtocolError as exc:
+            print(str(exc), file=sys.stderr)
+            raise SystemExit(1) from None
+        except (KeyError, TypeError) as exc:
+            print(f"REVIEW_RUN_INVALID: {exc}", file=sys.stderr)
+            raise SystemExit(1) from None
+        mode = str(run.get("mode") or mode)
+        enhancement = ReviewEnhancement(mode=mode, responses=tuple(responses))
+
+    if not args.input:
+        parser.error("--review requires --input")
+    if not args.template:
+        parser.error("--review requires --template")
+    if args.input.suffix.lower() != ".docx":
+        print(f"REVIEW_INPUT_UNSUPPORTED: 审查只接受 DOCX 输入：{args.input}", file=sys.stderr)
+        raise SystemExit(2)
+
+    if mode != "off" and not (args.llm_command or args.generate_requests or args.resume):
+        parser.error("AI review requires --llm-command, --generate-requests or --resume")
+
+    if args.generate_requests is not None:
+        requests = plan_review_requests(args.input, args.template, mode)
+        run_path = write_protocol(
+            args.generate_requests,
+            requests,
+            input_path=args.input,
+            template_path=args.template,
+            mode=mode,
+        )
+        print(
+            f"Wrote {len(requests)} review request(s) to {run_path.parent}; "
+            f"fill review_responses.jsonl, then resume {run_path}"
+        )
+        raise SystemExit(0)
+
+    if enhancement is None and mode != "off":
+        local_command = _llm_call_from_command(args.llm_command or "")
+        if local_command is None:
+            parser.error("AI review requires --llm-command")
+        enhancement = ReviewEnhancement(mode=mode, call=local_command)
+
+    # A review that cannot read its input is a caller error, not a crash: the
+    # release boundary turns it into a stable code instead of an unexpected exit.
+    try:
+        result = review_input_document(args.input, args.template, enhancement=enhancement)
+    except (OSError, ValueError, KeyError, BadZipFile) as exc:
+        print(f"REVIEW_FAILED: {exc}", file=sys.stderr)
+        raise SystemExit(1) from None
+    if args.report:
+        args.report.parent.mkdir(parents=True, exist_ok=True)
+        args.report.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    if args.report_md:
+        write_review_report(result, args.report_md)
+    if args.report_html:
+        write_review_report_html(result, args.report_html)
+    score = result.get("score", 0)
+    grade = result.get("grade", "unknown")
+    print(f"Review complete: {score}/100 ({grade})")
+    summary = result.get("summary", {})
+    if summary.get("total_issues"):
+        print(
+            f"Found {summary['total_issues']} issues "
+            f"(critical {summary.get('critical', 0)}, high {summary.get('high', 0)}, "
+            f"medium {summary.get('medium', 0)}, low {summary.get('low', 0)})"
+        )
+    else:
+        print("No issues found")
+    ai_review = result.get("ai_review") or {}
+    if ai_review.get("status") not in {None, "not_requested"}:
+        detail = "、".join(
+            f"{name}={info.get('status')}"
+            for name, info in sorted((ai_review.get("capabilities") or {}).items())
+        )
+        print(f"AI review: {ai_review.get('status')} ({detail})")
+    raise SystemExit(0)
+
+
 def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) -> None:
     global SKILL_VERSION
     cli_arguments = list(sys.argv[1:] if argv is None else argv)
@@ -378,6 +483,7 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
     parser.add_argument("--strict-normalize", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--report", type=Path, default=None)
     parser.add_argument("--report-md", type=Path, default=None)
+    parser.add_argument("--report-html", type=Path, default=None, help="HTML review report path (--review mode).")
     parser.add_argument("--ast", type=Path, default=None, help="Normalized document model (Step 2 output).")
     parser.add_argument("--source-ast", type=Path, default=None, help="Parsed source document model (Step 1 output).")
     parser.add_argument("--table-row-height-cm", type=float, default=DEFAULT_TABLE_ROW_HEIGHT_CM)
@@ -389,16 +495,21 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
             "off", "auto",
             "s", "a", "b", "c", "sa", "sb", "sc", "ab", "ac", "bc",
             "sab", "sac", "sbc", "abc", "sabc",
+            "d", "e", "f", "de", "df", "ef", "def",
             "force-s", "force-a", "force-b", "force-c", "force-sa", "force-sb", "force-sc",
             "force-ab", "force-ac", "force-bc", "force-sab", "force-sac", "force-sbc",
             "force-abc", "force-sabc",
-            "toc_region_review", "list_detect", "caption_gen", "document_review", "all",
+            "force-d", "force-e", "force-f", "force-def", "force-sabcdef", "sabcdef",
+            "toc_region_review", "list_detect", "caption_gen", "document_review",
+            "citation_order_review", "glossary_review", "list_prose_review",
+            "all",
         ],
         default="off",
         help=(
             "LLM enhancement level (default: off). "
-            "New names: toc_region_review / list_detect / caption_gen / document_review / all. "
-            "Compact phase combinations remain supported."
+            "Conversion capabilities: toc_region_review / list_detect / caption_gen / document_review. "
+            "Review capabilities: citation_order_review / glossary_review / list_prose_review. "
+            "all selects every registered capability."
         ),
     )
     parser.add_argument(
@@ -437,6 +548,15 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
             "the pipeline (enhance → validate → apply → render)."
         ),
     )
+    parser.add_argument(
+        "--review",
+        action="store_true",
+        default=False,
+        help=(
+            "Review mode: audit the input document against template requirements "
+            "and output a compliance report. Mutually exclusive with conversion."
+        ),
+    )
     args = parser.parse_args(cli_arguments)
 
     import os as _os
@@ -448,6 +568,10 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
 
     if _os.environ.get("WX_DOC_FORMAT_RELEASE") == "1" and (args.ast or args.source_ast):
         parser.error("--ast and --source-ast are unavailable in release packages")
+
+    if args.review:
+        _run_review_mode(args, parser)
+        return
 
     # ── Argument validation ─────────────────────────────────────────
     if args.generate_requests and args.resume:

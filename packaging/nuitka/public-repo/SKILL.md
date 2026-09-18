@@ -12,9 +12,17 @@ metadata:
 ## 触发与模式
 
 1. 确认输入为可读取的 Markdown 或 DOCX。缺少输入时请用户补充。完成条件：已取得一个明确的输入文件。
-2. 用户已指定普通模式或 LLM 增强模式时直接采用。用户未指定时请其二选一，默认建议普通模式。完成条件：运行模式唯一确定。
-3. 普通模式执行本地确定性转换。LLM 增强模式转到“LLM 文件协议”。完成条件：已进入对应命令分支。
-4. LLM 增强模式按能力分批发起请求，当前提供的能力为 `toc_region_review`（目录区域复核）、`list_detect`（列表识别）、`caption_gen`（题注生成）和 `document_review`（审计后受限复核）。`document_review` 请求会附带 `review_packet`，修复范围以其 `targets` 为准。完成条件：能力集与请求契约明确。
+2. 请用户四选一。用户未指定时默认建议普通格式转换。完成条件：运行模式唯一确定。
+
+   | 选项 | 用途 | 章节 |
+   |------|------|------|
+   | 普通格式转换 | 把文档转换为模板化 DOCX，全部本地确定性处理 | 「普通模式」 |
+   | AI 增强格式转换 | 转换前用 LLM 复核目录区域、列表识别与题注 | 「LLM 文件协议」 |
+   | 普通格式审查 | 审查文档是否符合模板要求，输出评分与整改报告；完全离线 | 「文档格式审查」 |
+   | AI 增强格式审查 | 在普通审查之上增加语义检查（引用文件排序、术语与缩略语、列项用法） | 「AI 增强格式审查」 |
+
+3. 普通格式转换与普通格式审查不需要任何模型；两个 AI 选项都需要代理提供响应：线上由 `--llm-command` 直接调用，离线按文件协议由代理填写响应后恢复。完成条件：已进入对应命令分支。
+4. LLM 增强格式转换按能力分批发起请求，当前提供的能力为 `toc_region_review`（目录区域复核）、`list_detect`（列表识别）、`caption_gen`（题注生成）和 `document_review`（审计后受限复核）。`document_review` 请求会附带 `review_packet`，修复范围以其 `targets` 为准。AI 增强格式审查提供的语义检查见对应章节。完成条件：能力集与请求契约明确。
 
 ## 平台与启动
 
@@ -40,6 +48,77 @@ metadata:
 ```
 
 完成条件：命令退出，输出文件与报告文件均已生成；任一文件缺失时停止交付并报告退出码。
+
+## 文档格式审查
+
+审查模式不转换文档，而是审查一个输入 DOCX 是否符合模板要求，输出百分制评分和整改报告。使用独立入口，与普通模式、LLM 文件协议互斥：
+
+```bash
+"$SKILL_ROOT/scripts/run.sh" \
+  --review \
+  --input "$INPUT_FILE" \
+  --template "$SKILL_ROOT/assets/wx_template.docx" \
+  --report-md "$REVIEW_REPORT_FILE"
+```
+
+`--report`、`--report-md`、`--report-html` 分别写出 JSON、Markdown 与 HTML 报告；不指定报告路径时只打印评分摘要。审查覆盖样式与元素格式、大纲层级、列表结构（含每章节重启）、表格格式合同、目录、附录、题注、注、页码与编号九个维度，逐项给出问题分级与整改建议。
+
+元素格式按共享格式合同比对，流程与文档使用哪些样式无关：先按**角色**识别每个段落（正文、几级标题、题注、注、列项、附录标题、公式），识别依据语义证据（大纲级别、编号、注/题注/附录语义）与样式名（模板名与通用名）以及文本特征；再解析该段落的**有效格式值**（docDefaults → 样式链 → 编号级别 → 段落直接属性），与该角色的规格期望值比对，并标明偏差来自文档默认、某个样式、编号级别还是直接格式。因此使用 Word 默认样式或自定义样式的文档同样能报出格式问题，不依赖转换器。
+
+页码与编号维度检查三项，期望形状同样取自模板：分节与页码格式（前置节罗马数字、正文节阿拉伯数字并从 1 重编）、公式编号连续性与居中/编号右对齐、图表编号全文统一（附录题注按 `表A.1` 形态单独成组）。完成条件：命令退出且评分与问题摘要已输出；需要报告时对应文件已生成。
+
+## AI 增强格式审查
+
+在普通审查之上增加三项语义检查。它们判断的是脚本读不出的规则，请求与响应各自一份文件，与转换侧的 LLM 文件协议分开：
+
+| 能力 | 相位 | 检查内容 |
+|------|------|----------|
+| `citation_order_review` | D | 引用文件／依据文件是否按「国标、国军标、行业标、团体标、企标、国际标、规章制度、其他技术文件」排序；标准号与数字之间是否有空格；是否与正文引用一一对应 |
+| `glossary_review` | E | 术语是否按条排列、中文优先；缩略语是否按数字、字母顺序；缩略语一章是否误写定义 |
+| `list_prose_review` | F | 列项是否被当作标题使用；列项内是否出现句号 |
+
+两段式流程。生成请求：
+
+```bash
+"$SKILL_ROOT/scripts/run.sh" \
+  --review \
+  --input "$INPUT_FILE" \
+  --template "$SKILL_ROOT/assets/wx_template.docx" \
+  --report-md "$REVIEW_REPORT_FILE" \
+  --llm-enhance all \
+  --generate-requests "$REQUEST_DIR"
+```
+
+完成条件：`review_requests.jsonl` 与 `review_run.json` 已生成，或报告状态已进入失败。
+
+逐行读取 `review_requests.jsonl`，为每个请求写出一行响应到同目录的 `review_responses.jsonl`。请求含 `request_id`、`capability`、`phase`、`task`、`allowed_codes`、`items` 和 `view_sha256`；`items` 是该能力可判断的文本条目。响应形态：
+
+```json
+{
+  "request_id": "$request.request_id",
+  "response_id": "$response_id",
+  "view_sha256": "$request.view_sha256",
+  "findings": [
+    {
+      "code": "$candidate_code",
+      "level": "medium",
+      "location": "出现位置",
+      "evidence": "判断依据",
+      "suggestion": "整改建议"
+    }
+  ]
+}
+```
+
+`code` 必须取自该请求的 `allowed_codes`，`level` 必须为 `critical` / `high` / `medium` / `low`，`location` 不得为空，`view_sha256` 必须与请求一致。没有发现问题时 `findings` 用空数组。违反任何一条的响应会被记为 `llm_response_invalid` 诊断，不产生问题条目。完成条件：每个待处理请求恰有一个对应响应，且占位值均已替换。
+
+恢复：
+
+```bash
+"$SKILL_ROOT/scripts/run.sh" --review --resume "$REQUEST_DIR/review_run.json"
+```
+
+恢复会校验输入与模板的摘要与生成请求时一致，不一致即以 `REVIEW_SOURCE_CHANGED` 停止，避免把针对另一份文档的回答套用上来。完成条件：命令退出且评分、问题摘要与 AI 语义检查状态已输出；需要报告时对应文件已生成。
 
 ## LLM 文件协议
 

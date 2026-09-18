@@ -15,7 +15,10 @@ if str(SCRIPTS) not in sys.path:
 from wxdf.capabilities import (
     AUTO_TRIGGER_THRESHOLD,
     CAPABILITY_REGISTRY,
+    CONVERSION_PHASES,
     CapabilityConfig,
+    REVIEW_CAPABILITIES,
+    REVIEW_PHASES,
     _resolve_capability,
     _resolve_legacy_phase,
     compute_suspicion_score,
@@ -25,11 +28,14 @@ from wxdf.capabilities import (
 )
 
 
-def test_the_registry_declares_the_four_capabilities_with_their_phase_letters() -> None:
+def test_the_registry_declares_every_capability_with_its_phase_letter() -> None:
     assert sorted(CAPABILITY_REGISTRY) == [
         "caption_gen",
+        "citation_order_review",
         "document_review",
+        "glossary_review",
         "list_detect",
+        "list_prose_review",
         "toc_region_review",
     ]
     for capability, phase in (
@@ -37,10 +43,19 @@ def test_the_registry_declares_the_four_capabilities_with_their_phase_letters() 
         ("list_detect", "A"),
         ("caption_gen", "B"),
         ("document_review", "C"),
+        ("citation_order_review", "D"),
+        ("glossary_review", "E"),
+        ("list_prose_review", "F"),
     ):
         assert _resolve_legacy_phase(capability) == phase
         assert _resolve_capability(phase) == capability
         assert _resolve_capability(capability) == capability
+
+
+def test_the_review_capabilities_are_disjoint_from_the_conversion_ones() -> None:
+    assert set(REVIEW_CAPABILITIES) == {"citation_order_review", "glossary_review", "list_prose_review"}
+    assert REVIEW_PHASES == {"D", "E", "F"}
+    assert REVIEW_PHASES.isdisjoint(CONVERSION_PHASES)
 
 
 def test_an_unknown_name_resolves_to_nothing_and_passes_through_unchanged() -> None:
@@ -58,7 +73,12 @@ def test_capability_names_normalize_to_their_compact_mode_letters() -> None:
     assert normalize_mode("toc_region_review") == "s"
     assert normalize_mode("caption_gen") == "b"
     assert normalize_mode("document_review") == "c"
-    assert normalize_mode("all") == "sabc"
+    assert normalize_mode("citation_order_review") == "d"
+    assert normalize_mode("glossary_review") == "e"
+    assert normalize_mode("list_prose_review") == "f"
+    # ``all`` names every registered capability; each surface then takes the
+    # phases it owns, so one word serves the conversion and the review alike.
+    assert normalize_mode("all") == "sabcdef"
 
 
 def test_unknown_modes_are_returned_as_written() -> None:

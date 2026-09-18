@@ -201,7 +201,7 @@ def _native_enhancement_candidates(
 ) -> tuple[list[Mapping[str, Any]], dict[str, Any]]:
     """Collect validated native candidates from explicitly enabled adapters."""
 
-    from .capabilities import CAPABILITY_REGISTRY, normalize_mode, should_enhance
+    from .capabilities import CAPABILITY_REGISTRY, REVIEW_CAPABILITIES, normalize_mode, should_enhance
 
     from .enhancement import EnhancementExecutor, build_native_request, serialize_native_request
 
@@ -221,6 +221,10 @@ def _native_enhancement_candidates(
         capability
         for capability in CAPABILITY_REGISTRY
         if capability != "document_review"
+        # The review capabilities read the source document and produce findings,
+        # not patch candidates, so the conversion chain never selects them even
+        # when a mode such as ``all`` names every registered capability.
+        and capability not in REVIEW_CAPABILITIES
         and should_enhance({}, capability, normalized_mode)
     ]
     configured_budget = options.get("enhancement_budget", len(selected))
@@ -493,12 +497,31 @@ def _native_renderer(context: ModuleExecutionContext) -> Mapping[str, Any]:
 
 
 def _native_auditor(context: ModuleExecutionContext) -> dict[str, Any]:
+    import io
+
+    from docx import Document
+
     from .auditing import audit_bundle, collect_audit_findings
 
     normalized = context.require("normalized")
     render_result = context.require("render_result")
     appendix_semantics = context.require("appendix_semantics")
     staging_path = context.services["staging_path"]
+    # The page checks need the template rather than the artifact as their
+    # baseline, because the artifact does not carry the template's section
+    # structure.  A context assembled without a bundle (a unit test driving this
+    # executor on its own) simply skips them.
+    try:
+        template = context.require("template_bundle")
+    except KeyError:
+        template = None
+    template_document = None
+    template_bytes = getattr(template, "template_bytes", None)
+    if template_bytes:
+        try:
+            template_document = Document(io.BytesIO(template_bytes))
+        except Exception:
+            template_document = None
     with context.stage("audit"):
         appendix_findings = (
             audit_native_appendix(normalized["source_ast"], appendix_semantics)
@@ -510,11 +533,14 @@ def _native_auditor(context: ModuleExecutionContext) -> dict[str, Any]:
             normalized,
             render_result["render_map"],
             appendix_audit=appendix_findings,
+            template_document=template_document,
         )
     model_findings = audits["model"]
     saved_findings = audits["saved_output"]
     appendix_findings = audits["appendix"]
     list_readback_audit = audits["list_readback"]
+    format_findings = audits["document_format"]
+    page_findings = audits["page_contract"]
     # A list readback mismatch means the saved numPr disagrees with the semantic
     # list, so it is folded into the report-visible saved-output audit while
     # keeping its own ``list_readback_mismatch`` code.  Renderer clamp
@@ -545,6 +571,22 @@ def _native_auditor(context: ModuleExecutionContext) -> dict[str, Any]:
     ]
     if render_clamps:
         saved_findings = {**saved_findings, "list_render_clamped": render_clamps}
+    # The element format and page/numbering audits report spec deviations in the
+    # delivered document.  They are advisory by design, so the findings ride on
+    # their own key instead of ``issues``: ``run_result`` treats every issue in
+    # this audit as blocking, and a formatting deviation must never block
+    # publication.  The report still shows them, and each audit keeps ``passed``.
+    format_issues = [
+        *[dict(item) for item in (format_findings.get("issues") or [])],
+        *[dict(item) for item in (page_findings.get("issues") or [])],
+    ]
+    if format_issues:
+        saved_findings = {
+            **saved_findings,
+            "format_issues": format_issues,
+            "format_checked": int(format_findings.get("checked") or 0),
+            "page_checked": int(page_findings.get("checked") or 0),
+        }
     digest_after = digest_source_facts(dict(context.require("source_facts")))
     # The readback issues are merged into the saved-output view above, so the
     # normalized findings are computed from the merged audit instead of the

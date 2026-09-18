@@ -83,6 +83,10 @@ tests/*
 !tests/test_issue4_acceptance.py
 !tests/test_kept_semantics.py
 !tests/test_capabilities.py
+!tests/test_format_contract.py
+!tests/test_input_review.py
+!tests/test_page_contract.py
+!tests/test_review_enhancement.py
 !tests/modular_support.py
 !tests/fixtures/
 !tests/fixtures/modular_v3/

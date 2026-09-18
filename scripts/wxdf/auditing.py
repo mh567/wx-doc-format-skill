@@ -11,7 +11,9 @@ from xml.etree import ElementTree
 
 from docx import Document
 
+from .format_contract import audit_document_format
 from .model import effective_outline_level, inline_text_projection, is_body_outline_heading
+from .page_contract import audit_page_contract
 from .render_plan import build_render_plan
 from .validation import validate_ast
 
@@ -988,14 +990,55 @@ def audit_bundle(
     render_map: Mapping[str, Any],
     *,
     appendix_audit: Mapping[str, Any] | None = None,
+    template_document: Document | None = None,
 ) -> dict[str, Any]:
     """Run the complete native audit set and expose normalized findings."""
 
+    document = None
+    try:
+        document = Document(Path(path))
+    except Exception:
+        document = None
+    profile = normalized.get("presentation", {}).get("profile", {})
+    if document is not None and isinstance(profile, Mapping):
+        # The rendered artifact carries the template's own styles, so it is its own
+        # template for baseline derivation: the check compares each paragraph with
+        # the style it claims to use, which is what catches a direct override.
+        detail = audit_document_format(document, profile, document, consumer="audit")
+    else:
+        detail = {"passed": True, "issues": [], "checked": 0}
+    # The delivered document's element formatting is reported but never blocks:
+    # a finding here is a spec deviation worth surfacing, not a broken artifact.
+    document_format = {
+        "passed": True,
+        "advisory": True,
+        "issues": list(detail.get("issues") or []),
+        "checked": int(detail.get("checked") or 0),
+    }
+    # The page, formula and caption numbering checks are advisory for the same
+    # reason: they report the spec's numbering requirements, not a broken
+    # artifact.  They need the real template rather than the artifact as their
+    # baseline: unlike the styles, the artifact does not carry the template's
+    # section structure, so comparing it with itself would hide the difference.
+    page_template = template_document if template_document is not None else document
+    page_detail = (
+        audit_page_contract(document, page_template)
+        if document is not None and page_template is not None
+        else {"passed": True, "issues": [], "checked": 0}
+    )
+    page_contract_audit = {
+        "passed": True,
+        "advisory": True,
+        "issues": list(page_detail.get("issues") or []),
+        "checked": int(page_detail.get("checked") or 0),
+    }
     audits = {
         "model": check_model(normalized),
-        "saved_output": check_saved_output(path, normalized, render_map),
+        "saved_output": check_saved_output(path, normalized, render_map, document=document),
         "list_readback": audit_list_readback(path, normalized),
         "appendix": dict(appendix_audit or {"passed": True, "issues": []}),
+        "document_format": document_format,
+        "page_contract": page_contract_audit,
     }
     findings = collect_audit_findings(audits)
     return {
@@ -1132,7 +1175,13 @@ def _has_inline_contract(inline_content: list[Mapping[str, Any]]) -> bool:
     return any(item.get("kind") in {"image", "link", "break", "tab"} for item in inline_content)
 
 
-def check_saved_output(path: Path | str, expected: Mapping[str, Any], render_map: Mapping[str, Any]) -> dict[str, Any]:
+def check_saved_output(
+    path: Path | str,
+    expected: Mapping[str, Any],
+    render_map: Mapping[str, Any],
+    *,
+    document: Document | None = None,
+) -> dict[str, Any]:
     issues: list[dict[str, Any]] = []
     unexpected_styles: list[str] = []
     output = Path(path)
@@ -1163,14 +1212,15 @@ def check_saved_output(path: Path | str, expected: Mapping[str, Any], render_map
             "unexpected_styles": unexpected_styles,
         }
 
-    try:
-        document = Document(output)
-    except Exception as exc:
-        return {
-            "passed": False,
-            "issues": [{"code": "readback_failed", "message": str(exc)}],
-            "unexpected_styles": unexpected_styles,
-        }
+    if document is None:
+        try:
+            document = Document(output)
+        except Exception as exc:
+            return {
+                "passed": False,
+                "issues": [{"code": "readback_failed", "message": str(exc)}],
+                "unexpected_styles": unexpected_styles,
+            }
     namespace = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
     ns = {"w": namespace}
     xml_paragraphs: list[Any] = []

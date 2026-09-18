@@ -71,6 +71,28 @@ def _register_default_capabilities() -> None:
     _register_phase_alias("A", "list_detect")
     _register_phase_alias("B", "caption_gen")
     _register_phase_alias("C", "document_review")
+    # The review-side capabilities.  They read the source document and produce
+    # findings rather than patch candidates, so they have their own phases and
+    # never run inside the conversion chain.
+    for name in REVIEW_CAPABILITIES:
+        register_capability(CapabilityConfig(name))
+    _register_phase_alias("D", "citation_order_review")
+    _register_phase_alias("E", "glossary_review")
+    _register_phase_alias("F", "list_prose_review")
+
+
+REVIEW_CAPABILITIES: tuple[str, ...] = (
+    "citation_order_review",
+    "glossary_review",
+    "list_prose_review",
+)
+"""Capabilities the input review runs; the conversion chain never selects them."""
+
+REVIEW_PHASES: frozenset[str] = frozenset({"D", "E", "F"})
+"""Phase letters belonging to the review surface."""
+
+CONVERSION_PHASES: frozenset[str] = frozenset({"S", "A", "B", "C"})
+"""Phase letters belonging to the conversion surface."""
 
 
 _register_default_capabilities()
@@ -81,7 +103,12 @@ _ENHANCE_MODE_ALIASES: dict[str, str] = {
     "list_detect": "a",
     "caption_gen": "b",
     "document_review": "c",
-    "all": "sabc",
+    "citation_order_review": "d",
+    "glossary_review": "e",
+    "list_prose_review": "f",
+    # ``all`` means every registered capability: each surface takes the phases it
+    # owns, so one word selects the conversion's S/A/B/C and the review's D/E/F.
+    "all": "sabcdef",
 }
 
 # Phase letters selected by each compact mode string.  The ``force-`` variants
@@ -103,6 +130,19 @@ _ENHANCE_MODE_PHASES: dict[str, frozenset[str]] = {
     "abc": frozenset({"A", "B"}),
     "sabc": frozenset({"S", "A", "B", "C"}),
     "ab": frozenset({"A", "B"}),
+    "d": frozenset({"D"}),
+    "e": frozenset({"E"}),
+    "f": frozenset({"F"}),
+    "de": frozenset({"D", "E"}),
+    "df": frozenset({"D", "F"}),
+    "ef": frozenset({"E", "F"}),
+    "def": frozenset({"D", "E", "F"}),
+    "sabcdef": frozenset({"S", "A", "B", "C", "D", "E", "F"}),
+    "force-d": frozenset({"D"}),
+    "force-e": frozenset({"E"}),
+    "force-f": frozenset({"F"}),
+    "force-def": frozenset({"D", "E", "F"}),
+    "force-sabcdef": frozenset({"S", "A", "B", "C", "D", "E", "F"}),
     "force-s": frozenset({"S"}),
     "force-a": frozenset({"A"}),
     "force-b": frozenset({"B"}),

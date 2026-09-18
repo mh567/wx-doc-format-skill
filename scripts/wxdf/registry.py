@@ -453,7 +453,7 @@ def build_native_v2_registry(
                 "native-auditor",
                 "2.0",
                 ("audit",),
-                ("source_facts", "source_facts_digest", "normalized", "render_result", "appendix_semantics"),
+                ("source_facts", "source_facts_digest", "normalized", "render_result", "appendix_semantics", "template_bundle"),
                 ("model_audit", "saved_output_audit", "appendix_audit", "audit_findings", "source_facts_integrity"),
                 required_audits=("model_audit", "saved_output_audit"),
                 runtime_services=("metrics", "staging_path"),
