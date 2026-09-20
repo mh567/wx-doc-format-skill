@@ -9,7 +9,12 @@ from typing import Any, Mapping
 from ..list_policy import default_projection
 from ..model import consume_leading_text
 from ..validation import validate_source_facts
-from .protected import protected_code_style, protected_style_reason, protected_text_reason
+from .protected import (
+    _looks_like_list_style_name,
+    protected_code_style,
+    protected_style_reason,
+    protected_text_reason,
+)
 from note_semantics import source_note_role
 
 
@@ -235,6 +240,252 @@ def _list_family(evidence: Mapping[str, Any], container: Mapping[str, Any] | Non
     return None
 
 
+_HEADING_STYLE_RE = re.compile(r"^(?:heading|标题)\s*([1-9])$", re.IGNORECASE)
+# A parallel requirement clause is recognised by the lead it repeats, not by the
+# verb it happens to use.  The lead is the two leading characters every clause of
+# a run shares, and a clause closes on a clause terminator.
+_PARALLEL_LEAD_LENGTH = 2
+_PARALLEL_TERMINATORS = ("；", "。")
+_INFERRED_LIST_KIND = "ordered"
+_INFERRED_LIST_RECORD = "inferred_requirement_list"
+# The protection reasons a whole-section run outranks.  A clause that merely
+# reads like a formula (a performance clause carrying "≤3s"), an API path, a date
+# or a legal clause is protected on its own, but the run is the structural
+# confirmation: the section is made of the same clause repeated, which is the
+# same standing a confirmed numbering instance has (``_is_protected`` accepts a
+# detected marker over exactly these text patterns).  Heading protection is not
+# in this set: a heading never joins a run.
+_TEXT_PATTERN_PROTECTION_REASONS = frozenset(
+    {"formula", "api_label", "api_path", "ip_address", "date_or_version", "legal_clause"}
+)
+
+
+def _is_heading_unit(unit: Mapping[str, Any], evidence: Mapping[str, Any]) -> bool:
+    """Return whether a unit opens a section.
+
+    A section boundary is read from the source's own heading declaration: the
+    resolved heading role, or a heading style name.  A paragraph that only looks
+    like a heading carries no ``manual_heading_marker`` protection here, so the
+    style and role are the evidence this pass is allowed to use.
+    """
+
+    if str(unit.get("role") or evidence.get("role") or "") == "heading":
+        return True
+    style = str(unit.get("style") or evidence.get("style") or "").strip().replace(" ", "")
+    return _HEADING_STYLE_RE.match(style) is not None
+
+
+def _clause_lead(text: str) -> str:
+    return text[:_PARALLEL_LEAD_LENGTH] if len(text) >= _PARALLEL_LEAD_LENGTH else ""
+
+
+def _clause_text(inline_content: list[Mapping[str, Any]]) -> str:
+    return _unit_text({"inline_content": list(inline_content)}).strip()
+
+
+def _parallel_clause_segments(unit: Mapping[str, Any]) -> list[list[dict[str, Any]]] | None:
+    """Return the soft-break separated clauses of a unit, or ``None``.
+
+    The author wrote several requirements into one numbered paragraph and
+    separated them with soft line breaks.  The paragraph is one source unit, so
+    the segments are returned only when every segment is a complete parallel
+    clause: a soft line break inside a multi-line sentence is left alone.
+    """
+
+    segments: list[list[dict[str, Any]]] = [[]]
+    for item in unit.get("inline_content") or []:
+        if isinstance(item, Mapping) and item.get("kind") == "break":
+            segments.append([])
+            continue
+        segments[-1].append(copy.deepcopy(item))
+    if len(segments) < 2:
+        return None
+    texts = [_clause_text(segment) for segment in segments]
+    if any(not text for text in texts):
+        return None
+    lead = _clause_lead(texts[0])
+    if len(lead) < _PARALLEL_LEAD_LENGTH or lead.isspace():
+        return None
+    if any(_clause_lead(text) != lead for text in texts[1:]):
+        return None
+    if any(not text.endswith(_PARALLEL_TERMINATORS) for text in texts):
+        return None
+    return segments
+
+
+def _parallel_split_items(facts: Mapping[str, Any]) -> dict[str, list[list[dict[str, Any]]]]:
+    """Return the paragraphs whose soft-break separated clauses are separate items.
+
+    The author wrote several parallel clauses into one paragraph and separated
+    them with soft line breaks.  Splitting is a list concept, so a paragraph is
+    offered here only when it can become a list item and it is not a table cell,
+    whose content the table contract owns.  A paragraph that never becomes an
+    item keeps its breaks, because the materializer applies the split only to the
+    units the list semantics actually decided as items.
+    """
+
+    parents = _parent_map(facts)
+    splits: dict[str, list[list[dict[str, Any]]]] = {}
+    for unit_id, unit in facts["units"].items():
+        if unit.get("kind") != "paragraph":
+            continue
+        parent = facts["containers"].get(parents.get(str(unit_id), ""), {})
+        if parent.get("kind") in {"table_cell", "table_row"}:
+            continue
+        segments = _parallel_clause_segments(unit)
+        if segments is not None:
+            splits[str(unit_id)] = segments
+    return splits
+
+
+def _member_clause_texts(
+    unit: Mapping[str, Any],
+    splits: Mapping[str, list[list[dict[str, Any]]]],
+    unit_id: str,
+) -> list[str]:
+    """Return the clause text of every item the unit contributes.
+
+    A unit written as several parallel clauses contributes one clause per
+    soft-break separated line; any other unit contributes its whole text.
+    """
+
+    segments = splits.get(unit_id)
+    if segments:
+        return [_clause_text(segment) for segment in segments]
+    return [_clause_text(unit.get("inline_content") or [])]
+
+
+def _confirmed_clause_leads(facts: Mapping[str, Any]) -> set[str]:
+    """Return the clause leads the document itself already confirmed as list items.
+
+    The document is its own authority for what a requirement clause looks like: a
+    lead that at least two of its own list-style items repeat is a confirmed
+    requirement lead.  A document that never confirms one infers nothing, so the
+    inference cannot fire on a document whose list vocabulary is unknown.
+    """
+
+    counts: dict[str, int] = {}
+    for unit_id, unit in facts["units"].items():
+        if unit.get("kind") != "paragraph":
+            continue
+        evidence = facts["evidence"].get(unit_id, {})
+        if not evidence.get("marker_kind"):
+            continue
+        style = str(unit.get("style") or evidence.get("style") or "")
+        if not _looks_like_list_style_name(style):
+            continue
+        lead = _clause_lead(_clause_text(unit.get("inline_content") or []))
+        if lead:
+            counts[lead] = counts.get(lead, 0) + 1
+    if not counts:
+        return set()
+    # The dominant confirmed lead is the document's requirement shape.  A lead
+    # that only a small minority of confirmed items repeat can be a coincidence
+    # of two leading characters (a prose paragraph opening with the same two
+    # characters as an unrelated list item), so it is not treated as the shape.
+    threshold = max(2, max(counts.values()) // 2)
+    return {lead for lead, count in counts.items() if count >= threshold}
+
+
+def _collect_inferred_run(
+    facts: Mapping[str, Any],
+    body: list[str],
+    heading_id: str | None,
+    leads: set[str],
+    splits: Mapping[str, list[list[dict[str, Any]]]],
+    inferred: dict[str, dict[str, Any]],
+    records: list[dict[str, Any]],
+) -> None:
+    """Record one section whose whole body is a run of parallel clauses."""
+
+    members = list(body)
+    # A blank paragraph at either end of the section is a formatting artifact of
+    # the source, not a member of the run.  A blank paragraph in the interior
+    # would break the run into two lists, so the section is left alone instead.
+    for edge in ("head", "tail"):
+        while members:
+            unit = facts["units"].get(members[0] if edge == "head" else members[-1])
+            if unit is not None and not _clause_text(unit.get("inline_content") or []):
+                members.pop(0 if edge == "head" else -1)
+                continue
+            break
+    unit_clauses: list[tuple[str, list[str]]] = []
+    for unit_id in members:
+        unit = facts["units"].get(unit_id)
+        if unit is None or unit.get("kind") != "paragraph":
+            return
+        evidence = facts["evidence"].get(unit_id, {})
+        protected, reason = _is_protected(unit, evidence)
+        if protected and reason not in _TEXT_PATTERN_PROTECTION_REASONS:
+            return
+        if evidence.get("marker_kind") or _has_numbering_definition(evidence):
+            return
+        texts = _member_clause_texts(unit, splits, str(unit_id))
+        if any(not text or not text.endswith(_PARALLEL_TERMINATORS) for text in texts):
+            return
+        unit_clauses.append((str(unit_id), texts))
+    clauses = [text for _unit_id, texts in unit_clauses for text in texts]
+    if len(clauses) < 2:
+        return
+    lead = _clause_lead(clauses[0])
+    if lead not in leads:
+        return
+    if any(_clause_lead(text) != lead for text in clauses[1:]):
+        return
+    position = 1
+    for unit_id, texts in unit_clauses:
+        inferred[unit_id] = {"list_kind": _INFERRED_LIST_KIND, "lead": lead, "position": position}
+        position += len(texts)
+    heading_text = _clause_text(facts["units"][heading_id].get("inline_content") or []) if heading_id else ""
+    records.append(
+        {
+            "code": _INFERRED_LIST_RECORD,
+            "severity": "info",
+            "message": (
+                f"section {heading_text!r} holds a run of parallel {lead} clauses and the document "
+                f"confirms {lead} as a list lead elsewhere; the {len(clauses)} clauses are level-1 ordered list items"
+            ),
+            "node_id": members[0],
+            "heading_text": heading_text,
+            "lead": lead,
+            "member_node_ids": list(members),
+            "clause_count": len(clauses),
+        }
+    )
+
+
+def _inferred_requirement_runs(
+    facts: Mapping[str, Any],
+    splits: Mapping[str, list[list[dict[str, Any]]]],
+) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
+    """Return the inferred requirement-list members and their report records."""
+
+    leads = _confirmed_clause_leads(facts)
+    inferred: dict[str, dict[str, Any]] = {}
+    records: list[dict[str, Any]] = []
+    if not leads:
+        return inferred, records
+    for parent_id in sorted(facts["children"]):
+        if _node_kind(facts, parent_id) in {"list", "list_item"}:
+            continue
+        # The rule is section scoped: a parent that holds no section (a table
+        # cell, for instance, whose content the table contract owns) is skipped.
+        if facts["containers"].get(parent_id, {}).get("kind") in {"table_cell", "table_row"}:
+            continue
+        heading_id: str | None = None
+        body: list[str] = []
+        for child_id in [*facts["children"].get(parent_id, []), None]:
+            if child_id is not None and not _is_heading_unit(
+                facts["units"].get(child_id, {}), facts["evidence"].get(child_id, {})
+            ):
+                body.append(child_id)
+                continue
+            if heading_id is not None:
+                _collect_inferred_run(facts, body, heading_id, leads, splits, inferred, records)
+            heading_id, body = (child_id, []) if child_id is not None else (None, [])
+    return inferred, records
+
+
 def _source_numbering_evidence(evidence: Mapping[str, Any]) -> dict[str, Any]:
     fields = (
         "numbering_status",
@@ -356,6 +607,11 @@ def _emit_group(
         last_by_depth[depth] = item_id
         target_ordinal = None
         generated_anchor, anchor_reason = _anchor_info(item_id, facts)
+        if item.get("split_index"):
+            # A clause split off a paragraph is created together with the
+            # paragraph it holds, so the item already owns its own paragraph and
+            # generates no marker anchor (decision 10).
+            generated_anchor, anchor_reason = False, "split_clause_paragraph"
         source_ilvl = evidence.get("source_ilvl")
         effective_ilvl_value = evidence.get("effective_ilvl")
         if not isinstance(effective_ilvl_value, int):
@@ -374,10 +630,19 @@ def _emit_group(
             "parent_item_id": parent_id,
             "scope_id": scope_id,
             "source_marker": facts["containers"].get(item_id, {}).get("source_marker") or evidence.get("marker_text"),
-            "source_ordinal": facts["containers"].get(item_id, {}).get("source_ordinal") or evidence.get("ordinal"),
+            "source_ordinal": (
+                item.get("member_ordinal")
+                or facts["containers"].get(item_id, {}).get("source_ordinal")
+                or evidence.get("ordinal")
+            ),
             "source_sequence_id": source_sequence_id,
             "list_kind": list_kind,
             "target_ordinal": target_ordinal,
+            # A clause split off a paragraph records the paragraph it came from and
+            # its position in the clause run, so the materializer can generate the
+            # block the extra item owns.
+            "split_source_id": item.get("split_source_id"),
+            "split_index": item.get("split_index"),
             "generated_anchor_required": generated_anchor,
             "anchor_reason": anchor_reason,
             "explicit": explicit,
@@ -590,6 +855,7 @@ def _state_candidates_for_paragraph(
     evidence: Mapping[str, Any],
     downgrade_codes: Mapping[str, str],
     low_confidence_nodes: list[str] | None = None,
+    inferred: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Offer the competing states a single paragraph's raw evidence supports.
 
@@ -598,10 +864,37 @@ def _state_candidates_for_paragraph(
     definition, a marker that no numbering definition confirms) two states with
     equal evidence strength compete, so the Resolver arbitrates instead of
     confirming a decision that was already taken elsewhere.
+
+    ``inferred`` carries the parallel-requirement-run verdict for a block whose
+    source carries no marker of its own.  Its structural evidence outranks the
+    contextual evidence of an ordinary body paragraph, so the block is offered as
+    a list item while the body state keeps competing.
     """
 
     protected, reason = _is_protected(unit, evidence)
     marker_kind = evidence.get("marker_kind")
+    if inferred is not None and not marker_kind and not _has_numbering_definition(evidence):
+        level = _raw_depth(evidence)
+        return [
+            _state_candidate(
+                node_id,
+                "LIST_ITEM",
+                list_kind=str(inferred.get("list_kind") or _INFERRED_LIST_KIND),
+                semantic_level=level,
+                positive_evidence=[{"kind": "structural", "source": "parallel_requirement_run"}],
+                # A text pattern that protects the clause on its own is kept as a
+                # record on the decision the run outranks.
+                negative_evidence=(
+                    [{"kind": "protected_content", "reason": reason}] if protected and reason else []
+                ),
+            ),
+            _state_candidate(
+                node_id,
+                "OUTSIDE_LIST",
+                semantic_level=level,
+                positive_evidence=[{"kind": "contextual", "source": "body_paragraph"}],
+            ),
+        ]
     if protected:
         role = str(unit.get("role") or evidence.get("role") or "")
         style = str(unit.get("style") or evidence.get("style") or "")
@@ -766,6 +1059,8 @@ def _state_candidates_for_paragraph(
 
 def _build_state_candidates(
     facts: Mapping[str, Any],
+    *,
+    inferred: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Encode the scored candidate-state set for every source block.
 
@@ -835,6 +1130,7 @@ def _build_state_candidates(
                             evidence,
                             downgrade_codes,
                             low_confidence_nodes=low_confidence_nodes,
+                            inferred=(inferred or {}).get(child_key),
                         )
                     )
                 walk(child_id, owner_item_id=owner_item_id)
@@ -1361,9 +1657,21 @@ def analyze_lists(facts: Mapping[str, Any], *, context: Mapping[str, Any] | None
         result["diagnostics"].append(diagnostic)
         result["downgrades"].append(copy.deepcopy(diagnostic))
 
-    state_candidates, low_confidence_nodes = _build_state_candidates(facts)
+    # A section whose whole body is a run of parallel requirement clauses is a
+    # list even though the source carries no marker for it.  The inference is
+    # resolved before the state set is built so the block states, the grouping and
+    # the published records all read one verdict.
+    splits = _parallel_split_items(facts)
+    inferred, inferred_records = _inferred_requirement_runs(facts, splits)
+    result["inferred_requirement_runs"] = copy.deepcopy(inferred_records)
+
+    state_candidates, low_confidence_nodes = _build_state_candidates(facts, inferred=inferred)
     _validate_state_enum(state_candidates)
     result["state_candidates"] = state_candidates
+    # An inference is a solved decision, so it is published as a downgrade record
+    # beside the other list decisions instead of as a diagnostic: it stays visible
+    # in the report without turning a clean document into a warning run.
+    result["downgrades"].extend(copy.deepcopy(inferred_records))
     # A block whose numbering evidence was merely low confidence stays body text.
     # The native group analysis already resolved it to a body paragraph, so this
     # is not a Resolver conflict and must not leave ``list_semantics.status``
@@ -1399,6 +1707,17 @@ def analyze_lists(facts: Mapping[str, Any], *, context: Mapping[str, Any] | None
         for decision in state_decisions
         if decision.get("target_node_ids")
     }
+
+    # One paragraph the author filled with several parallel clauses becomes one
+    # item per clause.  The split is applied to the units the states resolved into
+    # implicit items: a paragraph inside an explicit ``list_item`` container keeps
+    # the source shape the container already expresses.
+    split_items = {
+        unit_id: segments
+        for unit_id, segments in splits.items()
+        if decided_states.get(unit_id) in {"LIST_ITEM", "NESTED_LIST_ITEM"}
+    }
+    result["split_items"] = copy.deepcopy(split_items)
 
     def ordered_list_ids() -> list[str]:
         ordered: list[str] = []
@@ -1504,7 +1823,13 @@ def analyze_lists(facts: Mapping[str, Any], *, context: Mapping[str, Any] | None
                 else:
                     declared_depth = _raw_depth(evidence)
                 depth = declared_depth
-                family = _list_family(evidence)
+                # A clause inferred from its section carries no marker of its own,
+                # so the list family comes from the inference verdict instead of
+                # from numbering evidence the source never wrote.
+                inferred_member = inferred.get(str(unit_id))
+                family = _list_family(evidence) or (
+                    str(inferred_member.get("list_kind")) if inferred_member else None
+                )
                 parent_item_id = active_items.get(depth - 1) if depth > 0 else None
                 # A block declared at level 0 whose numbering instance differs
                 # from the open level-0 list opens or continues a sub-list under
@@ -1694,13 +2019,29 @@ def analyze_lists(facts: Mapping[str, Any], *, context: Mapping[str, Any] | None
                     merged = current.setdefault("merged_sequences", [])
                     if effective_sequence is not None and effective_sequence not in merged:
                         merged.append(effective_sequence)
-                current["items"].append({
-                    "item_id": unit_id,
-                    "evidence": evidence,
-                    "parent_item_id": parent_item_id,
-                    "effective_depth": depth,
-                })
-                active_items[depth] = unit_id
+                segments = split_items.get(str(unit_id))
+                member_ids = (
+                    [str(unit_id)]
+                    if not segments
+                    else [str(unit_id), *[f"{unit_id}#{index}" for index in range(1, len(segments))]]
+                )
+                ordinal_base = inferred_member.get("position") if inferred_member else evidence.get("ordinal")
+                for member_index, member_id in enumerate(member_ids):
+                    current["items"].append({
+                        "item_id": member_id,
+                        "evidence": evidence,
+                        "parent_item_id": parent_item_id,
+                        "effective_depth": depth,
+                        # An inferred clause has no authored ordinal: its position in
+                        # the run is the ordinal, and a clause split off a paragraph
+                        # continues the paragraph's own number.
+                        "member_ordinal": (
+                            ordinal_base + member_index if isinstance(ordinal_base, int) else None
+                        ),
+                        "split_source_id": str(unit_id) if member_index else None,
+                        "split_index": member_index,
+                    })
+                active_items[depth] = member_ids[-1]
                 for old_depth in [key for key in active_items if key > depth]:
                     active_items.pop(old_depth, None)
                     active_groups.pop(old_depth, None)
@@ -1819,15 +2160,29 @@ def analyze_lists(facts: Mapping[str, Any], *, context: Mapping[str, Any] | None
     relation_by_id = {item["item_id"]: item for item in result["items"]}
     counters: dict[str, int] = {}
     visited: set[str] = set()
+    # A clause split off a paragraph has no node in the source tree, so its
+    # ordinal is assigned when the tree walk reaches the paragraph it came from.
+    split_members: dict[str, list[str]] = {}
+    for item in result["items"]:
+        source = item.get("split_source_id")
+        if source:
+            split_members.setdefault(str(source), []).append(str(item["item_id"]))
+
+    def assign_ordinal(node_id: str) -> None:
+        relation = relation_by_id[node_id]
+        if relation["list_kind"] == "ordered":
+            scope_id = relation["scope_id"]
+            counters[scope_id] = counters.get(scope_id, 0) + 1
+            relation["target_ordinal"] = counters[scope_id]
 
     def assign_in_reading_order(node_id: str) -> None:
         if node_id in relation_by_id and node_id not in visited:
-            relation = relation_by_id[node_id]
             visited.add(node_id)
-            if relation["list_kind"] == "ordered":
-                scope_id = relation["scope_id"]
-                counters[scope_id] = counters.get(scope_id, 0) + 1
-                relation["target_ordinal"] = counters[scope_id]
+            assign_ordinal(node_id)
+        for member_id in split_members.get(node_id, []):
+            if member_id in relation_by_id and member_id not in visited:
+                visited.add(member_id)
+                assign_ordinal(member_id)
         for child_id in facts["children"].get(node_id, []):
             assign_in_reading_order(child_id)
 

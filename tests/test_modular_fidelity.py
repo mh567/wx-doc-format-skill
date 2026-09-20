@@ -25,7 +25,13 @@ from docx.oxml import parse_xml
 from docx.oxml.ns import qn
 
 from note_semantics import is_heading_style, source_note_role
-from wxdf.normalization import _body_outline_overrides, _drop_excluded_blocks, _paragraph_presentation, normalize
+from wxdf.normalization import (
+    _IMAGE_PARAGRAPH_INDENT,
+    _body_outline_overrides,
+    _drop_excluded_blocks,
+    _paragraph_presentation,
+    normalize,
+)
 from wxdf.parsers import parse
 from wxdf.rendering import _write_caption
 from wxdf.semantics.regions import classify_regions, resolve_source_regions
@@ -341,12 +347,14 @@ def test_paragraph_presentation_carries_only_the_alignment_a_style_cannot() -> N
     presentation = _paragraph_presentation(ast)
 
     # Only the image node, the paragraph whose content is an inline image and the
-    # formula number own an alignment: a paragraph that mixes text with an image,
+    # formula number own a presentation: a paragraph that mixes text with an image,
     # a heading and a table cell keep the template style or the table contract,
-    # and any other alignment belongs to the template style.
+    # and any other alignment belongs to the template style.  An image paragraph
+    # also owns the zeroed indent that keeps the template ``Normal`` first-line
+    # indent from pushing the centred image off centre (decision 2).
     assert presentation == {
-        "image": {"alignment": "center"},
-        "image_carrier": {"alignment": "center"},
+        "image": {"alignment": "center", "indent": dict(_IMAGE_PARAGRAPH_INDENT)},
+        "image_carrier": {"alignment": "center", "indent": dict(_IMAGE_PARAGRAPH_INDENT)},
         "formula_number": {"alignment": "right"},
     }
 
@@ -415,11 +423,19 @@ def test_an_inline_image_paragraph_is_centred_without_a_style(tmp_path: Path) ->
     )
     properties = image_paragraph._p.find(qn("w:pPr"))
     assert properties is not None
-    # No style and no other property: the centred alignment is the whole of the
-    # image paragraph's presentation, which is decision 2's contract.  A
-    # ``pStyle`` or any other paragraph property would show up in this list.
-    assert [element.tag.rsplit("}", 1)[-1] for element in properties] == ["jc"]
+    # No style and no other property: the centred alignment and the zeroed indent
+    # are the whole of the image paragraph's presentation, which is decision 2's
+    # contract.  A ``pStyle`` or any other paragraph property would show up in
+    # this list.
+    assert [element.tag.rsplit("}", 1)[-1] for element in properties] == ["jc", "ind"]
     assert [element.get(qn("w:val")) for element in properties.iter(qn("w:jc"))] == ["center"]
+    indent = properties.find(qn("w:ind"))
+    assert {name.rsplit("}", 1)[-1]: value for name, value in indent.attrib.items()} == {
+        "firstLine": "0",
+        "firstLineChars": "0",
+        "left": "0",
+        "leftChars": "0",
+    }
     assert carrier_id in result["render_map"]
     assert len(result["render_map"][carrier_id]["image_resources"]) == 1
 

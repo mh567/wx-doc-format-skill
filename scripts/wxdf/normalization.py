@@ -266,13 +266,21 @@ def _table_owned_nodes(document: Mapping[str, Any]) -> set[str]:
     return owned
 
 
+# The template's own picture paragraph zeroes the first-line and left indent, so
+# a centred image is centred in the full text column instead of inheriting the
+# body style's two-character first-line indent.
+_IMAGE_PARAGRAPH_INDENT = {"firstLine": 0, "firstLineChars": 0, "left": 0, "leftChars": 0}
+
+
 def _paragraph_presentation(ast: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
     """Return the presentation each non-list paragraph owns.
 
-    An image paragraph inherits no style, so its centred alignment is the whole
-    of its presentation (AGENTS.md decision 2).  The template's own image
-    paragraphs carry no style and ``jc=center``, which is what this record
-    reproduces.  A formula number is right aligned in the source and no style
+    An image paragraph inherits no style, so its centred alignment and the indent
+    that alignment needs are the whole of its presentation (AGENTS.md decision 2).
+    The template's own image paragraphs carry no style, ``jc=center`` and a zeroed
+    first-line indent, which is what this record reproduces: without the zeroes the
+    paragraph inherits the template ``Normal`` first-line indent and the centred
+    image is offset.  A formula number is right aligned in the source and no style
     says so, so that alignment is recorded too.  Any other alignment belongs to
     the template style, not to the source.
 
@@ -300,7 +308,7 @@ def _paragraph_presentation(ast: Mapping[str, Any]) -> dict[str, dict[str, Any]]
             result[str(node_id)] = {"outline_level": 0}
             continue
         if block.get("block_type") == "image":
-            result[str(node_id)] = {"alignment": "center"}
+            result[str(node_id)] = {"alignment": "center", "indent": dict(_IMAGE_PARAGRAPH_INDENT)}
             continue
         if block.get("block_type") != "paragraph":
             continue
@@ -314,7 +322,7 @@ def _paragraph_presentation(ast: Mapping[str, Any]) -> dict[str, dict[str, Any]]
             # the template centres.  A paragraph with its own style (heading,
             # caption, note) keeps that style's alignment, and the inline image
             # stays in the body paragraph that draws it.
-            result[str(node_id)] = {"alignment": "center"}
+            result[str(node_id)] = {"alignment": "center", "indent": dict(_IMAGE_PARAGRAPH_INDENT)}
             continue
         if block.get("semantic_role") != "formula_number":
             continue

@@ -326,6 +326,36 @@ def materialize_list_semantics(
     candidates: list[dict[str, Any]] = []
     from .lists import strip_visible_list_marker, table_numbering_role
 
+    split_items = list_result.get("split_items") or {}
+    split_member_ids = {
+        f"{unit_id}#{index}": str(unit_id)
+        for unit_id, segments in split_items.items()
+        for index in range(1, len(segments))
+    }
+    for unit_id, segments in split_items.items():
+        # The paragraph keeps its first clause; the clauses after the first become
+        # items of their own, so the paragraph no longer holds the whole run.
+        if len(segments) < 2:
+            continue
+        ref = source_ref(str(unit_id))
+        candidates.append({
+            "candidate_id": f"list-split-content-{unit_id}",
+            "module_id": "list_semantics",
+            "module_version": "1.0",
+            "target_source_refs": [ref] if ref is not None else [],
+            "target_node_ids": [str(unit_id)],
+            "proposal": {
+                "operation": "update_node_content",
+                "property_scope": ["inline_content"],
+                "value": {"inline_content": copy.deepcopy(segments[0])},
+            },
+            "positive_evidence": [{"kind": "structural", "source": "parallel_clause_split"}],
+            "negative_evidence": [],
+            "scope": {"stages": ["relation"]},
+            "constraints": [{"kind": "preserve_source_clause_evidence"}],
+            "rationale": "the first clause stays on the source paragraph and the remaining clauses become their own items",
+        })
+
     for relation in list_result.get("items", []):
         source_item_id = str(relation["item_id"])
         block = blocks.get(source_item_id)
@@ -394,12 +424,19 @@ def materialize_list_semantics(
             item_id = item_map[source_item_id]
             existing_item = item_id in containers and containers[item_id].get("kind") == "list_item"
             if not existing_item:
-                unit = source_node(source_item_id)
-                evidence = facts.get("evidence", {}).get(source_item_id, {})
+                # A clause split off a source paragraph reads the paragraph's own
+                # evidence, so its marker and ordinal come from the run it came
+                # from.  It is a generated block, so it carries no source
+                # reference of its own; the paragraph it was split from is its
+                # generation basis.
+                split_source_id = str(relation.get("split_source_id") or "")
+                unit = source_node(split_source_id or source_item_id)
+                evidence = facts.get("evidence", {}).get(split_source_id or source_item_id, {})
+                item_ref = source_ref(split_source_id or source_item_id)
                 item_node: dict[str, Any] = {
                     "kind": "list_item",
                     "source_marker": _normalized_list_marker(relation, evidence),
-                    "source_ordinal": relation.get("source_ordinal") or evidence.get("ordinal"),
+                    "source_ordinal": relation.get("source_ordinal") or evidence.get("ordinal") or 1,
                     "source_sequence_id": relation.get("source_sequence_id") or source_item_id,
                 }
                 numbering_role = table_numbering_role(
@@ -453,7 +490,7 @@ def materialize_list_semantics(
                     "candidate_id": f"list-item-structure-{source_item_id}",
                     "module_id": "list_semantics",
                     "module_version": "1.0",
-                    "target_source_refs": [source_ref(source_item_id)] if source_ref(source_item_id) else [],
+                    "target_source_refs": [item_ref] if item_ref else [],
                     "target_node_ids": [item_id],
                     "proposal": {
                         "operation": "create_node",
@@ -466,6 +503,38 @@ def materialize_list_semantics(
                     "constraints": [],
                     "rationale": "list item owner derived from immutable source facts",
                 })
+                if split_source_id:
+                    member_index = int(relation.get("split_index") or 0)
+                    segments = list(split_items.get(split_source_id) or [])
+                    if member_index < len(segments):
+                        candidates.append({
+                            "candidate_id": f"list-split-item-{source_item_id}",
+                            "module_id": "list_semantics",
+                            "module_version": "1.0",
+                            "target_source_refs": [item_ref] if item_ref else [],
+                            "target_node_ids": [source_item_id],
+                            "proposal": {
+                                "operation": "create_node",
+                                "property_scope": ["children"],
+                                "value": {
+                                    "node_id": source_item_id,
+                                    "parent_id": item_id,
+                                    "index": 0,
+                                    "node": {
+                                        "block_type": "paragraph",
+                                        "role": "body",
+                                        "inline_content": copy.deepcopy(segments[member_index]),
+                                        "generated_by": "list_semantics.parallel_clause_split",
+                                        "generation_basis": [split_source_id],
+                                    },
+                                },
+                            },
+                            "positive_evidence": [{"kind": "structural", "source": "parallel_clause_split"}],
+                            "negative_evidence": [],
+                            "scope": {"stages": ["relation"]},
+                            "constraints": [{"kind": "preserve_source_clause_evidence"}],
+                            "rationale": "a clause split off a source paragraph is a generated block inside its own item",
+                        })
 
     for candidate in list_result.get("candidates", []):
         mapped = copy.deepcopy(dict(candidate))
@@ -474,6 +543,10 @@ def materialize_list_semantics(
             candidates.append(mapped)
             continue
         source_item_id = target_ids[0]
+        if source_item_id in split_member_ids:
+            # The clause block is created directly inside its own item container,
+            # so the item ownership move has nothing to move.
+            continue
         item_id = item_map.get(source_item_id, source_item_id)
         proposal = dict(mapped.get("proposal") or {})
         value = dict(proposal.get("value") or {})

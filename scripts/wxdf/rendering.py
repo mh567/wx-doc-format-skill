@@ -316,6 +316,27 @@ def _apply_paragraph_alignment(paragraph: Any, record: Mapping[str, Any] | None)
     properties.append(element)
 
 
+def _apply_paragraph_indent(paragraph: Any, record: Mapping[str, Any] | None) -> None:
+    """Write the indent a paragraph's presentation owns.
+
+    An image paragraph carries no style, so it inherits the template ``Normal``
+    first-line indent unless the paragraph zeroes it.  The template's own picture
+    paragraph zeroes the first-line and left indent to make the centring exact, so
+    the presentation record carries those zeroes and this writes them.
+    """
+
+    indent = (record or {}).get("indent")
+    if not isinstance(indent, Mapping) or not indent:
+        return
+    properties = paragraph._p.get_or_add_pPr()
+    for existing in properties.findall(qn("w:ind")):
+        properties.remove(existing)
+    element = OxmlElement("w:ind")
+    for name, value in indent.items():
+        element.set(qn(f"w:{name}"), str(value))
+    properties.append(element)
+
+
 def _write_inline(
     paragraph: Any,
     inline_content: list[Mapping[str, Any]],
@@ -808,6 +829,7 @@ def render(
             # not override it.
             paragraph_presentation = presentation_paragraphs.get(node_id)
             _apply_paragraph_alignment(paragraph, paragraph_presentation)
+            _apply_paragraph_indent(paragraph, paragraph_presentation)
             _apply_paragraph_outline_level(paragraph, paragraph_presentation)
         if numbering and numbering.get("num_id") is not None:
             _write_direct_numbering(
