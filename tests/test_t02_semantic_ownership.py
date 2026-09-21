@@ -250,3 +250,43 @@ def test_appendix_reads_the_published_list_item_map(tmp_path: Path) -> None:
 
     assert mapped_nodes != unmapped_nodes
     assert any(set(node_ids) & set(item_map.values()) for node_ids in mapped_nodes)
+
+
+def test_caption_semantics_publishes_the_object_inventory(tmp_path: Path) -> None:
+    """The recognizer publishes the objects its captions attach to.
+
+    The inventory is the denominator of every caption check: without it a
+    consumer cannot tell an uncaptioned object from a missing measurement.  It is
+    built while the caption targets are resolved, so it is published alongside
+    the captions it resolved rather than discarded.
+    """
+
+    from docx.shared import Cm
+    from PIL import Image
+
+    image = tmp_path / "figure.png"
+    Image.new("RGB", (60, 40), (30, 90, 160)).save(image)
+    document = Document()
+    document.add_paragraph("表1 数据示例")
+    table = document.add_table(rows=2, cols=2)
+    table.cell(0, 0).text = "项目"
+    table.cell(0, 1).text = "说明"
+    document.add_paragraph().add_run().add_picture(str(image), width=Cm(3))
+    document.add_paragraph("图1 流程示意")
+    source = tmp_path / "inventory.docx"
+    document.save(str(source))
+
+    facts = parse(source)
+    table_semantics = collect_source_table_semantics(facts)
+    published = collect_source_caption_semantics(facts, table_semantics)
+
+    inventory = {obj["node_id"]: obj["kind"] for obj in published["objects"]}
+    assert sorted(inventory.values()) == ["figure", "table"]
+    for table_semantic in table_semantics:
+        if table_semantic["caption_eligible"]:
+            assert inventory[table_semantic["node_id"]] == "table"
+    assert [
+        inventory[caption["target_node_id"]]
+        for caption in published["captions"]
+        if caption["status"] == "associated"
+    ] == ["table", "figure"]

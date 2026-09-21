@@ -632,6 +632,57 @@ def _figure_note_position_issues(doc: Document) -> list[dict[str, Any]]:
     return issues
 
 
+def _caption_measurement(
+    table_semantics: list[Mapping[str, Any]],
+    caption_semantics: Mapping[str, Any],
+) -> tuple[list[Mapping[str, Any]], set[str], str | None]:
+    """Return the caption objects, the captioned targets and a failure reason.
+
+    The check reads the caption semantics module's published result: the object
+    inventory it resolved against and the captions it associated with them.  The
+    inventory is the denominator, so its absence means the measurement could not
+    be made.  It must not read as "this document has no captions": that reading
+    turns a missing key into a finding against the document.
+
+    The table half of the inventory is cross-checked against ``table_semantics``,
+    the eligibility list the producer itself resolves against, so an inventory
+    that lost or gained an eligible table is caught even when the key is present.
+    That is an internal-consistency guard, not an independent measurement: both
+    sides read the same table result.  The figure half has no such guard, since
+    no other module publishes a figure inventory.  A producer that dropped a
+    figure therefore costs a missed finding rather than a false one, and the
+    element-level checks in ``contracts.validate_capability_payload`` are what
+    stand behind the figure side.
+    """
+
+    inventory = caption_semantics.get("objects")
+    if not isinstance(inventory, list):
+        return [], set(), "caption_inventory_missing"
+    captions = caption_semantics.get("captions")
+    if not isinstance(captions, list):
+        return [], set(), "caption_inventory_missing"
+    eligible_tables = {
+        str(table.get("node_id"))
+        for table in table_semantics
+        if table.get("caption_eligible")
+    }
+    inventory_tables = {
+        str(obj.get("node_id"))
+        for obj in inventory
+        if isinstance(obj, Mapping) and obj.get("kind") == "table"
+    }
+    if inventory_tables != eligible_tables:
+        return [], set(), "caption_inventory_incomplete"
+    targets = {
+        str(caption.get("target_node_id"))
+        for caption in captions
+        if isinstance(caption, Mapping)
+        and caption.get("status") == "associated"
+        and caption.get("target_node_id")
+    }
+    return list(inventory), targets, None
+
+
 def check_captions(
     doc: Document,
     table_semantics: list[Mapping[str, Any]],
@@ -639,12 +690,17 @@ def check_captions(
 ) -> dict[str, Any]:
     issues: list[dict[str, Any]] = []
     issues.extend(_figure_note_position_issues(doc))
-    associations = caption_semantics.get("associations") or []
-    targets = {
-        str(rel.get("target_id"))
-        for rel in associations
-        if rel.get("kind") == "caption_target"
-    }
+    objects, targets, failure = _caption_measurement(table_semantics, caption_semantics)
+    if failure is not None:
+        # The dimension cannot be judged, so it states no verdict at all.  The
+        # caller drops it from the score and reports the reason, the way an
+        # absent AI dimension is left out rather than counted as a clean pass.
+        return {
+            "total_items": 1,
+            "issues": issues,
+            "unmeasured": True,
+            "unmeasured_reason": failure,
+        }
     total = 0
     for index, table in enumerate(table_semantics):
         if not table.get("caption_eligible"):
@@ -657,7 +713,7 @@ def check_captions(
                 "location": f"表格 {index + 1}（{table.get('table_type')}）",
                 **get_suggestion("table_missing_caption"),
             })
-    figures = [obj for obj in (caption_semantics.get("objects") or []) if obj.get("kind") == "figure"]
+    figures = [obj for obj in objects if obj.get("kind") == "figure"]
     for index, obj in enumerate(figures):
         total += 1
         if str(obj.get("node_id")) not in targets:
@@ -667,6 +723,23 @@ def check_captions(
                 "location": f"图片 {index + 1}（{obj.get('location', '')}）",
                 **get_suggestion("figure_missing_caption"),
             })
+    text_by_node = {
+        str(caption.get("node_id")): str(caption.get("text") or "")
+        for caption in (caption_semantics.get("captions") or [])
+        if isinstance(caption, Mapping)
+    }
+    for record in caption_semantics.get("issues") or []:
+        if not isinstance(record, Mapping):
+            continue
+        code = str(record.get("code") or "")
+        if code != "caption_target_missing":
+            continue
+        text = text_by_node.get(str(record.get("node_id")), "")
+        issues.append({
+            "code": code,
+            "location": f"题注「{text}」" if text else "题注",
+            **get_suggestion(code),
+        })
     return {"total_items": max(total, 1), "issues": issues}
 
 

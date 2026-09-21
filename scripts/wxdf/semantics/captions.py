@@ -727,7 +727,11 @@ def collect_source_caption_semantics(
         })
     for caption in captions:
         caption.pop("order", None)
-    return {"captions": captions, "issues": issues}
+    # The inventory the captions were resolved against is part of the published
+    # result: a consumer that checks whether an object carries a caption needs
+    # the objects, not only the captions, or an object nobody captioned and a
+    # measurement it never made look the same.
+    return {"captions": captions, "issues": issues, "objects": objects}
 
 
 def recognize_caption_semantics(

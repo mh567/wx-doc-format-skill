@@ -37,8 +37,13 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 from review_report import write_review_report, write_review_report_html
+from wxdf import input_reviewer
 from wxdf.input_reviewer import review_input_document
+from wxdf.parsers import parse
+from wxdf.review_checks import check_captions
 from wxdf.review_scoring import build_scoring_result, score_to_grade
+from wxdf.semantics.captions import collect_source_caption_semantics
+from wxdf.semantics.tables import collect_source_table_semantics
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -59,6 +64,37 @@ def _build_document(path: Path) -> None:
 
 def _issue_codes(result: dict) -> list[str]:
     return [str(issue.get("code")) for issue in result["issues"]]
+
+
+def _document_with_a_table_and_a_figure(tmp_path: Path, name: str, *, captions: bool) -> Path:
+    """Build a DOCX holding one data table and one figure, captioned or not."""
+
+    from docx.shared import Cm
+    from PIL import Image
+
+    image = tmp_path / f"{name}.png"
+    Image.new("RGB", (60, 40), (30, 90, 160)).save(image)
+    document = Document()
+    document.add_paragraph("文档标题", style="Heading 1")
+    if captions:
+        document.add_paragraph("表1 字段说明")
+    table = document.add_table(rows=1, cols=2)
+    table.cell(0, 0).text = "字段"
+    table.cell(0, 1).text = "说明"
+    document.add_paragraph().add_run().add_picture(str(image), width=Cm(3))
+    if captions:
+        document.add_paragraph("图1 流程示意")
+    source = tmp_path / f"{name}.docx"
+    document.save(str(source))
+    return source
+
+
+def _published_caption_result(source: Path) -> tuple[Document, list, dict]:
+    """Return a document with the caption semantics its own content produces."""
+
+    facts = parse(source, {"source_store": None, "source_type": "docx"})
+    table_semantics = collect_source_table_semantics(facts)
+    return Document(source), table_semantics, collect_source_caption_semantics(facts, table_semantics)
 
 
 def test_review_reports_custom_style_heading_jump_and_missing_toc(tmp_path: Path) -> None:
@@ -580,3 +616,174 @@ def test_review_reports_an_authored_body_alignment(tmp_path: Path) -> None:
     body = [issue for issue in mismatches if issue.get("role") == "body"]
     assert body
     assert "jc" in body[0]["properties"]
+
+
+# ---------------------------------------------------------------------------
+# Captions: the check reads the published caption semantics, both directions.
+# ---------------------------------------------------------------------------
+
+
+def test_review_accepts_a_table_and_a_figure_that_carry_captions(tmp_path: Path) -> None:
+    """A captioned object is not an uncaptioned one.
+
+    The check looked for keys the caption semantics module never published, so
+    every caption-eligible table was reported as uncaptioned while every figure
+    was skipped.  A recognized caption and a recognized figure target are
+    therefore both pinned here.
+    """
+
+    source = _document_with_a_table_and_a_figure(tmp_path, "captioned", captions=True)
+
+    result = review_input_document(source, TEMPLATE)
+
+    codes = _issue_codes(result)
+    assert "table_missing_caption" not in codes
+    assert "figure_missing_caption" not in codes
+    assert result["dimension_scores"]["caption"] == 100.0
+
+
+def test_review_reports_an_uncaptioned_table_and_an_uncaptioned_figure(tmp_path: Path) -> None:
+    """Both halves of the check are live: the figure half used to be skipped."""
+
+    source = _document_with_a_table_and_a_figure(tmp_path, "uncaptioned", captions=False)
+
+    result = review_input_document(source, TEMPLATE)
+
+    codes = _issue_codes(result)
+    assert codes.count("table_missing_caption") == 1
+    assert codes.count("figure_missing_caption") == 1
+    assert result["dimension_scores"]["caption"] < 100.0
+
+
+def test_review_reports_a_caption_that_targets_nothing(tmp_path: Path) -> None:
+    """A caption with no object to attach to is the recognizer's own finding."""
+
+    source = tmp_path / "orphan.docx"
+    document = Document()
+    document.add_paragraph("文档标题", style="Heading 1")
+    document.add_paragraph("表1 字段说明")
+    document.save(source)
+
+    result = review_input_document(source, TEMPLATE)
+
+    orphans = [issue for issue in result["issues"] if issue["code"] == "caption_target_missing"]
+    assert len(orphans) == 1
+    assert "字段说明" in orphans[0]["location"]
+
+
+def test_caption_check_refuses_a_result_without_its_object_inventory(tmp_path: Path) -> None:
+    """Absent evidence fails closed instead of becoming a document verdict.
+
+    This is the shape that produced thirteen false findings: the check read keys
+    that were never published, so a missing inventory looked like a document
+    without captions.  The measurement now reports itself as unmeasured and the
+    check states no per-object verdict.
+    """
+
+    source = _document_with_a_table_and_a_figure(tmp_path, "inventory", captions=True)
+    doc, table_semantics, published = _published_caption_result(source)
+
+    stripped = {"captions": published["captions"], "issues": published["issues"]}
+    outcome = check_captions(doc, table_semantics, stripped)
+
+    assert outcome["unmeasured"] is True
+    assert outcome["unmeasured_reason"] == "caption_inventory_missing"
+    codes = [issue["code"] for issue in outcome["issues"]]
+    assert "table_missing_caption" not in codes
+    assert "figure_missing_caption" not in codes
+
+
+def test_caption_check_refuses_an_inventory_the_parser_does_not_agree_with(tmp_path: Path) -> None:
+    """The table half of the inventory is cross-checked against the parser.
+
+    ``table_semantics`` is an independently produced result, so an inventory
+    that disagrees with it means the measurement is broken rather than the
+    document.
+    """
+
+    source = _document_with_a_table_and_a_figure(tmp_path, "partial", captions=True)
+    doc, table_semantics, published = _published_caption_result(source)
+
+    tampered = {
+        "captions": published["captions"],
+        "issues": published["issues"],
+        "objects": [obj for obj in published["objects"] if obj.get("kind") != "table"],
+    }
+    outcome = check_captions(doc, table_semantics, tampered)
+
+    assert outcome["unmeasured"] is True
+    assert outcome["unmeasured_reason"] == "caption_inventory_incomplete"
+    codes = [issue["code"] for issue in outcome["issues"]]
+    assert "table_missing_caption" not in codes
+
+
+def test_review_drops_and_announces_the_dimension_it_cannot_measure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unmeasurable dimension leaves the score alone and says so.
+
+    Dropping the dimension is the engine's own way of not claiming a verdict it
+    never reached: the AI dimension is skipped the same way when its checks did
+    not run.  The reason is surfaced as a risk note instead.
+    """
+
+    published = input_reviewer.collect_source_caption_semantics
+
+    def without_inventory(facts, table_semantics):
+        result = published(facts, table_semantics)
+        return {"captions": result["captions"], "issues": result["issues"]}
+
+    monkeypatch.setattr(input_reviewer, "collect_source_caption_semantics", without_inventory)
+    source = _document_with_a_table_and_a_figure(tmp_path, "unmeasured", captions=True)
+
+    result = review_input_document(source, TEMPLATE)
+
+    assert "caption" not in result["dimension_scores"]
+    assert "table_missing_caption" not in _issue_codes(result)
+    assert any("题注" in warning for warning in result["risk_warnings"])
+
+
+def test_review_keeps_a_placement_finding_when_the_inventory_is_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A finding the check did reach survives the unmeasured dimension.
+
+    The figure-note placement rule reads the document's own text, so it does not
+    depend on the object inventory.  Dropping the dimension must not drop that
+    finding with it.
+    """
+
+    published = input_reviewer.collect_source_caption_semantics
+
+    def without_inventory(facts, table_semantics):
+        result = published(facts, table_semantics)
+        return {"captions": result["captions"], "issues": result["issues"]}
+
+    monkeypatch.setattr(input_reviewer, "collect_source_caption_semantics", without_inventory)
+    source = tmp_path / "placement.docx"
+    document = Document()
+    document.add_paragraph("文档标题", style="Heading 1")
+    document.add_paragraph("图1 说明")
+    document.add_paragraph("注1：这是图注")
+    document.save(source)
+
+    result = review_input_document(source, TEMPLATE)
+
+    assert "caption" not in result["dimension_scores"]
+    assert "figure_note_below_caption" in _issue_codes(result)
+
+
+def test_review_report_names_the_dimensions_it_actually_scored(tmp_path: Path) -> None:
+    """The score sentence describes the scored set, not a fixed count."""
+
+    source = _document_with_a_table_and_a_figure(tmp_path, "sentence", captions=True)
+    result = review_input_document(source, TEMPLATE)
+
+    path = tmp_path / "scored.md"
+    write_review_report(result, path)
+    text = path.read_text(encoding="utf-8")
+
+    assert f"{len(result['dimension_scores'])} 个维度" in text
+    assert "页码与编号" in text

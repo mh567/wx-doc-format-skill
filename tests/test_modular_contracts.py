@@ -17,6 +17,7 @@ from wxdf.contracts import (
     PATCH_SCHEMA_VERSION,
     SOURCE_FACTS_SCHEMA_VERSION,
     ContractError,
+    validate_capability_payload,
 )
 from wxdf.validation import (
     validate_ast,
@@ -389,3 +390,64 @@ def test_contract_json_schemas_pin_versions_and_role_requirements() -> None:
         assert schema["$schema"].startswith("https://json-schema.org/")
         assert version in schema["$id"]
         assert "required" in schema
+
+
+def test_caption_semantics_result_publishes_its_captions_and_inventory() -> None:
+    """The published caption result declares its elements, not only its kind.
+
+    A capability contract that checks the top-level type alone lets a consumer
+    read a key the producer never published and treat the missing value as an
+    empty result.  The caption result is therefore validated element by element,
+    with the object inventory that its consumers measure against.
+    """
+
+    validate_capability_payload(
+        "caption_semantics_result",
+        {
+            "captions": [{"node_id": "u-1", "caption_type": "table", "status": "associated"}],
+            "issues": [],
+            "objects": [{"node_id": "c-1", "kind": "table"}],
+        },
+    )
+    for incomplete, code, path in (
+        (
+            {"captions": [], "issues": []},
+            "missing_caption_semantics_key",
+            "caption_semantics_result.objects",
+        ),
+        (
+            {"captions": [], "issues": [], "objects": {}},
+            "invalid_caption_semantics_key",
+            "caption_semantics_result.objects",
+        ),
+        (
+            {"captions": "captions", "issues": [], "objects": []},
+            "invalid_caption_semantics_key",
+            "caption_semantics_result.captions",
+        ),
+        (
+            {"captions": ["caption"], "issues": [], "objects": []},
+            "invalid_caption_entry",
+            "caption_semantics_result.captions[0]",
+        ),
+        (
+            {"captions": [{"node_id": "u-1"}], "issues": [], "objects": []},
+            "missing_caption_field",
+            "caption_semantics_result.captions[0].caption_type",
+        ),
+        (
+            {"captions": [], "issues": [], "objects": [{"kind": "table"}]},
+            "missing_caption_object_field",
+            "caption_semantics_result.objects[0].node_id",
+        ),
+        (
+            {"captions": [], "issues": [], "objects": ["table"]},
+            "invalid_caption_object",
+            "caption_semantics_result.objects[0]",
+        ),
+    ):
+        _assert_error(
+            lambda payload=incomplete: validate_capability_payload("caption_semantics_result", payload),
+            code=code,
+            path=path,
+        )

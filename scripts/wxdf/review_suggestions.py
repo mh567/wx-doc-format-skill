@@ -148,6 +148,11 @@ SUGGESTION_TEMPLATES: dict[str, dict[str, str]] = {
         "title": "图注位于图题下方",
         "suggestion": "图注和脚注应在图题上方（顺序为图片、图注、图题），请把注移到图题之前",
     },
+    "caption_target_missing": {
+        "level": "medium",
+        "title": "题注没有对应的表格或图片",
+        "suggestion": "该题注未指向任何表格或图片，请把它放在对应对象的上方或下方，或删除多余的题注",
+    },
     "toc_missing": {
         "level": "medium",
         "title": "缺少目录",

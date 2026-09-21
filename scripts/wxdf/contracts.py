@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal, Mapping, Sequence, TypeAlias, TypedDict
+from typing import Any, Callable, Literal, Mapping, Sequence, TypeAlias, TypedDict
 
 
 SOURCE_FACTS_SCHEMA_VERSION = "1.0"
@@ -136,7 +136,7 @@ _CAPABILITY_CONTRACT_DEFINITIONS = (
     ("table_semantics_result", "2.0", "sequence"),
     ("table_semantics_candidates", "2.0", "sequence"),
     ("table_semantics", "2.0", "mapping"),
-    ("caption_semantics_result", "2.0", "mapping"),
+    ("caption_semantics_result", "2.1", "mapping"),
     ("caption_semantics_candidates", "2.0", "sequence"),
     ("caption_semantics", "2.0", "mapping"),
     ("paragraph_semantics_candidates", "1.0", "sequence"),
@@ -175,6 +175,73 @@ CAPABILITY_CONTRACTS = {
 }
 
 
+def _validate_caption_semantics_result(value: Mapping[str, Any]) -> None:
+    """Require the caption result to publish every element its consumers read.
+
+    The top-level kind alone is not enough for a result other modules measure
+    against: a consumer that reads a key the producer never published sees an
+    empty value and reports it as a document defect.  The inventory is checked
+    with the captions because it is the denominator those consumers count
+    against.
+    """
+
+    contract = f"Capability caption_semantics_result {capability_contract('caption_semantics_result').version}"
+    for key in ("captions", "issues", "objects"):
+        if key not in value:
+            raise ContractError(
+                "missing_caption_semantics_key",
+                f"caption_semantics_result.{key}",
+                "published caption semantics must carry its captions, issues and object inventory",
+                contract=contract,
+            )
+        if not isinstance(value[key], list):
+            raise ContractError(
+                "invalid_caption_semantics_key",
+                f"caption_semantics_result.{key}",
+                f"expected list, got {type(value[key]).__name__}",
+                contract=contract,
+            )
+    for field, entry, invalid_code, missing_code, noun, required in (
+        (
+            "captions",
+            value["captions"],
+            "invalid_caption_entry",
+            "missing_caption_field",
+            "caption",
+            ("node_id", "caption_type", "status"),
+        ),
+        (
+            "objects",
+            value["objects"],
+            "invalid_caption_object",
+            "missing_caption_object_field",
+            "caption object",
+            ("node_id", "kind"),
+        ),
+    ):
+        for position, element in enumerate(entry):
+            if not isinstance(element, Mapping):
+                raise ContractError(
+                    invalid_code,
+                    f"caption_semantics_result.{field}[{position}]",
+                    f"expected mapping, got {type(element).__name__}",
+                    contract=contract,
+                )
+            for name in required:
+                if name not in element:
+                    raise ContractError(
+                        missing_code,
+                        f"caption_semantics_result.{field}[{position}].{name}",
+                        f"{noun} must declare {', '.join(required)}",
+                        contract=contract,
+                    )
+
+
+_ELEMENT_VALIDATORS: dict[str, Callable[[Mapping[str, Any]], None]] = {
+    "caption_semantics_result": _validate_caption_semantics_result,
+}
+
+
 def capability_contract(name: str) -> CapabilityContract:
     """Return a declared contract, using an unconstrained 1.0 fallback."""
 
@@ -206,6 +273,9 @@ def validate_capability_payload(name: str, value: Any) -> None:
             f"expected {kind}, got {type(value).__name__}",
             contract=f"Capability {contract.name} {contract.version}",
         )
+    element_validator = _ELEMENT_VALIDATORS.get(str(name))
+    if element_validator is not None:
+        element_validator(value)
 
 JSONValue: TypeAlias = None | bool | int | float | str | list["JSONValue"] | dict[str, "JSONValue"]
 JSONObject: TypeAlias = dict[str, JSONValue]

@@ -55,6 +55,11 @@ DIMENSION_AI = "ai_review"
 
 _SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 
+_CAPTION_UNMEASURED_REASONS = {
+    "caption_inventory_missing": "题注语义结果未提供对象清单",
+    "caption_inventory_incomplete": "题注语义结果的对象清单与解析到的表格不一致",
+}
+
 _DIMENSION_LABELS = {
     DIMENSION_FORMAT: "样式与元素格式符合模板",
     DIMENSION_HEADING: "标题层级与编号正确",
@@ -148,6 +153,7 @@ def review_input_document(
 
     style_check = check_styles(doc, template_profile)
     format_check = check_format_conformance(doc, template_doc, template_profile)
+    caption_check = check_captions(doc, table_semantics, caption_semantics)
 
     dimension_results = {
         DIMENSION_FORMAT: {
@@ -159,10 +165,19 @@ def review_input_document(
         DIMENSION_TABLE: table_check,
         DIMENSION_TOC: check_toc(doc),
         DIMENSION_APPENDIX: check_appendix(facts),
-        DIMENSION_CAPTION: check_captions(doc, table_semantics, caption_semantics),
+        DIMENSION_CAPTION: caption_check,
         DIMENSION_NOTE: check_notes(doc, template_profile),
         DIMENSION_NUMBERING: check_page_numbering(doc, template_doc),
     }
+    # A check that could not measure its surface states no verdict, so its
+    # dimension is left out of the score rather than counted as a clean pass.
+    # The reason is reported as a risk note, and the findings that check did
+    # reach are kept: a rule read from the document's own text is not less true
+    # because another rule in the same dimension could not run.
+    unmeasured_caption_findings: list[dict[str, Any]] = []
+    if caption_check.get("unmeasured"):
+        unmeasured_caption_findings = list(caption_check.get("issues") or [])
+        dimension_results.pop(DIMENSION_CAPTION)
     # The AI dimension is present only when the semantic checks ran.  Scoring
     # skips a dimension that is absent, so a plain review neither gains nor loses
     # points for checks it never made.
@@ -173,7 +188,7 @@ def review_input_document(
         }
 
     scoring = build_scoring_result(dimension_results)
-    all_issues: list[dict[str, Any]] = []
+    all_issues: list[dict[str, Any]] = list(unmeasured_caption_findings)
     for result in dimension_results.values():
         all_issues.extend(result.get("issues", []))
     all_issues.sort(key=lambda issue: _SEVERITY_ORDER.get(str(issue.get("level")), 4))
@@ -198,6 +213,12 @@ def review_input_document(
         risk_warnings.append(f"存在 {counts['high']} 个高优先级问题，建议立即修复")
     if counts["low"] > 0:
         risk_warnings.append(f"存在 {counts['low']} 个低优先级问题，可按需修正")
+    if caption_check.get("unmeasured"):
+        reason = _CAPTION_UNMEASURED_REASONS.get(
+            str(caption_check.get("unmeasured_reason")),
+            "题注语义结果不可用",
+        )
+        risk_warnings.append(f"题注维度未能测量（{reason}），本次未计入评分")
     if not risk_warnings:
         risk_warnings.append("未发现需要人工复核的高风险项")
 

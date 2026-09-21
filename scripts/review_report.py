@@ -17,6 +17,23 @@ SEVERITY_ICONS: dict[str, str] = {
     "low": "🔵 ",
 }
 
+# The dimension names in the order the score weighs them.  The sentence that
+# explains the score reads this map rather than a fixed list, so it names the
+# dimensions that were actually scored: a check that could not measure its
+# surface leaves its dimension out of the score.
+_DIMENSION_NAMES: dict[str, str] = {
+    "format_conformance": "样式与元素格式",
+    "heading_hierarchy": "大纲层级",
+    "list_structure": "列表结构",
+    "table_format": "表格",
+    "toc_structure": "目录",
+    "appendix_structure": "附录",
+    "caption": "题注",
+    "note_structure": "注",
+    "numbering_page": "页码与编号",
+    "ai_review": "AI 语义",
+}
+
 
 def _format_issues_by_severity(issues: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
     grouped: dict[str, list[dict[str, Any]]] = {"critical": [], "high": [], "medium": [], "low": []}
@@ -64,11 +81,19 @@ def write_review_report(result: dict[str, Any], path: Path) -> None:
     lines.append("")
     lines.append(f"**总分：{score}/100** | 等级：**{grade}**")
     lines.append("")
-    lines.append(
-        "评分是对样式、大纲层级、列表结构、表格、目录、附录、题注和注八个维度"
-        "按预定义权重加权的结果，每个问题按严重程度扣分（严重 25、高 15、中 8、低 3）；"
-        "具体问题与整改建议见下。"
-    )
+    scored = result.get("dimension_scores") or {}
+    scored_names = [name for key, name in _DIMENSION_NAMES.items() if key in scored]
+    if scored_names:
+        lines.append(
+            f"评分是对{'、'.join(scored_names)}等 {len(scored_names)} 个维度"
+            "按预定义权重加权的结果，每个问题按严重程度扣分（严重 25、高 15、中 8、低 3）；"
+            "具体问题与整改建议见下。"
+        )
+    else:
+        lines.append(
+            "评分按预定义权重加权，每个问题按严重程度扣分（严重 25、高 15、中 8、低 3）；"
+            "具体问题与整改建议见下。"
+        )
     lines.append("")
 
     lines.append("| 等级 | 数量 |")
