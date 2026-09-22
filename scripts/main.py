@@ -23,6 +23,7 @@ NATIVE_PROFILE = "wx-default-v2"
 
 DEFAULT_TABLE_ROW_HEIGHT_CM = 0.7
 DEFAULT_TABLE_ROW_HEIGHT_RULE = "at-least"
+DEFAULT_CAPTION_NUMBERING = "chapter"
 
 
 def skill_version() -> str:
@@ -358,6 +359,7 @@ def _native_checkpoint_configuration(args, *, output_path: Path) -> dict:
         "strict_normalize": args.strict_normalize,
         "table_row_height_cm": args.table_row_height_cm,
         "table_row_height_rule": args.table_row_height_rule,
+        "caption_numbering": args.caption_numbering,
         "pipeline": NATIVE_PIPELINE,
         "list_policy": NATIVE_PROFILE,
     }
@@ -504,6 +506,12 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
     parser.add_argument("--source-ast", type=Path, default=None, help="Parsed source document model (Step 1 output).")
     parser.add_argument("--table-row-height-cm", type=float, default=DEFAULT_TABLE_ROW_HEIGHT_CM)
     parser.add_argument("--table-row-height-rule", choices=["exact", "at-least"], default=DEFAULT_TABLE_ROW_HEIGHT_RULE)
+    parser.add_argument(
+        "--caption-numbering",
+        choices=["chapter", "sequential"],
+        default=DEFAULT_CAPTION_NUMBERING,
+        help="Caption numbering form (default: chapter, e.g. 图5-1; sequential renders 图1).",
+    )
     parser.add_argument("--fail-on-risk", action="store_true")
     parser.add_argument(
         "--llm-enhance",
@@ -674,6 +682,8 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
             args.table_row_height_cm = run_args["table_row_height_cm"]
         if "table_row_height_rule" in run_args and restore_native("--table-row-height-rule"):
             args.table_row_height_rule = run_args["table_row_height_rule"]
+        if "caption_numbering" in run_args and restore_native("--caption-numbering"):
+            args.caption_numbering = run_args["caption_numbering"]
     if _os.environ.get("WX_DOC_FORMAT_RELEASE") == "1" and (args.ast or args.source_ast):
         parser.error("--ast and --source-ast are unavailable in release packages")
 
@@ -712,6 +722,7 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
         "enhancement_call": enhancement_call,
         "table_row_height_cm": args.table_row_height_cm,
         "table_row_height_rule": args.table_row_height_rule,
+        "caption_numbering": args.caption_numbering,
     }
     if args.generate_requests is not None:
         request_dir = args.generate_requests.resolve()

@@ -476,6 +476,7 @@ def _native_renderer(context: ModuleExecutionContext) -> Mapping[str, Any]:
     render_options = {
         "table_row_height_cm": float(options.get("table_row_height_cm", 0.7)),
         "table_row_height_rule": str(options.get("table_row_height_rule", "at-least")),
+        "caption_numbering": str(options.get("caption_numbering", "chapter")),
     }
     with context.stage("render"):
         if hasattr(template, "path"):

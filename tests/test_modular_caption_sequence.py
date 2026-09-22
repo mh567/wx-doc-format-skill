@@ -88,17 +88,48 @@ def _source_with_captions(tmp_path: Path) -> Path:
     return source
 
 
-def _convert(tmp_path: Path, source: Path) -> tuple[Path, object]:
+def _convert(tmp_path: Path, source: Path, *, caption_numbering: str | None = None) -> tuple[Path, object]:
     output = tmp_path / f"{source.stem}-out.docx"
+    options: dict[str, object] = {"llm_enhance": "off"}
+    if caption_numbering is not None:
+        options["caption_numbering"] = caption_numbering
     request = ConversionRequest(
         input_path=source,
         output_path=output,
         template_path=TEMPLATE,
         pipeline="modular",
         list_policy="wx-default-v2",
-        options={"llm_enhance": "off"},
+        options=options,
     )
     return output, ConversionKernel().convert(request)
+
+
+def _caption_texts(path: Path) -> list[str]:
+    """Return the visible text of each caption-styled paragraph in a saved DOCX."""
+
+    return [
+        "".join(node.text or "" for node in paragraph.iter(f"{W}t"))
+        for paragraph in _caption_paragraphs(path)
+    ]
+
+
+def _source_with_chapters(tmp_path: Path) -> Path:
+    """Build a DOCX with one captioned table under each of two chapters."""
+
+    document = Document()
+    document.add_heading("第一章", level=1)
+    document.add_paragraph("表1 甲表")
+    first = document.add_table(rows=1, cols=2)
+    first.cell(0, 0).text = "字段"
+    first.cell(0, 1).text = "说明"
+    document.add_heading("第二章", level=1)
+    document.add_paragraph("表1 乙表")
+    second = document.add_table(rows=1, cols=2)
+    second.cell(0, 0).text = "字段"
+    second.cell(0, 1).text = "说明"
+    source = tmp_path / "chapters.docx"
+    document.save(str(source))
+    return source
 
 
 # ---------------------------------------------------------------------------
@@ -312,3 +343,109 @@ def test_a_formula_number_field_survives_the_caption_change(tmp_path: Path) -> N
         document_xml = archive.read("word/document.xml").decode("utf-8")
     assert document_xml.count("SEQ 公式") == 1
     assert "SEQ Table" not in document_xml
+
+
+# ---------------------------------------------------------------------------
+# Chapter-relative numbering (ruling of 2026-09-22)
+# ---------------------------------------------------------------------------
+
+def test_a_chapter_caption_is_written_with_the_styleref_and_reset_fields() -> None:
+    """The chapter form matches Word's own "include chapter number" field."""
+
+    template = Document(str(TEMPLATE))
+    paragraph = template.add_paragraph()
+    block = {
+        "role": "caption",
+        "caption_type": "table",
+        "inline_content": [{"kind": "text", "text": "表1 字段说明", "marks": []}],
+    }
+
+    text = _write_caption(paragraph, block, {}, None, {"chapter": 5, "sequence": 1})
+
+    assert _run_shapes(paragraph) == [
+        ("text", "表"),
+        ("fldChar", "begin"),
+        ("instrText", " STYLEREF 1 \\s "),
+        ("fldChar", "separate"),
+        ("text", "5"),
+        ("fldChar", "end"),
+        ("text", "-"),
+        ("fldChar", "begin"),
+        ("instrText", " SEQ 表 \\* ARABIC \\s 1 "),
+        ("fldChar", "separate"),
+        ("text", "1"),
+        ("fldChar", "end"),
+        ("text", " 字段说明"),
+    ]
+    assert text == "表5-1 字段说明"
+
+
+def test_an_appendix_caption_ignores_the_chapter_numbering() -> None:
+    """A preserved appendix number outranks the chapter form (decision 3)."""
+
+    template = Document(str(TEMPLATE))
+    paragraph = template.add_paragraph()
+    block = {
+        "role": "caption",
+        "caption_type": "table",
+        "source_number_preserved": True,
+        "appendix_id": "appendix-a",
+        "inline_content": [{"kind": "text", "text": "表A.1 说明", "marks": []}],
+    }
+
+    text = _write_caption(paragraph, block, {}, None, {"chapter": 5, "sequence": 1})
+
+    assert text == "表A.1 说明"
+    assert not any(run.tag == qn("w:instrText") for run in paragraph._p)
+
+
+def test_the_default_caption_numbering_is_chapter_relative(tmp_path: Path) -> None:
+    """A captioned table under each chapter numbers as 表1-1 and 表2-1."""
+
+    output, result = _convert(tmp_path, _source_with_chapters(tmp_path))
+
+    assert result.status == "completed", result.diagnostics
+    assert result.report["saved_output_audit"]["passed"] is True
+    assert result.report["saved_output_audit"]["unexpected_styles"] == []
+    assert _caption_texts(output) == ["表1-1 甲表", "表2-1 乙表"]
+    with ZipFile(output) as archive:
+        document_xml = archive.read("word/document.xml").decode("utf-8")
+    assert document_xml.count(" STYLEREF 1 \\s ") == 2
+    assert document_xml.count(" SEQ 表 \\* ARABIC \\s 1 ") == 2
+
+
+def test_the_sequential_option_restores_the_document_wide_numbers(tmp_path: Path) -> None:
+    """``--caption-numbering sequential`` drops the chapter prefix again."""
+
+    output, result = _convert(tmp_path, _source_with_chapters(tmp_path), caption_numbering="sequential")
+
+    assert result.status == "completed", result.diagnostics
+    assert result.report["saved_output_audit"]["passed"] is True
+    assert _caption_texts(output) == ["表1 甲表", "表1 乙表"]
+    with ZipFile(output) as archive:
+        document_xml = archive.read("word/document.xml").decode("utf-8")
+    assert "STYLEREF" not in document_xml
+    assert " SEQ 表 \\* ARABIC " in document_xml
+
+
+def test_a_caption_before_the_first_chapter_keeps_its_plain_number(tmp_path: Path) -> None:
+    """A front-matter caption has no chapter to borrow, so it stays sequential."""
+
+    document = Document()
+    document.add_paragraph("表1 前表")
+    front = document.add_table(rows=1, cols=2)
+    front.cell(0, 0).text = "字段"
+    front.cell(0, 1).text = "说明"
+    document.add_heading("第一章", level=1)
+    document.add_paragraph("表1 后表")
+    body = document.add_table(rows=1, cols=2)
+    body.cell(0, 0).text = "字段"
+    body.cell(0, 1).text = "说明"
+    source = tmp_path / "front-caption.docx"
+    document.save(str(source))
+
+    output, result = _convert(tmp_path, source)
+
+    assert result.status == "completed", result.diagnostics
+    assert result.report["saved_output_audit"]["passed"] is True
+    assert _caption_texts(output) == ["表1 前表", "表1-1 后表"]

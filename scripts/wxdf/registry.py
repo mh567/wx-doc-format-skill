@@ -443,7 +443,7 @@ def build_native_v2_registry(
                 ("normalized", "template_bundle", "resources"),
                 ("render_plan", "render_result"),
                 runtime_services=("metrics", "staging_path"),
-                option_keys=("table_row_height_cm", "table_row_height_rule"),
+                option_keys=("table_row_height_cm", "table_row_height_rule", "caption_numbering"),
                 **common,
             ),
             stage_executors["native-renderer"],

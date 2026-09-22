@@ -20,7 +20,7 @@ from text_utils import CAPTION_SEQUENCE_FALLBACK, caption_parts
 
 from .render_plan import build_render_plan
 from .media import MediaEmbedder
-from .model import effective_outline_level
+from .model import effective_outline_level, is_body_outline_heading
 from .template import TemplateBundle
 
 
@@ -411,6 +411,7 @@ def _write_caption(
     block: Mapping[str, Any],
     resources: Mapping[str, Any],
     sequences: Mapping[str, Any] | None = None,
+    numbering: Mapping[str, Any] | None = None,
 ) -> str:
     """Write a caption run and return its visible text.
 
@@ -424,6 +425,13 @@ def _write_caption(
     field and an invented identifier would render, but Word lists a
     cross-reference item by the sequence identifier, so the template's own
     spelling is what keeps 图 and 表 cross-referenceable.
+
+    ``numbering`` carries ``{"chapter": N, "sequence": M}`` when the caption is
+    numbered by chapter.  The chapter number is written as the ``STYLEREF 1``
+    field Word itself inserts for "include chapter number", and the sequence
+    field resets per chapter through ``\\s 1``, so the form is
+    ``图{ STYLEREF 1 \\s }-{ SEQ 图 \\* ARABIC \\s 1 }``.  When ``numbering`` is
+    absent the caption keeps the plain document-wide sequence field.
 
     A caption whose source numbering is preserved, which is what an appendix
     caption carries (``表A.1``), keeps its authored number instead: the sequence
@@ -453,6 +461,29 @@ def _write_caption(
             for element in _retained_inline_elements(item, resources):
                 paragraph._p.append(element)
         return authored
+
+    chapter = numbering.get("chapter") if isinstance(numbering, Mapping) else None
+    in_chapter_sequence = numbering.get("sequence") if isinstance(numbering, Mapping) else None
+    if isinstance(chapter, int) and not isinstance(chapter, bool) and isinstance(in_chapter_sequence, int) and not isinstance(in_chapter_sequence, bool):
+        paragraph.add_run(sequence)
+        _append_field_char(paragraph, "begin")
+        _append_instr_text(paragraph, " STYLEREF 1 \\s ")
+        _append_field_char(paragraph, "separate")
+        paragraph.add_run(str(chapter))
+        _append_field_char(paragraph, "end")
+        paragraph.add_run("-")
+        _append_field_char(paragraph, "begin")
+        _append_instr_text(paragraph, f" SEQ {sequence} \\* ARABIC \\s 1 ")
+        _append_field_char(paragraph, "separate")
+        paragraph.add_run(str(in_chapter_sequence))
+        _append_field_char(paragraph, "end")
+        _, _, _, body = caption_parts(authored)
+        paragraph.add_run(f" {body}")
+        for item in ends:
+            for element in _retained_inline_elements(item, resources):
+                paragraph._p.append(element)
+        return f"{sequence}{chapter}-{in_chapter_sequence} {body}"
+
     paragraph.add_run(sequence)
 
     _append_field_char(paragraph, "begin")
@@ -721,6 +752,7 @@ def render(
     resources: Mapping[str, Any] | None = None,
     table_row_height_cm: float = 0.7,
     table_row_height_rule: str = "at-least",
+    caption_numbering: str = "chapter",
 ) -> dict[str, Any]:
     """Render normalized nodes in children order and save a DOCX artifact."""
 
@@ -777,6 +809,23 @@ def render(
     semantic_table_cells: set[Any] = set()
     layout_table_cells: set[Any] = set()
     pending_page_break = False
+    # Chapter numbering for captions.  ``current_chapter`` tracks the ordinal of
+    # the body level-1 heading the walk has reached, and the per-kind counters
+    # restart at every chapter.  That keeps the cached chapter number and the
+    # chapter sequence in step with ``SEQ ... \s 1``, which resets at the same
+    # boundary, and with the template's own heading numbering.
+    chapter_caption_numbering = caption_numbering != "sequential"
+    current_chapter: int | None = None
+    caption_sequence_counters: dict[str, int] = {}
+
+    def _advance_chapter(node_id: str, block: Mapping[str, Any]) -> None:
+        nonlocal current_chapter, caption_sequence_counters
+        if not is_body_outline_heading(block):
+            return
+        if effective_outline_level(block, presentation_outline.get(node_id)) != 1:
+            return
+        current_chapter = (current_chapter or 0) + 1
+        caption_sequence_counters = {}
 
     def add_paragraph(
         node_id: str,
@@ -787,6 +836,7 @@ def render(
         parent: Any | None = None,
     ) -> Any:
         nonlocal paragraph_counter, pending_page_break
+        _advance_chapter(node_id, block)
         style = list_style or _style_for_block(block, styles, presentation_outline.get(node_id))
         if parent is not None and parent._tc in semantic_table_cells:
             style = styles.get("table_body", "表正文")
@@ -815,7 +865,19 @@ def render(
                     paragraph = parent.add_paragraph()
         caption_text: str | None = None
         if block.get("role") == "caption":
-            caption_text = _write_caption(paragraph, block, resources, caption_sequences)
+            caption_number: Mapping[str, Any] | None = None
+            if (
+                chapter_caption_numbering
+                and current_chapter is not None
+                and not (block.get("source_number_preserved") and block.get("appendix_id"))
+            ):
+                caption_kind = str(block.get("caption_type") or "table")
+                caption_sequence_counters[caption_kind] = caption_sequence_counters.get(caption_kind, 0) + 1
+                caption_number = {
+                    "chapter": current_chapter,
+                    "sequence": caption_sequence_counters[caption_kind],
+                }
+            caption_text = _write_caption(paragraph, block, resources, caption_sequences, caption_number)
         else:
             _write_inline(paragraph, block.get("inline_content", []), media, resources)
         if parent is not None and parent._tc in layout_table_cells:
