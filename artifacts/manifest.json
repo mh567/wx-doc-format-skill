@@ -1,18 +1,18 @@
 {
   "schema_version": 1,
-  "version": "0.17.5",
+  "version": "0.17.6",
   "source_identity": {
-    "version": "0.17.5",
-    "commit": "380041fb02ecc9aebc558b5c8c25a12f9f3514c7",
-    "tree": "36d1629453966ebc9490571943abc9fb8587562f"
+    "version": "0.17.6",
+    "commit": "57862ed8de2565cb25403064db46b15b8a6f9fa7",
+    "tree": "da1035f24b6dab7c333faf265dbceb59b44dc1b3"
   },
   "builds": [
     {
       "platform": "kylin-v10-arm64",
       "source_identity": {
-        "version": "0.17.5",
-        "commit": "380041fb02ecc9aebc558b5c8c25a12f9f3514c7",
-        "tree": "36d1629453966ebc9490571943abc9fb8587562f",
+        "version": "0.17.6",
+        "commit": "57862ed8de2565cb25403064db46b15b8a6f9fa7",
+        "tree": "da1035f24b6dab7c333faf265dbceb59b44dc1b3",
         "toolchain": {
           "python": "3.13.15",
           "nuitka": "4.1.2",
@@ -25,9 +25,9 @@
     {
       "platform": "macos-arm64",
       "source_identity": {
-        "version": "0.17.5",
-        "commit": "380041fb02ecc9aebc558b5c8c25a12f9f3514c7",
-        "tree": "36d1629453966ebc9490571943abc9fb8587562f",
+        "version": "0.17.6",
+        "commit": "57862ed8de2565cb25403064db46b15b8a6f9fa7",
+        "tree": "da1035f24b6dab7c333faf265dbceb59b44dc1b3",
         "toolchain": {
           "python": "3.13.15",
           "nuitka": "4.1.2",
@@ -41,15 +41,15 @@
   "platforms": {
     "kylin-v10-arm64": {
       "status": "candidate",
-      "name": "wx-doc-format-skill-0.17.5-kylin-v10-arm64.tar.gz",
-      "sha256": "3fbf73495352e71098141ce6c40032664c787b50b60d2a409a71bcec048d1619",
-      "size": 18630036
+      "name": "wx-doc-format-skill-0.17.6-kylin-v10-arm64.tar.gz",
+      "sha256": "e3eea99239b113430a2c709f2aee31567b7cd1915cd1983d1a4808c5e8b36c2f",
+      "size": 13342433
     },
     "macos-arm64": {
       "status": "accepted",
-      "name": "wx-doc-format-skill-0.17.5-macos-arm64.tar.gz",
-      "sha256": "18bfeeb601446683e9295adbec9f1285c0eb5d35cc137f95c067fdd6c1433b6a",
-      "size": 17338598
+      "name": "wx-doc-format-skill-0.17.6-macos-arm64.tar.gz",
+      "sha256": "5c259c7d4f9cc46370252a5b790014482d1955be3d78bd7c97ac7ffa2aefc065",
+      "size": 12477846
     }
   },
   "available_platforms": [
@@ -72,15 +72,15 @@
   "artifacts": [
     {
       "platform": "kylin-v10-arm64",
-      "name": "wx-doc-format-skill-0.17.5-kylin-v10-arm64.tar.gz",
-      "sha256": "3fbf73495352e71098141ce6c40032664c787b50b60d2a409a71bcec048d1619",
-      "size": 18630036
+      "name": "wx-doc-format-skill-0.17.6-kylin-v10-arm64.tar.gz",
+      "sha256": "e3eea99239b113430a2c709f2aee31567b7cd1915cd1983d1a4808c5e8b36c2f",
+      "size": 13342433
     },
     {
       "platform": "macos-arm64",
-      "name": "wx-doc-format-skill-0.17.5-macos-arm64.tar.gz",
-      "sha256": "18bfeeb601446683e9295adbec9f1285c0eb5d35cc137f95c067fdd6c1433b6a",
-      "size": 17338598
+      "name": "wx-doc-format-skill-0.17.6-macos-arm64.tar.gz",
+      "sha256": "5c259c7d4f9cc46370252a5b790014482d1955be3d78bd7c97ac7ffa2aefc065",
+      "size": 12477846
     }
   ]
 }
