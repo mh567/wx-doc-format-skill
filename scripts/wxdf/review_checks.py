@@ -21,13 +21,14 @@ from typing import Any, Mapping
 from docx import Document
 
 from note_semantics import source_note_role
-from table_formatting import audit_document_tables
+from table_formatting import audit_document_tables, table_index_from_path
 from text_utils import strip_heading_marker_prefix
 from toc_contract import TOC_MAX_LEVEL, TOC_TITLE_STYLE
 from toc_detector import audit_toc_replacement
-from wxdf.format_contract import audit_document_format
+from wxdf.format_contract import audit_document_format, paragraph_index_from_path
 from wxdf.model import inline_text_projection
 from wxdf.page_contract import audit_page_contract
+from wxdf.review_location import DocumentLocator, location_fields, location_summary
 from wxdf.review_suggestions import get_suggestion
 from wxdf.semantics.appendices import collect_source_appendix_semantics
 from wxdf.semantics.structure import collect_structure_candidates
@@ -42,22 +43,61 @@ def _normalized(value: str | None) -> str:
     return (value or "").casefold().replace(" ", "")
 
 
+def _node_positions(locator: DocumentLocator | None, *node_ids: Any) -> list[Any]:
+    if locator is None:
+        return []
+    return [locator.node(node_id) for node_id in node_ids]
+
+
+def _paragraph_positions(locator: DocumentLocator | None, *indexes: int) -> list[Any]:
+    if locator is None:
+        return []
+    return [locator.paragraph(index) for index in indexes]
+
+
+def _table_positions(locator: DocumentLocator | None, *indexes: int) -> list[Any]:
+    if locator is None:
+        return []
+    return [locator.table(index) for index in indexes]
+
+
+def _located(
+    issue: dict[str, Any],
+    locator: DocumentLocator | None,
+    positions: list[Any],
+    *,
+    count: int | None = None,
+) -> dict[str, Any]:
+    """Attach printable positions to an issue, or leave it when unmatched."""
+
+    if locator is not None:
+        issue.update(location_fields(locator, positions, count=count))
+    return issue
+
+
 def _is_allowed_style(style_name: str, allowed: set[str]) -> bool:
     normalized = _normalized(style_name)
     return any(normalized == _normalized(name) for name in allowed)
 
 
-def _document_style_records(doc: Document) -> list[tuple[str, str]]:
-    records: list[tuple[str, str]] = []
-    for paragraph in doc.paragraphs:
+def _document_style_records(doc: Document) -> list[tuple[str, str, int | None]]:
+    """Return ``(style_name, text, body_paragraph_index)`` for every paragraph.
+
+    ``body_paragraph_index`` is the paragraph's 1-based position among the
+    document's body paragraphs, or ``None`` for a paragraph inside a table cell
+    (those are not body paragraphs and have no paragraph ordinal).
+    """
+
+    records: list[tuple[str, str, int | None]] = []
+    for index, paragraph in enumerate(doc.paragraphs, 1):
         style_name = paragraph.style.name if paragraph.style else "Normal"
-        records.append((style_name or "Normal", paragraph.text.strip()))
+        records.append((style_name or "Normal", paragraph.text.strip(), index))
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
                 for paragraph in cell.paragraphs:
                     style_name = paragraph.style.name if paragraph.style else "Normal"
-                    records.append((style_name or "Normal", paragraph.text.strip()))
+                    records.append((style_name or "Normal", paragraph.text.strip(), None))
     return records
 
 
@@ -83,26 +123,36 @@ def allowed_template_styles(template_profile: Mapping[str, Any]) -> set[str]:
     return allowed
 
 
-def check_styles(doc: Document, template_profile: Mapping[str, Any]) -> dict[str, Any]:
+def check_styles(
+    doc: Document,
+    template_profile: Mapping[str, Any],
+    *,
+    locator: DocumentLocator | None = None,
+) -> dict[str, Any]:
     allowed = allowed_template_styles(template_profile)
     issues: list[dict[str, Any]] = []
-    used_styles: dict[str, str] = {}
-    for style_name, text in _document_style_records(doc):
-        used_styles.setdefault(style_name, text)
-    for style_name, text in used_styles.items():
+    used_styles: dict[str, list[int | None]] = {}
+    sample_text: dict[str, str] = {}
+    for style_name, text, index in _document_style_records(doc):
+        used_styles.setdefault(style_name, []).append(index)
+        sample_text.setdefault(style_name, text)
+    for style_name, indexes in used_styles.items():
         if _is_allowed_style(style_name, allowed):
             continue
-        issues.append({
+        positions = _paragraph_positions(locator, *(index for index in indexes if index is not None))
+        if locator is not None and not positions:
+            positions = [locator.document("表格内段落")]
+        issues.append(_located({
             "code": "missing_template_style",
             "level": "high",
-            "location": f"样式「{style_name}」，示例：{text[:40] or '（空段落）'}",
+            "location": f"样式「{style_name}」，示例：{sample_text[style_name][:40] or '（空段落）'}",
             "actual_style": style_name,
             "allowed_styles": sorted(allowed),
             **get_suggestion(
                 "missing_template_style",
                 allowed_styles="、".join(sorted(allowed)[:8]),
             ),
-        })
+        }, locator, positions, count=len(indexes)))
     return {"total_items": max(len(used_styles), 1), "issues": issues}
 
 
@@ -131,16 +181,17 @@ def heading_records(facts: Mapping[str, Any]) -> list[dict[str, Any]]:
     return records
 
 
-def check_headings(facts: Mapping[str, Any]) -> dict[str, Any]:
+def check_headings(facts: Mapping[str, Any], *, locator: DocumentLocator | None = None) -> dict[str, Any]:
     issues: list[dict[str, Any]] = []
     records = heading_records(facts)
     previous = 0
     for record in records:
         level = record["level"]
         text = str(record.get("text") or "")
+        node_id = str(record.get("node_id") or "")
         if previous and level > min(6, previous + 1):
             expected = min(6, previous + 1)
-            issues.append({
+            issues.append(_located({
                 "code": "heading_level_jump",
                 "level": "high",
                 "location": f"标题「{text[:40]}」",
@@ -153,21 +204,26 @@ def check_headings(facts: Mapping[str, Any]) -> dict[str, Any]:
                     to_level=level,
                     missing_level=expected,
                 ),
-            })
+            }, locator, _node_positions(locator, node_id)))
         if previous or level:
             previous = level
         if strip_heading_marker_prefix(text) != text:
-            issues.append({
+            issues.append(_located({
                 "code": "heading_manual_number",
                 "level": "low",
                 "location": f"标题「{text[:40]}」",
                 "text": text[:40],
                 **get_suggestion("heading_manual_number", text=text[:40]),
-            })
+            }, locator, _node_positions(locator, node_id)))
     return {"total_items": max(len(records), 1), "issues": issues}
 
 
-def check_lists(facts: Mapping[str, Any], list_analysis: Mapping[str, Any]) -> dict[str, Any]:
+def check_lists(
+    facts: Mapping[str, Any],
+    list_analysis: Mapping[str, Any],
+    *,
+    locator: DocumentLocator | None = None,
+) -> dict[str, Any]:
     issues: list[dict[str, Any]] = []
     items = list(list_analysis.get("items") or [])
     seen_depths: set[int] = set()
@@ -176,13 +232,13 @@ def check_lists(facts: Mapping[str, Any], list_analysis: Mapping[str, Any]) -> d
         if isinstance(level, int) and level > MAX_LIST_LEVEL and level not in seen_depths:
             seen_depths.add(level)
             marker = str(item.get("source_marker") or "")
-            issues.append({
+            issues.append(_located({
                 "code": "list_nested_too_deep",
                 "level": "medium",
                 "location": f"列表项「{marker}」（第 {level + 1} 层）",
                 "actual_depth": level + 1,
                 **get_suggestion("list_nested_too_deep", actual_depth=level + 1),
-            })
+            }, locator, _node_positions(locator, item.get("item_id"))))
 
     heading_ids = {record["node_id"] for record in heading_records(facts)}
     evidence = facts.get("evidence", {})
@@ -210,13 +266,13 @@ def check_lists(facts: Mapping[str, Any], list_analysis: Mapping[str, Any]) -> d
         ):
             reported_sequences.add(sequence)
             marker = str(item.get("source_marker") or "")
-            issues.append({
+            issues.append(_located({
                 "code": "list_numbering_not_restarted",
                 "level": "medium",
                 "location": f"标题后的首个有序列表项「{marker}」",
                 "actual_ordinal": ordinal,
                 **get_suggestion("list_numbering_not_restarted", actual_ordinal=ordinal),
-            })
+            }, locator, _node_positions(locator, node_id)))
         after_heading = False
     return {"total_items": max(len(items), 1), "issues": issues}
 
@@ -224,6 +280,8 @@ def check_lists(facts: Mapping[str, Any], list_analysis: Mapping[str, Any]) -> d
 def check_tables(
     facts: Mapping[str, Any],
     table_semantics: list[Mapping[str, Any]],
+    *,
+    locator: DocumentLocator | None = None,
 ) -> dict[str, Any]:
     issues: list[dict[str, Any]] = []
     for index, table in enumerate(table_semantics):
@@ -233,13 +291,13 @@ def check_tables(
         cell_styles = _table_cell_styles(facts, node_id)
         if cell_styles and any(style and not _is_table_body(style) for style in cell_styles):
             wrong = sorted({style for style in cell_styles if style and not _is_table_body(style)})
-            issues.append({
+            issues.append(_located({
                 "code": "table_cell_style",
                 "level": "medium",
                 "location": f"表格 {index + 1}",
                 "actual_styles": wrong,
                 **get_suggestion("table_cell_style", actual_styles="、".join(wrong)),
-            })
+            }, locator, _node_positions(locator, node_id)))
     return {"total_items": max(len(table_semantics), 1), "issues": issues}
 
 
@@ -258,7 +316,13 @@ def _is_table_body(style_name: str) -> bool:
     return "表正文" in style_name or _normalized(style_name) in {"normal", "tablegrid"}
 
 
-def check_table_contract(doc: Document, template_profile: Mapping[str, Any], roles: list[str]) -> dict[str, Any]:
+def check_table_contract(
+    doc: Document,
+    template_profile: Mapping[str, Any],
+    roles: list[str],
+    *,
+    locator: DocumentLocator | None = None,
+) -> dict[str, Any]:
     """Check a table against the template's table format contract.
 
     The contract is a template requirement like any other, so a deviation is
@@ -275,9 +339,9 @@ def check_table_contract(doc: Document, template_profile: Mapping[str, Any], rol
         "table_default_cell_margin_issues": ("table_default_cell_margin", "表格默认单元格边距与模板不一致"),
         "cell_margin_issues": ("table_cell_margin", "单元格设置了独立边距"),
         "paragraph_alignment_issues": ("table_paragraph_alignment", "单元格段落对齐与模板不一致"),
-        "paragraph_direct_format_issues": ("table_paragraph_direct_format", "单元格段落存在直接格式"),
-        "run_direct_format_issues": ("table_run_direct_format", "单元格文本存在直接格式"),
-        "table_body_style_spacing_issues": ("table_body_style_spacing", "表正文样式行距未按模板设置"),
+        "paragraph_direct_format_issues": ("table_paragraph_direct_format", "单元格段落有多余的手动格式"),
+        "run_direct_format_issues": ("table_run_direct_format", "单元格文字有多余的手动格式"),
+        "table_body_style_spacing_issues": ("table_body_style_spacing", "表正文样式的行距未按模板设置"),
         "cell_vertical_alignment_issues": ("table_cell_vertical_alignment", "单元格垂直对齐与模板不一致"),
         "row_height_rule_issues": ("table_row_height_rule", "表格行高规则与模板不一致"),
         "row_height_issues": ("table_row_height", "表格行高与模板不一致"),
@@ -288,20 +352,35 @@ def check_table_contract(doc: Document, template_profile: Mapping[str, Any], rol
         entries = audit.get(key) or []
         if not entries:
             continue
-        issues.append({
+        table_indexes = sorted({index for index in (_entry_table_index(entry) for entry in entries) if index})
+        issues.append(_located({
             "code": code,
             "level": "medium",
             "title": title,
-            "location": f"表格格式合同（{len(entries)} 处）",
-            "suggestion": f"{title}。请在表格属性中按模板设置",
-        })
+            "location": f"全文表格（{len(entries)} 处）",
+            "suggestion": f"{title}。请在表格属性中按模板的表格格式要求设置",
+        }, locator, _table_positions(locator, *table_indexes), count=len(entries)))
     return {"total_items": max(len(doc.tables), 1), "issues": issues}
+
+
+def _entry_table_index(entry: Mapping[str, Any]) -> int | None:
+    """Return the 1-based table index a contract audit entry names."""
+
+    for key in ("table", "row", "cell", "paragraph"):
+        value = entry.get(key)
+        if isinstance(value, str) and value:
+            index = table_index_from_path(value)
+            if index is not None:
+                return index
+    return None
 
 
 def check_format_conformance(
     doc: Document,
     template_doc: Document,
     template_profile: Mapping[str, Any],
+    *,
+    locator: DocumentLocator | None = None,
 ) -> dict[str, Any]:
     """Compare the source document's element formatting with the template.
 
@@ -334,8 +413,9 @@ def check_format_conformance(
             f"（来源：{_SOURCE_LABELS.get(str(finding.get('source')), str(finding.get('source')))}）"
             for prop, finding in properties.items()
         ]
-        count = len(affected.get(("format_value_mismatch", role), ()))
-        issues.append({
+        paths = affected.get(("format_value_mismatch", role), set())
+        count = len(paths)
+        issues.append(_located({
             **get_suggestion("format_value_mismatch", role=role_label, property="、".join(parts[:4])),
             "code": "format_value_mismatch",
             "level": _severity_for_ratio(count / checked),
@@ -343,22 +423,31 @@ def check_format_conformance(
             "role": role,
             "count": count,
             "properties": sorted(properties),
-        })
+        }, locator, _positions_for_paths(locator, paths), count=count))
     for (code, role), paths in affected.items():
         if code == "format_value_mismatch":
             continue
         role_label = _ROLE_LABELS.get(role, role)
         template = "format_run_direct_override" if code == "format_run_direct_override" else "format_unexpected_direct"
-        label = "文本直接格式" if code == "format_run_direct_override" else "多余直接格式"
-        issues.append({
+        label = "文本手动设置格式" if code == "format_run_direct_override" else "多余的手动格式"
+        issues.append(_located({
             **get_suggestion(template),
             "code": code,
             "level": _severity_for_ratio(len(paths) / checked),
             "location": f"{role_label} · {label}（{len(paths)} 段）",
             "role": role,
             "count": len(paths),
-        })
+        }, locator, _positions_for_paths(locator, paths), count=len(paths)))
     return {"total_items": checked, "issues": issues}
+
+
+def _positions_for_paths(locator: DocumentLocator | None, paths: Any) -> list[Any]:
+    if locator is None:
+        return []
+    return [
+        locator.paragraph(paragraph_index_from_path(str(path)))
+        for path in sorted(paths)
+    ]
 
 
 def _severity_for_ratio(ratio: float) -> str:
@@ -376,14 +465,14 @@ def _severity_for_ratio(ratio: float) -> str:
 _ROLE_LABELS = {
     "body": "正文",
     "title": "文档标题",
-    "caption": "图表标题",
+    "caption": "图表题注",
     "table_body": "表正文",
     "note": "注",
     "numbered_note": "有编号注",
-    "list_letter": "一级列项",
-    "list_decimal": "二级列项",
-    "list_dash": "一级无编号列项",
-    "list_bullet": "二级无编号列项",
+    "list_letter": "第一级列表项",
+    "list_decimal": "第二级列表项",
+    "list_dash": "第一级无编号列表项",
+    "list_bullet": "第二级无编号列表项",
     "appendix_title": "附录标题",
     "formula": "公式",
     **{f"heading_{level}": f"标题{level}" for level in range(1, 7)},
@@ -391,8 +480,8 @@ _ROLE_LABELS = {
 }
 
 _SOURCE_LABELS = {
-    "direct": "段落直接格式",
-    "numbering": "编号级别",
+    "direct": "手动设置的段落格式",
+    "numbering": "列表编号设置",
     "docDefaults": "文档默认格式",
     "unset": "未定义",
 }
@@ -406,7 +495,12 @@ def _display(value: Any) -> str:
     return str(value)
 
 
-def check_page_numbering(doc: Document, template_doc: Document) -> dict[str, Any]:
+def check_page_numbering(
+    doc: Document,
+    template_doc: Document,
+    *,
+    locator: DocumentLocator | None = None,
+) -> dict[str, Any]:
     """Check the document's page, formula and caption numbering.
 
     These three requirements are properties of the page setup and of the
@@ -427,14 +521,37 @@ def check_page_numbering(doc: Document, template_doc: Document) -> dict[str, Any
         if template is None:
             continue
         suggestion = get_suggestion(template, **_page_suggestion_args(code, first))
+        labels = _page_labels(locator, findings)
+        count = len(findings)
         issues.append({
             **suggestion,
             "code": code,
             "level": str(first.get("level") or "medium"),
-            "location": str(first.get("location") or "页面与编号"),
-            "count": len(findings),
+            "location": location_summary(labels, count) or "页面与编号",
+            "locations": labels or ["页面与编号"],
+            "count": count,
         })
     return {"total_items": max(int(detail.get("checked") or 0), 1), "issues": issues}
+
+
+def _page_labels(locator: DocumentLocator | None, findings: list[dict[str, Any]]) -> list[str]:
+    """Return one printable place per finding, deduplicated.
+
+    A finding that names a section gets that section's path; one that names a
+    document-wide object (the formula layout, the caption numbering scheme) keeps
+    its own descriptive text, which is more useful than a bare "全文".
+    """
+
+    labels: list[str] = []
+    for finding in findings:
+        index = finding.get("index")
+        if locator is not None and isinstance(index, int):
+            label = locator.section(index).label()
+        else:
+            label = str(finding.get("location") or "")
+        if label and label not in labels:
+            labels.append(label)
+    return labels
 
 
 _PAGE_SUGGESTIONS = {
@@ -484,7 +601,7 @@ def _page_suggestion_args(code: str, finding: Mapping[str, Any]) -> dict[str, An
     return {}
 
 
-def check_toc(doc: Document) -> dict[str, Any]:
+def check_toc(doc: Document, *, locator: DocumentLocator | None = None) -> dict[str, Any]:
     """Check the source table of contents against the template contract.
 
     The template fixes the TOC title text, the title style, the TOC 1-4 entry
@@ -496,13 +613,15 @@ def check_toc(doc: Document) -> dict[str, Any]:
 
     audit = audit_toc_replacement(doc, None)
     issues: list[dict[str, Any]] = []
+    toc_positions = [locator.toc()] if locator else []
     if not audit.get("toc_field_count") and not _has_toc_title(doc):
-        issues.append({
+        issue = {
             "code": "toc_missing",
             "level": "medium",
             "location": "文档目录",
             **get_suggestion("toc_missing"),
-        })
+        }
+        issues.append(_located(issue, locator, toc_positions))
         return {"total_items": 1, "issues": issues}
 
     title_issues = list(audit.get("title_issues") or [])
@@ -511,45 +630,49 @@ def check_toc(doc: Document) -> dict[str, Any]:
             (entry.get("actual") for entry in title_issues if entry.get("type") == "title_style"),
             None,
         )
-        issues.append({
+        issue = {
             "code": "toc_title_style",
             "level": "medium",
             "location": "目录标题",
             "expected_style": TOC_TITLE_STYLE,
             "actual_style": actual,
             **get_suggestion("toc_title_style", expected_style=TOC_TITLE_STYLE, actual_style=actual or "未定义"),
-        })
+        }
+        issues.append(_located(issue, locator, toc_positions))
 
     entry_issues = list(audit.get("toc_style_issues") or [])
     if entry_issues:
         kinds = "、".join(sorted({str(entry.get("type")) for entry in entry_issues}))
-        issues.append({
+        issue = {
             "code": "toc_entry_style",
             "level": "medium",
             "location": f"目录条目样式（{len(entry_issues)} 处）",
             "issue_types": sorted({str(entry.get("type")) for entry in entry_issues}),
             **get_suggestion("toc_entry_style", issue_types=kinds),
-        })
+        }
+        issues.append(_located(issue, locator, toc_positions))
 
     for entry in audit.get("field_level_issues") or []:
         actual = entry.get("actual_max_level")
         expected = entry.get("expected_max_level")
-        issues.append({
+        issue = {
             "code": "toc_level_too_deep",
             "level": "low",
-            "location": "目录域",
+            "location": "目录",
             "actual_level": actual,
             "expected_level": expected,
             **get_suggestion("toc_level_too_deep", actual_level=actual, expected_level=expected),
-        })
+        }
+        issues.append(_located(issue, locator, toc_positions))
 
     if audit.get("toc_field_count") and not audit.get("update_fields_on_open"):
-        issues.append({
+        issue = {
             "code": "toc_update_fields",
             "level": "low",
-            "location": "目录域",
+            "location": "目录",
             **get_suggestion("toc_update_fields"),
-        })
+        }
+        issues.append(_located(issue, locator, toc_positions))
 
     return {"total_items": max(int(audit.get("toc_field_count") or 0), 1), "issues": issues}
 
@@ -560,7 +683,7 @@ def _has_toc_title(doc: Document) -> bool:
     return any(paragraph.text.strip() in _TOC_TITLES for paragraph in doc.paragraphs)
 
 
-def check_appendix(facts: Mapping[str, Any]) -> dict[str, Any]:
+def check_appendix(facts: Mapping[str, Any], *, locator: DocumentLocator | None = None) -> dict[str, Any]:
     """Check the appendix the source declares.
 
     The appendix contract the converter audits is expressed on a document
@@ -575,12 +698,12 @@ def check_appendix(facts: Mapping[str, Any]) -> dict[str, Any]:
     issues: list[dict[str, Any]] = []
     ranges = list(semantics.get("ranges") or [])
     for entry in semantics.get("issues") or []:
-        issues.append({
+        issues.append(_located({
             "code": str(entry.get("code") or "appendix_structure_invalid"),
             "level": "medium",
             "location": f"附录位置 {entry.get('location', '')}",
             **get_suggestion("appendix_structure_invalid"),
-        })
+        }, locator, _node_positions(locator, entry.get("node_id"))))
     for candidate in semantics.get("candidates") or []:
         if candidate.get("accepted"):
             continue
@@ -589,16 +712,20 @@ def check_appendix(facts: Mapping[str, Any]) -> dict[str, Any]:
         # for a main-body heading that merely says 附录, so it stays unreported.
         if negative and set(negative) <= {"nested_main_numbered_heading"}:
             continue
-        issues.append({
+        issues.append(_located({
             "code": "appendix_ambiguous",
             "level": "medium",
             "location": "疑似附录",
             **get_suggestion("appendix_structure_invalid"),
-        })
+        }, locator, _node_positions(locator, candidate.get("node_id"))))
     return {"total_items": max(len(ranges), 1), "issues": issues}
 
 
-def _figure_note_position_issues(doc: Document) -> list[dict[str, Any]]:
+def _figure_note_position_issues(
+    doc: Document,
+    *,
+    locator: DocumentLocator | None = None,
+) -> list[dict[str, Any]]:
     """Report a figure's note that sits below the figure's caption.
 
     The spec puts a figure's note and footnote above the figure title: the order
@@ -622,13 +749,14 @@ def _figure_note_position_issues(doc: Document) -> list[dict[str, Any]]:
         style_name = note.style.name if note.style is not None else ""
         if source_note_role(style_name, None, text) is None:
             continue
-        issues.append({
+        issue = {
             "code": "figure_note_below_caption",
             "level": "medium",
             "location": f"图题「{paragraph.text.strip()[:30]}」下方",
             "note_text": text[:30],
             **get_suggestion("figure_note_below_caption"),
-        })
+        }
+        issues.append(_located(issue, locator, _paragraph_positions(locator, index + 1)))
     return issues
 
 
@@ -687,9 +815,11 @@ def check_captions(
     doc: Document,
     table_semantics: list[Mapping[str, Any]],
     caption_semantics: Mapping[str, Any],
+    *,
+    locator: DocumentLocator | None = None,
 ) -> dict[str, Any]:
     issues: list[dict[str, Any]] = []
-    issues.extend(_figure_note_position_issues(doc))
+    issues.extend(_figure_note_position_issues(doc, locator=locator))
     objects, targets, failure = _caption_measurement(table_semantics, caption_semantics)
     if failure is not None:
         # The dimension cannot be judged, so it states no verdict at all.  The
@@ -706,23 +836,25 @@ def check_captions(
         if not table.get("caption_eligible"):
             continue
         total += 1
-        if str(table.get("node_id")) not in targets:
-            issues.append({
+        node_id = str(table.get("node_id"))
+        if node_id not in targets:
+            issues.append(_located({
                 "code": "table_missing_caption",
                 "level": "medium",
-                "location": f"表格 {index + 1}（{table.get('table_type')}）",
+                "location": f"表格 {index + 1}",
                 **get_suggestion("table_missing_caption"),
-            })
+            }, locator, _node_positions(locator, node_id)))
     figures = [obj for obj in objects if obj.get("kind") == "figure"]
     for index, obj in enumerate(figures):
         total += 1
-        if str(obj.get("node_id")) not in targets:
-            issues.append({
+        node_id = str(obj.get("node_id"))
+        if node_id not in targets:
+            issues.append(_located({
                 "code": "figure_missing_caption",
                 "level": "medium",
-                "location": f"图片 {index + 1}（{obj.get('location', '')}）",
+                "location": f"图片 {index + 1}",
                 **get_suggestion("figure_missing_caption"),
-            })
+            }, locator, _node_positions(locator, node_id)))
     text_by_node = {
         str(caption.get("node_id")): str(caption.get("text") or "")
         for caption in (caption_semantics.get("captions") or [])
@@ -734,16 +866,22 @@ def check_captions(
         code = str(record.get("code") or "")
         if code != "caption_target_missing":
             continue
-        text = text_by_node.get(str(record.get("node_id")), "")
-        issues.append({
+        node_id = str(record.get("node_id"))
+        text = text_by_node.get(node_id, "")
+        issues.append(_located({
             "code": code,
             "location": f"题注「{text}」" if text else "题注",
             **get_suggestion(code),
-        })
+        }, locator, _node_positions(locator, node_id)))
     return {"total_items": max(total, 1), "issues": issues}
 
 
-def check_notes(doc: Document, template_profile: Mapping[str, Any]) -> dict[str, Any]:
+def check_notes(
+    doc: Document,
+    template_profile: Mapping[str, Any],
+    *,
+    locator: DocumentLocator | None = None,
+) -> dict[str, Any]:
     resolved = template_profile.get("resolved_styles", {})
     note_styles = {
         _normalized(resolved.get("note", "3.1注-无编号注")),
@@ -751,7 +889,7 @@ def check_notes(doc: Document, template_profile: Mapping[str, Any]) -> dict[str,
     }
     issues: list[dict[str, Any]] = []
     total = 0
-    for paragraph in doc.paragraphs:
+    for index, paragraph in enumerate(doc.paragraphs, 1):
         style_name = paragraph.style.name if paragraph.style else ""
         text = paragraph.text.strip()
         role = source_note_role(style_name, None, text)
@@ -759,11 +897,11 @@ def check_notes(doc: Document, template_profile: Mapping[str, Any]) -> dict[str,
             continue
         total += 1
         if _normalized(style_name) not in note_styles:
-            issues.append({
+            issues.append(_located({
                 "code": "note_style_missing",
                 "level": "medium",
                 "location": f"注段落「{text[:30]}」",
                 "actual_style": style_name,
                 **get_suggestion("note_style_missing"),
-            })
+            }, locator, _paragraph_positions(locator, index)))
     return {"total_items": max(total, 1), "issues": issues}

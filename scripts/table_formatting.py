@@ -469,3 +469,16 @@ def audit_document_tables(
     issue_keys = [key for key in audit if key.endswith("issues") or key == "invalid_table_styles"]
     audit["passed"] = not any(audit[key] for key in issue_keys)
     return audit
+
+
+def table_index_from_path(path: str) -> int | None:
+    """Return the 1-based ``doc.tables`` index a table-audit path names.
+
+    Paths are built from the table's position in ``doc.tables`` and widened with
+    ``.r{row}`` / ``.c{col}`` / ``.p{n}`` per element (see ``_audit_table``), so
+    the leading segment is the table index.  This is the decoder for that
+    encoding; it lives beside the producer.
+    """
+
+    head = str(path or "").split(".", 1)[0]
+    return int(head) if head.isdigit() else None

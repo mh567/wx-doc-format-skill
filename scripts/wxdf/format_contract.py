@@ -775,7 +775,27 @@ def audit_paragraph(
 
 def _iter_body_paragraphs(doc: Any) -> Iterable[tuple[str, Any]]:
     for index, paragraph in enumerate(doc.paragraphs, 1):
-        yield f"paragraph:{index}", paragraph
+        yield paragraph_path(index), paragraph
+
+
+_PARAGRAPH_PATH_PREFIX = "paragraph:"
+
+
+def paragraph_path(index: int) -> str:
+    """Encode a body paragraph's 1-based index as a finding path."""
+
+    return f"{_PARAGRAPH_PATH_PREFIX}{index}"
+
+
+def paragraph_index_from_path(path: str) -> int | None:
+    """Decode a path produced by :func:`paragraph_path`, or ``None``."""
+
+    if not path.startswith(_PARAGRAPH_PATH_PREFIX):
+        return None
+    try:
+        return int(path[len(_PARAGRAPH_PATH_PREFIX):])
+    except ValueError:
+        return None
 
 
 def audit_document_format(

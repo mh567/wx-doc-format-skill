@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from wxdf.review_location import Finding, location_summary, location_view
+
 SEVERITY_LABELS: dict[str, str] = {
     "critical": "严重",
     "high": "高优先级",
@@ -45,14 +47,20 @@ def _format_issues_by_severity(issues: list[dict[str, Any]]) -> dict[str, list[d
     return grouped
 
 
-def _format_issue(issue: dict[str, Any], index: int) -> list[str]:
+def _format_issue(issue: Finding, index: int) -> list[str]:
     lines: list[str] = []
     title = issue.get("title", issue.get("code", "unknown"))
     lines.append(f"#### {index}. {title}")
     lines.append("")
-    location = issue.get("location")
-    if location:
-        lines.append(f"- **位置**：{location}")
+    count, locations, omitted = location_view(issue)
+    if len(locations) == 1 and count <= 1:
+        lines.append(f"- **位置**：{locations[0]}")
+    elif locations:
+        lines.append(f"- **位置**（共 {count} 处）：")
+        for location in locations:
+            lines.append(f"  - {location}")
+        if omitted:
+            lines.append(f"  - （其余 {omitted} 处从略）")
     suggestion = issue.get("suggestion")
     if suggestion:
         lines.append(f"- **建议**：{suggestion}")
@@ -68,12 +76,19 @@ def _format_issue(issue: dict[str, Any], index: int) -> list[str]:
     return lines
 
 
+def _action_line(issue: Finding) -> str:
+    suggestion = str(issue.get("suggestion") or "")
+    count, locations, _ = location_view(issue)
+    if not locations:
+        return suggestion
+    return f"{location_summary(locations, count)}：{suggestion}"
+
+
 def write_review_report(result: dict[str, Any], path: Path) -> None:
     path = Path(path)
     lines: list[str] = []
     score = result.get("score", 0)
     grade = result.get("grade", "unknown")
-    summary = result.get("summary", {})
 
     lines.append("# 文档格式审查报告")
     lines.append("")
@@ -96,19 +111,18 @@ def write_review_report(result: dict[str, Any], path: Path) -> None:
         )
     lines.append("")
 
+    issues = result.get("issues", [])
+    grouped = _format_issues_by_severity(issues)
+
     lines.append("| 等级 | 数量 |")
     lines.append("|------|------|")
-    lines.append(f"| 严重 | {summary.get('critical', 0)} |")
-    lines.append(f"| 高 | {summary.get('high', 0)} |")
-    lines.append(f"| 中 | {summary.get('medium', 0)} |")
-    lines.append(f"| 低 | {summary.get('low', 0)} |")
+    for level in ["critical", "high", "medium", "low"]:
+        lines.append(f"| {SEVERITY_LABELS.get(level, level)} | {len(grouped.get(level, []))} |")
     lines.append("")
 
-    issues = result.get("issues", [])
     if issues:
         lines.append("## 问题清单")
         lines.append("")
-        grouped = _format_issues_by_severity(issues)
         issue_index = 0
         for level in ["critical", "high", "medium", "low"]:
             group = grouped.get(level, [])
@@ -127,10 +141,11 @@ def write_review_report(result: dict[str, Any], path: Path) -> None:
     immediate_actions = []
     suggested_actions = []
     for issue in issues:
+        action = _action_line(issue)
         if issue.get("level") in ("critical", "high"):
-            immediate_actions.append(issue.get("suggestion", ""))
+            immediate_actions.append(action)
         else:
-            suggested_actions.append(issue.get("suggestion", ""))
+            suggested_actions.append(action)
 
     if immediate_actions:
         lines.append("### 立即修改")
@@ -183,7 +198,6 @@ def write_review_report_html(result: dict[str, Any], path: Path) -> None:
     path = Path(path)
     score = result.get("score", 0)
     grade = result.get("grade", "unknown")
-    summary = result.get("summary", {})
     issues = result.get("issues", [])
 
     score_color = "#28a745" if score >= 80 else "#ffc107" if score >= 60 else "#dc3545"
@@ -224,9 +238,14 @@ h3 { color: #34495e; }
     html_parts.append("<h1>文档格式审查报告</h1>")
     html_parts.append(f'<div class="score-box"><div class="score-value">{score}</div><div class="score-grade">等级：{grade}</div></div>')
 
+    grouped = _format_issues_by_severity(issues)
     html_parts.append('<h2>问题统计</h2>')
     html_parts.append('<table class="summary-table"><tr><th>严重</th><th>高</th><th>中</th><th>低</th></tr>')
-    html_parts.append(f'<tr><td>{summary.get("critical", 0)}</td><td>{summary.get("high", 0)}</td><td>{summary.get("medium", 0)}</td><td>{summary.get("low", 0)}</td></tr>')
+    counts = "".join(
+        f'<td>{len(grouped.get(level, []))}</td>'
+        for level in ("critical", "high", "medium", "low")
+    )
+    html_parts.append(f'<tr>{counts}</tr>')
     html_parts.append('</table>')
 
     if issues:
@@ -234,12 +253,20 @@ h3 { color: #34495e; }
         for issue in issues:
             level = issue.get("level", "low")
             title = issue.get("title", issue.get("code", "unknown"))
-            location = issue.get("location", "")
+            count, locations, omitted = location_view(issue)
             suggestion = issue.get("suggestion", "")
             html_parts.append(f'<div class="issue-card issue-{level}">')
             html_parts.append(f'<div class="issue-title">{title}</div>')
-            if location:
-                html_parts.append(f'<div class="issue-location">位置：{location}</div>')
+            if len(locations) == 1 and count <= 1:
+                html_parts.append(f'<div class="issue-location">位置：{locations[0]}</div>')
+            elif locations:
+                html_parts.append(f'<div class="issue-location">位置（共 {count} 处）：</div>')
+                html_parts.append('<ul class="issue-locations">')
+                for location in locations:
+                    html_parts.append(f'<li>{location}</li>')
+                if omitted:
+                    html_parts.append(f'<li>（其余 {omitted} 处从略）</li>')
+                html_parts.append('</ul>')
             if suggestion:
                 html_parts.append(f'<div class="issue-suggestion">建议：{suggestion}</div>')
             html_parts.append('</div>')

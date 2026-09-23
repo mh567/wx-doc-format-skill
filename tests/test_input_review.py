@@ -787,3 +787,92 @@ def test_review_report_names_the_dimensions_it_actually_scored(tmp_path: Path) -
 
     assert f"{len(result['dimension_scores'])} 个维度" in text
     assert "页码与编号" in text
+
+
+def test_review_merges_same_kind_issues_and_lists_every_place(tmp_path: Path) -> None:
+    """One kind of problem is one entry, carrying every place it occurs."""
+
+    source = tmp_path / "merged.docx"
+    document = Document()
+    document.add_paragraph("文档标题", style="Heading 1")
+    for index in range(3):
+        document.add_paragraph(f"第{index + 1}章 章节", style="Heading 1")
+        document.add_table(rows=1, cols=2)
+    document.save(source)
+
+    result = review_input_document(source, TEMPLATE)
+
+    captions = [issue for issue in result["issues"] if issue["code"] == "table_missing_caption"]
+    assert len(captions) == 1
+    assert captions[0]["count"] == 3
+    assert len(captions[0]["locations"]) == 3
+    assert all("第1张表格" in location for location in captions[0]["locations"])
+    assert "第1章 章节" in captions[0]["locations"][0]
+    assert result["summary"]["issue_types"] == len(result["issues"])
+
+
+def test_review_locations_name_a_section_and_an_object(tmp_path: Path) -> None:
+    """A position reads as a section path plus the paragraph or table index."""
+
+    source = tmp_path / "located.docx"
+    document = Document()
+    document.add_paragraph("文档标题", style="Heading 1")
+    document.add_paragraph("第二章 系统设计", style="Heading 1")
+    document.add_paragraph("2.3 部署要求", style="Heading 2")
+    document.add_paragraph("这是一段正文。")
+    document.add_table(rows=1, cols=2)
+    document.save(source)
+
+    result = review_input_document(source, TEMPLATE)
+
+    body = next(
+        issue for issue in result["issues"]
+        if issue["code"] == "format_value_mismatch" and issue.get("role") == "body"
+    )
+    assert any(
+        "第二章 系统设计 > 2.3 部署要求" in location and "第1段" in location
+        for location in body["locations"]
+    )
+    table = [issue for issue in result["issues"] if issue["code"] == "table_missing_caption"][0]
+    assert "第1张表格" in table["locations"][0]
+
+
+def test_review_wording_avoids_internal_vocabulary(tmp_path: Path) -> None:
+    """Titles, suggestions and positions stay free of pipeline jargon."""
+
+    source = tmp_path / "wording.docx"
+    document = Document()
+    document.add_paragraph("文档标题", style="Heading 1")
+    document.add_paragraph("一段正文。")
+    document.add_table(rows=1, cols=2)
+    document.save(source)
+
+    result = review_input_document(source, TEMPLATE)
+
+    forbidden = ("data", "格式合同", "TOC 1", "表格正文", "目录域", "直接格式")
+    for issue in result["issues"]:
+        blob = " ".join(
+            str(issue.get(key, "")) for key in ("title", "suggestion", "location")
+        ) + " " + " ".join(issue.get("locations") or [])
+        for word in forbidden:
+            assert word not in blob, (word, issue)
+
+
+def test_review_caps_printed_locations_but_keeps_the_full_count(tmp_path: Path) -> None:
+    """More places than the cap: print the first ten, count them all."""
+
+    source = tmp_path / "many.docx"
+    document = Document()
+    document.add_paragraph("文档标题", style="Heading 1")
+    for index in range(12):
+        document.add_paragraph(f"第{index + 1}章 章节", style="Heading 1")
+        document.add_table(rows=1, cols=2)
+    document.save(source)
+
+    result = review_input_document(source, TEMPLATE)
+
+    captions = [issue for issue in result["issues"] if issue["code"] == "table_missing_caption"]
+    assert len(captions) == 1
+    assert captions[0]["count"] == 12
+    assert len(captions[0]["locations"]) == 10
+    assert "等 12 处" in captions[0]["location"]

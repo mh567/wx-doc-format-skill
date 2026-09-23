@@ -19,25 +19,21 @@ from docx import Document
 
 from template_profile import load_template_profile
 from wxdf.parsers import parse
-from wxdf.review_checks import (
-    check_appendix,
-    check_captions,
-    check_format_conformance,
-    check_headings,
-    check_lists,
-    check_notes,
-    check_page_numbering,
-    check_styles,
-    check_table_contract,
-    check_tables,
-    check_toc,
-)
-from wxdf.review_scoring import build_scoring_result
+from wxdf import review_checks as checks
 from wxdf.review_enhancement import (
     build_review_requests,
     call_direct,
     collect_findings,
 )
+from wxdf.review_location import (
+    LOCATION_LIMIT,
+    DocumentLocator,
+    Finding,
+    issue_count,
+    issue_locations,
+    location_summary,
+)
+from wxdf.review_scoring import build_scoring_result
 from wxdf.semantics.captions import collect_source_caption_semantics
 from wxdf.semantics.lists import analyze_lists
 from wxdf.semantics.tables import collect_source_table_semantics
@@ -72,6 +68,43 @@ _DIMENSION_LABELS = {
     DIMENSION_NUMBERING: "页码、公式与图表编号合规",
     DIMENSION_AI: "语义检查通过（引用文件、术语缩略语、列项用法）",
 }
+
+
+def _merge_issues(issues: list[Finding]) -> list[Finding]:
+    """Collapse findings of one kind into a single entry with all its places.
+
+    Same kind means same problem code *and* same element role: a format deviation
+    on the body and one on a heading are different issues and stay apart, while
+    every uncaptioned table becomes one entry listing each table.
+    """
+
+    merged: list[Finding] = []
+    index: dict[tuple[str, str], Finding] = {}
+    for issue in issues:
+        key = (str(issue.get("code") or ""), str(issue.get("role") or ""))
+        locations = issue_locations(issue)
+        count = issue_count(issue, locations)
+        entry = index.get(key)
+        if entry is None:
+            entry = dict(issue)
+            entry["count"] = count
+            entry["locations"] = locations
+            index[key] = entry
+            merged.append(entry)
+            continue
+        entry["count"] = int(entry.get("count") or 1) + count
+        for location in locations:
+            if location and location not in entry["locations"]:
+                entry["locations"].append(location)
+
+    for entry in merged:
+        locations = entry.get("locations") or []
+        if not locations:
+            continue
+        count = issue_count(entry, locations)
+        entry["locations"] = locations[:LOCATION_LIMIT]
+        entry["location"] = location_summary(entry["locations"], count)
+    return merged
 
 
 def _ai_review(facts: Mapping[str, Any], enhancement: Any) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -136,6 +169,7 @@ def review_input_document(
     template_doc = Document(template_path)
     template_profile = load_template_profile(template_path)
     facts = parse(input_path, {"source_store": None, "source_type": "docx"})
+    locator = DocumentLocator(facts, doc)
 
     ai_findings, ai_review = _ai_review(facts, enhancement)
 
@@ -143,31 +177,31 @@ def review_input_document(
     table_semantics = collect_source_table_semantics(facts)
     caption_semantics = collect_source_caption_semantics(facts, table_semantics)
 
-    table_check = check_tables(facts, table_semantics)
+    table_check = checks.check_tables(facts, table_semantics, locator=locator)
     roles = [str(table.get("table_type") or "data") for table in table_semantics]
-    table_contract = check_table_contract(doc, template_profile, roles)
+    table_contract = checks.check_table_contract(doc, template_profile, roles, locator=locator)
     table_check = {
         "total_items": table_check["total_items"],
         "issues": [*table_check["issues"], *table_contract["issues"]],
     }
 
-    style_check = check_styles(doc, template_profile)
-    format_check = check_format_conformance(doc, template_doc, template_profile)
-    caption_check = check_captions(doc, table_semantics, caption_semantics)
+    style_check = checks.check_styles(doc, template_profile, locator=locator)
+    format_check = checks.check_format_conformance(doc, template_doc, template_profile, locator=locator)
+    caption_check = checks.check_captions(doc, table_semantics, caption_semantics, locator=locator)
 
     dimension_results = {
         DIMENSION_FORMAT: {
             "total_items": max(style_check["total_items"], format_check["total_items"]),
             "issues": [*style_check["issues"], *format_check["issues"]],
         },
-        DIMENSION_HEADING: check_headings(facts),
-        DIMENSION_LIST: check_lists(facts, list_analysis),
+        DIMENSION_HEADING: checks.check_headings(facts, locator=locator),
+        DIMENSION_LIST: checks.check_lists(facts, list_analysis, locator=locator),
         DIMENSION_TABLE: table_check,
-        DIMENSION_TOC: check_toc(doc),
-        DIMENSION_APPENDIX: check_appendix(facts),
+        DIMENSION_TOC: checks.check_toc(doc, locator=locator),
+        DIMENSION_APPENDIX: checks.check_appendix(facts, locator=locator),
         DIMENSION_CAPTION: caption_check,
-        DIMENSION_NOTE: check_notes(doc, template_profile),
-        DIMENSION_NUMBERING: check_page_numbering(doc, template_doc),
+        DIMENSION_NOTE: checks.check_notes(doc, template_profile, locator=locator),
+        DIMENSION_NUMBERING: checks.check_page_numbering(doc, template_doc, locator=locator),
     }
     # A check that could not measure its surface states no verdict, so its
     # dimension is left out of the score rather than counted as a clean pass.
@@ -191,13 +225,16 @@ def review_input_document(
     all_issues: list[dict[str, Any]] = list(unmeasured_caption_findings)
     for result in dimension_results.values():
         all_issues.extend(result.get("issues", []))
-    all_issues.sort(key=lambda issue: _SEVERITY_ORDER.get(str(issue.get("level")), 4))
 
+    # The published counts stay per occurrence, the way the score reads them; the
+    # issue list itself is collapsed so one kind of problem is one entry.
     counts = {level: 0 for level in _SEVERITY_ORDER}
     for issue in all_issues:
         level = str(issue.get("level"))
         if level in counts:
             counts[level] += 1
+    merged_issues = _merge_issues(all_issues)
+    merged_issues.sort(key=lambda issue: _SEVERITY_ORDER.get(str(issue.get("level")), 4))
 
     compliant_items = [
         label
@@ -235,8 +272,9 @@ def review_input_document(
             "high": counts["high"],
             "medium": counts["medium"],
             "low": counts["low"],
+            "issue_types": len(merged_issues),
         },
-        "issues": all_issues,
+        "issues": merged_issues,
         "compliant_items": compliant_items,
         "risk_warnings": risk_warnings,
         "ai_review": ai_review,

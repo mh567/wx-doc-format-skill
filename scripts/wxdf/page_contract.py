@@ -95,6 +95,7 @@ def audit_page_setup(doc: Any, template_doc: Any) -> dict[str, Any]:
                 "code": "page_numbering_mismatch",
                 "level": "medium",
                 "location": f"第 {index} 节页码",
+                "index": index,
                 "field": field,
                 "expected": expected_section[field],
                 "actual": actual_section[field],
@@ -105,6 +106,7 @@ def audit_page_setup(doc: Any, template_doc: Any) -> dict[str, Any]:
                 "code": "page_footer_missing",
                 "level": "low",
                 "location": f"第 {index} 节页脚",
+                "index": index,
                 "severity": "low",
             })
     return {"total_items": max(len(expected), 1), "issues": issues}
