@@ -546,6 +546,20 @@ def audit_native_appendix(
         container_id, container = containers[0]
         expected_nodes = set(appendix.get("root_node_ids") or [])
         actual_nodes = set(document["children"].get(container_id, []))
+        # The range owns every block of its subtree, not only the container's
+        # direct children: list materialization folds a list item's following
+        # content into the item, so a declared block may sit one or more levels
+        # down.  Ownership is therefore containment, while a declared block that
+        # ends up outside the subtree and a child that was never declared are both
+        # still reported.
+        owned = set(actual_nodes)
+        frontier = list(actual_nodes)
+        while frontier:
+            current = frontier.pop()
+            for child in document["children"].get(current, []):
+                if child not in owned:
+                    owned.add(child)
+                    frontier.append(child)
         # A caption generated for a table or figure inside the range joins the
         # container after the range was declared, so it is not in the declared
         # roots.  A generated caption that declares this appendix and anchors to
@@ -558,8 +572,15 @@ def audit_native_appendix(
             and str((document["blocks"].get(node_id) or {}).get("target_id") or "") in expected_nodes
         }
         expected_nodes |= generated_nodes
-        if expected_nodes != actual_nodes:
-            issues.append({"code": "appendix_range_mismatch", "appendix_id": appendix_id, "expected": sorted(expected_nodes), "actual": sorted(actual_nodes)})
+        missing = expected_nodes - owned - {container_id}
+        foreign = actual_nodes - expected_nodes
+        if missing or foreign:
+            issues.append({
+                "code": "appendix_range_mismatch",
+                "appendix_id": appendix_id,
+                "missing": sorted(missing),
+                "foreign": sorted(foreign),
+            })
         if expected_nodes & root_children:
             issues.append({"code": "appendix_range_leak", "appendix_id": appendix_id, "node_ids": sorted(expected_nodes & root_children)})
         if container.get("title_ref") not in actual_nodes:
@@ -579,16 +600,7 @@ def audit_native_appendix(
             block = document["blocks"].get(heading.get("node_id"), {})
             if block.get("appendix_id") != appendix_id or block.get("appendix_relative_level") != heading.get("relative_level"):
                 issues.append({"code": "appendix_heading_metadata_mismatch", "appendix_id": appendix_id, "node_id": heading.get("node_id")})
-        descendants = set(actual_nodes)
-        frontier = list(actual_nodes)
-        while frontier:
-            current = frontier.pop()
-            children = document["children"].get(current, [])
-            for child in children:
-                if child not in descendants:
-                    descendants.add(child)
-                    frontier.append(child)
-        for node_id in sorted(descendants):
+        for node_id in sorted(owned):
             node = document["blocks"].get(node_id) or document["containers"].get(node_id) or {}
             if node.get("appendix_id") != appendix_id or node.get("semantic_scope_id") != f"semantic:appendix:{appendix_id}":
                 issues.append({"code": "appendix_scope_metadata_missing", "appendix_id": appendix_id, "node_id": node_id})

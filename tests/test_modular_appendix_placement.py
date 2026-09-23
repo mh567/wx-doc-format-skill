@@ -273,3 +273,90 @@ def test_the_reported_document_appendix_title_holds_its_outline_level(tmp_path: 
 
     assert titles, "the reported document has an appendix title"
     assert [_direct_outline_level(paragraph) for paragraph in titles] == ["0"]
+
+
+# ---------------------------------------------------------------------------
+# The range audit owns the appendix's whole subtree, not only its direct children
+# ---------------------------------------------------------------------------
+
+def _owned_node(**fields: object) -> dict:
+    return {"generated_by": "test", "generation_basis": ["test"], **fields}
+
+
+def _range_ast(*, extra_root: bool) -> tuple[dict, dict]:
+    """Return a minimal appendix AST whose range contains a nested list block.
+
+    ``list1`` is a direct child of the appendix and ``tbl1`` is declared as a
+    root of the range but sits inside the list item, which is the shape list
+    materialization produces when a list item absorbs its following content.
+    """
+
+    children = {"root": ["apx"], "apx": ["title", "list1"], "list1": ["item1"], "item1": ["tbl1"]}
+    blocks = {
+        "title": _owned_node(
+            block_type="paragraph", role="body", inline_content=[{"kind": "text", "text": "附录A"}],
+            appendix_id="A", appendix_role="title", semantic_scope_id="semantic:appendix:A",
+        ),
+        "tbl1": _owned_node(block_type="table", table_type="data", appendix_id="A", semantic_scope_id="semantic:appendix:A"),
+    }
+    root_node_ids = ["title", "list1", "tbl1"]
+    if extra_root:
+        children = {**children, "root": ["apx", "orphan"]}
+        blocks["orphan"] = _owned_node(
+            block_type="paragraph", role="body", inline_content=[{"kind": "text", "text": "正文"}],
+            appendix_id="A", semantic_scope_id="semantic:appendix:A",
+        )
+        root_node_ids.append("orphan")
+    ast = {
+        "schema_version": "2.0",
+        "revision": 1,
+        "document": {
+            "root_id": "root",
+            "children": children,
+            "containers": {
+                "root": {"kind": "document"},
+                "apx": _owned_node(
+                    kind="appendix", appendix_id="A", semantic_scope_id="semantic:appendix:A",
+                    title_ref="title", page_break_before=True, source_classification="unknown",
+                ),
+                "list1": _owned_node(
+                    kind="list", list_kind="ordered", source_start=1, source_sequence_id="s1",
+                    appendix_id="A", semantic_scope_id="semantic:appendix:A",
+                ),
+                "item1": _owned_node(
+                    kind="list_item", source_marker="a)", source_ordinal=1, source_sequence_id="s1",
+                    appendix_id="A", semantic_scope_id="semantic:appendix:A",
+                ),
+            },
+            "blocks": blocks,
+            "associations": [],
+            "resources": {},
+        },
+    }
+    semantics = {"ranges": [{"appendix_id": "A", "root_node_ids": root_node_ids, "heading_decisions": []}]}
+    return ast, semantics
+
+
+def test_the_range_audit_accepts_a_declared_block_nested_inside_the_appendix() -> None:
+    """A block the AST folds into a list item still belongs to the appendix."""
+
+    from wxdf.semantics.appendices import audit_native_appendix
+
+    ast, semantics = _range_ast(extra_root=False)
+
+    outcome = audit_native_appendix(ast, semantics)
+
+    assert outcome["passed"] is True, outcome["issues"]
+
+
+def test_the_range_audit_still_rejects_a_declared_block_outside_the_appendix() -> None:
+    """A declared root that ended up outside the range is a real leak."""
+
+    from wxdf.semantics.appendices import audit_native_appendix
+
+    ast, semantics = _range_ast(extra_root=True)
+
+    outcome = audit_native_appendix(ast, semantics)
+
+    codes = {issue["code"] for issue in outcome["issues"]}
+    assert "appendix_range_mismatch" in codes, outcome["issues"]

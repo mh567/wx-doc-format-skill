@@ -1126,36 +1126,78 @@ def _inline_signature(inline_content: list[Mapping[str, Any]]) -> list[dict[str,
                     "children": _inline_signature(list(item.get("children") or [])),
                 }
             )
+        elif kind in {"field", "math", "bookmark", "opaque_inline"}:
+            # A preserved atom is copied back from its retained source element and
+            # the saved XML signature skips that element, so the atom is opaque on
+            # both sides and contributes nothing here.  Only an atom with no
+            # retained payload is rebuilt as a plain text run, and then its cached
+            # text is the contract item both sides must show.  (The renderer reads
+            # the payload from ``resources``; a payload that is present but
+            # unreadable falls back the same way and is not distinguishable here.)
+            if not item.get("resource_id"):
+                cached = item.get("cached_result")
+                if isinstance(cached, str) and cached:
+                    signature.append({"kind": "text", "text": cached})
     return signature
 
 
-def _xml_inline_signature(element: Any, hyperlink_targets: Mapping[str, str]) -> list[dict[str, Any]]:
+def _xml_inline_signature(
+    element: Any,
+    hyperlink_targets: Mapping[str, str],
+    field_state: dict[str, int] | None = None,
+) -> list[dict[str, Any]]:
     signature: list[dict[str, Any]] = []
-    text_tag = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t"
-    tab_tag = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}tab"
+    namespace = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    text_tag = f"{{{namespace}}}t"
+    tab_tag = f"{{{namespace}}}tab"
     break_tags = {
-        "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}br",
-        "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}cr",
+        f"{{{namespace}}}br",
+        f"{{{namespace}}}cr",
     }
+    fld_char_tag = f"{{{namespace}}}fldChar"
+    fld_char_type = f"{{{namespace}}}fldCharType"
+    instr_text_tag = f"{{{namespace}}}instrText"
+    state = field_state if field_state is not None else {"depth": 0}
     for child in list(element):
         local_name = child.tag.rsplit("}", 1)[-1]
         if local_name in {"pPr", "rPr"}:
+            continue
+        if local_name == "fldSimple":
+            # A simple field is one element whose result is opaque; the expected
+            # signature drops its atom for the same reason, so its content is not
+            # part of the contract.
             continue
         if local_name == "hyperlink":
             relation_id = child.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id")
             target = hyperlink_targets.get(relation_id or "")
             if target is None:
-                anchor = child.get("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}anchor")
+                anchor = child.get(f"{{{namespace}}}anchor")
                 target = f"#{anchor}" if anchor else ""
             signature.append(
                 {
                     "kind": "link",
                     "target": target,
-                    "children": _xml_inline_signature(child, hyperlink_targets),
+                    "children": _xml_inline_signature(child, hyperlink_targets, state),
                 }
             )
             continue
         if local_name == "r":
+            run_tags = {grand.tag for grand in list(child)}
+            if fld_char_tag in run_tags:
+                for grand in list(child):
+                    if grand.tag != fld_char_tag:
+                        continue
+                    field_type = grand.get(fld_char_type)
+                    if field_type == "begin":
+                        state["depth"] += 1
+                    elif field_type == "end":
+                        state["depth"] = max(0, state["depth"] - 1)
+                continue
+            if state["depth"] > 0 or instr_text_tag in run_tags:
+                # Inside a complex field's region: the field is a preserved atom
+                # that the expected signature also drops, so neither its
+                # instruction nor its cached result is a contract item.
+                continue
             for run_child in list(child):
                 if run_child.tag == text_tag:
                     signature.append({"kind": "text", "text": run_child.text or ""})
@@ -1167,7 +1209,7 @@ def _xml_inline_signature(element: Any, hyperlink_targets: Mapping[str, str]) ->
                     blip_count = sum(1 for node in run_child.iter() if node.tag.rsplit("}", 1)[-1] == "blip")
                     signature.extend({"kind": "image"} for _ in range(blip_count))
             continue
-        signature.extend(_xml_inline_signature(child, hyperlink_targets))
+        signature.extend(_xml_inline_signature(child, hyperlink_targets, state))
     return signature
 
 

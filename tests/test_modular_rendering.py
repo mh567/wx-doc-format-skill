@@ -485,3 +485,76 @@ def test_saved_output_audit_keeps_tab_inside_numbered_item_text(tmp_path: Path) 
     findings = check_saved_output(output, normalized, result["render_map"])
 
     assert not any(issue["code"] == "list_numbering_missing" for issue in findings["issues"]), findings
+
+
+def test_the_inline_contract_treats_a_preserved_field_as_opaque() -> None:
+    """Both sides drop a retained field, however its cached result is stored.
+
+    The source keeps a cross-reference as a retained field atom (decision 9) and
+    the saved paragraph holds the source's field XML (begin / instruction /
+    separate / result / end).  A preserved field is not a contract item, so the
+    expected signature and the saved-XML signature must agree even when the cached
+    result is split across several runs.
+    """
+
+    from wxdf.auditing import _inline_signature, _xml_inline_signature
+
+    inline_content = [
+        {"kind": "text", "text": "错误码，正常回值为0，"},
+        {"kind": "tab"},
+        {"kind": "text", "text": "其他见"},
+        {"kind": "field", "resource_id": "res-1", "instruction": " REF _Ref9485 \\h ", "cached_result": "表 159"},
+    ]
+    paragraph = etree.fromstring(
+        '<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        "<w:r><w:t>错误码，正常回值为0，</w:t></w:r>"
+        "<w:r><w:tab/></w:r>"
+        "<w:r><w:t>其他见</w:t></w:r>"
+        '<w:r><w:fldChar w:fldCharType="begin"/></w:r>'
+        '<w:r><w:instrText xml:space="preserve"> REF _Ref9485 \\h </w:instrText></w:r>'
+        '<w:r><w:fldChar w:fldCharType="separate"/></w:r>'
+        "<w:r><w:t>表 </w:t></w:r><w:r><w:t>159</w:t></w:r>"
+        '<w:r><w:fldChar w:fldCharType="end"/></w:r>'
+        "</w:p>"
+    )
+
+    assert _inline_signature(inline_content) == _xml_inline_signature(paragraph, {})
+    assert _inline_signature(inline_content) == [
+        {"kind": "text", "text": "错误码，正常回值为0，"},
+        {"kind": "tab"},
+        {"kind": "text", "text": "其他见"},
+    ]
+
+
+def test_the_inline_contract_reads_a_rebuilt_atom_as_text() -> None:
+    """An atom with no retained payload is rebuilt as one text run on both sides."""
+
+    from wxdf.auditing import _inline_signature, _xml_inline_signature
+
+    inline_content = [
+        {"kind": "text", "text": "见"},
+        {"kind": "field", "cached_result": "表 159"},
+    ]
+    paragraph = etree.fromstring(
+        '<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        "<w:r><w:t>见</w:t></w:r><w:r><w:t>表 159</w:t></w:r>"
+        "</w:p>"
+    )
+
+    assert _inline_signature(inline_content) == _xml_inline_signature(paragraph, {})
+
+
+def test_a_simple_field_is_opaque_to_the_inline_contract() -> None:
+    """A ``w:fldSimple`` result is not a contract item on either side."""
+
+    from wxdf.auditing import _inline_signature, _xml_inline_signature
+
+    inline_content = [{"kind": "text", "text": "见"}, {"kind": "field", "resource_id": "res-1"}]
+    paragraph = etree.fromstring(
+        '<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        "<w:r><w:t>见</w:t></w:r>"
+        '<w:fldSimple w:instr=" REF x "><w:r><w:t>表 1</w:t></w:r></w:fldSimple>'
+        "</w:p>"
+    )
+
+    assert _inline_signature(inline_content) == _xml_inline_signature(paragraph, {})
