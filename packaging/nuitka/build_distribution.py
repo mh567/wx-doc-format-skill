@@ -74,6 +74,26 @@ RETIRED_RUNTIME_IMPORTS = frozenset({
     "llm_enhancer",
     "review_loop",
 })
+# Modules the conversion runtime never imports. Excluding them drops the OpenSSL
+# dylibs (only reachable through ``_ssl`` and ``_hashlib``; ``hashlib`` falls back
+# to the bundled ``_sha*``/``_md5`` implementations) and the unused lxml and
+# stdlib extensions that Nuitka would otherwise follow.
+UNUSED_RUNTIME_MODULES = (
+    "ssl",
+    "_ssl",
+    "_hashlib",
+    "decimal",
+    "statistics",
+    "bz2",
+    "lzma",
+    "termios",
+    "grp",
+    "_scproxy",
+    "lxml.objectify",
+    "lxml.sax",
+    "lxml.builder",
+    "lxml.html",
+)
 
 PUBLIC_REPORT_SUMMARY_CONTRACT = {
     "schema_version": "1.0",
@@ -370,6 +390,10 @@ def nuitka_command(build_dir: Path) -> list[str]:
         *[
             f"--nofollow-import-to={name}"
             for name in sorted(RETIRED_RUNTIME_IMPORTS)
+        ],
+        *[
+            f"--nofollow-import-to={name}"
+            for name in UNUSED_RUNTIME_MODULES
         ],
     ]
     return [
