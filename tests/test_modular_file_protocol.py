@@ -147,6 +147,69 @@ def _read_requests(checkpoint_path: Path) -> list[dict]:
     return [json.loads(line) for line in request_path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
+@pytest.mark.parametrize("invalid", [None, "anchor", "parent", "existing_id", "source_ref", "caption_type"])
+def test_caption_generation_resume_keeps_one_named_figure(tmp_path: Path, invalid: str | None) -> None:
+    from docx import Document
+    from docx.shared import Cm
+    from PIL import Image
+
+    picture = tmp_path / "flow.png"
+    Image.new("RGB", (60, 40), "blue").save(picture)
+    document = Document()
+    document.add_heading("事件处理", 1)
+    document.add_paragraph("处理流程包括采集、分析、研判和处置。")
+    document.add_picture(str(picture), width=Cm(3))
+    source = tmp_path / "flow.docx"
+    document.save(source)
+    output = tmp_path / "named-flow.docx"
+    generated = _run("--input", source, "--output", output, "--template", TEMPLATE,
+                     "--llm-enhance", "caption_gen", "--generate-requests", tmp_path / "requests")
+    assert generated.returncode == 0, generated.stderr
+    checkpoint = tmp_path / "requests/run.json"
+    request = _read_requests(checkpoint)[0]
+    ast = request["items"][0]["source_ast"]
+    target_id = next(key for key, node in ast["document"]["blocks"].items()
+                     if node.get("block_type") == "image")
+    response = _response(request, marker=None)
+    response["candidates"] = [{
+        "candidate_id": "named-figure", "module_id": "caption_gen", "module_version": "2.0",
+        "target_node_ids": ["ai-flow-caption"],
+        "target_source_refs": [ast["document"]["blocks"][target_id]["source_ref"]],
+        "proposal": {"operation": "create_node", "property_scope": ["children"], "value": {
+            "node_id": "ai-flow-caption", "parent_id": ast["document"]["root_id"],
+            "anchor_node_id": target_id, "anchor_position": "after",
+            "node": {"block_type": "paragraph", "role": "caption", "caption_type": "figure",
+                     "target_id": target_id, "generated_by": "caption_gen", "generation_basis": [target_id],
+                     "inline_content": [{"kind": "text", "text": "安全事件处理流程", "marks": []}]}}},
+        "positive_evidence": [{"kind": "source_structure"}], "negative_evidence": [],
+        "scope": {"stages": ["relation", "normalize", "render", "audit"]},
+        "constraints": [], "rationale": "图示与相邻文字均为事件处理流程", "confidence": 0.98,
+    }]
+    candidate = response["candidates"][0]
+    value = candidate["proposal"]["value"]
+    if invalid == "anchor":
+        value["anchor_node_id"] = "missing-source"
+    elif invalid == "parent":
+        value["parent_id"] = target_id
+    elif invalid == "existing_id":
+        value["node_id"] = target_id
+        candidate["target_node_ids"] = [target_id]
+    elif invalid == "source_ref":
+        candidate["target_source_refs"][0] = {**candidate["target_source_refs"][0], "part": "wrong.xml"}
+    elif invalid == "caption_type":
+        value["node"]["caption_type"] = "image"
+    _write_responses(checkpoint, [response])
+    resumed = _run("--resume", checkpoint)
+    if invalid is not None:
+        assert resumed.returncode != 0
+        assert not output.exists()
+        return
+    assert resumed.returncode == 0, resumed.stderr
+    captions = [p.text for p in Document(output).paragraphs if p.style.name == "Caption"]
+    assert captions == ["图 1-1 安全事件处理流程"]
+    assert _run("--resume", checkpoint).returncode == 0
+
+
 def _response(request: dict, *, marker: str | None = "file-protocol-marker", response_id: str | None = None) -> dict:
     ast = request["items"][0]["source_ast"]
     target_id = next(iter(ast["document"]["blocks"]))

@@ -173,6 +173,9 @@ def _native_candidate_set(context: ModuleExecutionContext) -> list[Mapping[str, 
         context.require("source_ast"),
         options,
     )
+    from .semantics.captions import reconcile_generated_captions
+
+    candidates = reconcile_generated_captions(candidates, enhancement_candidates)
     candidates.extend(enhancement_candidates)
     context.provide("candidate_set", candidates)
     context.provide("ledger_view", ledger_view)

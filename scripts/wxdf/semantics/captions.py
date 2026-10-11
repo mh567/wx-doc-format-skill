@@ -331,6 +331,25 @@ def _authored_caption_candidates(
         if isinstance(item, Mapping)
     }
     for caption in semantics.get("captions", []):
+        if caption.get("status") == "duplicate":
+            caption_id = str(caption.get("node_id") or "")
+            original_id = str(caption.get("duplicate_of") or "")
+            if caption_id not in blocks or original_id not in blocks:
+                continue
+            refs = [copy.deepcopy(facts["units"][caption_id]["source_ref"])]
+            value = {"semantic_scope": "excluded", "region_kind": "duplicate_caption"}
+            result.append({
+                "candidate_id": f"caption-duplicate-{caption_id}",
+                "module_id": "caption_semantics", "module_version": "1.0",
+                "target_source_refs": refs, "target_node_ids": [caption_id],
+                "proposal": {"operation": "update_overlay",
+                             "property_scope": overlay_property_scope(value), "value": value},
+                "positive_evidence": [{"kind": "source_structure", "source": "adjacent_identical_caption", "duplicate_of": original_id}],
+                "negative_evidence": [], "scope": {"stages": ["relation", "normalize"]},
+                "constraints": [{"kind": "preserve_source_fact"}], "confidence": None,
+                "rationale": "adjacent identical authored captions name the same target; retain one rendering and both source records",
+            })
+            continue
         if caption.get("status") != "associated":
             continue
         caption_id = str(caption.get("node_id") or "")
@@ -502,6 +521,13 @@ def collect_caption_candidates(
                 collect_source_table_semantics(facts),
             )
         result, captioned = _authored_caption_candidates(ast, facts, caption_semantics)
+        # A capability can create a caption before relation recognition. Its
+        # committed AST role and target own that caption, even though the source
+        # facts cannot contain a newly generated node.
+        known_ids = {item["candidate_id"] for item in result}
+        result.extend(item for item in _authored_caption_role_candidates(ast)
+                      if item["candidate_id"] not in known_ids)
+        captioned.update(_captioned_targets(ast))
     for node_id, block in ast["document"]["blocks"].items():
         if block.get("block_type") == "table" and block.get("table_type") == "data":
             value = {"caption_type": "table", "eligible": True}
@@ -691,7 +717,21 @@ def collect_source_caption_semantics(
 
     assigned: set[str] = set()
     issues: list[dict[str, Any]] = []
+    previous_caption: dict[str, Any] | None = None
     for caption in captions:
+        if (previous_caption is not None
+                and previous_caption.get("status") in {"associated", "duplicate"}
+                and caption["order"] == previous_caption["order"] + 1
+                and caption["caption_type"] == previous_caption["caption_type"]
+                and caption["raw_number"] == previous_caption["raw_number"]
+                and caption["text"] == previous_caption["text"]
+                and all(item.get("kind") == "text" for node_id in
+                        (caption["node_id"], previous_caption["node_id"])
+                        for item in facts["units"][node_id].get("inline_content", []))):
+            caption.update({"status": "duplicate", "duplicate_of": previous_caption.get("duplicate_of", previous_caption["node_id"])})
+            previous_caption = caption
+            continue
+        previous_caption = caption
         caption_type = str(caption["caption_type"])
         if caption_type == "table":
             candidates = [item for item in objects if item["kind"] == "table" and item["order"] > caption["order"]]
@@ -748,6 +788,54 @@ def recognize_caption_semantics(
         caption_semantics=result,
     )
     return {"result": result, "candidates": candidates}
+
+
+def reconcile_generated_captions(
+    rule_candidates: list[Mapping[str, Any]],
+    enhancement_candidates: list[Mapping[str, Any]],
+) -> list[Mapping[str, Any]]:
+    """Replace only empty rule captions when a capability names that target.
+
+    The rule association keeps ownership of placement and target binding. Its
+    source reference remains unchanged when it binds the capability's node.
+    Authored captions and unrelated targets are never removed.
+    """
+    named_targets: dict[str, str] = {}
+    for candidate in enhancement_candidates:
+        proposal = candidate.get("proposal") or {}
+        value = proposal.get("value") or {}
+        node = value.get("node") or {}
+        if (proposal.get("operation") == "create_node" and node.get("role") == "caption"
+                and node.get("caption_type") in {"table", "figure"}
+                and inline_text_projection(node.get("inline_content", [])).strip()):
+            target_id = str(node.get("target_id") or "")
+            if target_id in named_targets:
+                raise ValueError("multiple generated captions name the same target")
+            named_targets[target_id] = str(value["node_id"])
+    replaced_nodes: dict[str, str] = {}
+    for candidate in rule_candidates:
+        proposal = candidate.get("proposal") or {}
+        value = proposal.get("value") or {}
+        node = value.get("node") or {}
+        target_id = str(node.get("target_id") or "")
+        if (proposal.get("operation") == "create_node"
+                and node.get("generated_by") == "caption_semantics.sequence_caption"
+                and not node.get("inline_content") and target_id in named_targets):
+            replaced_nodes[str(value["node_id"])] = named_targets[target_id]
+    result: list[Mapping[str, Any]] = []
+    for candidate in rule_candidates:
+        proposal = candidate.get("proposal") or {}
+        value = proposal.get("value") or {}
+        if proposal.get("operation") == "create_node" and value.get("node_id") in replaced_nodes:
+            continue
+        association = value.get("association") or {}
+        if (proposal.get("operation") == "update_association"
+                and association.get("kind") == "caption_target"
+                and association.get("source_id") in replaced_nodes):
+            candidate = copy.deepcopy(dict(candidate))
+            candidate["proposal"]["value"]["association"]["source_id"] = replaced_nodes[association["source_id"]]
+        result.append(candidate)
+    return result
 
 
 __all__ = ["audit_caption_placement", "build_caption_overlay", "collect_caption_candidates", "collect_source_caption_semantics", "invalidate_overlay", "recognize_caption_semantics"]

@@ -572,7 +572,7 @@ def test_native_caption_output_matches_the_legacy_sequence_contract(tmp_path: Pa
         flattened = re.sub(r"\s+", " ", paragraph)
         assert f'<w:pStyle w:val="{caption_style_id}"/>' in flattened, flattened
         assert "SEQ 表 \\* ARABIC" in flattened
-        assert "<w:t>表</w:t>" in flattened
+        assert '<w:t xml:space="preserve">表 </w:t>' in flattened
         assert "<w:t>1</w:t>" in flattened.replace(" ", "")
 
     report = json.loads(paths["report"].read_text(encoding="utf-8"))
@@ -844,7 +844,7 @@ def test_uncaptioned_docx_image_renders_one_seq_figure_field(tmp_path: Path) -> 
 
     assert xml.count("SEQ 图") == 1, xml.count("SEQ 图")
     assert xml.count("SEQ 表") == 1, xml.count("SEQ 表")
-    assert re.search(r"<w:t>图</w:t>", xml), "the figure label run is missing"
+    assert re.search(r'<w:t xml:space="preserve">图 </w:t>', xml), "the figure label run is missing"
 
     report = json.loads(paths["report"].read_text(encoding="utf-8"))
     assert report["saved_output_audit"]["passed"] is True

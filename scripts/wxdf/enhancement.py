@@ -287,6 +287,19 @@ def _validate_candidate_targets(candidates: Sequence[Mapping[str, Any]], ast: Ma
     nodes = {**document["blocks"], **document["containers"]}
     for candidate in candidates:
         targets = [str(value) for value in candidate.get("target_node_ids") or []]
+        proposal = candidate.get("proposal") or {}
+        if proposal.get("operation") == "create_node":
+            value = proposal.get("value") or {}
+            node_id = value.get("node_id")
+            anchor_id = value.get("anchor_node_id")
+            parent_id = value.get("parent_id")
+            if (not isinstance(node_id, str) or targets != [node_id] or node_id in nodes
+                    or anchor_id not in nodes or parent_id not in nodes
+                    or anchor_id not in document["children"].get(parent_id, [])):
+                raise LookupError("created candidate must name a new node and a current source anchor")
+            # The new node has no source reference. Its existing anchor binds
+            # the proposal to the immutable source view sent to the capability.
+            targets = [str(anchor_id)]
         if not targets or any(target not in nodes for target in targets):
             raise LookupError("candidate target is absent from the current AST revision")
         current_refs = [

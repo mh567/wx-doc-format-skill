@@ -113,6 +113,43 @@ def _caption_texts(path: Path) -> list[str]:
     ]
 
 
+def test_adjacent_identical_markdown_captions_render_once(tmp_path: Path) -> None:
+    source = tmp_path / "duplicate-caption.md"
+    source.write_text(
+        "# 接入方案\n\n表99 设备接入核对表\n\n表99 设备接入核对表\n\n"
+        "| 序号 | 对象 |\n| --- | --- |\n| 1 | 网络设备 |\n",
+        encoding="utf-8",
+    )
+    output, result = _convert(tmp_path, source)
+    assert result.exit_code == 0, result.diagnostics
+    matching = [p for p in Document(output).paragraphs if "设备接入核对表" in p.text]
+    assert len(matching) == 1
+    assert matching[0].style.name == "Caption"
+
+
+def test_chapter_caption_has_label_spacing(tmp_path: Path) -> None:
+    source = tmp_path / "nine-chapters.md"
+    source.write_text(
+        "# 演示方案\n\n" + "\n\n".join(f"# 章节{i}\n\n说明{i}。" for i in range(1, 10))
+        + "\n\n表99 设备接入核对表\n\n| 序号 | 对象 |\n| --- | --- |\n| 1 | 网络设备 |\n",
+        encoding="utf-8",
+    )
+    output, result = _convert(tmp_path, source)
+    assert result.exit_code == 0, result.diagnostics
+    assert _caption_texts(output) == ["表 9-1 设备接入核对表"]
+
+
+def test_identical_titles_for_separate_tables_are_retained(tmp_path: Path) -> None:
+    source = tmp_path / "separate-tables.md"
+    source.write_text(
+        "# 方案\n\n# 接入\n\n" + "\n\n".join(
+            "表1 接入核对表\n\n| 序号 | 对象 |\n| --- | --- |\n| 1 | " + name + " |"
+            for name in ("网络设备", "安全设备")), encoding="utf-8")
+    output, result = _convert(tmp_path, source)
+    assert result.exit_code == 0, result.diagnostics
+    assert _caption_texts(output) == ["表 1-1 接入核对表", "表 1-2 接入核对表"]
+
+
 def _source_with_chapters(tmp_path: Path) -> Path:
     """Build a DOCX with one captioned table under each of two chapters."""
 
@@ -363,7 +400,7 @@ def test_a_chapter_caption_is_written_with_the_styleref_and_reset_fields() -> No
     text = _write_caption(paragraph, block, {}, None, {"chapter": 5, "sequence": 1})
 
     assert _run_shapes(paragraph) == [
-        ("text", "表"),
+        ("text", "表 "),
         ("fldChar", "begin"),
         ("instrText", " STYLEREF 1 \\s "),
         ("fldChar", "separate"),
@@ -377,7 +414,7 @@ def test_a_chapter_caption_is_written_with_the_styleref_and_reset_fields() -> No
         ("fldChar", "end"),
         ("text", " 字段说明"),
     ]
-    assert text == "表5-1 字段说明"
+    assert text == "表 5-1 字段说明"
 
 
 def test_an_appendix_caption_ignores_the_chapter_numbering() -> None:
@@ -407,7 +444,7 @@ def test_the_default_caption_numbering_is_chapter_relative(tmp_path: Path) -> No
     assert result.status == "completed", result.diagnostics
     assert result.report["saved_output_audit"]["passed"] is True
     assert result.report["saved_output_audit"]["unexpected_styles"] == []
-    assert _caption_texts(output) == ["表1-1 甲表", "表2-1 乙表"]
+    assert _caption_texts(output) == ["表 1-1 甲表", "表 2-1 乙表"]
     with ZipFile(output) as archive:
         document_xml = archive.read("word/document.xml").decode("utf-8")
     assert document_xml.count(" STYLEREF 1 \\s ") == 2
@@ -448,4 +485,4 @@ def test_a_caption_before_the_first_chapter_keeps_its_plain_number(tmp_path: Pat
 
     assert result.status == "completed", result.diagnostics
     assert result.report["saved_output_audit"]["passed"] is True
-    assert _caption_texts(output) == ["表1 前表", "表1-1 后表"]
+    assert _caption_texts(output) == ["表1 前表", "表 1-1 后表"]

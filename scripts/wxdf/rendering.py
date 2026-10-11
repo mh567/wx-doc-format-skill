@@ -465,7 +465,7 @@ def _write_caption(
     chapter = numbering.get("chapter") if isinstance(numbering, Mapping) else None
     in_chapter_sequence = numbering.get("sequence") if isinstance(numbering, Mapping) else None
     if isinstance(chapter, int) and not isinstance(chapter, bool) and isinstance(in_chapter_sequence, int) and not isinstance(in_chapter_sequence, bool):
-        paragraph.add_run(sequence)
+        paragraph.add_run(f"{sequence} ")
         _append_field_char(paragraph, "begin")
         _append_instr_text(paragraph, " STYLEREF 1 \\s ")
         _append_field_char(paragraph, "separate")
@@ -482,7 +482,7 @@ def _write_caption(
         for item in ends:
             for element in _retained_inline_elements(item, resources):
                 paragraph._p.append(element)
-        return f"{sequence}{chapter}-{in_chapter_sequence} {body}"
+        return f"{sequence} {chapter}-{in_chapter_sequence} {body}"
 
     paragraph.add_run(sequence)
 
