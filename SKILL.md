@@ -201,6 +201,34 @@ metadata:
 
 将替换完成的整个响应对象压缩为一行 JSON，写入同目录的 `llm_responses.jsonl`，文件内只存 JSON 行。后续等待阶段保留已有响应原样，仅为新增请求追加响应；重复提交同一请求时使用同一响应。完成条件：每个待处理请求恰有一个对应响应，全部占位值均已替换，`request_id`、整数 `base_revision` 和 `view_sha256` 与对应请求一致，且所有 `response_id` 唯一。
 
+#### 题注生成候选
+
+`caption_gen` 根据图片、表格与相邻文字提供名称，编号交给渲染器。正文按章节编号，例如 `表 9-1 设备接入核对表`，附录保留已有的 `表A.1` 编号。相邻且完全相同的重复题注只呈现一次，原始来源仍保留在处理记录中；不同图表的同名题注分别保留。
+
+已有题注节点时，用 `update_node_content` 更新其名称。缺少题注时，用 `create_node` 新增段落，候选的 `target_node_ids` 必须为新题注的 ID。`value.parent_id` 取源图表在 `document.children` 中的父节点，`anchor_node_id` 指向源图表，图题注放在 `after`，表题注放在 `before`。`target_source_refs` 使用源图表的完整引用，新节点通过 `generated_by` 与 `generation_basis` 记录生成依据，不能伪造源引用。
+
+图片对象的 `block_type` 是 `image`，图题注的 `caption_type` 必须是 `figure`。下面是新增图题注的 `proposal.value` 示例，候选其余字段沿用上面的 2.0 形态：
+
+```json
+{
+  "node_id": "$new_caption_id",
+  "parent_id": "$target_parent_id",
+  "anchor_node_id": "$target_image_id",
+  "anchor_position": "after",
+  "node": {
+    "block_type": "paragraph",
+    "role": "caption",
+    "caption_type": "figure",
+    "target_id": "$target_image_id",
+    "inline_content": [{"kind": "text", "text": "安全事件处理流程", "marks": []}],
+    "generated_by": "caption_gen",
+    "generation_basis": ["$target_image_id"]
+  }
+}
+```
+
+同一目标只提供一个新增题注候选。续跑后检查真实 DOCX：题注数量、名称、位置、样式及章节编号均正确，再截取展示图。候选建议不能替代成功转换的成品截图。
+
 3. 恢复运行：
 
 ```bash
