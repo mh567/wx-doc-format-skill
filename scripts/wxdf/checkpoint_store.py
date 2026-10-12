@@ -214,9 +214,8 @@ def write_native_waiting_checkpoint(
     responses_path = _path(responses_path)
     requests_path.parent.mkdir(parents=True, exist_ok=True)
     requests = copy.deepcopy(requests)
-    requests_path.write_text(
-        "".join(canonical_json(item) + "\n" for item in requests),
-        encoding="utf-8",
+    requests_path.write_bytes(
+        "".join(canonical_json(item) + "\n" for item in requests).encode("utf-8")
     )
     responses_path.write_text("", encoding="utf-8")
 

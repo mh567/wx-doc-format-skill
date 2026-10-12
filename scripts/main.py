@@ -94,10 +94,10 @@ def _llm_call_from_command(command: str):
     def _llm(prompt: str) -> str:
         if "{prompt_file}" not in command:
             r = subprocess.run(
-                command,
+                shlex.split(command) if _os.name == "nt" else command,
                 input=prompt,
                 text=True,
-                shell=True,
+                shell=_os.name != "nt",
                 capture_output=True,
                 timeout=60,
             )
