@@ -16,7 +16,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: engine
-          ref: 77f0c29
+          ref: 77f0c2942bba50279bc4d4e773c9ebb43e71c926
       - uses: actions/checkout@v4
         with:
           repository: mh567/wx-doc-format-desktop
