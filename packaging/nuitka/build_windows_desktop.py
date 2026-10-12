@@ -60,6 +60,25 @@ def main() -> None:
         (desktop / name).write_text(version + '\n')
     (desktop / 'src' / 'wxdoc_desktop' / '_version.py').write_text(f'__version__ = "{version}"\n')
     run(sys.executable, '-m', 'pip', 'install', '-e', f'{desktop}[test,build]')
+    fixture = desktop / 'tests' / 'conftest.py'
+    fixture.write_text(fixture.read_text(encoding='utf-8') + r"""
+
+@pytest.fixture(autouse=True)
+def windows_script_runtime(native_skill_runtime, monkeypatch):
+    # Existing unit fixtures simulate the engine with a Python script.
+    # Windows requires Python to launch it; packaged smoke uses the real EXE.
+    import subprocess
+    import sys
+    source = native_skill_runtime / "runtime" / "wx-doc-format"
+    executable = source.with_suffix(".exe")
+    executable.write_bytes(source.read_bytes())
+    original = subprocess.run
+    def run_script(command, *args, **kwargs):
+        if isinstance(command, (list, tuple)) and command and str(command[0]) == str(executable):
+            command = [sys.executable, str(source), *command[1:]]
+        return original(command, *args, **kwargs)
+    monkeypatch.setattr(subprocess, "run", run_script)
+""", encoding='utf-8')
     run(sys.executable, '-m', 'pytest', str(desktop / 'tests'), cwd=desktop)
     sys.path.insert(0, str(desktop / 'packaging'))
     import prepare_native_skill
