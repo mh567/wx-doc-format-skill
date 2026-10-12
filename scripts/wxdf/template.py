@@ -156,10 +156,10 @@ def load_template_bundle(
 ) -> TemplateBundle:
     template_path = Path(template)
     raw = template_path.read_bytes() if template_bytes is None else bytes(template_bytes)
-    with tempfile.NamedTemporaryFile(suffix=".docx") as snapshot:
-        snapshot.write(raw)
-        snapshot.flush()
-        profile = load_template_profile(snapshot.name)
+    with tempfile.TemporaryDirectory(prefix="wxdf-template-") as directory:
+        snapshot = Path(directory) / "template.docx"
+        snapshot.write_bytes(raw)
+        profile = load_template_profile(snapshot)
     profile["path"] = str(template_path)
     document = Document(io.BytesIO(raw))
     toc_fragment = tuple(

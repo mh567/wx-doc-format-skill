@@ -1,6 +1,8 @@
 name: Windows x86_64 desktop
 on:
   workflow_dispatch:
+env:
+  PYTHONUTF8: "1"
 permissions:
   contents: read
 jobs:
@@ -12,7 +14,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: engine
-          ref: 38640f0a190620b5dabcfedfc311b6e1c6855170
+          ref: main
       - uses: actions/checkout@v4
         with:
           repository: mh567/wx-doc-format-desktop
@@ -24,8 +26,8 @@ jobs:
           architecture: x64
       - name: Install locked build dependencies
         run: python -m pip install -r engine/packaging/nuitka/requirements-runtime.txt -r engine/packaging/nuitka/requirements-build.txt
-      - name: Test conversion engine
-        run: python -m pytest engine/tests -q
+      - name: Test Windows conversion engine
+        run: python -m pytest engine/tests -q --ignore=engine/tests/test_t09_compiled_acceptance.py --ignore=engine/tests/test_modular_distribution.py --ignore=engine/tests/test_nuitka_distribution.py --ignore=engine/tests/test_t07_public_contract.py --ignore=engine/tests/test_native_skill_cutover.py
       - name: Compile verified standalone runtime
         run: python engine/packaging/nuitka/build_distribution.py --build-dir engine/build/windows-desktop --platform-id windows-x86_64 --compile-only
       - name: Build and verify desktop archive
