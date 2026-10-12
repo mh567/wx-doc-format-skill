@@ -205,7 +205,7 @@ def test_l11_docx_protection_uses_the_same_public_semantics(tmp_path: Path) -> N
     # candidate as evidence, and a protection with a role of its own keeps its
     # precedence, so the numbered note below stays a note.
     assert text_by_block["API 用户详情"]["role"] == "heading"
-    assert text_by_block["注2 无冒号说明"]["role"] == "numbered_note"
+    assert text_by_block["无冒号说明"]["role"] == "numbered_note"
 
 
 def test_l11_native_report_and_saved_output_preserve_protected_roles(tmp_path: Path) -> None:
@@ -269,7 +269,7 @@ GET /users
     assert text_by_node["v1.2.3 版本说明"][1]["role"] == "body"
     assert text_by_node["GET /users"][1]["role"] == "body"
     assert text_by_node["请求参数"][1]["role"] == "body"
-    assert text_by_node["注1 无冒号说明"][1]["role"] == "numbered_note"
+    assert text_by_node["无冒号说明"][1]["role"] == "numbered_note"
     operations = report["model_audit"]["render_plan"]["operations"]
     operation_by_text = {
         _ast_text(source_ast, operation["node_id"]): operation
@@ -281,7 +281,7 @@ GET /users
     assert operation_by_text["v1.2.3 版本说明"]["role"] == "body"
     assert operation_by_text["GET /users"]["role"] == "body"
     assert operation_by_text["请求参数"]["role"] == "body"
-    assert operation_by_text["注1 无冒号说明"]["role"] == "numbered_note"
+    assert operation_by_text["无冒号说明"]["role"] == "numbered_note"
     with ZipFile(output) as archive:
         document = ElementTree.fromstring(archive.read("word/document.xml"))
         styles = ElementTree.fromstring(archive.read("word/styles.xml"))
@@ -306,9 +306,9 @@ GET /users
         "v1.2.3 版本说明",
         "GET /users",
         "请求参数",
-        "注1 无冒号说明",
+        "无冒号说明",
     ):
-        expected_style = "3.2注-有编号注" if text == "注1 无冒号说明" else "Normal"
+        expected_style = "3.2注-有编号注" if text == "无冒号说明" else "Normal"
         assert saved_paragraphs[text] == expected_style
     assert any(
         _ast_text(source_ast, child_id) == "真正列项"
@@ -340,7 +340,7 @@ def test_l11_heading_like_labels_follow_the_style_the_source_declares(tmp_path: 
         if block.get("inline_content")
     }
     assert text_by_block["API 用户查询"]["role"] == "heading"
-    assert text_by_block["注2 无冒号说明"]["role"] == "numbered_note"
+    assert text_by_block["无冒号说明"]["role"] == "numbered_note"
     operations = report["model_audit"]["render_plan"]["operations"]
     operation_by_text = {
         _ast_text(source_ast, operation["node_id"]): operation
@@ -348,4 +348,4 @@ def test_l11_heading_like_labels_follow_the_style_the_source_declares(tmp_path: 
         if operation["kind"] == "paragraph"
     }
     assert operation_by_text["API 用户查询"]["role"] == "heading"
-    assert operation_by_text["注2 无冒号说明"]["role"] == "numbered_note"
+    assert operation_by_text["无冒号说明"]["role"] == "numbered_note"

@@ -55,7 +55,23 @@ def classify_regions(
     validate_source_facts(facts)
     front_positions = {int(value) for value in (front_matter_positions or set())}
     toc_positions_set = {int(value) for value in (toc_positions or set())}
-    root_node_ids = {str(node_id) for node_id in facts["children"].get("root", [])}
+    root_order = list(facts["children"].get("root", []))
+    leading = facts["units"].get(root_order[0], {}) if root_order else {}
+    title_id = root_order[0] if leading.get("role") == "heading" and leading.get("level") == 1 else None
+    body_heading_seen = False
+    front_toc_ids: set[str] = set()
+    for index, node_id in enumerate(root_order):
+        unit = facts["units"].get(node_id, {})
+        text = _node_text(unit).strip()
+        toc_label = text in {"目录", "目次", "目  次", "目  录"}
+        following = facts["units"].get(root_order[index + 1], {}) if index + 1 < len(root_order) else {}
+        empty_toc_heading = unit.get("role") == "heading" and following.get("role") == "heading"
+        if node_id != title_id and not body_heading_seen and toc_label and (
+            unit.get("role") != "heading" or empty_toc_heading
+        ):
+            front_toc_ids.add(str(node_id))
+        elif node_id != title_id and unit.get("role") == "heading":
+            body_heading_seen = True
     regions: list[dict[str, Any]] = []
     node_scope: dict[str, str] = {}
     for node_id, unit in facts["units"].items():
@@ -77,9 +93,7 @@ def classify_regions(
             kind, scope, reason = "toc", "excluded", "source_toc"
         elif (
             facts["source"].get("source_type") == "markdown"
-            and str(node_id) in root_node_ids
-            and unit.get("role") != "heading"
-            and text.strip() in {"目录", "目次", "目  次", "目  录"}
+            and str(node_id) in front_toc_ids
         ):
             kind, scope, reason = "toc", "excluded", "source_toc_title"
         else:

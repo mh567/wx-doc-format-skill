@@ -270,6 +270,21 @@ def collect_structure_candidates(
                     {"role": resolved_role},
                     [{"kind": "format_contract", "source": "protected_content", "reason": protected.get("reason")}],
                 ))
+                if protected_role in {"note", "numbered_note"}:
+                    canonical = str(protected["text"])
+                    prefix_length = text.find(canonical) if canonical else -1
+                    if prefix_length > 0:
+                        content = consume_leading_text(list(unit.get("inline_content") or []), prefix_length)
+                        if inline_text_projection(content).strip() == canonical:
+                            candidate = copy.deepcopy(result[-1])
+                            candidate["candidate_id"] = f"note-content-{node_id}"
+                            candidate["proposal"] = {
+                                "operation": "update_node_content",
+                                "property_scope": ["inline_content"],
+                                "value": {"inline_content": content},
+                            }
+                            candidate["rationale"] = "consume the literal note marker after resolving its note role"
+                            result.append(candidate)
                 semantic_content_seen = True
                 continue
         if not is_markdown:

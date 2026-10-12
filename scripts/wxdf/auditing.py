@@ -1107,7 +1107,11 @@ def check_model(normalized: Mapping[str, Any]) -> dict[str, Any]:
 def _expected_paragraph_texts(expected: Mapping[str, Any], render_map: Mapping[str, Any]) -> list[str]:
     if expected.get("expected_texts"):
         return [str(value) for value in expected["expected_texts"]]
-    return [str(item.get("text") or "") for item in render_map.values() if item.get("kind") == "paragraph"]
+    return [
+        str(item.get("text") or "")
+        for item in render_map.values()
+        if item.get("kind") == "paragraph" and not item.get("omitted_empty")
+    ]
 
 
 def _inline_signature(inline_content: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -1320,7 +1324,7 @@ def check_saved_output(
         }
     used_paragraph_indexes: set[int] = set()
     for node_id, item in render_map.items():
-        if item.get("kind") != "paragraph" or not _has_inline_contract(item.get("inline_content", [])):
+        if item.get("kind") != "paragraph" or item.get("omitted_empty") or not _has_inline_contract(item.get("inline_content", [])):
             continue
         expected_signature = _inline_signature(item.get("inline_content", []))
         expected_text = str(item.get("text") or "")
@@ -1409,7 +1413,7 @@ def check_saved_output(
                 issues.append({"code": "image_resource_mismatch", "index": index, "resource_id": resource_id, "expected": expected_hash, "actual": actual_hash})
             if index < len(expected_image_targets) and expected_image_targets[index] != actual_target:
                 issues.append({"code": "image_relationship_target_mismatch", "index": index, "resource_id": resource_id, "expected": expected_image_targets[index], "actual": actual_target})
-    expected_numbered_items = [item for item in render_map.values() if item.get("numbered")]
+    expected_numbered_items = [item for item in render_map.values() if item.get("numbered") and not item.get("omitted_empty")]
     expected_numbered_texts = [str(item.get("text") or "") for item in expected_numbered_items if str(item.get("text") or "")]
     expected_numbered_styles = {str(item.get("style") or "") for item in expected_numbered_items if item.get("style")}
     expected_profile = expected.get("presentation", {}).get("profile", {})

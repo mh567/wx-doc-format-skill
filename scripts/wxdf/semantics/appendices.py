@@ -6,7 +6,7 @@ import copy
 import re
 from typing import Any, Mapping
 
-from ..model import inline_text_projection
+from ..model import consume_leading_text, inline_text_projection
 from ..validation import validate_ast, validate_source_facts
 from appendix_semantics import (
     appendix_heading_level,
@@ -481,6 +481,28 @@ def collect_native_appendix_candidates(
                 evidence=[{"kind": "structural", "source": "appendix_range"}],
             ))
 
+        def consume_marker(node_id: str, pattern: str) -> None:
+            block = document["blocks"][node_id]
+            content = list(block.get("inline_content") or [])
+            text = inline_text_projection(content)
+            match = re.match(pattern, text, re.IGNORECASE)
+            if match is None:
+                return
+            cleaned = consume_leading_text(content, match.end())
+            if inline_text_projection(cleaned) != text[match.end():]:
+                return
+            ref = _ast_source_ref(source_ast, node_id)
+            candidates.append(_appendix_candidate(
+                f"appendix-content-{node_id}", [node_id], [ref] if ref else [],
+                {"operation": "update_node_content", "property_scope": ["inline_content"],
+                 "value": {"inline_content": cleaned}},
+                rationale="consume the authored appendix marker owned by template numbering",
+            ))
+
+        # Dedicated styles can name an appendix without a literal marker.
+        # Only consume a prefix the shared marker parser actually recognizes.
+        if parse_appendix_marker(_text(document["blocks"][title_id]).split("\n", 1)[0]) is not None:
+            consume_marker(title_id, r"^[ \t]*附\s*录(?:[ \t]*[A-Z])?(?:[ \t]*[：:])?[ \t]*")
         title_value = {
             "semantic_role": "appendix_title",
             "appendix_role": "title",
@@ -502,6 +524,7 @@ def collect_native_appendix_candidates(
             heading_ref = _ast_source_ref(source_ast, heading_id)
             if not heading_id or heading_ref is None:
                 continue
+            consume_marker(heading_id, r"^[ \t]*" + re.escape(appendix_id) + r"(?:[.．]\d+){1,3}(?:[ \t、：:.)）-]+|$)")
             heading_value = {
                 "semantic_role": "appendix_heading",
                 "appendix_role": "heading",

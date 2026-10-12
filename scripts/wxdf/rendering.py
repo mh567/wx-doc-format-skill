@@ -28,6 +28,57 @@ class RenderError(RuntimeError):
     """Raised when a normalized node cannot be rendered with available resources."""
 
 
+def _remove_empty_body_paragraphs(doc: Any) -> list[Any]:
+    """Remove root-level paragraphs with no text or preserved document content.
+
+    Keep meaningful paragraph properties, page breaks, section properties,
+    drawings, fields, bookmarks, and other non-run content. Numbering alone
+    does not give an empty paragraph useful content. Table-cell paragraphs are
+    required by Word and are outside this pass.
+    """
+
+    body = doc._element.body
+    removed: list[Any] = []
+    paragraph_tag = qn("w:p")
+    properties_tag = qn("w:pPr")
+    numbering_tag = qn("w:numPr")
+    run_tag = qn("w:r")
+    run_properties_tag = qn("w:rPr")
+    break_tag = qn("w:br")
+    carriage_return_tag = qn("w:cr")
+    text_tag = qn("w:t")
+    for paragraph in list(body):
+        if paragraph.tag != paragraph_tag:
+            continue
+        properties = paragraph.find(properties_tag)
+        if properties is not None and any(child.tag != numbering_tag for child in properties):
+            continue
+        empty = True
+        for child in paragraph:
+            if child is properties:
+                continue
+            if child.tag != run_tag:
+                empty = False
+                break
+            for run_child in child:
+                if run_child.tag == run_properties_tag:
+                    continue
+                if run_child.tag == text_tag and not (run_child.text or "").strip():
+                    continue
+                if run_child.tag == break_tag and run_child.get(qn("w:type")) in {None, "textWrapping"}:
+                    continue
+                if run_child.tag == carriage_return_tag:
+                    continue
+                empty = False
+                break
+            if not empty:
+                break
+        if empty:
+            body.remove(paragraph)
+            removed.append(paragraph)
+    return removed
+
+
 def _write_direct_numbering(paragraph: Any, num_id: int, ilvl: int) -> None:
     """Write an explicit list numbering reference on a paragraph.
 
@@ -800,6 +851,7 @@ def render(
                 settings.append(update_fields)
             update_fields.set(qn("w:val"), "true")
     render_map: dict[str, dict[str, Any]] = {}
+    rendered_paragraphs: dict[str, Any] = {}
     diagnostics: list[dict[str, Any]] = []
     presentation_outline = normalized.get("presentation", {}).get("outline", {})
     presentation_paragraphs = normalized.get("presentation", {}).get("paragraphs", {})
@@ -918,6 +970,7 @@ def render(
             "style": actual_style,
             "numbered": actual_style in {"List Number", "List Bullet"} or "列项" in actual_style,
         }
+        rendered_paragraphs[node_id] = paragraph._p
         image_resource_ids = _image_resource_ids(block.get("inline_content", []))
         if image_resource_ids:
             render_map[node_id]["image_resources"] = image_resource_ids
@@ -1180,6 +1233,17 @@ def render(
         render_children(node_id, parent=parent)
 
     render_children(document["root_id"])
+    removed_paragraph_elements = _remove_empty_body_paragraphs(doc)
+    removed_element_ids = {id(element) for element in removed_paragraph_elements}
+    for node_id, paragraph in rendered_paragraphs.items():
+        if id(paragraph) in removed_element_ids:
+            render_map[node_id]["omitted_empty"] = True
+    removed_empty_paragraphs = len(removed_paragraph_elements)
+    if removed_empty_paragraphs:
+        diagnostics.append({
+            "code": "empty_body_paragraphs_removed",
+            "count": removed_empty_paragraphs,
+        })
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
     doc.save(output)

@@ -82,7 +82,7 @@ def test_l12_appendix_ranges_materialize_native_scope_and_keep_numbering_scope_s
     _assert_native_completed(report, output)
     assert report["capability_migration"]["appendix_semantics"] == "consumed"
     assert report["appendix_semantics_consumption"] == {
-        "candidate_count": 12,
+        "candidate_count": 16,
         "range_candidate_count": 2,
         "range_consumed_count": 2,
         "heading_candidate_count": 2,
@@ -128,8 +128,8 @@ def test_l12_appendix_ranges_materialize_native_scope_and_keep_numbering_scope_s
         for node_id, block in document["blocks"].items()
         if block.get("appendix_role") == "heading"
     }
-    assert heading_blocks["A.1 适用范围"]["appendix_relative_level"] == 1
-    assert heading_blocks["B.1 附录内容"]["appendix_relative_level"] == 1
+    assert heading_blocks["适用范围"]["appendix_relative_level"] == 1
+    assert heading_blocks["附录内容"]["appendix_relative_level"] == 1
 
     presentations = _list_items_by_text(source_ast, normalized)
     assert [presentations[text]["target_ordinal"] for text in ("正文一", "正文二")] == [1, 2]
@@ -151,9 +151,10 @@ def test_l12_appendix_ranges_materialize_native_scope_and_keep_numbering_scope_s
     appendix_title_paragraphs = [
         paragraph
         for paragraph in document_xml.findall(".//w:p", ns)
-        if "".join(node.text or "" for node in paragraph.findall(".//w:t", ns)) == "附录 A"
+        if paragraph.find("w:pPr/w:outlineLvl", ns) is not None
+        and paragraph.find("w:pPr/w:pageBreakBefore", ns) is not None
     ]
-    assert len(appendix_title_paragraphs) == 1
+    assert len(appendix_title_paragraphs) == 2
     assert appendix_title_paragraphs[0].find("w:pPr/w:pageBreakBefore", ns) is not None
 
 

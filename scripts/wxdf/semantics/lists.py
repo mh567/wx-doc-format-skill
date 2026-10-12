@@ -106,12 +106,15 @@ def strip_visible_list_marker(
     marker = evidence.get("visible_marker", {}).get("marker_text")
     if not isinstance(marker, str) or not marker:
         return copy.deepcopy(list(inline_content))
-    prefix = re.compile(r"^[ \t]*" + re.escape(marker) + r"[ \t]+")
+    prefix = re.compile(r"^[ \t]*" + re.escape(marker) + r"[ \t]*")
     visible = _unit_text({"inline_content": list(inline_content)})
     match = prefix.match(visible)
     if match is None:
         return copy.deepcopy(list(inline_content))
-    return consume_leading_text(list(inline_content), match.end())
+    cleaned = consume_leading_text(list(inline_content), match.end())
+    if _unit_text({"inline_content": cleaned}) != visible[match.end():]:
+        return copy.deepcopy(list(inline_content))
+    return cleaned
 
 
 def _inline_text(items: list[Mapping[str, Any]]) -> str:
@@ -332,7 +335,28 @@ def _parallel_split_items(facts: Mapping[str, Any]) -> dict[str, list[list[dict[
         parent = facts["containers"].get(parents.get(str(unit_id), ""), {})
         if parent.get("kind") in {"table_cell", "table_row"}:
             continue
-        segments = _parallel_clause_segments(unit)
+        segments = None
+        if parents.get(str(unit_id)) == "root":
+            marked_lines: list[list[dict[str, Any]]] = [[]]
+            for item in unit.get("inline_content") or []:
+                if item.get("kind") == "break":
+                    marked_lines.append([])
+                else:
+                    marked_lines[-1].append(copy.deepcopy(dict(item)))
+            if len(marked_lines) > 1:
+                markers = []
+                for line in marked_lines:
+                    line_text = _clause_text(line)
+                    match = re.match(r"^[ \t]*([A-Za-z][)）])(?=[ \t]+\S)", line_text)
+                    markers.append(match.group(1).casefold() if match else None)
+                if (
+                    all(markers)
+                    and all(ord(markers[index][0]) == ord(markers[0][0]) + index for index in range(len(markers)))
+                    and all(marker[1:] == markers[0][1:] for marker in markers)
+                ):
+                    segments = marked_lines
+        if segments is None:
+            segments = _parallel_clause_segments(unit)
         if segments is not None:
             splits[str(unit_id)] = segments
     return splits

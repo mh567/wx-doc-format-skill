@@ -30,7 +30,7 @@ _EMU_PER_INCH = 914400
 _VML_NS = "{urn:schemas-microsoft-com:vml}"
 _WP_NS = "{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing}"
 _DOCX_VISIBLE_LIST_MARKER_RE = re.compile(
-    r"^(?P<indent>[ \t]*)(?P<marker>(?:\d+(?:[.．-]\d+)+(?:[.)])?|\d+[.)]|[A-Za-z][)]|[-+*•▪◦]))(?=[ \t]+)"
+    r"^(?P<indent>[ \t]*)(?P<marker>(?:\d+(?:[.．-]\d+)+(?:[.)])?|\d+[.)）]|[A-Za-z][)）]|[-+*•▪◦]))(?=[ \t]+|(?<=[)）])\S)"
 )
 
 
@@ -529,11 +529,35 @@ class _MarkdownFactsBuilder:
                     ref,
                     self.facts["parser"]["version"],
                 )
-                fields: dict[str, Any] = {"role": role, "inline_content": inline_content}
-                if level is not None:
-                    fields["level"] = level
-                unit_id = self._new_unit("paragraph", token, **fields)
-                self.facts["evidence"][unit_id] = {"line_start": (getattr(token, "map", None) or [0])[0] + 1, "source_token": "inline", "blank_before": False}
+                # CommonMark leaves letter markers in a hard-break paragraph.
+                # Record each explicitly marked line without consuming source text.
+                from .model import inline_text_projection
+                segments = [[]]
+                for item in inline_content:
+                    if item.get("kind") == "break":
+                        segments.append([])
+                    else:
+                        segments[-1].append(item)
+                markers = [_docx_visible_list_marker(inline_text_projection(part)) for part in segments]
+                split = (
+                    role == "body" and self.stack[-1] == "root" and len(segments) > 1
+                    and all(marker and marker["source_list_type"] == "lower_letter_paren" for marker in markers)
+                    and all(markers[index]["ordinal"] == markers[0]["ordinal"] + index for index in range(len(markers)))
+                )
+                parts = segments if split else [inline_content]
+                for index, part in enumerate(parts):
+                    fields: dict[str, Any] = {"role": role, "inline_content": part}
+                    if level is not None:
+                        fields["level"] = level
+                    unit_id = self._new_unit("paragraph", token, **fields)
+                    evidence = {"line_start": (getattr(token, "map", None) or [0])[0] + 1 + index, "source_token": "inline", "blank_before": False}
+                    marker = _docx_visible_list_marker(inline_text_projection(part))
+                    explicit_item = self.facts["containers"].get(self.stack[-1], {}).get("kind") == "list_item"
+                    if role == "body" and marker and (split or explicit_item or marker["source_list_type"] == "lower_letter_paren"):
+                        evidence.update(marker)
+                        evidence["visible_marker"] = marker
+                        evidence["numbering_status"] = "detected"
+                    self.facts["evidence"][unit_id] = evidence
                 self.pending = None
             elif token_type in {"fence", "code_block"}:
                 unit_id = self._new_unit("code_block", token, raw_text=token.content, language=(token.info or "").strip() or None)
@@ -1956,6 +1980,28 @@ def _parse_docx(source: Path | str, *, store: SourceStore) -> dict[str, Any]:
                 evidence["effective_ilvl"] = descriptor["effective_ilvl"]
             if descriptor.get("indent_cluster_level") is not None:
                 evidence["indent_cluster_level"] = dict(descriptor["indent_cluster_level"])
+            # Word numbering is separate from paragraph text. If the author also
+            # typed the same kind of marker into the paragraph, retain it as
+            # explicit evidence so the list transaction can remove the duplicate.
+            visible_marker = _docx_visible_list_marker(paragraph.text)
+            expected_kind = (
+                "unordered"
+                if descriptor.get("source_list_type") in UNORDERED_LIST_TYPES
+                else "ordered"
+            )
+            if (
+                visible_marker is not None
+                and visible_marker["marker_kind"] == expected_kind
+                and visible_marker["source_list_type"] != "decimal_chain"
+            ):
+                evidence["visible_marker"] = {
+                    "marker_text": visible_marker["marker_text"],
+                    "source_list_type": visible_marker["source_list_type"],
+                    "ordinal": visible_marker["ordinal"],
+                    "indent_value": visible_marker["indent_value"],
+                    "indent_unit": visible_marker["indent_unit"],
+                    "span": visible_marker["marker_span"],
+                }
         elif isinstance(paragraph.text, str):
             visible_marker = _docx_visible_list_marker(paragraph.text)
             if visible_marker is not None:

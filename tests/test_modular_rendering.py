@@ -9,6 +9,7 @@ from xml.etree import ElementTree
 import pytest
 from docx import Document
 from docx.enum.style import WD_STYLE_TYPE
+from docx.enum.text import WD_BREAK
 from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from docx.parts.image import ImagePart
 from docx.oxml import OxmlElement
@@ -26,7 +27,7 @@ from test_modular_normalization import _ast, _profile
 from wxdf.auditing import check_model, check_saved_output
 from wxdf.normalization import normalize
 from wxdf.parsers import parse
-from wxdf.rendering import RenderError, render
+from wxdf.rendering import RenderError, _remove_empty_body_paragraphs, render
 import wxdf.template as template_module
 from wxdf.validation import validate_ast
 
@@ -438,7 +439,7 @@ def test_saved_output_audit_keeps_tab_only_paragraph_in_order(tmp_path: Path) ->
     assert not any(issue["code"] == "paragraph_order_changed" for issue in findings["issues"]), findings
 
 
-def test_saved_output_audit_keeps_line_break_only_paragraph_in_order(tmp_path: Path) -> None:
+def test_saved_output_audit_accepts_cleanup_of_line_break_only_paragraph(tmp_path: Path) -> None:
     ast = _ast()
     ast["document"]["blocks"]["p3"]["inline_content"] = [{"kind": "break"}]
     normalized = normalize(ast, _profile(), strategy="legacy")
@@ -448,6 +449,30 @@ def test_saved_output_audit_keeps_line_break_only_paragraph_in_order(tmp_path: P
     findings = check_saved_output(output, normalized, result["render_map"])
 
     assert not any(issue["code"] == "paragraph_order_changed" for issue in findings["issues"]), findings
+    assert findings["passed"] is True
+    assert result["diagnostics"] == [
+        {"code": "empty_body_paragraphs_removed", "count": 1},
+    ]
+
+
+def test_empty_paragraph_cleanup_preserves_page_and_section_breaks() -> None:
+    document = Document()
+    document.add_paragraph("正文")
+    document.add_paragraph()
+    soft_break = document.add_paragraph()
+    soft_break.add_run().add_break()
+    page_break = document.add_paragraph()
+    page_break.add_run().add_break(WD_BREAK.PAGE)
+    section_paragraph = document.add_paragraph()
+    section_properties = OxmlElement("w:sectPr")
+    section_paragraph._p.get_or_add_pPr().append(section_properties)
+
+    removed = _remove_empty_body_paragraphs(document)
+
+    assert len(removed) == 2
+    assert len(document.paragraphs) == 3
+    assert document.paragraphs[1]._p.find(".//" + qn("w:br")).get(qn("w:type")) == "page"
+    assert document.paragraphs[2]._p.find(".//" + qn("w:sectPr")) is not None
 
 
 def test_saved_output_audit_keeps_tab_inside_numbered_item_text(tmp_path: Path) -> None:

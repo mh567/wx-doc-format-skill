@@ -9,9 +9,23 @@ the transaction commits.
 from __future__ import annotations
 
 import copy
+import re
 from typing import Any, Mapping
 
 from ..model import inline_text_projection
+
+
+def _clean_hardbreak_list_segment(segment: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Consume the authored letter marker from one confirmed split list line."""
+
+    from .lists import strip_visible_list_marker
+
+    copied = copy.deepcopy(list(segment))
+    text = inline_text_projection(copied)
+    match = re.match(r"^[ \t]*([A-Za-z][)）])[ \t]+", text)
+    if match is None:
+        return copied
+    return strip_visible_list_marker(copied, {"visible_marker": {"marker_text": match.group(1)}})
 
 
 def _image_alt_text(
@@ -347,7 +361,7 @@ def materialize_list_semantics(
             "proposal": {
                 "operation": "update_node_content",
                 "property_scope": ["inline_content"],
-                "value": {"inline_content": copy.deepcopy(segments[0])},
+                "value": {"inline_content": _clean_hardbreak_list_segment(segments[0])},
             },
             "positive_evidence": [{"kind": "structural", "source": "parallel_clause_split"}],
             "negative_evidence": [],
@@ -358,11 +372,15 @@ def materialize_list_semantics(
 
     for relation in list_result.get("items", []):
         source_item_id = str(relation["item_id"])
+        if containers.get(source_item_id, {}).get("kind") == "list_item":
+            item_children = children.get(source_item_id, [])
+            if item_children:
+                source_item_id = str(item_children[0])
         block = blocks.get(source_item_id)
         if not isinstance(block, Mapping) or block.get("block_type") != "paragraph":
             continue
         evidence = facts.get("evidence", {}).get(source_item_id, {})
-        if not evidence.get("visible_marker"):
+        if source_item_id in split_items or not evidence.get("visible_marker"):
             continue
         cleaned = strip_visible_list_marker(block.get("inline_content", []), evidence)
         if cleaned == block.get("inline_content", []):
@@ -523,7 +541,7 @@ def materialize_list_semantics(
                                     "node": {
                                         "block_type": "paragraph",
                                         "role": "body",
-                                        "inline_content": copy.deepcopy(segments[member_index]),
+                                        "inline_content": _clean_hardbreak_list_segment(segments[member_index]),
                                         "generated_by": "list_semantics.parallel_clause_split",
                                         "generation_basis": [split_source_id],
                                     },
