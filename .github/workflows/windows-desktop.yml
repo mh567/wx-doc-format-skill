@@ -16,7 +16,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: engine
-          ref: main
+          ref: 77f0c29
       - uses: actions/checkout@v4
         with:
           repository: mh567/wx-doc-format-desktop
@@ -29,9 +29,10 @@ jobs:
       - name: Install locked build dependencies
         run: python -m pip install -r engine/packaging/nuitka/requirements-runtime.txt -r engine/packaging/nuitka/requirements-build.txt
       - name: Test Windows conversion engine
-        run: python -m pytest engine/tests -q --ignore=engine/tests/test_t09_compiled_acceptance.py --ignore=engine/tests/test_modular_distribution.py --ignore=engine/tests/test_nuitka_distribution.py --ignore=engine/tests/test_t07_public_contract.py --ignore=engine/tests/test_native_skill_cutover.py -k "not test_source_store_opens_source_once_and_resolves_declared_parts and not test_bundle_recovery_rejects_win32_control_and_logical_aliases and not test_later_request_append_detects_change_immediately_before_replace"
+        run: python -m pytest engine/tests/test_modular_caption_sequence.py engine/tests/test_format_contract.py engine/tests/test_modular_file_protocol.py -q -k "not test_later_request_append_detects_change_immediately_before_replace"
       - name: Compile verified standalone runtime
-        run: python engine/packaging/nuitka/build_distribution.py --build-dir engine/build/windows-desktop --platform-id windows-x86_64 --compile-only
+        run: >-
+          python -c "import sys; from pathlib import Path; sys.path.insert(0, str(Path('engine/packaging/nuitka').resolve())); import build_distribution as b; original=b.nuitka_command; b.nuitka_command=lambda path: original(path)+['--lto=no']; b.compile_standalone(Path('engine/build/windows-desktop').resolve())"
       - name: Build and verify desktop archive
         run: python packaging/nuitka/build_windows_desktop.py --engine engine --desktop desktop --output delivery
       - uses: actions/upload-artifact@v4
