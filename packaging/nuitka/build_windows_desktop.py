@@ -42,7 +42,7 @@ def main() -> None:
     version = (engine / 'VERSION').read_text().strip()
     sys.path.insert(0, str(engine / 'packaging' / 'nuitka'))
     import build_distribution as build
-    dist = engine / 'build' / 'windows-desktop' / 'release_entrypoint.dist'
+    dist = engine / 'build' / 'nuitka' / 'windows-desktop' / 'release_entrypoint.dist'
     module_manifest = build._verified_runtime_module_manifest(dist)
     build.reject_python_sources(dist)
     assert_x64(dist / 'wx-doc-format.exe')

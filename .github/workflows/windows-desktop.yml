@@ -32,7 +32,16 @@ jobs:
         run: python -m pytest engine/tests/test_modular_caption_sequence.py engine/tests/test_format_contract.py engine/tests/test_modular_file_protocol.py -q -k "not test_later_request_append_detects_change_immediately_before_replace"
       - name: Compile verified standalone runtime
         run: >-
-          python -c "import sys; from pathlib import Path; sys.path.insert(0, str(Path('engine/packaging/nuitka').resolve())); import build_distribution as b; original=b.nuitka_command; b.nuitka_command=lambda path: original(path)+['--lto=no']; b.compile_standalone(Path('engine/build/windows-desktop').resolve())"
+          python -c "import sys; from pathlib import Path; sys.path.insert(0, str(Path('engine/packaging/nuitka').resolve())); import build_distribution as b; original=b.nuitka_command; b.nuitka_command=lambda path: original(path)+['--lto=no']; b.compile_standalone(Path('engine/build/nuitka/windows-desktop').resolve())"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-runtime-intermediate
+          path: |
+            engine/build/nuitka/windows-desktop/release_entrypoint.dist
+            engine/build/nuitka/windows-desktop/compilation-report.xml
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Build and verify desktop archive
         run: python packaging/nuitka/build_windows_desktop.py --engine engine --desktop desktop --output delivery
       - uses: actions/upload-artifact@v4
