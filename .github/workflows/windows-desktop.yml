@@ -1,0 +1,41 @@
+name: Windows x86_64 desktop
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          path: engine
+          ref: 38640f0a190620b5dabcfedfc311b6e1c6855170
+      - uses: actions/checkout@v4
+        with:
+          repository: mh567/wx-doc-format-desktop
+          ref: 468e627c70e1157a8ca4bf8cf5e704f6166dd89b
+          path: desktop
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          architecture: x64
+      - name: Install locked build dependencies
+        run: python -m pip install -r engine/packaging/nuitka/requirements-runtime.txt -r engine/packaging/nuitka/requirements-build.txt
+      - name: Test conversion engine
+        run: python -m pytest engine/tests -q
+      - name: Compile verified standalone runtime
+        run: python engine/packaging/nuitka/build_distribution.py --build-dir engine/build/windows-desktop --platform-id windows-x86_64 --compile-only
+      - name: Build and verify desktop archive
+        run: python packaging/nuitka/build_windows_desktop.py --engine engine --desktop desktop --output delivery
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-0.17.9-windows-x86_64
+          path: |
+            delivery/wx-doc-format-0.17.9-windows-x86_64.zip
+            delivery/SHA256SUMS.txt
+            delivery/acceptance.json
+          if-no-files-found: error
+          retention-days: 14
