@@ -660,7 +660,9 @@ def test_t08_protected_content_stays_body_text_after_the_policy_change(tmp_path:
     assert result.status == "completed", result.diagnostics
     semantics = result.report["list_semantics"]
     assert semantics["item_count"] == 0, semantics
-    assert (result.report.get("risk_warnings") or []) == [], result.report.get("risk_warnings")
+    assert [warning.get("type") for warning in (result.report.get("risk_warnings") or [])] == [
+        "document_title_generated"
+    ], result.report.get("risk_warnings")
 
 
 if __name__ == "__main__":  # pragma: no cover

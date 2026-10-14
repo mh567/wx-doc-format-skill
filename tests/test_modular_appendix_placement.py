@@ -174,7 +174,11 @@ def test_the_conversion_reports_clean_audits(tmp_path: Path) -> None:
         audit = result.report.get(name)
         assert audit and audit.get("passed") is True, (name, audit)
     assert result.report["saved_output_audit"]["unexpected_styles"] == []
-    assert (result.report.get("risk_warnings") or []) == []
+    # A DOCX that declares no title gets the one the front matter resolved, which
+    # the report surfaces as the only risk warning.
+    assert [warning.get("type") for warning in (result.report.get("risk_warnings") or [])] == [
+        "document_title_generated"
+    ]
     assert output.is_file()
 
 

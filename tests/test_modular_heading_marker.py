@@ -306,7 +306,10 @@ def test_a_marked_heading_renders_as_a_heading_end_to_end(tmp_path: Path) -> Non
     assert result.report["model_audit"]["passed"] is True
     assert result.report["saved_output_audit"]["passed"] is True
     assert result.report["saved_output_audit"]["unexpected_styles"] == []
-    assert (result.report.get("risk_warnings") or []) == []
+    # The DOCX declares no title, so the front matter title is the only warning.
+    assert [warning.get("type") for warning in (result.report.get("risk_warnings") or [])] == [
+        "document_title_generated"
+    ]
 
     document = Document(str(output))
     styled = [

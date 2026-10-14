@@ -212,7 +212,13 @@ def test_caption_generation_resume_keeps_one_named_figure(tmp_path: Path, invali
 
 def _response(request: dict, *, marker: str | None = "file-protocol-marker", response_id: str | None = None) -> dict:
     ast = request["items"][0]["source_ast"]
-    target_id = next(iter(ast["document"]["blocks"]))
+    # The first block may be a generated node (the document title), which carries
+    # no source reference, so the response targets the first source-backed block.
+    target_id = next(
+        node_id
+        for node_id, block in ast["document"]["blocks"].items()
+        if isinstance(block, dict) and isinstance(block.get("source_ref"), dict)
+    )
     source_ref = copy.deepcopy(ast["document"]["blocks"][target_id]["source_ref"])
     candidates = []
     if marker is not None:

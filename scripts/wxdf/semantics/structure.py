@@ -197,6 +197,25 @@ def _generated_title_candidate(facts: Mapping[str, Any]) -> dict[str, Any] | Non
     }
 
 
+def declares_document_title(facts: Mapping[str, Any]) -> bool:
+    """Return whether the source declares a non-empty document title of its own.
+
+    A source that applies a title style already carries the title line the
+    template renders, so no generated title is needed.  A blank title-styled
+    paragraph declares nothing and still takes the generated line.  The style
+    vocabulary stays owned here (``_docx_style_role``), so the reader and the
+    structure module cannot disagree about which style is the document title.
+    """
+
+    for unit in (facts.get("units") or {}).values():
+        if not isinstance(unit, Mapping):
+            continue
+        role, _level = _docx_style_role(str(unit.get("style") or ""))
+        if role == "title" and inline_text_projection(list(unit.get("inline_content") or [])).strip():
+            return True
+    return False
+
+
 def collect_structure_candidates(
     facts: Mapping[str, Any],
     regions: Mapping[str, Any] | None = None,

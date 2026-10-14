@@ -275,17 +275,31 @@ def build_native_run_result(
     structure_evidence = (context.evidence or {}).get("document-structure")
     if isinstance(structure_evidence, Mapping):
         generated_title = structure_evidence.get("generated_title")
+    summary = context.artifacts.get("source_facts_summary") or {}
+    source_type = str((summary or {}).get("source_type") or "")
+    if not generated_title:
+        # A DOCX source resolves its title through the front matter (a cover
+        # title, the core properties title, or the file name), and the source
+        # parser records the generated text.
+        parser_evidence = (context.evidence or {}).get("native-source-parser")
+        if isinstance(parser_evidence, Mapping):
+            generated_title = parser_evidence.get("generated_document_title")
     if generated_title:
-        # The title came from the file name, not from the source, so the reader
-        # is told to check it.
-        report["risk_warnings"] = [
-            *list(report.get("risk_warnings") or []),
-            {
+        # The title did not come from the source body, so the reader is told to
+        # check it.
+        if source_type == "docx":
+            warning = {
+                "type": "document_title_generated",
+                "message": "DOCX declared no title; the front matter title was generated.",
+                "title": str(generated_title),
+            }
+        else:
+            warning = {
                 "type": "markdown_title_generated",
                 "message": "Markdown had no leading H1; filename title was generated.",
                 "title": str(generated_title),
-            },
-        ]
+            }
+        report["risk_warnings"] = [*list(report.get("risk_warnings") or []), warning]
     status = "completed" if not diagnostics and (
         delivery.get("policy") == "strict" or delivery.get("audit_state") == "passed"
     ) else "completed_with_warnings"

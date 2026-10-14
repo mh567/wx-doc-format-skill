@@ -286,6 +286,68 @@ def test_direct_body_text_outline_level_overrides_the_style(tmp_path: Path) -> N
     assert "outline_level" not in facts["evidence"][facts["children"]["root"][0]]
 
 
+def test_parser_records_the_front_matter_document_title(tmp_path: Path) -> None:
+    source = _outline_docx(tmp_path, [("正文。", None)])
+
+    facts = parse(source)
+
+    assert facts["source"]["document_title"] == "outline"
+
+
+def test_source_ast_generates_the_title_the_source_does_not_declare(tmp_path: Path) -> None:
+    source = _outline_docx(tmp_path, [("一、前言", 0), ("正文。", None)])
+    facts = parse(source)
+
+    ast = build_source_ast(facts)
+
+    first = ast["document"]["children"]["root"][0]
+    block = ast["document"]["blocks"][first]
+    assert block["role"] == "title"
+    assert block["generated_by"] == "front_matter.document_title"
+    assert inline_text_projection(block["inline_content"]) == "outline"
+
+
+def test_source_ast_keeps_a_title_the_source_declares(tmp_path: Path) -> None:
+    document = Document()
+    document.add_paragraph("真实标题", style="Title")
+    document.add_paragraph("正文。")
+    source = tmp_path / "titled.docx"
+    document.save(str(source))
+
+    facts = parse(source)
+    ast = build_source_ast(facts)
+
+    assert not any(
+        block.get("generated_by") == "front_matter.document_title"
+        for block in ast["document"]["blocks"].values()
+        if isinstance(block, dict)
+    )
+
+
+def test_a_docx_without_a_title_renders_the_front_matter_title(tmp_path: Path) -> None:
+    source = _outline_docx(tmp_path, [("一、前言", 0), ("正文内容。", None)])
+    output = tmp_path / "out.docx"
+    result = ConversionKernel().convert(ConversionRequest(
+        input_path=source,
+        output_path=output,
+        template_path=TEMPLATE,
+        pipeline="modular",
+        list_policy="wx-default-v2",
+        options={"llm_enhance": "off"},
+    ))
+
+    assert result.status in {"completed", "completed_with_warnings"}, result.diagnostics
+    titles = [
+        paragraph.text
+        for paragraph in Document(str(output)).paragraphs
+        if paragraph.style.name == "文档标题" and paragraph.text.strip()
+    ]
+    assert titles == ["outline"]
+    assert [warning.get("type") for warning in (result.report.get("risk_warnings") or [])] == [
+        "document_title_generated"
+    ]
+
+
 def test_outline_headings_render_with_heading_styles_end_to_end(tmp_path: Path) -> None:
     source = _outline_docx(tmp_path, [("一、前言", 0), ("1.1 概述", 1), ("正文内容。", None)])
     output = tmp_path / "out.docx"

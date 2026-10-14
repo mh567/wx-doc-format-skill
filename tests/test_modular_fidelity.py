@@ -596,7 +596,9 @@ def test_a_markdown_source_without_a_leading_h1_gets_a_filename_title(tmp_path: 
     assert bundle is not None
 
 
-def test_docx_source_never_gets_a_filename_title(tmp_path: Path) -> None:
+def test_structure_candidates_do_not_generate_a_docx_title(tmp_path: Path) -> None:
+    # The structure module never invents a DOCX title; the source AST carries the
+    # one the parser resolved through the front matter policy.
     source = tmp_path / "source.docx"
     document = Document()
     document.add_paragraph("正文。")

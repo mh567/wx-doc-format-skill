@@ -193,10 +193,48 @@ def build_source_ast(facts: Mapping[str, Any]) -> dict[str, Any]:
             "resources": copy.deepcopy(facts["resources"]),
         },
     }
+    _inject_document_title(ast, facts)
     from ..validation import validate_ast
 
     validate_ast(ast)
     return ast
+
+
+def _inject_document_title(ast: dict[str, Any], facts: Mapping[str, Any]) -> None:
+    """Give the model the title line the template renders when it declares none.
+
+    The source's own title, when it declares one, already carries the block.  A
+    source that does not declare one takes the title the parser resolved through
+    the front matter policy (a cover title, the core properties title, or the
+    file name).  The block belongs to the Source AST so every rebuild derives it
+    and the normalized view embeds it, and it records how it was produced so no
+    reader mistakes it for authored content.
+    """
+
+    document = ast["document"]
+    blocks = document["blocks"]
+    if any(isinstance(block, Mapping) and block.get("role") == "title" for block in blocks.values()):
+        return
+    title = str((facts.get("source") or {}).get("document_title") or "").strip()
+    if not title:
+        return
+    from .structure import declares_document_title
+
+    if declares_document_title(facts):
+        return
+    node_id = "generated-title"
+    blocks[node_id] = {
+        "block_type": "paragraph",
+        "role": "title",
+        "inline_content": [{"kind": "text", "text": title, "marks": []}],
+        "generated_by": "front_matter.document_title",
+        "generation_basis": [title],
+    }
+    children = document["children"]
+    root_id = document["root_id"]
+    children.setdefault(root_id, [])
+    children.setdefault(node_id, [])
+    children[root_id].insert(0, node_id)
 
 
 def _normalized_list_marker(

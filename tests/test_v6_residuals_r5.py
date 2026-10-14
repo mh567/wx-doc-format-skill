@@ -293,7 +293,11 @@ def test_r5_docx_note_after_run_renders_with_note_style_under_the_item(tmp_path:
     report = _report_of(result)
     assert report.get("saved_output_audit", {}).get("passed") is True, report.get("saved_output_audit")
     assert report.get("saved_output_audit", {}).get("unexpected_styles") in (None, [])
-    assert not report.get("risk_warnings"), report.get("risk_warnings")
+    # The DOCX declares no title, so the generated front matter title is the only
+    # risk warning the report carries.
+    assert [warning.get("type") for warning in (report.get("risk_warnings") or [])] == [
+        "document_title_generated"
+    ], report.get("risk_warnings")
 
     document = normalized["source_ast"]["document"]
     parents = _parent_index(document["children"])
@@ -440,7 +444,9 @@ def test_r5_docx_table_between_items_hangs_under_the_preceding_item(tmp_path: Pa
 
     report = _report_of(result)
     assert report.get("saved_output_audit", {}).get("passed") is True, report.get("saved_output_audit")
-    assert not report.get("risk_warnings"), report.get("risk_warnings")
+    assert [warning.get("type") for warning in (report.get("risk_warnings") or [])] == [
+        "document_title_generated"
+    ], report.get("risk_warnings")
 
     document = normalized["source_ast"]["document"]
     parents = _parent_index(document["children"])

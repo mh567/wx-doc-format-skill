@@ -2349,6 +2349,27 @@ def _parse_docx(source: Path | str, *, store: SourceStore) -> dict[str, Any]:
             })
 
     facts["extensions"]["docx_numbering_report"] = {"source_lists": report.get("source_lists", {})}
+    # The front matter policy owns the document title (a cover title, the core
+    # properties title, or the file name).  It is resolved here so the title is a
+    # parsed fact the Source AST can carry, and every rebuild of that AST derives
+    # the same title.  A text box or a control that holds no cover simply yields
+    # the file name.
+    try:
+        from front_matter import analyze_front_matter
+        from toc_detector import detect_toc_regions
+
+        front_report: dict[str, Any] = {}
+        front_matter = analyze_front_matter(
+            document,
+            detect_toc_regions(document, front_report),
+            handle.path,
+            front_report,
+        )
+        title = str((front_matter.get("title") or {}).get("text") or "").strip()
+        if title:
+            facts["source"]["document_title"] = title
+    except Exception:
+        pass
     validate_source_facts(facts)
     return facts
 

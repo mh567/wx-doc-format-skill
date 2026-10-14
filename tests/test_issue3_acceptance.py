@@ -549,9 +549,9 @@ def test_l09_merged_and_nested_table_cells_are_unique_and_scope_local(tmp_path: 
     for child_id in document["children"]["root"]:
         if child_id in document["blocks"]:
             block = document["blocks"][child_id]
-            # T02 materializes a generated caption node directly above its
-            # table.  This case asserts the outer block and table sequence.
-            if block.get("role") == "caption":
+            # A generated node (a caption or the document title) is not source
+            # content.  This case asserts the source block and table sequence.
+            if block.get("role") == "caption" or block.get("generated_by"):
                 continue
             if block.get("block_type") == "table":
                 root_labels.append(("table", None))

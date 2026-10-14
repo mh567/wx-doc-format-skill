@@ -701,6 +701,7 @@ def test_t05_docx_item_tail_renders_in_source_order_with_caption_above_table(
     labels = _rendered_body_sequence(output)
     meaningful = [(kind, text.strip()) for kind, text in labels if text.strip() or kind == "tbl"]
     assert meaningful == [
+        ("p", "示例技术文件模板"),
         ("num", "第一项"),
         ("num", "第二项"),
         ("p", "第二项后的续接正文。"),
@@ -813,6 +814,7 @@ def test_t05_docx_tail_starting_with_table_renders_in_source_order(tmp_path: Pat
         if text.strip() or kind == "tbl"
     ]
     assert meaningful == [
+        ("p", "示例技术文件模板"),
         ("num", "第一项"),
         ("num", "第二项"),
         ("p", "表1"),

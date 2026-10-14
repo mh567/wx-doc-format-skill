@@ -75,9 +75,21 @@ def _native_source_ast(context: ModuleExecutionContext) -> dict[str, Any]:
     evidence = {
         "block_count": len(ast["document"]["blocks"]),
         "container_count": len(ast["document"]["containers"]),
+        "generated_document_title": _generated_document_title(ast),
     }
     context.evidence["native-source-parser"] = evidence
     return ast
+
+
+def _generated_document_title(ast: Mapping[str, Any]) -> str | None:
+    """Return the generated document title the model carries, or ``None``."""
+
+    for block in (ast.get("document") or {}).get("blocks", {}).values():
+        if isinstance(block, Mapping) and block.get("generated_by") == "front_matter.document_title":
+            inline = list(block.get("inline_content") or [])
+            text = "".join(str(item.get("text") or "") for item in inline if isinstance(item, Mapping))
+            return text.strip() or None
+    return None
 
 
 def _native_candidate_set(context: ModuleExecutionContext) -> list[Mapping[str, Any]]:
