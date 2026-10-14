@@ -18,6 +18,8 @@ docs/
 docs/*
 !docs/markdown-ast-recognition-spec.md
 !docs/development-workflow.md
+!docs/desktop-delivery-policy.md
+!docs/desktop-delivery-policy-evidence.md
 !docs/modular-pipeline-design-v3.md
 !docs/modular-pipeline-migration-v3.1.md
 !docs/execution-v3/
@@ -55,6 +57,8 @@ tests/
 !tests/
 tests/*
 !tests/test_table_formatting.py
+!tests/test_delivery_policy.py
+!tests/test_cli_delivery_policy.py
 !tests/test_nuitka_distribution.py
 !tests/test_modular_*.py
 !tests/test_t01_kernel_static_relocation.py

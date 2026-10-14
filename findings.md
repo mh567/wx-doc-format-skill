@@ -287,3 +287,9 @@ AST 2.0 已增加 `title` role、table `header_rows`、table_cell `cell_role`、
 - 题注模块使用对象邻接和样式边界识别无编号题注，排除“相关表介绍”等 Heading 标题，括号包裹题注先解包再关联。
 - 真实输出回读：目标图题均为 Caption 样式，`Heading 7/8` 标题为 Heading 6，`事件运营需求` 下的编号正文无手工前缀且使用一级列表样式。
 - 真实转换状态为 `completed_with_warnings`，退出码 0。模型、保存输出和附录审计通过。8 条剩余诊断均来自源文件编号定义不完整或不可恢复的显式深层列表，未阻塞发布。
+
+## 2026-10-14 审计交付策略
+
+已复现 0.18.0 手册三处带分页符图题注导致 inline_content_changed。移除三处分页面并指定项目模板后转换通过。publisher 与 run_result 重复实施审计门禁；reviewer 在 baseline 审计失败时不给 selected_artifact；Desktop runtime 将非零退出码提升异常，service 清理用户目标路径且临时证据消失。格式检查已有 advisory 特例，需要统一策略。
+
+本次代码审查另修复公开报告任意 message/location 字符串暴露、必需审计缺项被判 passed、失败报告缺失、copy 失败临时文件泄漏、回滚失败备份清理、硬链接输出碰撞问题。审计结果 passed、交付门禁与能力迁移验证须分别表达，格式提示不得污染语义迁移证明。当前使用 source adapter 验证真实 Desktop 调用链，未构建或替换安装软件。

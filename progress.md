@@ -485,3 +485,17 @@
 - 审查轴一确认合理的解释：软换行落在行内投影符合规范第 6 节；哈希与渲染、审计、读回、迁移各处都按通用 `break` 形状消费，无需同步改动；两个夹具（t09、issue7）改成硬换行是规则的正当结果，其断言未削弱，软换行与硬换行各自另有专项用例。
 - 复审：全量测试 `1325 passed, 0 failed`。样例矩阵端到端：无一级标题的 md 产出 `[文档标题] sample`，JSON 与 Markdown 报告都带 `markdown_title_generated`；软换行成空格、硬换行成换行；代码跨度里的尖括号与 `a < b` 这类比较保留，HTML 块与行内标签剥离后保留可读文本。
 - 残留：实体写法（如 `&lt;div&gt;`）解码后与真实标签在文本里不可区分，剥离规则只按标签形状判断，因此作者用实体写出的尖括号文本会被当作标签移除。legacy 读取器存在同样限制。
+
+## 2026-10-14 审计交付策略实施
+
+用户授权设计并实现。已声明架构、实施、审查路径；架构智能体进行只读定案。源码工作区初始无改动，当前分支 dev。Desktop 位于写入边界外，先在临时目录实施与测试，验证后申请工具授权写回具体改动。
+
+架构定案已完成，设计写入 docs/desktop-delivery-policy.md。CLI 两项红灯均失败后接入参数、公开摘要与检查点配置，30 项 CLI/公开合同测试通过。检查点旧配置兼容已补充，文件协议回归运行中。Desktop 在 /private/tmp/wx-desktop-delivery-work 实施，核心独立实现中。
+
+Desktop 四个文件已通过工具授权写回配对仓库；原仓库完整测试 54 passed。引擎初次全量 1289 passed、3 skipped、3 failed，其中两项为 advisory 状态污染迁移和 bundle 门禁，已建立红灯并修复为 2 passed；另一项为本地 HTTP 监听沙箱限制，单项获授权后通过。最终引擎全量正在运行。真实手册通过 Desktop service + 子进程 source adapter，DOCX/JSON/HTML 均生成，status review，三处行内差异仍保留；ZIP 无损坏，unexpected_styles=0。strict 退出 1、不发布正式文件，转换状态 completed、审计 issues、交付 blocked。独立复审最终快照无待修问题。
+
+最终验收：核心 1293 passed、3 skipped（179.29s），Desktop 54 passed（3.58s），新策略与 CLI 定向 11 passed。两项全量回归修复经独立复审确认无待修问题。证据写入 docs/desktop-delivery-policy-evidence.md。方案和新增测试已加入 .gitignore 显式允许项，确保不会被误忽略。所有授权源码工作已完成；未执行构建、安装替换或发布。
+
+## 2026-10-14 升版提交与残留修复
+
+用户授权先改版本并提交，再继续未完成问题。Skill 与 Desktop 统一升至 0.18.1，先本地提交已验收交付策略改动；后续修复单独提交。未授权推送或发布。

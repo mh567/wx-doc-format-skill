@@ -167,6 +167,7 @@ _CAPABILITY_CONTRACT_DEFINITIONS = (
     ("review_result", "2.0", "mapping"),
     ("acceptance", "1.0", "mapping"),
     ("published_output", "1.0", "optional_string"),
+    ("delivery_decision", "1.0", "mapping"),
 )
 
 CAPABILITY_CONTRACTS = {

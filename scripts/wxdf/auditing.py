@@ -336,8 +336,8 @@ def _read_saved_list_parts(
             document_xml = archive.read("word/document.xml")
             numbering_xml = archive.read("word/numbering.xml") if "word/numbering.xml" in names else b""
             styles_xml = archive.read("word/styles.xml") if "word/styles.xml" in names else b""
-    except (OSError, BadZipFile) as exc:
-        return None, b"", b"", {}, {"code": "list_readback_invalid_docx", "message": str(exc)}
+    except (OSError, BadZipFile):
+        return None, b"", b"", {}, {"code": "list_readback_invalid_docx", "message": "Saved DOCX could not be read."}
     return document_xml, numbering_xml, styles_xml, _numbering_format_map(numbering_xml), None
 
 
@@ -1004,16 +1004,20 @@ def audit_bundle(
         # The rendered artifact carries the template's own styles, so it is its own
         # template for baseline derivation: the check compares each paragraph with
         # the style it claims to use, which is what catches a direct override.
-        detail = audit_document_format(document, profile, document, consumer="audit")
+        try:
+            detail = audit_document_format(document, profile, document, consumer="audit")
+        except Exception as exc:
+            detail = {"passed": None, "status": "incomplete", "issues": [{"code": "audit_exception", "audit": "document_format", "exception_type": type(exc).__name__, "message": "Audit check did not complete."}], "checked": 0}
     else:
         detail = {"passed": True, "issues": [], "checked": 0}
     # The delivered document's element formatting is reported but never blocks:
     # a finding here is a spec deviation worth surfacing, not a broken artifact.
     document_format = {
-        "passed": True,
+        "passed": detail.get("passed", True),
         "advisory": True,
         "issues": list(detail.get("issues") or []),
         "checked": int(detail.get("checked") or 0),
+        **({"status": detail["status"]} if detail.get("status") else {}),
     }
     # The page, formula and caption numbering checks are advisory for the same
     # reason: they report the spec's numbering requirements, not a broken
@@ -1021,30 +1025,57 @@ def audit_bundle(
     # baseline: unlike the styles, the artifact does not carry the template's
     # section structure, so comparing it with itself would hide the difference.
     page_template = template_document if template_document is not None else document
-    page_detail = (
-        audit_page_contract(document, page_template)
-        if document is not None and page_template is not None
-        else {"passed": True, "issues": [], "checked": 0}
-    )
+    try:
+        page_detail = (
+            audit_page_contract(document, page_template)
+            if document is not None and page_template is not None
+            else {"passed": True, "issues": [], "checked": 0}
+        )
+    except Exception as exc:
+        page_detail = {"passed": None, "status": "incomplete", "issues": [{"code": "audit_exception", "audit": "page_contract", "exception_type": type(exc).__name__, "message": "Audit check did not complete."}], "checked": 0}
     page_contract_audit = {
-        "passed": True,
+        "passed": page_detail.get("passed", True),
         "advisory": True,
         "issues": list(page_detail.get("issues") or []),
         "checked": int(page_detail.get("checked") or 0),
+        **({"status": page_detail["status"]} if page_detail.get("status") else {}),
     }
+    def run_audit(name: str, callback: Any) -> dict[str, Any]:
+        try:
+            return dict(callback())
+        except Exception as exc:
+            return {
+                "passed": None,
+                "status": "incomplete",
+                "issues": [{
+                    "code": "audit_exception",
+                    "audit": name,
+                    "exception_type": type(exc).__name__,
+                    "message": "Audit check did not complete.",
+                }],
+            }
+
     audits = {
-        "model": check_model(normalized),
-        "saved_output": check_saved_output(path, normalized, render_map, document=document),
-        "list_readback": audit_list_readback(path, normalized),
+        "model": run_audit("model", lambda: check_model(normalized)),
+        "saved_output": run_audit("saved_output", lambda: check_saved_output(path, normalized, render_map, document=document)),
+        "list_readback": run_audit("list_readback", lambda: audit_list_readback(path, normalized)),
         "appendix": dict(appendix_audit or {"passed": True, "issues": []}),
         "document_format": document_format,
         "page_contract": page_contract_audit,
     }
+    for audit_name in ("document_format", "page_contract"):
+        audit = audits[audit_name]
+        if audit.get("passed") is None:
+            audit.setdefault("status", "incomplete")
     findings = collect_audit_findings(audits)
+    required_audits_passed = all(
+        audits[name].get("passed") is True
+        for name in ("model", "saved_output", "list_readback", "appendix")
+    ) and all(audit.get("passed") is not None for audit in audits.values())
     return {
         **audits,
         "findings": findings,
-        "passed": all(audit.get("passed") is True for audit in audits.values()),
+        "passed": required_audits_passed,
     }
 
 
@@ -1251,20 +1282,20 @@ def check_saved_output(
                 document_xml = archive.read("word/document.xml")
             if "word/_rels/document.xml.rels" in names:
                 relationships_xml = archive.read("word/_rels/document.xml.rels")
-    except (OSError, BadZipFile) as exc:
+    except (OSError, BadZipFile):
         return {
             "passed": False,
-            "issues": [{"code": "invalid_docx", "message": str(exc)}],
+            "issues": [{"code": "invalid_docx", "message": "Saved DOCX could not be read."}],
             "unexpected_styles": unexpected_styles,
         }
 
     if document is None:
         try:
             document = Document(output)
-        except Exception as exc:
+        except Exception:
             return {
                 "passed": False,
-                "issues": [{"code": "readback_failed", "message": str(exc)}],
+                "issues": [{"code": "readback_failed", "message": "Saved DOCX could not be read."}],
                 "unexpected_styles": unexpected_styles,
             }
     namespace = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"

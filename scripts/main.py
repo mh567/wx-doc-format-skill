@@ -207,6 +207,8 @@ def _public_summary_scalar(value: object) -> str:
 def _public_audit_status(value: object) -> str:
     if not isinstance(value, dict):
         return "not_run"
+    if value.get("status") == "incomplete":
+        return "incomplete"
     if value.get("passed") is True:
         return "passed"
     if value.get("passed") is False:
@@ -292,6 +294,46 @@ def _reported_diagnostic_code(diagnostics: list) -> str:
     return ranked[0][2] or "MODULAR_CONVERSION_FAILED"
 
 
+_DELIVERY_FINDING_MESSAGES = {
+    "audit_exception": "部分自动检查未完成，请复核输出文档。",
+    "inline_content_changed": "输出行内内容与源内容存在待核对差异。",
+    "paragraph_order_changed": "输出段落顺序或文本存在待核对差异。",
+    "inline_paragraph_missing": "行内检查未找到预期段落，请核对相关内容。",
+    "image_resource_missing": "图片资源检查发现异常，请核对图片。",
+    "image_count_changed": "图片数量检查发现差异，请核对图片。",
+    "table_count_changed": "表格数量检查发现差异，请核对表格。",
+    "unexpected_styles": "输出包含模板外样式，请复核格式。",
+}
+
+
+def _public_delivery_findings(findings: list) -> list[dict]:
+    """Publish diagnostic identity and paragraph positions without arbitrary strings."""
+
+    result = []
+    for item in findings:
+        if not isinstance(item, dict):
+            continue
+        code = item.get("code")
+        if not isinstance(code, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,120}", code):
+            code = "audit_finding"
+        finding = {"code": code, "message": _DELIVERY_FINDING_MESSAGES.get(code, "自动检查发现需复核项，请查看转换报告。")}
+        for key, values in (
+            ("category", {"audit", "model", "saved_output", "appendix", "document_format", "page_contract", "list_readback", "content_integrity"}),
+            ("severity", {"critical", "high", "medium", "low", "warning", "info", "error"}),
+            ("certainty", {"confirmed", "suspected", "reported", "unknown", "incomplete"}),
+        ):
+            if isinstance(item.get(key), str) and item[key] in values:
+                finding[key] = item[key]
+        block_id = item.get("block_id")
+        if isinstance(block_id, str) and re.fullmatch(r"(?:u-[0-9a-f]{16}|b[0-9]+|(?:node|block)-[0-9]+)", block_id):
+            finding["block_id"] = block_id
+        location = item.get("location")
+        if isinstance(location, str) and re.fullmatch(r"(?:第[0-9]+段|Paragraph [0-9]+)", location):
+            finding["location"] = location
+        result.append(finding)
+    return result
+
+
 def public_report_summary(report: dict) -> dict:
     audits = {
         public_name: _public_audit_status(report.get(source_key))
@@ -317,7 +359,7 @@ def public_report_summary(report: dict) -> dict:
             )
         )
     )
-    return {
+    summary = {
         "schema_version": "1.0",
         "status": status,
         "audits": audits,
@@ -325,6 +367,14 @@ def public_report_summary(report: dict) -> dict:
         "manual_review_required": manual_review_required,
         "diagnostic_codes": diagnostic_codes,
     }
+    for key in ("delivery_policy", "conversion_status", "audit_status", "delivery_status"):
+        if key in report:
+            summary[key] = _public_summary_scalar(report[key])
+    if isinstance(report.get("audit_findings"), list):
+        summary["audit_findings"] = _public_delivery_findings(report["audit_findings"])
+    if report.get("audit_status") in {"issues", "incomplete"}:
+        summary["manual_review_required"] = True
+    return summary
 
 
 def report_for_output(report: dict, *, release: bool | None = None) -> dict:
@@ -338,6 +388,8 @@ def report_for_output(report: dict, *, release: bool | None = None) -> dict:
     if not is_release:
         return report
     public_report = sanitize_release_report(report)
+    if isinstance(report.get("audit_findings"), list):
+        public_report["audit_findings"] = _public_delivery_findings(report["audit_findings"])
     public_report["public_summary"] = public_report_summary(report)
     return public_report
 
@@ -345,7 +397,7 @@ def report_for_output(report: dict, *, release: bool | None = None) -> dict:
 def _native_checkpoint_configuration(args, *, output_path: Path) -> dict:
     """Freeze the effective native CLI configuration used across resume."""
 
-    return {
+    configuration = {
         "input": str(args.input),
         "output": str(output_path),
         "template": str(args.template) if args.template else None,
@@ -357,12 +409,16 @@ def _native_checkpoint_configuration(args, *, output_path: Path) -> dict:
         "llm_enhance": args.llm_enhance,
         "llm_hint": args.llm_hint,
         "strict_normalize": args.strict_normalize,
+        "delivery_policy": args.delivery_policy,
         "table_row_height_cm": args.table_row_height_cm,
         "table_row_height_rule": args.table_row_height_rule,
         "caption_numbering": args.caption_numbering,
         "pipeline": NATIVE_PIPELINE,
         "list_policy": NATIVE_PROFILE,
     }
+    if getattr(args, "_legacy_delivery_configuration", False):
+        configuration.pop("delivery_policy")
+    return configuration
 
 
 def _run_review_mode(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
@@ -499,6 +555,10 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
     parser.add_argument("--output", type=Path, help="Output .docx path (optional when --resume is used)")
     parser.add_argument("--template", type=Path, default=None, help="DOCX template driving styles and numbering.")
     parser.add_argument("--strict-normalize", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--delivery-policy", choices=["strict", "desktop"], default="strict",
+        help="Delivery gate: strict audit acceptance, or readable Desktop output with review findings.",
+    )
     parser.add_argument("--report", type=Path, default=None)
     parser.add_argument("--report-md", type=Path, default=None)
     parser.add_argument("--report-html", type=Path, default=None, help="HTML review report path (--review mode).")
@@ -678,12 +738,21 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
             args.llm_hint = run_args["llm_hint"]
         if "strict_normalize" in run_args and restore_native("--strict-normalize", "--no-strict-normalize"):
             args.strict_normalize = run_args["strict_normalize"]
+        if "delivery_policy" in run_args and restore_native("--delivery-policy"):
+            args.delivery_policy = run_args["delivery_policy"]
+        args._legacy_delivery_configuration = (
+            "delivery_policy" not in run_args
+            and restore_native("--delivery-policy")
+            and args.delivery_policy == "strict"
+        )
         if "table_row_height_cm" in run_args and restore_native("--table-row-height-cm"):
             args.table_row_height_cm = run_args["table_row_height_cm"]
         if "table_row_height_rule" in run_args and restore_native("--table-row-height-rule"):
             args.table_row_height_rule = run_args["table_row_height_rule"]
         if "caption_numbering" in run_args and restore_native("--caption-numbering"):
             args.caption_numbering = run_args["caption_numbering"]
+    if args.delivery_policy not in {"strict", "desktop"}:
+        parser.error("unsupported delivery policy in checkpoint")
     if _os.environ.get("WX_DOC_FORMAT_RELEASE") == "1" and (args.ast or args.source_ast):
         parser.error("--ast and --source-ast are unavailable in release packages")
 
@@ -711,6 +780,7 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
             def enhancement_call(payload, *, _local_command=local_command):
                 return _local_command(json.dumps(payload, ensure_ascii=False))
     kernel_options = {
+        "delivery_policy": args.delivery_policy,
         "llm_enhance": args.llm_enhance,
         "protocol_mode": modular_protocol_mode,
         "source_ast_path": args.source_ast,

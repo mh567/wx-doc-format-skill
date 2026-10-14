@@ -254,7 +254,7 @@ class ConversionKernel:
                     return RunResult(
                         status="failed",
                         exit_code=1,
-                        report={**report, "status": "failed"},
+                        report={**result.report, "status": "failed", "delivery_status": "blocked"},
                         artifacts={},
                         diagnostics=[*result.diagnostics, diagnostic],
                         metrics=metrics.snapshot(),
@@ -367,7 +367,7 @@ class ConversionKernel:
                     return RunResult(
                         status="failed",
                         exit_code=1,
-                        report={**result.report, "status": "failed"},
+                        report={**result.report, "status": "failed", "delivery_status": "blocked"},
                         artifacts={},
                         diagnostics=[*result.diagnostics, diagnostic],
                         metrics=result.metrics,

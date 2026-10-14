@@ -105,7 +105,6 @@ def build_native_run_result(
     result that must not publish.
     """
 
-    from .auditing import is_advisory_audit_issue
     from .decision_ledger import ledger_replay_report
 
     candidates = list(context.require("candidate_set"))
@@ -124,6 +123,7 @@ def build_native_run_result(
     saved_findings = selected_audits["saved_output"]
     appendix_audit = selected_audits["appendix"]
     published = context.require("published_output")
+    delivery = context.require("delivery_decision")
     integrity = context.require("source_facts_integrity")
     source_facts_digest = context.require("source_facts_digest")
     source_facts_digest_after = str(integrity["digest_after"])
@@ -190,34 +190,11 @@ def build_native_run_result(
     diagnostics.extend(model_findings.get("issues") or [])
     diagnostics.extend(saved_findings.get("issues") or [])
     diagnostics.extend(appendix_audit.get("issues") or [])
-    audits_passed = (
-        model_findings.get("passed") is True
-        and saved_findings.get("passed") is True
-        and appendix_audit.get("passed") is True
-    )
-    blocking_diagnostics = [
-        item
-        for item in diagnostics
-        if item in (decision_set.get("unresolved") or [])
-        or item in (saved_findings.get("issues") or [])
-        or item in (appendix_audit.get("issues") or [])
-        or (
-            item.get("severity") in {"error", "warning"}
-            # A finding whose defect the delivered document already resolved is
-            # reported and repairable without blocking the delivery, so the
-            # severity alone cannot decide when the code is advisory.
-            and not is_advisory_audit_issue(item)
-        )
-        or (
-            item in (model_findings.get("issues") or [])
-            # A model finding whose defect the normalization already resolved in
-            # the rendered model is reported and repairable without blocking the
-            # delivery: the document carries the contract-conforming level
-            # either way.
-            and not is_advisory_audit_issue(item)
-        )
-    ]
-    if published is None or not audits_passed or blocking_diagnostics:
+    for reason in delivery.get("hard_blocks", []):
+        if not any(item.get("code") == reason for item in diagnostics):
+            diagnostics.append({"code": str(reason), "severity": "error", "message": f"Delivery blocked: {reason}."})
+    audits_passed = bool(delivery.get("required_audits_passed"))
+    if published is None or not delivery.get("publish"):
         report.update({
             "status": "failed",
             "source_ast_revision": snapshot.ast["revision"],
@@ -234,6 +211,12 @@ def build_native_run_result(
             "appendix_semantics": appendix_semantics,
             "appendix_semantics_consumption": appendix_consumption,
             "appendix_preservation_audit": appendix_audit,
+            "delivery_decision": delivery,
+            "delivery_policy": delivery.get("policy"),
+            "conversion_status": delivery.get("conversion_status"),
+            "audit_status": delivery.get("audit_state"),
+            "delivery_status": delivery.get("delivery_status"),
+            "audit_findings": delivery.get("findings", []),
             "execution_plan": {
                 "profile": profile,
                 "modules": execution_plan_report(execution_plan),
@@ -292,7 +275,9 @@ def build_native_run_result(
                 "title": str(generated_title),
             },
         ]
-    status = "completed" if not diagnostics else "completed_with_warnings"
+    status = "completed" if not diagnostics and (
+        delivery.get("policy") == "strict" or delivery.get("audit_state") == "passed"
+    ) else "completed_with_warnings"
     report.update({
         "status": status,
         "source_facts_summary": context.require("source_facts_summary"),
@@ -350,6 +335,12 @@ def build_native_run_result(
         "native_module_evidence": copy.deepcopy(context.evidence),
         "model_audit": model_findings,
         "saved_output_audit": saved_findings,
+        "delivery_decision": delivery,
+        "delivery_policy": delivery.get("policy"),
+        "conversion_status": delivery.get("conversion_status"),
+        "audit_status": delivery.get("audit_state"),
+        "delivery_status": delivery.get("delivery_status"),
+        "audit_findings": delivery.get("findings", []),
         "capability_migration": {
             **capability_migration,
         },

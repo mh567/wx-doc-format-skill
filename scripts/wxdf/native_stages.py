@@ -527,11 +527,18 @@ def _native_auditor(context: ModuleExecutionContext) -> dict[str, Any]:
         except Exception:
             template_document = None
     with context.stage("audit"):
-        appendix_findings = (
-            audit_native_appendix(normalized["source_ast"], appendix_semantics)
-            if appendix_semantics is not None
-            else {"passed": True, "issues": []}
-        )
+        try:
+            appendix_findings = (
+                audit_native_appendix(normalized["source_ast"], appendix_semantics)
+                if appendix_semantics is not None
+                else {"passed": True, "issues": []}
+            )
+        except Exception as exc:
+            appendix_findings = {
+                "passed": None,
+                "status": "incomplete",
+                "issues": [{"code": "audit_exception", "audit": "appendix", "exception_type": type(exc).__name__, "message": "Audit check did not complete."}],
+            }
         audits = audit_bundle(
             staging_path,
             normalized,
@@ -588,6 +595,10 @@ def _native_auditor(context: ModuleExecutionContext) -> dict[str, Any]:
         saved_findings = {
             **saved_findings,
             "format_issues": format_issues,
+            "advisory_audits": {
+                "document_format": format_findings,
+                "page_contract": page_findings,
+            },
             "format_checked": int(format_findings.get("checked") or 0),
             "page_checked": int(page_findings.get("checked") or 0),
         }
@@ -985,6 +996,8 @@ def _native_reviewer(context: ModuleExecutionContext) -> dict[str, Any]:
             "appendix": review_context.require("appendix_audit"),
             "findings": list(review_context.require("audit_findings")),
         }
+        if any(candidate_audits[name].get("passed") is None for name in ("model", "saved_output", "appendix")):
+            raise RuntimeError("candidate audit did not complete")
         candidate_audits["passed"] = all(
             candidate_audits[name].get("passed") is True
             for name in ("model", "saved_output", "appendix")
@@ -1054,43 +1067,41 @@ def _native_reviewer(context: ModuleExecutionContext) -> dict[str, Any]:
 
 
 def _native_publisher(context: ModuleExecutionContext) -> bool:
+    from .delivery import decide_delivery
     from .auditing import is_advisory_audit_issue
-    from .publication import PublicationError, validate_acceptance
 
     review_result = context.require("review_result")
-    try:
-        validate_acceptance(context.require("acceptance"))
-    except PublicationError:
-        context.provide("published_output", None)
-        return False
+    policy = str(context.request.options.get("delivery_policy", "strict"))
     audits = review_result["audits"]
-    # A list-readback mismatch is folded into ``saved_output`` by the auditor
-    # (see ``_native_auditor``), and ``saved_output.passed`` is the gate here, so
-    # a readback failure blocks publication through the saved-output audit
-    # rather than a separate ``list_readback`` key that never exists on this
-    # dict.
-    audits_passed = (
-        audits["model"].get("passed") is True
-        and audits["saved_output"].get("passed") is True
-        and audits["appendix"].get("passed") is True
-    )
-    fatal_diagnostics = [
-        item
-        for item in context.require("list_semantics_result").get("diagnostics", [])
-        if item.get("severity") in {"error", "warning"}
-        # A finding whose defect the delivered document already resolved does not
-        # block publication, exactly as it does not block the run result.
-        and not is_advisory_audit_issue(item)
+    acceptance = context.require("acceptance")
+    selected_artifact = review_result.get("selected_artifact")
+    if acceptance.get("accepted") is not True or selected_artifact is None:
+        selected_artifact = review_result.get("baseline_artifact")
+    decision_set = context.require("decision_set")
+    integrity = context.require("source_facts_integrity")
+    strict_diagnostics = [
+        item for name in ("model", "saved_output", "appendix")
+        for item in audits[name].get("issues", [])
+        if not is_advisory_audit_issue(item)
     ]
-    if audits_passed and not fatal_diagnostics:
-        selected_artifact = Path(review_result["selected_artifact"])
-        if not selected_artifact.is_file():
-            context.provide("published_output", None)
-            return False
-        context.provide("published_output", str(selected_artifact))
-        return True
-    context.provide("published_output", None)
-    return False
+    strict_diagnostics.extend(
+        item for item in context.require("list_semantics_result").get("diagnostics", [])
+        if item.get("severity") in {"error", "warning"} and not is_advisory_audit_issue(item)
+    )
+    decision = decide_delivery(
+        policy,
+        audits,
+        artifact=selected_artifact,
+        source_facts_immutable=bool(integrity.get("immutable")),
+        unresolved=list(decision_set.get("unresolved") or []),
+        transaction_status=str(review_result["transaction_commit"].status),
+        acceptance=acceptance,
+        strict_diagnostics=strict_diagnostics,
+        render_map=review_result.get("render_result", {}).get("render_map", {}),
+    )
+    context.provide("delivery_decision", decision)
+    context.provide("published_output", decision.get("selected_artifact") if decision.get("publish") else None)
+    return bool(decision.get("publish"))
 
 
 def native_stage_executors() -> dict[str, Callable[[ModuleExecutionContext], Any]]:
