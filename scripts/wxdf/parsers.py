@@ -2368,8 +2368,12 @@ def _parse_docx(source: Path | str, *, store: SourceStore) -> dict[str, Any]:
         title = str((front_matter.get("title") or {}).get("text") or "").strip()
         if title:
             facts["source"]["document_title"] = title
-    except Exception:
-        pass
+    except Exception as exc:
+        facts["diagnostics"].append({
+            "code": "front_matter_title_unavailable",
+            "severity": "info",
+            "message": f"document title could not be resolved ({type(exc).__name__})",
+        })
     validate_source_facts(facts)
     return facts
 

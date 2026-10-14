@@ -324,6 +324,27 @@ def test_source_ast_keeps_a_title_the_source_declares(tmp_path: Path) -> None:
     )
 
 
+def test_a_title_style_inside_a_table_cell_still_takes_the_generated_title(tmp_path: Path) -> None:
+    # A title style the delivered body never renders (a table cell, or the
+    # source's own cover) declares nothing, so the generated line still appears.
+    document = Document()
+    table = document.add_table(rows=1, cols=1)
+    table.cell(0, 0).paragraphs[0].text = "表内标题"
+    table.cell(0, 0).paragraphs[0].style = "Title"
+    document.add_paragraph("正文内容。")
+    source = tmp_path / "cell-title.docx"
+    document.save(str(source))
+
+    facts = parse(source)
+    ast = build_source_ast(facts)
+
+    assert any(
+        block.get("generated_by") == "front_matter.document_title"
+        for block in ast["document"]["blocks"].values()
+        if isinstance(block, dict)
+    )
+
+
 def test_a_docx_without_a_title_renders_the_front_matter_title(tmp_path: Path) -> None:
     source = _outline_docx(tmp_path, [("一、前言", 0), ("正文内容。", None)])
     output = tmp_path / "out.docx"
