@@ -123,28 +123,59 @@ def _element_bytes(element: Any) -> bytes:
     return etree.tostring(element, encoding="utf-8")
 
 
+def _source_toc_controls(body: Any) -> list[Any]:
+    """Return the content controls that hold the source's own table of contents.
+
+    One owner for the question of which ``w:sdt`` is the source's front control,
+    so the paragraph and table readers below cannot disagree about it.  The
+    wrapper is read here because the reader is the only stage that still sees
+    which control an element came from.
+    """
+
+    from docx.oxml.ns import qn
+
+    controls: list[Any] = []
+    for control in body.iter(qn("w:sdt")):
+        if any(
+            "TOC" in str(instruction.text or "")
+            for instruction in control.iter(qn("w:instrText"))
+        ):
+            controls.append(control)
+    return controls
+
+
 def _docx_source_toc_paragraphs(body: Any) -> list[Any]:
     """Return the paragraphs that live in a content control holding a TOC field.
 
-    A document keeps its own table of contents in a ``w:sdt`` whose first
-    paragraph carries the ``TOC`` field instruction.  The whole control is the
-    source's table of contents, and the template supplies the replacement, so
-    every paragraph inside it is one region.  The wrapper is read here because
-    the reader is the only stage that still sees which control an element came
-    from.  The elements themselves are returned, not their ids: an lxml proxy is
-    only stable while a reference to it is alive.
+    The whole control is the source's front region, and the template supplies the
+    replacement, so every paragraph inside it is one region.  The elements
+    themselves are returned, not their ids: an lxml proxy is only stable while a
+    reference to it is alive.
     """
 
     from docx.oxml.ns import qn
 
     members: list[Any] = []
-    for control in body.iter(qn("w:sdt")):
-        if not any(
-            "TOC" in str(instruction.text or "")
-            for instruction in control.iter(qn("w:instrText"))
-        ):
-            continue
+    for control in _source_toc_controls(body):
         members.extend(control.iter(qn("w:p")))
+    return members
+
+
+def _docx_source_toc_tables(body: Any) -> list[Any]:
+    """Return the tables that live in a content control holding a TOC field.
+
+    A control that carries the source's table of contents often carries the cover
+    beside it, so a revision record table sits inside the same ``w:sdt``.  The
+    table leaves with the paragraphs ``_docx_source_toc_paragraphs`` marks; were
+    it kept while its cell paragraphs left, the cover would render as an empty
+    table.
+    """
+
+    from docx.oxml.ns import qn
+
+    members: list[Any] = []
+    for control in _source_toc_controls(body):
+        members.extend(control.iter(qn("w:tbl")))
     return members
 
 
@@ -1166,6 +1197,61 @@ def _style_id(paragraph: Any) -> str:
         return ""
 
 
+def _outline_level_value(node: Any) -> int | None:
+    """Return the outline level a ``w:outlineLvl`` element declares, or ``None``.
+
+    OOXML numbers outline levels 1 to 9 as ``0`` to ``8``; ``9`` is Word's "body
+    text" value, so a paragraph that carries it declares the opposite of a
+    heading and yields nothing here.
+    """
+
+    raw = node.get(qn("w:val"))
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    if value < 0 or value > 8:
+        return None
+    return value
+
+
+def docx_paragraph_outline_level(paragraph: Any) -> int | None:
+    """Return the outline level a paragraph declares, or ``None``.
+
+    OOXML states a heading either through a direct ``w:outlineLvl`` on the
+    paragraph or through the paragraph's style chain, resolved in that order, the
+    same precedence the input review applies through
+    ``format_contract.resolve_paragraph_value``.  A direct ``w:outlineLvl`` is
+    decisive even when it names Word's "body text" value, so a paragraph that
+    states its own level is never re-read from its style.
+    """
+
+    direct = paragraph._p.pPr
+    if direct is not None:
+        node = direct.find(qn("w:outlineLvl"))
+        if node is not None:
+            return _outline_level_value(node)
+    style = getattr(paragraph, "style", None)
+    seen: set[str] = set()
+    while style is not None:
+        style_key = str(getattr(style, "style_id", "") or getattr(style, "name", ""))
+        if style_key in seen:
+            break
+        seen.add(style_key)
+        element = getattr(style, "element", None)
+        properties = element.find(qn("w:pPr")) if element is not None else None
+        if properties is not None:
+            node = properties.find(qn("w:outlineLvl"))
+            if node is not None:
+                level = _outline_level_value(node)
+                if level is not None:
+                    return level
+        style = getattr(style, "base_style", None)
+    return None
+
+
 def _is_list_style(style_name: str) -> bool:
     """Return whether a DOCX paragraph style is a named list style."""
 
@@ -1909,6 +1995,7 @@ def _parse_docx(source: Path | str, *, store: SourceStore) -> dict[str, Any]:
     )
     body = document.element.body
     source_toc_paragraphs = _docx_source_toc_paragraphs(body)
+    source_toc_tables = _docx_source_toc_tables(body)
     position = 0
     nested_list_ordinals: dict[tuple[str, int, int, str | None], int] = {}
 
@@ -1942,6 +2029,13 @@ def _parse_docx(source: Path | str, *, store: SourceStore) -> dict[str, Any]:
             # The template supplies the table of contents, so the source's own
             # control is one region and the scope module excludes it.
             evidence["source_toc"] = True
+        outline_level = docx_paragraph_outline_level(paragraph)
+        if outline_level is not None:
+            # A source may declare a heading through a direct ``w:outlineLvl``
+            # instead of a heading style.  The structure module grades a heading
+            # on this evidence, so the level the paragraph declares is recorded
+            # here rather than left to the style name alone.
+            evidence["outline_level"] = outline_level
         if descriptor is not None:
             evidence.update({
                 "numbering_status": descriptor.get("status"),
@@ -2143,6 +2237,10 @@ def _parse_docx(source: Path | str, *, store: SourceStore) -> dict[str, Any]:
                         add_nested_block(cell_id, child, cell_path, cell)
                 column_cursor += col_span
         facts["evidence"][table_id] = {"source_position": table_position, "table_scope": "cell_local"}
+        if any(member is table._tbl for member in source_toc_tables):
+            # The table sits inside the source's own table of contents control,
+            # so it leaves with the paragraphs that control carries.
+            facts["evidence"][table_id]["source_toc"] = True
 
     def add_nested_block(parent_id: str, container: Any, container_path: list[Any], proxy: Any) -> None:
         """Convert the wrapped paragraphs and tables under one container.

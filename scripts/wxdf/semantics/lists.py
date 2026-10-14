@@ -124,6 +124,19 @@ def _inline_text(items: list[Mapping[str, Any]]) -> str:
 _HEADING_PROTECTION_REASONS = frozenset({"manual_heading_marker", "protected_style"})
 
 
+def _declares_outline_heading(evidence: Mapping[str, Any]) -> bool:
+    """Return whether the source declared a heading through an outline level.
+
+    A paragraph that carries ``w:outlineLvl`` is a heading the source declared,
+    so it is never promoted to a list item and it opens a section, exactly like
+    a heading style does.  The DOCX reader records the level as evidence, which
+    is the same signal the structure module grades the role on.
+    """
+
+    level = evidence.get("outline_level")
+    return isinstance(level, int) and not isinstance(level, bool)
+
+
 def _is_protected(unit: Mapping[str, Any], evidence: Mapping[str, Any]) -> tuple[bool, str | None]:
     if unit.get("kind") != "paragraph":
         return True, "non_paragraph_unit"
@@ -132,6 +145,10 @@ def _is_protected(unit: Mapping[str, Any], evidence: Mapping[str, Any]) -> tuple
     text = _unit_text(unit).strip()
     if role in {"heading", "note", "numbered_note", "caption", "title", "code", "code_block"}:
         return True, f"protected_role:{role}"
+    if _declares_outline_heading(evidence):
+        # Heading structure outranks a confirmed numbering instance, so this
+        # stays above the numbering short-circuits below.
+        return True, "outline_level_heading"
     if protected_code_style(style):
         return True, "opaque_code"
     if evidence.get("protected") is True:
@@ -273,6 +290,8 @@ def _is_heading_unit(unit: Mapping[str, Any], evidence: Mapping[str, Any]) -> bo
     """
 
     if str(unit.get("role") or evidence.get("role") or "") == "heading":
+        return True
+    if _declares_outline_heading(evidence):
         return True
     style = str(unit.get("style") or evidence.get("style") or "").strip().replace(" ", "")
     return _HEADING_STYLE_RE.match(style) is not None

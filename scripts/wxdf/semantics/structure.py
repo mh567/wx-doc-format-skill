@@ -246,6 +246,19 @@ def collect_structure_candidates(
         if not is_markdown:
             source_style = str(unit.get("style") or evidence.get("style") or "")
             style_role, style_level = _docx_style_role(source_style)
+            outline_level = evidence.get("outline_level")
+            if (
+                style_role == "body"
+                and isinstance(outline_level, int)
+                and not isinstance(outline_level, bool)
+            ):
+                # A heading the source declares through ``w:outlineLvl`` alone
+                # earns the same role as one it declares through a heading style.
+                # The reader records the level, the review already reads the same
+                # property, and this grades the paragraph so a plain-styled title
+                # does not lose its section role.
+                style_role = "heading"
+                style_level = max(1, min(outline_level + 1, 6))
         # A heading the source itself declares, through a heading style or a
         # Markdown marker, outweighs the text protections a heading can carry
         # (rulings of 2026-09-16 and 2026-09-17).  The reason still rides on the

@@ -505,7 +505,7 @@ def _native_auditor(context: ModuleExecutionContext) -> dict[str, Any]:
 
     from docx import Document
 
-    from .auditing import audit_bundle, collect_audit_findings
+    from .auditing import audit_bundle, audit_declared_outline_presence, collect_audit_findings
 
     normalized = context.require("normalized")
     render_result = context.require("render_result")
@@ -547,6 +547,13 @@ def _native_auditor(context: ModuleExecutionContext) -> dict[str, Any]:
             template_document=template_document,
         )
     model_findings = audits["model"]
+    outline_presence = audit_declared_outline_presence(context.require("source_facts"), normalized)
+    if outline_presence.get("issues"):
+        model_findings = {
+            **model_findings,
+            "issues": [*(model_findings.get("issues") or []), *outline_presence["issues"]],
+            "passed": False,
+        }
     saved_findings = audits["saved_output"]
     appendix_findings = audits["appendix"]
     list_readback_audit = audits["list_readback"]
@@ -608,7 +615,9 @@ def _native_auditor(context: ModuleExecutionContext) -> dict[str, Any]:
     # pre-merge ``audit_bundle`` output.  Otherwise a readback issue would be
     # visible under its own category but missing from the merged saved-output
     # category that drives publication.
-    merged_findings = collect_audit_findings({**audits, "saved_output": saved_findings})
+    merged_findings = collect_audit_findings(
+        {**audits, "model": model_findings, "saved_output": saved_findings}
+    )
     context.provide("model_audit", model_findings)
     context.provide("saved_output_audit", saved_findings)
     context.provide("appendix_audit", appendix_findings)

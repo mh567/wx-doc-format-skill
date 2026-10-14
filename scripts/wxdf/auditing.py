@@ -1087,6 +1087,53 @@ def audit_bundle(
     }
 
 
+def audit_declared_outline_presence(
+    facts: Mapping[str, Any],
+    normalized: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Report source outline headings the delivered model does not carry.
+
+    A source may declare its headings through ``w:outlineLvl`` rather than a
+    heading style, and the structure module grades those.  If the delivered model
+    ends up with no heading block while the source declares section headings at
+    the document root, the outline was lost, so the gap is reported here instead
+    of a run that reads as clean.  Only document-root paragraphs are counted, so a
+    table cell that happens to carry an outline level cannot raise the check.
+    """
+
+    root_children = [str(node_id) for node_id in (facts.get("children") or {}).get("root", [])]
+    evidence = facts.get("evidence") or {}
+    declared = [
+        node_id
+        for node_id in root_children
+        if isinstance(evidence.get(node_id), Mapping)
+        and isinstance(evidence[node_id].get("outline_level"), int)
+        and not isinstance(evidence[node_id].get("outline_level"), bool)
+    ]
+    if not declared:
+        return {"passed": True, "issues": []}
+    blocks = normalized.get("source_ast", {}).get("document", {}).get("blocks", {})
+    # A paragraph that carries an outline level becomes a heading or the document
+    # title, and both are materialized outline structure, so either role clears
+    # the check.
+    materialized = sum(
+        1
+        for block in blocks.values()
+        if isinstance(block, Mapping) and block.get("role") in {"heading", "title"}
+    )
+    if materialized:
+        return {"passed": True, "issues": []}
+    return {
+        "passed": False,
+        "issues": [{
+            "code": "source_outline_not_materialized",
+            "severity": "high",
+            "declared_heading_count": len(declared),
+            "heading_count": 0,
+        }],
+    }
+
+
 def check_model(normalized: Mapping[str, Any]) -> dict[str, Any]:
     issues: list[dict[str, Any]] = []
     try:

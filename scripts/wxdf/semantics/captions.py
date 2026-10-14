@@ -10,7 +10,7 @@ from text_utils import caption_parts
 
 from ..contracts import overlay_property_scope
 from ..digest import digest
-from ..model import inline_text_projection
+from ..model import build_indexes, inline_text_projection
 from ..validation import validate_ast
 from ..validation import validate_source_facts
 
@@ -501,6 +501,42 @@ def _captioned_targets(ast: Mapping[str, Any]) -> set[str]:
     }
 
 
+def _image_shares_text_paragraph(blocks: Mapping[str, Any], block: Mapping[str, Any]) -> bool:
+    """Return whether an image shares its source paragraph with visible text.
+
+    A materialized inline image records the paragraph it came from first in
+    ``generation_basis``.  When that paragraph still shows text, the image is a
+    button icon inside running text rather than a figure, so it takes no caption
+    and no caption target.  A paragraph whose whole content is the image stays a
+    figure and is captioned as before.
+    """
+
+    basis = block.get("generation_basis")
+    if not isinstance(basis, (list, tuple)) or not basis:
+        return False
+    owner = blocks.get(str(basis[0]))
+    if not isinstance(owner, Mapping) or owner.get("block_type") != "paragraph":
+        return False
+    return bool(inline_text_projection(owner.get("inline_content") or []).strip())
+
+
+def _node_inside_table(indexes: Any, blocks: Mapping[str, Any], node_id: str) -> bool:
+    """Return whether a node lives in a table's subtree.
+
+    An image inside a table cell is the cell's content, not a document figure, so
+    it takes no caption and no caption target.  Only a figure that stands in the
+    body is caption eligible.
+    """
+
+    parent = indexes.parent_by_id.get(str(node_id))
+    while parent is not None:
+        block = blocks.get(parent)
+        if isinstance(block, Mapping) and block.get("block_type") == "table":
+            return True
+        parent = indexes.parent_by_id.get(parent)
+    return False
+
+
 def collect_caption_candidates(
     ast: Mapping[str, Any],
     facts: Mapping[str, Any] | None = None,
@@ -528,7 +564,9 @@ def collect_caption_candidates(
         result.extend(item for item in _authored_caption_role_candidates(ast)
                       if item["candidate_id"] not in known_ids)
         captioned.update(_captioned_targets(ast))
-    for node_id, block in ast["document"]["blocks"].items():
+    blocks = ast["document"]["blocks"]
+    indexes = build_indexes(ast, validate=False)
+    for node_id, block in blocks.items():
         if block.get("block_type") == "table" and block.get("table_type") == "data":
             value = {"caption_type": "table", "eligible": True}
             result.append({"candidate_id": f"caption-target-{node_id}", "module_id": "caption_semantics", "module_version": "1.0", "target_source_refs": [copy.deepcopy(dict(block["source_ref"]))] if isinstance(block.get("source_ref"), Mapping) else [], "target_node_ids": [node_id], "proposal": {"operation": "create_overlay", "property_scope": overlay_property_scope(value), "value": value}, "positive_evidence": [{"kind": "format_contract", "source": "data_table_caption_eligibility"}], "negative_evidence": [], "scope": {"stage": "relation"}, "constraints": [{"kind": "caption_above_table"}], "rationale": "data table is caption eligible", "confidence": None})
@@ -541,6 +579,8 @@ def collect_caption_candidates(
                     constraint="caption_above_table",
                 ))
         elif block.get("block_type") == "image":
+            if _image_shares_text_paragraph(blocks, block) or _node_inside_table(indexes, blocks, node_id):
+                continue
             value = {"caption_type": "figure", "eligible": True}
             result.append({"candidate_id": f"caption-target-{node_id}", "module_id": "caption_semantics", "module_version": "1.0", "target_source_refs": [copy.deepcopy(dict(block["source_ref"]))] if isinstance(block.get("source_ref"), Mapping) else [], "target_node_ids": [node_id], "proposal": {"operation": "create_overlay", "property_scope": overlay_property_scope(value), "value": value}, "positive_evidence": [{"kind": "format_contract", "source": "image_caption_eligibility"}], "negative_evidence": [], "scope": {"stage": "relation"}, "constraints": [{"kind": "caption_below_figure"}], "rationale": "image is figure caption eligible", "confidence": None})
             if node_id not in captioned:

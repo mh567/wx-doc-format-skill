@@ -13,6 +13,12 @@ HEADING_PATTERNS = [
     (re.compile(r"^([一二三四五六七八九十百千零\d]+)[、，,\.\s]\s*"), 1),
     (re.compile(r"^\(([一二三四五六七八九十百千零\d]+)\)\s*"), 2),
     (re.compile(r"^（([一二三四五六七八九十百千零\d]+)）\s*"), 2),
+    # A bare ``1）`` marker.  The close paren must be consumed after the digits,
+    # so a hierarchical ``5.3.1`` never reads as one.  An upper-case letter mark
+    # such as ``A. 修改`` is stripped only when a space follows the mark, so an
+    # appendix number ``A.1`` and an abbreviation such as ``U.S.`` are kept.
+    (re.compile(r"^\d+[)）]\s*"), 2),
+    (re.compile(r"^[A-Z][.．]\s+"), 3),
 ]
 
 _HIERARCHICAL_ARABIC_HEADING = re.compile(

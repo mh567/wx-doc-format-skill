@@ -112,7 +112,11 @@ def classify_regions(
             continue
         evidence = facts["evidence"].get(container_id, {})
         position = evidence.get("source_position")
-        if isinstance(position, int) and position in front_positions:
+        if evidence.get("source_toc") is True:
+            # The container sits inside the source's own table of contents
+            # control, so it leaves with the paragraphs the reader marked.
+            kind, scope, reason = "toc", "excluded", "source_toc_content"
+        elif isinstance(position, int) and position in front_positions:
             kind, scope, reason = "front_matter", "excluded", "front_matter"
         elif isinstance(position, int) and position in toc_positions_set:
             kind, scope, reason = "toc", "excluded", "source_toc"
