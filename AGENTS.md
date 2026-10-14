@@ -51,6 +51,7 @@ LLM 增强为 Capability 插拔架构，当前能力：
 ### 3. 题注用 SEQ 域代码
 - 编号标识符与域形态取自模板自身的题注域（本模板为 `SEQ 表` 与 `SEQ 图`），不写死英文标识符。Word 的交叉引用按序列标识符匹配编号项，标识符必须是模板的那一个，否则「引用类型」选 图/表 时编号项列表为空。域按模板写成复杂域（`fldChar begin` + `instrText` + `separate` + 缓存编号 + `end`），正文按章编号的题注在标签与编号之间留一个空格，例如“表 9-1 设备接入核对表”；全文连续编号和附录题注保留已有形式。模板没有对应种类的题注域时回落 `表` / `图`
 - 表题注在表格上方，图题注在图片下方
+- 图题注只给独占段落的图片。与正文同段的内联图标、表格单元格内的图片不配题注
 - 题注自带源编号且属于附录范围时保留源编号形态（`表A.1`），不注入文档级 SEQ，因为该序列只覆盖正文
 - 2026-09-22 用户裁定：正文题注默认按关联章节编号输出（`图5-1`、`表6-2`），域形态即 Word 自身「包含章节号」的写法：标签 run + `STYLEREF 1 \s`（取最近一级标题的编号，模板 `Heading 1` 自带自动编号）+ `-` + `SEQ 表 \* ARABIC \s 1`（`\s 1` 使序数逐章重置）。章号与章内序数在渲染遍历时按一级标题边界计算并写入缓存结果，故未重算域的阅读器也显示正确编号，Word/WPS 打开时经 `updateFields` 重算。章号取正文一级标题（`is_body_outline_heading` 且派生大纲级别为 1）；附录标题不推进章号，附录题注仍按上一条保留源编号。首个一级标题之前的题注无章可借，回落纯序号形态。`--caption-numbering sequential`（默认 `chapter`）切换为全文连续编号（`图1`）
 
@@ -110,13 +111,21 @@ LLM 增强为 Capability 插拔架构，当前能力：
 - 列项样式层级的 `numFmt=none` 且 `lvlText` 非空时仍是列项，标记与列表种类由 `lvlText` 决定，不由 `numFmt` 决定
 - 段落呈现记录在 `presentation.paragraphs`。由该记录决定对齐的只有两类段落：图片段落居中（决策 2，模板的图片段落不带样式，带 `jc=center` 与清零的 ind），以及公式编号保留源对齐（源把它右对齐，没有样式表达这一点）。附录标题的记录承载的是大纲级别而非对齐（决策 7、8）。**其余段落的对齐一律由模板样式决定**，正文即模板 `Normal` 的两端对齐，作者的其它对齐不保留。这是 2026-09-18 的裁定：一切以模板要求为准，审查按模板报出正文对齐偏差，转换器不为其保留作者对齐
 - 语义表格单元格的样式与对齐由表格格式合同拥有，段落呈现不覆盖它
-- 源目录由 `w:sdt` 承载时，解析阶段为该控件内每个段落登记 `source_toc` 证据，范围模块据此整段排除
+- 源目录由 `w:sdt` 承载时，解析阶段为该控件内每个段落与表格登记 `source_toc` 证据，范围模块据该证据排除，容器随其子树一并移除。控件同时包住封面内容时，封面表格随之离场，不留空表
+- 源用直接 `w:outlineLvl` 声明标题（样式仍是 Normal）时，解析阶段按直接属性优先、样式链兜底的顺序记下 `outline_level` 证据，角色模块据此判标题，层级取 `min(outline_level + 1, 6)`；`outlineLvl=9` 是 Word 的正文文本值，不产生标题。该证据同时让列表模块不把标题提升为列项
 - 列项自身的段落就是承载标记的段落，空段落也不例外；只有列项自身没有段落时才生成承载锚点，且只生成一个
 
 ### 11. Markdown 读取
 - 软换行是空格，只有硬换行成为换行；来源同一段的折行不改变输出换行
 - 方言关闭 HTML，标签按文本到达，读取时剥离标签保留可读文本并记录 `html_inline`
 - 源没有一级标题时，结构语义按文件名生成 `role=title` 的块（`generated_by=structure_semantics.filename_title`），并在报告写入 `markdown_title_generated` 风险提示
+
+### 12. 文档标题派生
+- 模板在目录上方渲染一行文档标题。源未声明标题时补一个标题块，`generated_by` 为 `front_matter.document_title`
+- 2026-10-14 用户裁定：DOCX 的标题来源依次为封面标题、文档核心属性标题、文件名，由 `front_matter.analyze_front_matter` 单一所有。解析阶段把结果记入 `facts["source"]["document_title"]`，`build_source_ast` 据此把标题块注入 source AST 首位
+- 标题块属于 source AST，检查点各处重建 AST 得到同一标题，规范化视图与保存的源 AST 保持一致，标题不进入候选与决策账本
+- 只有正文能渲染的根级段落算源已声明标题。标题样式落在表格单元格内或源目录控件内时不算，仍补生成标题
+- 报告按源类型写入风险提示：DOCX 为 `document_title_generated`，Markdown 为 `markdown_title_generated`（见决策 11）
 
 ## 输出验证不变量
 
@@ -132,7 +141,7 @@ LLM 增强为 Capability 插拔架构，当前能力：
 - 源文档自带目录区段不进入输出，目录域只来自模板
 - 公式、域代码与书签按源引用复制，数量与源文档一致
 - 表格编号列使用模板普通十进制编号，不出现列项样式
-- Markdown 输入没有一级标题时仍产出文档标题，并给出 `markdown_title_generated` 风险提示
+- 源没有声明标题时仍产出文档标题：DOCX 给出 `document_title_generated` 风险提示，Markdown 给出 `markdown_title_generated`
 
 ## 多 Agent 协作分工
 
@@ -159,8 +168,8 @@ LLM 增强为 Capability 插拔架构，当前能力：
 cd scripts && .venv/bin/python3 -m main \
   --input ../input/xxx.docx \
   --output ../wx_output/xxx.docx \
-  --template ../assets/技术文件格式及书写要求.docx \
+  --template ../assets/wx_template.docx \
   --report ../wx_output/report.json
 
-.venv/bin/python3 -m pytest tests/ -q
+cd .. && scripts/.venv/bin/python3 -m pytest tests/ -q
 ```
