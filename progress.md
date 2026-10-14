@@ -505,3 +505,9 @@ Desktop 四个文件已通过工具授权写回配对仓库；原仓库完整测
 后续修复已通过原手册严格转换：exit0/status completed，三项审计 passed，saved issues0、format issues0、unexpected_styles为空。源与输出均11个显式分页符。Desktop service通过源码子进程适配器验证版本0.18.1，status completed、warnings0。新增删除链接、分页改类型、删除REF/OMML/书签反向测试均能发现差异。第一次全量1299 passed/3 skipped；纯分页段和原子完整性补强后的最终全量运行中。
 
 最终本轮验收：核心1302 passed/3 skipped（180.01s），Desktop0.18.1全量54 passed（3.79s）。原手册strict exit0/全部审计passed/无格式或模板外样式问题，Desktop completed/warnings0，XML显式分页符11到11。独立复审确认自定义序列、编号书签与原子检查范围，已修所有明确问题；保留前缀时warning可见。证据见docs/caption-inline-contract-fix.md。开始单独提交后续修复，保持0.18.1未发布状态。
+
+## 2026-10-14 0.18.1 发布执行
+
+用户明确授权提交并发布Skill与Desktop。已完整读取开发及Nuitka流程，核对远程最新0.18.0、两个0.18.1 Release不存在。固定Skill059cb1f、Desktop83245a6，并创建ASCII隔离clone。macOS构建开始；启动Colima ARM64，Linux智能体负责Linux构建与容器验收。发布外部动作已获用户本轮授权，无同版本资产替换或历史重写。
+
+发布完成：Skill薄仓库298fd2c/v0.18.1，两平台原生制品线上下载hash通过；新鲜克隆空缓存与标准离线安装、用户手册strict转换通过。Desktop83245a6/v0.18.1，正式Release工作流38547812361四项全部success，两次CI success；两个最终资产hash通过，macOS正式制品实际用户文档completed/audit passed。证据docs/release-0.18.1-evidence.md。macOS最低26.0，Linux保持容器候选，Word/WPS视觉与Kylin真机仍待验收。
