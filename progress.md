@@ -511,3 +511,9 @@ Desktop 四个文件已通过工具授权写回配对仓库；原仓库完整测
 用户明确授权提交并发布Skill与Desktop。已完整读取开发及Nuitka流程，核对远程最新0.18.0、两个0.18.1 Release不存在。固定Skill059cb1f、Desktop83245a6，并创建ASCII隔离clone。macOS构建开始；启动Colima ARM64，Linux智能体负责Linux构建与容器验收。发布外部动作已获用户本轮授权，无同版本资产替换或历史重写。
 
 发布完成：Skill薄仓库298fd2c/v0.18.1，两平台原生制品线上下载hash通过；新鲜克隆空缓存与标准离线安装、用户手册strict转换通过。Desktop83245a6/v0.18.1，正式Release工作流38547812361四项全部success，两次CI success；两个最终资产hash通过，macOS正式制品实际用户文档completed/audit passed。证据docs/release-0.18.1-evidence.md。macOS最低26.0，Linux保持容器候选，Word/WPS视觉与Kylin真机仍待验收。
+
+## 2026-10-15 0.18.2 发布执行
+
+用户要求提交并发布Skill与Desktop，版本定为补丁号0.18.2。本轮内容为大纲级别标题识别、源目录控件表格范围、内联图标题注资格、文档标题派生与对应审计不变量。冻结Skill源码9b11fde/tree94c7506、Desktop源码73bb33f，推送私有dev/main后本地构建macOS ARM64，Colima容器构建kylin-v10-arm64，两平台各1319 passed/3 skipped。
+
+发布完成：Skill薄仓库7bcd7b9/v0.18.2，两平台归档hash与线上下载一致；全新克隆的validator、shell与历史门禁通过，空缓存与离线安装版本检查得到0.18.2，发布包运行用户手册返回码0、两项审计passed、无模板外样式。Desktop73bb33f/v0.18.2，Release工作流38599967940四项全部success，两次CI success，两个资产hash通过。证据docs/release-0.18.2-evidence.md。macOS最低26.0，Linux保持容器候选，Word/WPS视觉与Kylin真机仍待验收，本次未构建Windows制品。
