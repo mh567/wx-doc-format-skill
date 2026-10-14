@@ -11,7 +11,7 @@ from xml.etree import ElementTree
 
 from docx import Document
 
-from .format_contract import audit_document_format
+from .format_contract import audit_document_format, retained_run_fingerprint
 from .model import effective_outline_level, inline_text_projection, is_body_outline_heading
 from .page_contract import audit_page_contract
 from .render_plan import build_render_plan
@@ -1005,7 +1005,15 @@ def audit_bundle(
         # template for baseline derivation: the check compares each paragraph with
         # the style it claims to use, which is what catches a direct override.
         try:
-            detail = audit_document_format(document, profile, document, consumer="audit")
+            artifact_metadata = render_map.get("__artifact__")
+            retained_provenance = (
+                artifact_metadata.get("retained_inline_run_provenance")
+                if isinstance(artifact_metadata, Mapping)
+                else None
+            )
+            detail = audit_document_format(
+                document, profile, document, consumer="audit", provenance=retained_provenance
+            )
         except Exception as exc:
             detail = {"passed": None, "status": "incomplete", "issues": [{"code": "audit_exception", "audit": "document_format", "exception_type": type(exc).__name__, "message": "Audit check did not complete."}], "checked": 0}
     else:
@@ -1141,18 +1149,42 @@ def _expected_paragraph_texts(expected: Mapping[str, Any], render_map: Mapping[s
     return [
         str(item.get("text") or "")
         for item in render_map.values()
-        if item.get("kind") == "paragraph" and not item.get("omitted_empty")
+        if item.get("kind") == "paragraph"
+        and not item.get("omitted_empty")
+        and not _is_page_only_paragraph(item)
     ]
+
+
+def _is_page_only_paragraph(item: Mapping[str, Any]) -> bool:
+    inline_content = item.get("inline_content", [])
+    return (
+        isinstance(inline_content, list)
+        and len(inline_content) == 1
+        and isinstance(inline_content[0], Mapping)
+        and inline_content[0].get("kind") == "break"
+        and inline_content[0].get("break_type") == "page"
+        and str(item.get("text") or "") == "\n"
+    )
 
 
 def _inline_signature(inline_content: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
     signature: list[dict[str, Any]] = []
+
+    def add_text(value: str) -> None:
+        if signature and signature[-1].get("kind") == "text":
+            signature[-1]["text"] += value
+        else:
+            signature.append({"kind": "text", "text": value})
+
     for item in inline_content:
         kind = item.get("kind")
         if kind == "text":
-            signature.append({"kind": "text", "text": str(item.get("text") or "")})
+            add_text(str(item.get("text") or ""))
         elif kind in {"break", "tab", "image"}:
-            signature.append({"kind": str(kind)})
+            if kind == "break":
+                signature.append({"kind": "break", "break_type": str(item.get("break_type") or "line")})
+            else:
+                signature.append({"kind": str(kind)})
         elif kind == "link":
             signature.append(
                 {
@@ -1172,7 +1204,7 @@ def _inline_signature(inline_content: list[Mapping[str, Any]]) -> list[dict[str,
             if not item.get("resource_id"):
                 cached = item.get("cached_result")
                 if isinstance(cached, str) and cached:
-                    signature.append({"kind": "text", "text": cached})
+                    add_text(cached)
     return signature
 
 
@@ -1182,6 +1214,13 @@ def _xml_inline_signature(
     field_state: dict[str, int] | None = None,
 ) -> list[dict[str, Any]]:
     signature: list[dict[str, Any]] = []
+
+    def add_text(value: str) -> None:
+        if signature and signature[-1].get("kind") == "text":
+            signature[-1]["text"] += value
+        else:
+            signature.append({"kind": "text", "text": value})
+
     namespace = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
     text_tag = f"{{{namespace}}}t"
     tab_tag = f"{{{namespace}}}tab"
@@ -1235,11 +1274,14 @@ def _xml_inline_signature(
                 continue
             for run_child in list(child):
                 if run_child.tag == text_tag:
-                    signature.append({"kind": "text", "text": run_child.text or ""})
+                    add_text(run_child.text or "")
                 elif run_child.tag == tab_tag:
                     signature.append({"kind": "tab"})
                 elif run_child.tag in break_tags:
-                    signature.append({"kind": "break"})
+                    break_type = run_child.get(f"{{{namespace}}}type") or "line"
+                    if break_type == "textWrapping":
+                        break_type = "line"
+                    signature.append({"kind": "break", "break_type": break_type})
                 elif any(node.tag.rsplit("}", 1)[-1] == "blip" for node in run_child.iter()):
                     blip_count = sum(1 for node in run_child.iter() if node.tag.rsplit("}", 1)[-1] == "blip")
                     signature.extend({"kind": "image"} for _ in range(blip_count))
@@ -1317,6 +1359,33 @@ def check_saved_output(
                 collect_xml(child)
 
     collect_xml(document.element.body)
+
+    artifact_metadata = render_map.get("__artifact__")
+    retained_elements = (
+        artifact_metadata.get("retained_inline_element_provenance")
+        if isinstance(artifact_metadata, Mapping)
+        else None
+    )
+    if isinstance(retained_elements, Mapping):
+        for paragraph_key, expected_elements in retained_elements.items():
+            try:
+                paragraph_index = int(str(paragraph_key).split(":", 1)[1]) - 1
+                paragraph = xml_paragraphs[paragraph_index]
+            except (IndexError, ValueError, TypeError):
+                issues.append({"code": "retained_inline_changed", "paragraph": str(paragraph_key), "path": "", "reason": "paragraph_missing"})
+                continue
+            if not isinstance(expected_elements, Mapping):
+                continue
+            for child_path, expected_fingerprint in expected_elements.items():
+                element = paragraph
+                try:
+                    for ordinal in str(child_path).split("/"):
+                        element = list(element)[int(ordinal)]
+                except (IndexError, ValueError, TypeError):
+                    issues.append({"code": "retained_inline_changed", "paragraph": str(paragraph_key), "path": str(child_path), "reason": "element_missing"})
+                    continue
+                if retained_run_fingerprint(element) != expected_fingerprint:
+                    issues.append({"code": "retained_inline_changed", "paragraph": str(paragraph_key), "path": str(child_path), "reason": "element_changed"})
     def paragraph_text(paragraph: Any) -> str:
         parts: list[str] = []
         for node in paragraph.iter():
@@ -1357,7 +1426,8 @@ def check_saved_output(
     for node_id, item in render_map.items():
         if item.get("kind") != "paragraph" or item.get("omitted_empty") or not _has_inline_contract(item.get("inline_content", [])):
             continue
-        expected_signature = _inline_signature(item.get("inline_content", []))
+        expected_inline = item.get("audit_inline_content", item.get("inline_content", []))
+        expected_signature = _inline_signature(expected_inline)
         expected_text = str(item.get("text") or "")
         if not expected_text:
             continue

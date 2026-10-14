@@ -831,7 +831,11 @@ def _docx_inline_content(
                     elif run_tag == qn("w:tab"):
                         target.append({"kind": "tab"})
                     elif run_tag in {qn("w:br"), qn("w:cr")}:
-                        target.append({"kind": "break"})
+                        break_type = run_child.get(qn("w:type"))
+                        token = {"kind": "break"}
+                        if break_type in {"page", "column"}:
+                            token["break_type"] = break_type
+                        target.append(token)
                     elif run_tag == qn("w:noBreakHyphen"):
                         target.append({"kind": "text", "text": "\u2011", "marks": list(marks)})
                     elif run_tag in {qn("w:drawing"), qn("w:pict")} or any(

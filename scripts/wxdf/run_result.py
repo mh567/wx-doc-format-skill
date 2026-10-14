@@ -190,6 +190,17 @@ def build_native_run_result(
     diagnostics.extend(model_findings.get("issues") or [])
     diagnostics.extend(saved_findings.get("issues") or [])
     diagnostics.extend(appendix_audit.get("issues") or [])
+    selected_render = review_result.get("render_result") or {}
+    for item in selected_render.get("diagnostics") or []:
+        if item.get("code") == "caption_number_prefix_not_consumed":
+            diagnostic = dict(item)
+            diagnostic.setdefault("severity", "warning")
+            if not any(
+                existing.get("code") == diagnostic["code"]
+                and existing.get("node_id") == diagnostic.get("node_id")
+                for existing in diagnostics
+            ):
+                diagnostics.append(diagnostic)
     for reason in delivery.get("hard_blocks", []):
         if not any(item.get("code") == reason for item in diagnostics):
             diagnostics.append({"code": str(reason), "severity": "error", "message": f"Delivery blocked: {reason}."})

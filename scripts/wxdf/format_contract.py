@@ -22,12 +22,15 @@ Two consumers share the expectations but not the assumptions:
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
 from docx.enum.style import WD_STYLE_TYPE
 from docx.oxml.ns import qn
+from lxml import etree
 
 from appendix_semantics import appendix_role_from_style, is_explicit_appendix_title
 from note_semantics import source_note_role
@@ -648,11 +651,49 @@ def _is_emphasis(run: Any) -> bool:
     return False
 
 
+def retained_run_fingerprint(run_element: Any) -> str:
+    """Return a stable structural digest for a retained Word run.
+
+    Expanded XML names and sorted attributes make the digest independent of
+    namespace prefixes and attribute order. XML tails are formatting whitespace
+    between siblings, so they are deliberately excluded; element text is kept.
+    """
+
+    def expanded_name(name: str) -> str:
+        if name.startswith("{") and "}" in name:
+            namespace, local = name[1:].split("}", 1)
+            return f"{namespace}|{local}"
+        return name
+
+    def shape(element: Any) -> Any:
+        # Some python-docx custom elements, notably CT_R, override ``.text``
+        # with a semantic projection of descendant text. Read the underlying
+        # lxml text slot so equivalent XML nodes fingerprint identically.
+        text = etree._Element.text.__get__(element, type(element))
+        if len(element) and text is not None and text.isspace():
+            text = None
+        return {
+            "tag": expanded_name(str(element.tag)),
+            "attributes": sorted(
+                (expanded_name(str(key)), value)
+                for key, value in element.attrib.items()
+            ),
+            "text": text,
+            "children": [shape(child) for child in element],
+        }
+
+    payload = json.dumps(shape(run_element), ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def _run_issues(
     paragraph: Any,
     baseline: Mapping[str, str | None],
     path: str,
     role: str,
+    *,
+    consumer: str = "audit",
+    retained_run_digests: Mapping[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Compare each run's direct formatting against the baseline.
 
@@ -667,6 +708,12 @@ def _run_issues(
     if runs is None:
         return issues
     for index, run in enumerate(runs, 1):
+        if (
+            consumer == "audit"
+            and retained_run_digests is not None
+            and retained_run_digests.get(str(index)) == retained_run_fingerprint(run._r)
+        ):
+            continue
         r_pr = run._r.find(qn("w:rPr"))
         if r_pr is None:
             continue
@@ -723,6 +770,7 @@ def audit_paragraph(
     path: str,
     *,
     consumer: str = "audit",
+    retained_run_digests: Mapping[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Compare one paragraph against the contract and its template expectation."""
 
@@ -769,7 +817,10 @@ def audit_paragraph(
                 "severity": "low",
             })
 
-    issues.extend(_run_issues(paragraph, baseline, path, contract.role))
+    issues.extend(_run_issues(
+        paragraph, baseline, path, contract.role,
+        consumer=consumer, retained_run_digests=retained_run_digests,
+    ))
     return issues
 
 
@@ -804,6 +855,7 @@ def audit_document_format(
     template_doc: Any,
     *,
     consumer: str = "audit",
+    provenance: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Check every paragraph whose role the resolver can place.
 
@@ -825,5 +877,9 @@ def audit_document_format(
             unclassified += 1
             continue
         checked += 1
-        issues.extend(audit_paragraph(paragraph, contract, baseline[role], path, consumer=consumer))
+        retained = provenance.get(path) if isinstance(provenance, Mapping) else None
+        issues.extend(audit_paragraph(
+            paragraph, contract, baseline[role], path, consumer=consumer,
+            retained_run_digests=retained if isinstance(retained, Mapping) else None,
+        ))
     return {"passed": not issues, "issues": issues, "checked": checked, "unclassified": unclassified}

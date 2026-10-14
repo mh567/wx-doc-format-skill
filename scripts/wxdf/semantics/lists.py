@@ -297,7 +297,7 @@ def _parallel_clause_segments(unit: Mapping[str, Any]) -> list[list[dict[str, An
 
     segments: list[list[dict[str, Any]]] = [[]]
     for item in unit.get("inline_content") or []:
-        if isinstance(item, Mapping) and item.get("kind") == "break":
+        if isinstance(item, Mapping) and item.get("kind") == "break" and item.get("break_type", "line") == "line":
             segments.append([])
             continue
         segments[-1].append(copy.deepcopy(item))
@@ -339,7 +339,7 @@ def _parallel_split_items(facts: Mapping[str, Any]) -> dict[str, list[list[dict[
         if parents.get(str(unit_id)) == "root":
             marked_lines: list[list[dict[str, Any]]] = [[]]
             for item in unit.get("inline_content") or []:
-                if item.get("kind") == "break":
+                if item.get("kind") == "break" and item.get("break_type", "line") == "line":
                     marked_lines.append([])
                 else:
                     marked_lines[-1].append(copy.deepcopy(dict(item)))

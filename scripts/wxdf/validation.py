@@ -162,6 +162,9 @@ def _validate_inline_content(value: Any, path: str, contract: str, resources: Ma
                     _fail("unknown_mark", f"{item_path}.marks[{mark_index}]", "mark is not supported", contract)
             visible.append(text)
         elif kind == "break":
+            break_type = item.get("break_type", "line")
+            if break_type not in {"line", "page", "column"}:
+                _fail("invalid_break_type", f"{item_path}.break_type", "break type must be line, page, or column", contract)
             visible.append("\n")
         elif kind == "tab":
             visible.append("\t")

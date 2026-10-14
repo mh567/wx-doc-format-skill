@@ -499,3 +499,9 @@ Desktop 四个文件已通过工具授权写回配对仓库；原仓库完整测
 ## 2026-10-14 升版提交与残留修复
 
 用户授权先改版本并提交，再继续未完成问题。Skill 与 Desktop 统一升至 0.18.1，先本地提交已验收交付策略改动；后续修复单独提交。未授权推送或发布。
+
+升版提交完成：Skill a952eab，Desktop 83245a6，版本 0.18.1。版本合同和 17 项 Desktop 转换测试通过；没有推送、标签或发布。后续架构定案为保留可选 break_type、题注正文使用通用行内渲染、render_map 单独携带重建后的审计合同。实施智能体开始红绿回归。
+
+后续修复已通过原手册严格转换：exit0/status completed，三项审计 passed，saved issues0、format issues0、unexpected_styles为空。源与输出均11个显式分页符。Desktop service通过源码子进程适配器验证版本0.18.1，status completed、warnings0。新增删除链接、分页改类型、删除REF/OMML/书签反向测试均能发现差异。第一次全量1299 passed/3 skipped；纯分页段和原子完整性补强后的最终全量运行中。
+
+最终本轮验收：核心1302 passed/3 skipped（180.01s），Desktop0.18.1全量54 passed（3.79s）。原手册strict exit0/全部审计passed/无格式或模板外样式问题，Desktop completed/warnings0，XML显式分页符11到11。独立复审确认自定义序列、编号书签与原子检查范围，已修所有明确问题；保留前缀时warning可见。证据见docs/caption-inline-contract-fix.md。开始单独提交后续修复，保持0.18.1未发布状态。

@@ -12,15 +12,16 @@ from zipfile import ZipFile
 from docx import Document
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
+from docx.enum.text import WD_BREAK
 from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from lxml import etree
 
 from table_formatting import normalize_table, table_role
-from text_utils import CAPTION_SEQUENCE_FALLBACK, caption_parts
+from text_utils import CAPTION_PATTERN, CAPTION_SEQUENCE_FALLBACK, caption_parts
 
 from .render_plan import build_render_plan
 from .media import MediaEmbedder
-from .model import effective_outline_level, is_body_outline_heading
+from .model import effective_outline_level, inline_text_projection, is_body_outline_heading
 from .template import TemplateBundle
 
 
@@ -77,6 +78,34 @@ def _remove_empty_body_paragraphs(doc: Any) -> list[Any]:
             body.remove(paragraph)
             removed.append(paragraph)
     return removed
+
+
+def _paragraph_elements_in_body(body: Any) -> list[Any]:
+    paragraphs: list[Any] = []
+
+    def visit(container: Any) -> None:
+        for child in list(container):
+            if child.tag == qn("w:p"):
+                paragraphs.append(child)
+            elif child.tag == qn("w:sdt"):
+                continue
+            else:
+                visit(child)
+
+    visit(body)
+    return paragraphs
+
+
+def _element_child_path(ancestor: Any, element: Any) -> str | None:
+    parts: list[str] = []
+    current = element
+    while current is not ancestor:
+        parent = current.getparent()
+        if parent is None:
+            return None
+        parts.append(str(list(parent).index(current)))
+        current = parent
+    return "/".join(reversed(parts))
 
 
 def _write_direct_numbering(paragraph: Any, num_id: int, ilvl: int) -> None:
@@ -232,7 +261,8 @@ def _attach_image_artifact_metadata(output_path: Path, render_map: dict[str, dic
             )
         media_parts = sorted(name for name in archive.namelist() if name.startswith("word/media/"))
 
-    render_map["__artifact__"] = {"kind": "artifact", "media_parts": media_parts}
+    artifact = render_map.setdefault("__artifact__", {"kind": "artifact"})
+    artifact["media_parts"] = media_parts
     target_index = 0
     for item in render_map.values():
         resource_ids = item.get("image_resources", [])
@@ -268,6 +298,9 @@ def _write_link(
     item: Mapping[str, Any],
     media: MediaEmbedder,
     resources: Mapping[str, Any] | None = None,
+    *,
+    retained_run_collector: list[Any] | None = None,
+    retained_element_collector: list[Any] | None = None,
 ) -> None:
     target = str(item.get("target") or "")
     hyperlink = OxmlElement("w:hyperlink")
@@ -286,7 +319,7 @@ def _write_link(
             _move_run_to_hyperlink(paragraph, hyperlink, run)
         elif kind == "break":
             run = paragraph.add_run()
-            run.add_break()
+            run.add_break(_break_enum(child))
             _move_run_to_hyperlink(paragraph, hyperlink, run)
         elif kind == "tab":
             run = paragraph.add_run("\t")
@@ -297,6 +330,10 @@ def _write_link(
         elif kind in {"field", "math", "bookmark", "opaque_inline"}:
             for element in _retained_inline_elements(child, resources or {}):
                 hyperlink.append(element)
+                if retained_element_collector is not None:
+                    retained_element_collector.append(element)
+                if retained_run_collector is not None:
+                    retained_run_collector.extend(element.iter(qn("w:r")))
 
 
 def _retained_inline_elements(
@@ -393,6 +430,9 @@ def _write_inline(
     inline_content: list[Mapping[str, Any]],
     media: MediaEmbedder,
     resources: Mapping[str, Any] | None = None,
+    *,
+    retained_run_collector: list[Any] | None = None,
+    retained_element_collector: list[Any] | None = None,
 ) -> None:
     retained = resources or {}
     for item in inline_content:
@@ -401,21 +441,203 @@ def _write_inline(
             run = paragraph.add_run(str(item.get("text") or ""))
             _apply_marks(run, item)
         elif kind == "break":
-            paragraph.add_run().add_break()
+            paragraph.add_run().add_break(_break_enum(item))
         elif kind == "tab":
             paragraph.add_run("\t")
         elif kind == "link":
-            _write_link(paragraph, item, media, retained)
+            _write_link(
+                paragraph,
+                item,
+                media,
+                retained,
+                retained_run_collector=retained_run_collector,
+                retained_element_collector=retained_element_collector,
+            )
         elif kind == "image":
             _write_image(paragraph, item, media)
         elif kind in {"field", "math", "bookmark", "opaque_inline"}:
             elements = _retained_inline_elements(item, retained)
             for element in elements:
                 paragraph._p.append(element)
+                if retained_element_collector is not None:
+                    retained_element_collector.append(element)
+                if retained_run_collector is not None:
+                    retained_run_collector.extend(element.iter(qn("w:r")))
             if not elements:
                 cached = str(item.get("cached_result") or "")
                 if cached:
                     paragraph.add_run(cached)
+
+
+def _break_enum(item: Mapping[str, Any]) -> Any:
+    return {"page": WD_BREAK.PAGE, "column": WD_BREAK.COLUMN}.get(
+        str(item.get("break_type") or "line"), WD_BREAK.LINE
+    )
+
+
+def _caption_audit_inline(
+    block: Mapping[str, Any], *, chapter_numbered: bool
+) -> list[Mapping[str, Any]]:
+    authored = inline_text_projection(list(block.get("inline_content") or []))
+    if block.get("source_number_preserved") and block.get("appendix_id"):
+        return list(block.get("inline_content") or [])
+    prefix_length = _caption_prefix_length(authored)
+    body, safely_consumed = _consume_caption_prefix(list(block.get("inline_content") or []), prefix_length)
+    if prefix_length and (not safely_consumed or inline_text_projection(body) != authored[prefix_length:]):
+        body = list(block.get("inline_content") or [])
+    _, label, _, _ = caption_parts(authored)
+    label = label or ("图" if block.get("caption_type") == "figure" else "表")
+    prefix = label + (" - " if chapter_numbered else " ")
+    return [{"kind": "text", "text": prefix}, *body]
+
+
+def _caption_prefix_length(authored: str) -> int:
+    stripped = authored.lstrip()
+    match = CAPTION_PATTERN.match(stripped)
+    if not match:
+        return 0
+    number_end = len(authored) - len(stripped) + match.start(2)
+    tail = authored[number_end:]
+    return number_end + len(tail) - len(tail.lstrip())
+
+
+def _consume_caption_prefix(
+    inline_content: list[Mapping[str, Any]], count: int
+) -> tuple[list[dict[str, Any]], bool]:
+    remaining = max(0, count)
+    result: list[dict[str, Any]] = []
+    for index, item in enumerate(inline_content):
+        copied = copy.deepcopy(dict(item))
+        kind = copied.get("kind")
+        if remaining <= 0 or kind == "bookmark":
+            result.append(copied)
+            continue
+        if kind == "link":
+            original_length = len(inline_text_projection(copied.get("children", [])))
+            children, safe = _consume_caption_prefix(list(copied.get("children", [])), remaining)
+            if not safe:
+                return [*result, copied, *[copy.deepcopy(dict(v)) for v in inline_content[index + 1 :]]], False
+            copied["children"] = children
+            remaining -= original_length - len(inline_text_projection(children))
+            if children:
+                result.append(copied)
+            continue
+        if kind not in {"text", "tab"}:
+            return [*result, copied, *[copy.deepcopy(dict(v)) for v in inline_content[index + 1 :]]], False
+        old = str(copied.get("text") or "") if kind == "text" else "\t"
+        consumed = min(remaining, len(old))
+        remaining -= consumed
+        rest = old[consumed:]
+        if rest:
+            if kind == "text":
+                copied["text"] = rest
+            else:
+                copied = {"kind": "text", "text": rest, "marks": []}
+            result.append(copied)
+    return result, remaining == 0
+
+
+def _partition_caption_prefix_bookmarks(
+    inline_content: list[Mapping[str, Any]], prefix_length: int
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    starts: list[dict[str, Any]] = []
+    ends: list[dict[str, Any]] = []
+    # The visible number is followed by a separator that the renderer writes
+    # itself. Source bookmarks often include that separator in their range.
+    prefix_boundary = prefix_length
+
+    def visit(items: list[Mapping[str, Any]], offset: int) -> tuple[list[dict[str, Any]], int]:
+        retained: list[dict[str, Any]] = []
+        consumed = 0
+        for item in items:
+            copied = copy.deepcopy(dict(item))
+            kind = copied.get("kind")
+            position = offset + consumed
+            if kind == "bookmark":
+                role = str(copied.get("role") or "")
+                if role == "start" and position < prefix_length:
+                    starts.append(copied)
+                elif role == "end" and position <= prefix_boundary:
+                    ends.append(copied)
+                else:
+                    retained.append(copied)
+                continue
+            if kind == "link":
+                children = list(copied.get("children") or [])
+                rewritten, child_length = visit(children, position)
+                copied["children"] = rewritten
+                if rewritten:
+                    retained.append(copied)
+                consumed += child_length
+                continue
+            if kind == "text":
+                text = str(copied.get("text") or "")
+                remove = min(len(text), max(0, prefix_length - position))
+                if remove < len(text):
+                    copied["text"] = text[remove:]
+                    retained.append(copied)
+                consumed += len(text)
+                continue
+            if kind == "tab":
+                if position >= prefix_length:
+                    retained.append(copied)
+                consumed += 1
+                continue
+            retained.append(copied)
+            consumed += len(inline_text_projection([copied]))
+        return retained, consumed
+
+    body, _ = visit(inline_content, 0)
+    return body, starts, ends
+
+
+def _append_caption_bookmarks(
+    paragraph: Any,
+    markers: list[Mapping[str, Any]],
+    resources: Mapping[str, Any],
+    retained_run_collector: list[Any] | None,
+    retained_element_collector: list[Any] | None,
+) -> None:
+    for marker in markers:
+        for element in _retained_inline_elements(marker, resources):
+            paragraph._p.append(element)
+            if retained_element_collector is not None:
+                retained_element_collector.append(element)
+            if retained_run_collector is not None:
+                retained_run_collector.extend(element.iter(qn("w:r")))
+
+
+def _write_caption_body(
+    paragraph: Any,
+    inline_content: list[Mapping[str, Any]],
+    media: MediaEmbedder | None,
+    resources: Mapping[str, Any],
+    retained_run_collector: list[Any] | None = None,
+    retained_element_collector: list[Any] | None = None,
+) -> None:
+    content = copy.deepcopy(inline_content)
+    if content and content[0].get("kind") == "text" and not content[0].get("marks"):
+        first = dict(content.pop(0))
+        run = paragraph.add_run(" " + str(first.get("text") or ""))
+        _apply_marks(run, first)
+        _write_inline(
+            paragraph,
+            content,
+            media or MediaEmbedder({}, resources),
+            resources,
+            retained_run_collector=retained_run_collector,
+            retained_element_collector=retained_element_collector,
+        )
+        return
+    paragraph.add_run(" ")
+    _write_inline(
+        paragraph,
+        content,
+        media or MediaEmbedder({}, resources),
+        resources,
+        retained_run_collector=retained_run_collector,
+        retained_element_collector=retained_element_collector,
+    )
 
 
 def _caption_sequences(normalized: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -463,6 +685,12 @@ def _write_caption(
     resources: Mapping[str, Any],
     sequences: Mapping[str, Any] | None = None,
     numbering: Mapping[str, Any] | None = None,
+    *,
+    diagnostics: list[dict[str, Any]] | None = None,
+    media: MediaEmbedder | None = None,
+    retained_run_collector: list[Any] | None = None,
+    retained_element_collector: list[Any] | None = None,
+    node_id: str | None = None,
 ) -> str:
     """Write a caption run and return its visible text.
 
@@ -500,23 +728,50 @@ def _write_caption(
     # copied around the rebuilt run: a cross reference that targets the caption
     # still resolves after the fields refresh.  A retained field keeps its text
     # in the rebuilt run instead, so the visible text is written once.
-    starts = [item for item in inline_content if str(item.get("kind") or "") in {"bookmark", "math", "opaque_inline"} and str(item.get("role") or "") != "end"]
-    ends = [item for item in inline_content if str(item.get("kind") or "") in {"bookmark", "math", "opaque_inline"} and str(item.get("role") or "") == "end"]
-    for item in starts:
-        for element in _retained_inline_elements(item, resources):
-            paragraph._p.append(element)
-    authored = _text([item for item in inline_content if str(item.get("kind") or "") != "bookmark"], resources)
+    authored = _text(inline_content, resources)
     if block.get("source_number_preserved") and block.get("appendix_id"):
-        paragraph.add_run(authored)
-        for item in ends:
-            for element in _retained_inline_elements(item, resources):
-                paragraph._p.append(element)
+        _write_inline(
+            paragraph,
+            inline_content,
+            media or MediaEmbedder({}, resources),
+            resources,
+            retained_run_collector=retained_run_collector,
+            retained_element_collector=retained_element_collector,
+        )
         return authored
+
+    prefix_length = _caption_prefix_length(authored)
+    body_content, prefix_safe = _consume_caption_prefix(inline_content, prefix_length)
+    prefix_bookmark_starts: list[dict[str, Any]] = []
+    prefix_bookmark_ends: list[dict[str, Any]] = []
+    if prefix_length and (not prefix_safe or inline_text_projection(body_content) != authored[prefix_length:]):
+        # A field or other atomic object occurred inside the source label/number.
+        # Keep the source content and make the unresolved prefix visible.
+        body_content = copy.deepcopy(inline_content)
+        if diagnostics is not None:
+            diagnostics.append({
+                "code": "caption_number_prefix_not_consumed",
+                "node_id": str(node_id or block.get("id") or ""),
+                "message": "A source inline object prevented safe removal of the authored caption number.",
+            })
+    elif prefix_length:
+        body_content, prefix_bookmark_starts, prefix_bookmark_ends = _partition_caption_prefix_bookmarks(
+            inline_content, prefix_length
+        )
+    _, label, _, _ = caption_parts(authored)
+    label = label or ("图" if caption_type == "figure" else "表")
 
     chapter = numbering.get("chapter") if isinstance(numbering, Mapping) else None
     in_chapter_sequence = numbering.get("sequence") if isinstance(numbering, Mapping) else None
     if isinstance(chapter, int) and not isinstance(chapter, bool) and isinstance(in_chapter_sequence, int) and not isinstance(in_chapter_sequence, bool):
-        paragraph.add_run(f"{sequence} ")
+        _append_caption_bookmarks(
+            paragraph,
+            prefix_bookmark_starts,
+            resources,
+            retained_run_collector,
+            retained_element_collector,
+        )
+        paragraph.add_run(f"{label} ")
         _append_field_char(paragraph, "begin")
         _append_instr_text(paragraph, " STYLEREF 1 \\s ")
         _append_field_char(paragraph, "separate")
@@ -528,27 +783,40 @@ def _write_caption(
         _append_field_char(paragraph, "separate")
         paragraph.add_run(str(in_chapter_sequence))
         _append_field_char(paragraph, "end")
-        _, _, _, body = caption_parts(authored)
-        paragraph.add_run(f" {body}")
-        for item in ends:
-            for element in _retained_inline_elements(item, resources):
-                paragraph._p.append(element)
-        return f"{sequence} {chapter}-{in_chapter_sequence} {body}"
+        _append_caption_bookmarks(
+            paragraph,
+            prefix_bookmark_ends,
+            resources,
+            retained_run_collector,
+            retained_element_collector,
+        )
+        _write_caption_body(paragraph, body_content, media, resources, retained_run_collector, retained_element_collector)
+        return f"{label} {chapter}-{in_chapter_sequence} {_text(body_content, resources)}"
 
-    paragraph.add_run(sequence)
+    _append_caption_bookmarks(
+        paragraph,
+        prefix_bookmark_starts,
+        resources,
+        retained_run_collector,
+        retained_element_collector,
+    )
+    paragraph.add_run(label)
 
     _append_field_char(paragraph, "begin")
     _append_instr_text(paragraph, f" SEQ {sequence} \\* ARABIC ")
     _append_field_char(paragraph, "separate")
     paragraph.add_run("1")
     _append_field_char(paragraph, "end")
+    _append_caption_bookmarks(
+        paragraph,
+        prefix_bookmark_ends,
+        resources,
+        retained_run_collector,
+        retained_element_collector,
+    )
 
-    _, _, _, body = caption_parts(authored)
-    paragraph.add_run(f" {body}")
-    for item in ends:
-        for element in _retained_inline_elements(item, resources):
-            paragraph._p.append(element)
-    return f"{sequence}1 {body}"
+    _write_caption_body(paragraph, body_content, media, resources, retained_run_collector, retained_element_collector)
+    return f"{label}1 {_text(body_content, resources)}"
 
 
 def _style_for_block(
@@ -852,6 +1120,8 @@ def render(
             update_fields.set(qn("w:val"), "true")
     render_map: dict[str, dict[str, Any]] = {}
     rendered_paragraphs: dict[str, Any] = {}
+    retained_runs_by_node: dict[str, list[Any]] = {}
+    retained_elements_by_node: dict[str, list[Any]] = {}
     diagnostics: list[dict[str, Any]] = []
     presentation_outline = normalized.get("presentation", {}).get("outline", {})
     presentation_paragraphs = normalized.get("presentation", {}).get("paragraphs", {})
@@ -916,6 +1186,8 @@ def render(
                 except KeyError:
                     paragraph = parent.add_paragraph()
         caption_text: str | None = None
+        retained_run_collector: list[Any] = []
+        retained_element_collector: list[Any] = []
         if block.get("role") == "caption":
             caption_number: Mapping[str, Any] | None = None
             if (
@@ -929,9 +1201,31 @@ def render(
                     "chapter": current_chapter,
                     "sequence": caption_sequence_counters[caption_kind],
                 }
-            caption_text = _write_caption(paragraph, block, resources, caption_sequences, caption_number)
+            caption_text = _write_caption(
+                paragraph,
+                block,
+                resources,
+                caption_sequences,
+                caption_number,
+                diagnostics=diagnostics,
+                media=media,
+                retained_run_collector=retained_run_collector,
+                retained_element_collector=retained_element_collector,
+                node_id=node_id,
+            )
         else:
-            _write_inline(paragraph, block.get("inline_content", []), media, resources)
+            _write_inline(
+                paragraph,
+                block.get("inline_content", []),
+                media,
+                resources,
+                retained_run_collector=retained_run_collector,
+                retained_element_collector=retained_element_collector,
+            )
+        if retained_run_collector:
+            retained_runs_by_node[node_id] = retained_run_collector
+        if retained_element_collector:
+            retained_elements_by_node[node_id] = retained_element_collector
         if parent is not None and parent._tc in layout_table_cells:
             _apply_layout_paragraph_format(
                 paragraph,
@@ -970,6 +1264,14 @@ def render(
             "style": actual_style,
             "numbered": actual_style in {"List Number", "List Bullet"} or "列项" in actual_style,
         }
+        if block.get("role") == "caption":
+            render_map[node_id]["audit_inline_content"] = _caption_audit_inline(
+                block,
+                chapter_numbered=bool(
+                    isinstance(caption_number, Mapping)
+                    and isinstance(caption_number.get("chapter"), int)
+                ),
+            )
         rendered_paragraphs[node_id] = paragraph._p
         image_resource_ids = _image_resource_ids(block.get("inline_content", []))
         if image_resource_ids:
@@ -1244,6 +1546,54 @@ def render(
             "code": "empty_body_paragraphs_removed",
             "count": removed_empty_paragraphs,
         })
+    retained_provenance: dict[str, dict[str, str]] = {}
+    retained_inline_element_provenance: dict[str, dict[str, str]] = {}
+    from .format_contract import retained_run_fingerprint
+
+    paragraph_elements = _paragraph_elements_in_body(doc.element.body)
+    paragraph_indexes = {id(paragraph): index for index, paragraph in enumerate(paragraph_elements, start=1)}
+    paragraph_by_id = {id(paragraph): paragraph for paragraph in paragraph_elements}
+    root_paragraph_indexes = {
+        id(paragraph._p): index for index, paragraph in enumerate(doc.paragraphs, start=1)
+    }
+    retained_run_ids = {
+        id(element)
+        for elements in retained_runs_by_node.values()
+        for element in elements
+    }
+    for paragraph_index, paragraph_element in enumerate(paragraph_elements, start=1):
+        root_paragraph_index = root_paragraph_indexes.get(id(paragraph_element))
+        if root_paragraph_index is None:
+            continue
+        direct_runs = paragraph_element.findall(qn("w:r"))
+        retained = {
+            f"{run_index}": retained_run_fingerprint(run)
+            for run_index, run in enumerate(direct_runs, start=1)
+            if id(run) in retained_run_ids
+        }
+        if retained:
+            retained_provenance[f"paragraph:{root_paragraph_index}"] = retained
+    for node_id, elements in retained_elements_by_node.items():
+        paragraph = rendered_paragraphs.get(node_id)
+        if paragraph is None:
+            continue
+        paragraph_index = paragraph_indexes.get(id(paragraph))
+        if paragraph_index is None:
+            continue
+        paragraph_element = paragraph_by_id[id(paragraph)]
+        paths = retained_inline_element_provenance.setdefault(f"paragraph:{paragraph_index}", {})
+        for element in elements:
+            path = _element_child_path(paragraph_element, element)
+            if path is not None:
+                paths[path] = retained_run_fingerprint(element)
+    if retained_provenance:
+        render_map.setdefault("__artifact__", {"kind": "artifact"})[
+            "retained_inline_run_provenance"
+        ] = retained_provenance
+    if retained_inline_element_provenance:
+        render_map.setdefault("__artifact__", {"kind": "artifact"})[
+            "retained_inline_element_provenance"
+        ] = retained_inline_element_provenance
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
     doc.save(output)

@@ -20,6 +20,7 @@ docs/*
 !docs/development-workflow.md
 !docs/desktop-delivery-policy.md
 !docs/desktop-delivery-policy-evidence.md
+!docs/caption-inline-contract-fix.md
 !docs/modular-pipeline-design-v3.md
 !docs/modular-pipeline-migration-v3.1.md
 !docs/execution-v3/

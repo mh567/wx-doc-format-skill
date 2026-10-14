@@ -25,6 +25,7 @@ from docx.enum.style import WD_STYLE_TYPE
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Pt
+from lxml import etree
 
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
@@ -42,6 +43,7 @@ from wxdf.format_contract import (
     derive_baseline,
     resolve_paragraph_value,
     resolve_role,
+    retained_run_fingerprint,
     style_role_index,
 )
 
@@ -116,6 +118,95 @@ def test_the_audit_catches_a_direct_override(tmp_path: Path, profile: dict) -> N
     codes = {issue["code"] for issue in detail["issues"]}
     assert "format_value_mismatch" in codes
     assert detail["passed"] is False
+
+
+def _add_field_run(paragraph, font_name: str = "Courier New"):
+    run = paragraph.add_run()
+    run.font.name = font_name
+    for kind in ("begin", "instrText", "separate", "text", "end"):
+        child = OxmlElement("w:fldChar" if kind in {"begin", "separate", "end"} else "w:instrText" if kind == "instrText" else "w:t")
+        if kind in {"begin", "separate", "end"}:
+            child.set(qn("w:fldCharType"), kind)
+        elif kind == "instrText":
+            child.text = " REF _Ref123 \\h "
+        else:
+            child.text = "引用文本"
+        run._r.append(child)
+    return run
+
+
+def _empty_template_document() -> Document:
+    document = Document(TEMPLATE)
+    for child in list(document.element.body):
+        if child.tag != qn("w:sectPr"):
+            document.element.body.remove(child)
+    return document
+
+
+def test_retained_field_font_override_is_skipped_only_with_matching_provenance(
+    profile: dict,
+) -> None:
+    document = _empty_template_document()
+    paragraph = document.add_paragraph(style="Normal")
+    paragraph.add_run("正文")
+    field_run = _add_field_run(paragraph)
+    path = "paragraph:1"
+    digest = retained_run_fingerprint(field_run._r)
+
+    without_provenance = audit_document_format(document, profile, document)
+    with_provenance = audit_document_format(
+        document, profile, document, provenance={path: {"2": digest}}
+    )
+    review_with_provenance = audit_document_format(
+        document, profile, document, consumer="review", provenance={path: {"2": digest}}
+    )
+
+    assert any(issue["property"] == "run[2].rFonts.ascii" for issue in without_provenance["issues"])
+    assert not any(issue.get("property") == "run[2].rFonts.ascii" for issue in with_provenance["issues"])
+    assert any(issue["property"] == "run[2].rFonts.ascii" for issue in review_with_provenance["issues"])
+
+
+def test_retained_field_fingerprint_mismatch_and_adjacent_runs_still_audit(profile: dict) -> None:
+    document = _empty_template_document()
+    paragraph = document.add_paragraph(style="Normal")
+    paragraph.add_run("正文")
+    retained = _add_field_run(paragraph)
+    adjacent = paragraph.add_run("邻接普通文本")
+    adjacent.font.name = "Courier New"
+    path = "paragraph:1"
+    stale_digest = retained_run_fingerprint(retained._r)
+    retained.font.size = Pt(13)
+
+    detail = audit_document_format(
+        document, profile, document,
+        provenance={path: {"2": stale_digest}},
+    )
+
+    properties = {issue["property"] for issue in detail["issues"]}
+    assert "run[2].sz" in properties
+    assert "run[2].rFonts.ascii" in properties
+    assert "run[3].rFonts.ascii" in properties
+
+
+def test_retained_fingerprint_ignores_pretty_container_whitespace_and_keeps_leaf_text(
+    tmp_path: Path,
+) -> None:
+    document = _empty_template_document()
+    paragraph = document.add_paragraph(style="Normal")
+    paragraph.add_run("正文")
+    run = _add_field_run(paragraph)
+    original = retained_run_fingerprint(run._r)
+    generic_run = etree.fromstring(etree.tostring(run._r))
+    assert retained_run_fingerprint(generic_run) == original
+    etree._Element.text.__set__(run._r, "\n    ")
+    pretty_source = tmp_path / "pretty-retained-run.docx"
+    document.save(pretty_source)
+    reopened = Document(pretty_source)
+    reopened_run = reopened.paragraphs[0].runs[1]._r
+    assert retained_run_fingerprint(reopened_run) == original
+
+    etree._Element.text.__set__(run._r[-2], " ")
+    assert retained_run_fingerprint(run._r) != original
 
 
 def test_the_resolver_prefers_direct_then_numbering_then_style_then_defaults(template_doc: Document) -> None:

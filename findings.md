@@ -293,3 +293,5 @@ AST 2.0 已增加 `title` role、table `header_rows`、table_cell `cell_role`、
 已复现 0.18.0 手册三处带分页符图题注导致 inline_content_changed。移除三处分页面并指定项目模板后转换通过。publisher 与 run_result 重复实施审计门禁；reviewer 在 baseline 审计失败时不给 selected_artifact；Desktop runtime 将非零退出码提升异常，service 清理用户目标路径且临时证据消失。格式检查已有 advisory 特例，需要统一策略。
 
 本次代码审查另修复公开报告任意 message/location 字符串暴露、必需审计缺项被判 passed、失败报告缺失、copy 失败临时文件泄漏、回滚失败备份清理、硬链接输出碰撞问题。审计结果 passed、交付门禁与能力迁移验证须分别表达，格式提示不得污染语义迁移证明。当前使用 source adapter 验证真实 Desktop 调用链，未构建或替换安装软件。
+
+0.18.1 后续修复红灯：原手册 strict 退出 1，saved_output_audit 有3条inline_content_changed。另16条format_run_direct_override均为4个REF源原子内cached/end run字体，决定通过渲染来源run指纹精确表达格式所有权，不泛豁免字段或正文段落。
