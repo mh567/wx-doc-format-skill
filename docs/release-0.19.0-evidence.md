@@ -6,7 +6,9 @@
 - 冻结源码：`a67ab14b2aac0dd9e2e8a1b3e453fdeba8b1c2bb`
 - 源码树：`aa3208c1ea098a449c91d54c3b10006d8fd01c4f`
 - 分支：私有 `dev`，两个平台制品均从该干净提交构建，`manifest.json` 的 `source_identity` 与之一致
-- 未推送、未打标签、未创建 Release，公开仓库未同步
+- 公开提交：`60623ab68871f5fa9949837687c25e6ec34c69b6`
+- 公开树：`4caa7916c95bbcdf3102ef87bc3dec3c92b8243a`
+- Release：https://github.com/mh567/wx-doc-format-skill/releases/tag/v0.19.0
 
 ## 本次变更
 
@@ -57,7 +59,14 @@ Kylin 包内解释器摘要：`578d9da1983463ffb0c8c98ab0da2f18177f44069328eb0af
 - macOS 只覆盖 3.12 到 3.14。目标机解释器不在该范围时按 `WXDF-E-VENDOR-UNAVAILABLE` 退出，需要扩充 `WXDF_VENDOR_TAGS` 后重建。
 - 随包解释器来自 `python-build-standalone`，其许可与来源需随发布说明一并记录。
 - `pip download` 未启用 `--require-hashes`，`vendor.json` 中的摘要证明的是本次下载内容一致，不构成上游来源证明。
-- 制品已构建但未上传，公开仓库与 Release 仍待授权。
+
+## 发布后验证
+
+- 全新克隆公开仓库，HEAD 为 `60623ab`，当前树与全部可达历史均无 `.py`、`.pyc`、`.pyo`。
+- Skill validator 通过，启动脚本 shell 语法通过。
+- 空缓存运行薄 Skill，从 GitHub Release 下载、校验 SHA256、安装并输出 `0.19.0`。
+- 薄 Skill 真实转换：`status=completed`，DOCX ZIP 完整。
+- 离线包解压到空目录：版本 `0.19.0`，真实转换 `status=completed`，DOCX ZIP 完整。
 
 ## 本地证据
 
