@@ -74,6 +74,41 @@ GitHub Actions 额度受限期间，发布制品使用本地构建。
 
 macOS ARM64 与 Linux ARM64 发布入口负责锁定依赖、执行测试、编译 standalone、组装平台包并执行真实转换冒烟，公开包产物位于 `dist/local/`。Windows 历史入口执行测试和 standalone 编译后停止，runtime 位于 `build/nuitka/local-windows-x86_64/compile/release_entrypoint.dist`，不进入公开包组装、归档、package smoke 或发布流程。
 
+Nuitka 入口保留为历史路径。当前发布路径是 3.1 的解释型制品，它不含第一方原生代码，因此不需要 macOS 代码签名与公证。
+
+### 3.1 解释型制品（当前发布路径）
+
+构建流程见 [`packaging/interpreted/README.md`](../packaging/interpreted/README.md)。顺序固定为：取依赖、组装离线包、执行验收、生成薄公开 Skill。
+
+```bash
+scripts/.venv/bin/python3 packaging/interpreted/fetch_vendor.py \
+  --kind common --output dist/vendor/<platform>/common
+scripts/.venv/bin/python3 packaging/interpreted/fetch_vendor.py \
+  --kind native --platform <wheel-platform-tag> --python-version <digits> \
+  --abi <cp3xx> --python-tag <cp3xx> --output dist/vendor/<platform>/<cp3xx>
+
+scripts/.venv/bin/python3 packaging/interpreted/build_package.py \
+  --platform <platform-id> \
+  --vendor-root dist/vendor/<platform> \
+  --output-dir dist/local
+
+scripts/.venv/bin/python3 packaging/interpreted/smoke_distribution.py \
+  dist/local/wx-doc-format-skill-<version>-<platform-id> \
+  --evidence-dir /tmp/wxdf-smoke
+
+scripts/.venv/bin/python3 packaging/interpreted/assemble_public_skill.py \
+  --artifacts-dir dist/local \
+  --output-dir dist/public-skill \
+  --require-platform macos-arm64 \
+  --require-platform kylin-v10-arm64 \
+  --macos-min-version 11.0
+```
+
+解释型制品的目标机要求 Python 版本落在 `runtime.python_tags` 内，显式覆盖的小版本才可用。macOS 默认覆盖 3.12 到 3.14，可用 `WXDF_VENDOR_TAGS` 调整。Kylin V10 ARM64 默认随包携带可重定位 CPython 3.13，并把 vendor 目录固定为 `cp313`。
+
+完成条件：两个平台的 `smoke_distribution.py` 验收全部通过，`acceptance.json` 的 `passed` 为真，包内 `vendor` 目录与目标解释器小版本一致，`unexpected_styles` 为空。
+
+
 以下公开包合同仅适用于当前发布目标。版本发布前先更新 `VERSION`，然后从同一私有提交重建所有本次提供的平台制品。制品内 `VERSION`、运行时 `--version`、归档名和发布标签必须一致。
 
 候选源码身份的冻结顺序：
@@ -93,15 +128,15 @@ macOS ARM64 与 Linux ARM64 发布入口负责锁定依赖、执行测试、编�
 当前发布目标仅包含 macOS ARM64 和 Linux ARM64。Windows x86_64 不再进入打包、验收或发布门禁。
 
 ```bash
-build/nuitka/local-macos-arm64/venv/bin/python3 packaging/nuitka/assemble_public_skill.py \
+scripts/.venv/bin/python3 packaging/interpreted/assemble_public_skill.py \
   --artifacts-dir dist/local \
   --output-dir dist/public-skill \
   --require-platform macos-arm64 \
   --require-platform kylin-v10-arm64 \
-  --macos-min-version <measured-minos>
+  --macos-min-version 11.0
 ```
 
-`<measured-minos>` 使用本次 macOS 制品的实测值，不沿用旧版本数字。
+解释型制品的 macOS 最低版本取自依赖 wheel 的标签，当前 `lxml` 为 universal2 的 10.15、ARM64 实际下限为 11.0。依赖升级后重新取该值，不沿用旧数字。Nuitka 历史路径仍使用 `packaging/nuitka/assemble_public_skill.py` 和实测 `minos`。
 
 在冻结 C 的干净工作树生成公开 Skill。生成入口读取归档内部元数据并校验完整文件集和 hash，要求两个平台及当前检出的 version、commit 和 tree 相同。公开清单保留平台各自的工具链身份。候选源码之后的证据提交不作为公开生成的源码身份。
 

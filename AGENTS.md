@@ -127,9 +127,20 @@ LLM 增强为 Capability 插拔架构，当前能力：
 - 只有正文能渲染的根级段落算源已声明标题。标题样式落在表格单元格内或源目录控件内时不算，仍补生成标题
 - 报告按源类型写入风险提示：DOCX 为 `document_title_generated`，Markdown 为 `markdown_title_generated`（见决策 11）
 
+### 13. 交付形态：解释型加密载荷
+- 发布包不再编译原生运行时。包结构为 `lib/boot.py`、`lib/payload.bin` 和 `vendor/cp3xx/`，由目标机已有的 Python 3.10 或更新版本解释执行。制品内没有第一方 Mach-O，因此不触发 macOS 代码签名与公证
+- 加密只保护静态制品。密钥随包发送，能运行包的人就能取出明文，它的定位是提高阅读门槛，不作为保密手段，也不替代许可与追溯
+- 依赖只随包携带，不在目标机联网安装。只有 `lxml` 是原生扩展，由 wheel 构建方签名；`pillow` 不进入运行时依赖，全仓没有 `import PIL`
+- `vendor` 按 CPython 小版本分目录，启动器按解释器版本选择目录。解释器低于 3.10 或小版本不匹配时以退出码 3 停止，不自动降级
+- 公开仓库仍不得出现 `.py`。业务源码只存在于 `payload.bin`，`lib/boot.py` 不含业务逻辑，也不进入公开仓库
+- 载荷内模块的 `__file__` 由 loader 设为虚拟路径。`scripts/main.py` 是唯一依赖该路径定位 `VERSION` 的位置，业务代码不为打包改动
+- 构建与验收入口在 `packaging/interpreted/`，Nuitka 入口保留为历史路径
+
 ## 输出验证不变量
 
 - unexpected_styles 必须为空
+- 解释型包内获批的 Python 文件只有 `lib/boot.py`、`vendor/` 与随包解释器的 `runtime/python/`，其余位置不得出现 `.py`；`vendor/` 与 `runtime/python/` 之外不得出现 `.pyc` 或 `.pyo`
+- 解释型包内第一方 Mach-O 数为零，原生代码只允许出现在 `vendor/` 与 `runtime/python/`
 - 标题文本不含手工编号
 - 普通语义表格单元格全部为 表正文
 - 表格格式合同的段落部分覆盖单元格内全部段落，不止每格首段（渲染器在单元格内容生成后执行合同，`strip_direct_format=False`，因为列项编号和源表头 marks 由渲染器所有权持有）

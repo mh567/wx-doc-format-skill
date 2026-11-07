@@ -32,6 +32,7 @@ metadata:
 2. Kylin 状态为 `candidate` 时，启动脚本输出 `WXDF-W-RUNTIME-CANDIDATE` 后继续。交付时保留真机复核项。
 3. 平台状态为 `unavailable`，平台条目缺失，状态未知或 manifest 损坏时，启动脚本以退出码 3 停止。保留原始文件并向用户报告稳定错误码。
 4. 在线仓库安装首次运行时下载当前版本制品并校验 SHA256。离线安装包直接使用包内运行时，不执行下载。
+5. 运行时由目标机 Python 3.10 或更新版本解释执行，依赖随包携带。解释器版本不足输出 `WXDF-E-PYTHON-UNAVAILABLE`，包内依赖与解释器小版本不匹配输出 `WXDF-E-VENDOR-UNAVAILABLE`，两者均以退出码 3 停止。载荷缺失或完整性校验失败输出 `WXDF-E-PAYLOAD` 并以退出码 4 停止。
 
 完成条件：启动脚本接受当前平台，或已按退出码 3 停止且没有尝试转换。
 

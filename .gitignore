@@ -17,6 +17,7 @@ docs/
 !docs/
 docs/*
 !docs/markdown-ast-recognition-spec.md
+!docs/release-*.md
 !docs/development-workflow.md
 !docs/desktop-delivery-policy.md
 !docs/desktop-delivery-policy-evidence.md
@@ -61,6 +62,7 @@ tests/*
 !tests/test_delivery_policy.py
 !tests/test_cli_delivery_policy.py
 !tests/test_nuitka_distribution.py
+!tests/test_interpreted_distribution.py
 !tests/test_modular_*.py
 !tests/test_outline_heading_recognition.py
 !tests/test_t01_kernel_static_relocation.py

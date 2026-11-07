@@ -1,0 +1,96 @@
+name: Interpreted offline package candidates
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build-macos-arm64:
+    name: macos-arm64
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install builder dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Run full test suite
+        run: python -m pytest tests/ -q
+      - name: Build, smoke and archive
+        run: WXDF_PYTHON="$(command -v python3)" packaging/interpreted/build-local-macos-arm64.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: interpreted-macos-arm64
+          path: dist/local/*-macos-arm64.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  build-kylin-v10-arm64:
+    name: kylin-v10-arm64
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install builder dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Run full test suite
+        run: python -m pytest tests/ -q
+      - name: Build, smoke and archive
+        run: WXDF_PYTHON="$(command -v python3)" packaging/interpreted/build-local-linux-arm64.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: interpreted-kylin-v10-arm64
+          path: dist/local/*-kylin-v10-arm64.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  assemble-public-skill:
+    name: assemble-public-skill
+    needs:
+      - build-macos-arm64
+      - build-kylin-v10-arm64
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install builder dependencies
+        run: python -m pip install -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: interpreted-*
+          merge-multiple: true
+          path: dist/local
+      - name: Assemble thin public Skill
+        run: |
+          python packaging/interpreted/assemble_public_skill.py \
+            --artifacts-dir dist/local \
+            --output-dir dist/public-skill \
+            --require-platform macos-arm64 \
+            --require-platform kylin-v10-arm64 \
+            --macos-min-version 11.0
+      - name: Public tree gate
+        run: |
+          if find dist/public-skill \( -name '*.py' -o -name '*.pyc' -o -name '*.pyo' \) -print | grep -q .; then
+            echo "public Skill tree contains Python source or bytecode" >&2
+            exit 1
+          fi
+          /bin/sh -n dist/public-skill/scripts/run.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: public-skill
+          path: dist/public-skill
+          if-no-files-found: error
+          retention-days: 14
