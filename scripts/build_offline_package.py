@@ -31,6 +31,10 @@ PLATFORMS = {
     },
 }
 OFFLINE_MARKER = "OFFLINE_PACKAGE"
+PACKAGE_ROOT_FILES = {"SKILL.md", "README.md", "VERSION", "requirements.txt"}
+PACKAGE_PREFIXES = ("assets/", "scripts/")
+PACKAGE_EXCLUDED = {"scripts/build_offline_package.py"}
+ARCHIVE_ROOT = "wx-doc-format"
 
 
 def sha256_file(path: Path) -> str:
@@ -78,8 +82,18 @@ def tracked_files() -> list[str]:
     return [item for item in output.decode("utf-8").split("\0") if item]
 
 
-def stage_source(destination: Path) -> None:
+def package_files() -> list[str]:
+    files = []
     for relative in tracked_files():
+        if relative in PACKAGE_EXCLUDED:
+            continue
+        if relative in PACKAGE_ROOT_FILES or relative.startswith(PACKAGE_PREFIXES):
+            files.append(relative)
+    return files
+
+
+def stage_source(destination: Path) -> None:
+    for relative in package_files():
         source = ROOT / relative
         if not source.is_file():
             raise FileNotFoundError(f"tracked file is missing: {relative}")
@@ -115,8 +129,7 @@ def build_wheelhouse(destination: Path, platform_id: str) -> None:
     )
 
 
-def write_archive(staging: Path, archive: Path) -> None:
-    root_name = staging.name
+def write_archive(staging: Path, archive: Path, root_name: str) -> None:
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as handle:
         for path in sorted(staging.rglob("*")):
             if not path.is_file():
@@ -133,9 +146,8 @@ def write_archive(staging: Path, archive: Path) -> None:
 
 def build(platform_id: str, output_dir: Path) -> Path:
     version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
-    name = f"wx-doc-format-skill-{version}-{platform_id}"
     output_dir.mkdir(parents=True, exist_ok=True)
-    staging = output_dir / name
+    staging = output_dir / f".staging-{platform_id}"
     if staging.exists():
         shutil.rmtree(staging)
     staging.mkdir(parents=True)
@@ -144,9 +156,9 @@ def build(platform_id: str, output_dir: Path) -> Path:
     (staging / OFFLINE_MARKER).write_text(
         f"version={version}\nplatform={platform_id}\n", encoding="utf-8"
     )
-    archive = output_dir / f"{name}.zip"
+    archive = output_dir / f"{ARCHIVE_ROOT}-{version}-{platform_id}.zip"
     archive.unlink(missing_ok=True)
-    write_archive(staging, archive)
+    write_archive(staging, archive, ARCHIVE_ROOT)
     shutil.rmtree(staging)
     return archive
 

@@ -9,6 +9,23 @@ metadata:
 
 将用户提供的 Markdown 或 DOCX 转换为模板化 DOCX，并依据公开审计摘要决定是否交付。
 
+## 安装方式
+
+### 在线安装
+
+1. 把仓库地址 `https://github.com/mh567/wx-doc-format-skill` 交给 agent，并要求安装 `wx-doc-format` skill。
+2. agent 将仓库克隆或下载到自己的 skills 目录，目录名为 `wx-doc-format`，保证该目录根下是本文文件。
+3. 在 Skill 目录执行 `scripts/setup.sh` 安装依赖。该步骤需要网络。
+4. 安装完成后通过 `scripts/run.sh` 调用。
+
+### 离线安装
+
+1. 从 Release 下载与目标设备平台一致的 zip，文件名形如 `wx-doc-format-<VERSION>-macos-arm64.zip` 或 `wx-doc-format-<VERSION>-linux-arm64.zip`。
+2. 解压到 agent 的 skills 目录，得到 `wx-doc-format/`，该目录根下是本文文件。
+3. 直接运行 `scripts/run.sh`。首次运行从包内 `wheelhouse/` 安装依赖，不访问网络。
+
+两种方式都要求 Python 3.10 或更新版本。离线 zip 按平台区分，因为依赖中的 `lxml` 是原生扩展，wheel 与平台和 Python 小版本绑定。
+
 ## 触发与模式
 
 1. 确认输入为可读取的 Markdown 或 DOCX。缺少输入时请用户补充。完成条件：已取得一个明确的输入文件。
@@ -266,7 +283,6 @@ metadata:
 
 1. 目录页码与复杂域需在 Word 或 WPS 中更新，分节效果需在原生应用中复核。
 2. 复杂嵌入对象及无法完整重建的文本框、形状、SmartArt、批注和修订记录需人工复核。
-3. Kylin V10 ARM64 候选制品需在目标真机完成安装和转换冒烟。
 
 ### 按需检查
 

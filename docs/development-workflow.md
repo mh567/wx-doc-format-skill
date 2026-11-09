@@ -78,7 +78,7 @@ scripts/.venv/bin/python3 scripts/build_offline_package.py
 
 5. 在当前提交上创建 `v<VERSION>` annotated tag。
 6. 推送提交与 tag。
-7. 将 `dist/wx-doc-format-skill-<VERSION>-<platform>.zip` 上传到 Release。
+7. 将 `dist/wx-doc-format-<VERSION>-<platform>.zip` 上传到 Release。
 
 离线 zip 内包含 `wheelhouse/`，首次运行只从包内安装依赖。Release 说明写明平台与 Python 覆盖范围。
 
