@@ -49,31 +49,27 @@ LLM 增强以 Capability 插拔方式接入，当前能力：`toc_region_review`
 
 ## 在线安装
 
-把仓库地址 `https://github.com/mh567/wx-doc-format-skill` 交给 agent，并要求安装 `wx-doc-format` skill。agent 将仓库放到自己的 skills 目录，目录名为 `wx-doc-format`。
-
-在 Skill 目录直接运行：
+在支持 `cmd skills add` 的宿主直接执行：
 
 ```bash
-./scripts/run.sh --version
+cmd skills add mh567/wx-doc-format-skill
 ```
 
-首次运行自动创建 `.venv` 并从 PyPI 安装依赖，需要网络。
+也可以把仓库地址 `https://github.com/mh567/wx-doc-format-skill` 交给 agent，并要求安装 `wx-doc-format` skill。
+
+安装后直接提出转换或审查请求，agent 调用 `scripts/run.sh`。首次调用自动在 Skill 目录创建 `.venv` 并从 PyPI 安装依赖，无需手工执行脚本。
 
 ## 离线安装包
 
 从 Release 下载与目标设备平台一致的 zip，解压到 agent 的 skills 目录，得到 `wx-doc-format/`。包内 `wheelhouse/` 携带对应平台与 Python 小版本的依赖 wheel。
 
-解压后直接运行：
-
-```bash
-./scripts/run.sh --version
-```
-
-首次运行会在包目录创建 `.venv`，并从 `wheelhouse/` 离线安装依赖。安装固定使用 `--no-index`，不访问网络。
+安装后直接提出转换或审查请求，agent 调用 `scripts/run.sh`。首次调用自动从 `wheelhouse/` 离线安装依赖，固定使用 `--no-index`，不访问网络。
 
 `wheelhouse/manifest.json` 记录包内覆盖的平台与 Python 小版本。
 
 ## 运行
+
+以下命令由 agent 在 Skill 目录执行。
 
 ```bash
 ./scripts/run.sh \

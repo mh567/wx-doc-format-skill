@@ -13,7 +13,7 @@ from wxdf.capabilities import normalize_mode
 from wxdf.kernel import ConversionKernel, ConversionRequest
 
 
-SKILL_VERSION = "0.20.3"
+SKILL_VERSION = "0.20.4"
 
 # The conversion identity.  It is recorded in the run configuration and the
 # report so a resumed run can prove it continued the same conversion, and it is

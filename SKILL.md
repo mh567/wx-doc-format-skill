@@ -1,6 +1,7 @@
 ---
 name: wx-doc-format
 description: 将 Markdown 或 DOCX 转换为模板化技术文档 DOCX，或审查文档是否符合模板要求并给出评分与整改报告。当用户要求技术文档格式、WX 格式转换、按模板整理标题、目录、列表、表格、题注与附录，或要求格式审查、格式检查、格式评分与整改建议时使用。
+compatibility: Requires Python 3.10 or newer. Runtime dependencies are installed automatically on first run.
 metadata:
   short-description: 技术文档格式转换与审查
 ---
@@ -13,15 +14,15 @@ metadata:
 
 ### 在线安装
 
-1. 把仓库地址 `https://github.com/mh567/wx-doc-format-skill` 交给 agent，并要求安装 `wx-doc-format` skill。
-2. agent 将仓库克隆或下载到自己的 skills 目录，目录名为 `wx-doc-format`，保证该目录根下是本文文件。
-3. 直接调用 `scripts/run.sh`。首次运行自动在 Skill 目录创建 `.venv` 并从 PyPI 安装依赖。
+1. 把仓库地址 `https://github.com/mh567/wx-doc-format-skill` 交给 agent，并要求安装 `wx-doc-format` skill。支持 `cmd skills add` 的宿主可直接执行 `cmd skills add mh567/wx-doc-format-skill`。
+2. agent 将仓库安装到自己的 skills 目录，目录名为 `wx-doc-format`，保证该目录根下是本文文件。
+3. 安装完成后不需要手工执行任何脚本。用户提出转换或审查请求时，agent 按本文调用 `scripts/run.sh`；首次调用自动在 Skill 目录创建 `.venv` 并从 PyPI 安装依赖。
 
 ### 离线安装
 
 1. 从 Release 下载与目标设备平台一致的 zip，文件名形如 `wx-doc-format-<VERSION>-macos-arm64.zip` 或 `wx-doc-format-<VERSION>-linux-arm64.zip`。
 2. 解压到 agent 的 skills 目录，得到 `wx-doc-format/`，该目录根下是本文文件。
-3. 直接调用 `scripts/run.sh`。首次运行自动从包内 `wheelhouse/` 安装依赖，不访问网络。
+3. 安装完成后不需要手工执行任何脚本。用户提出转换或审查请求时，agent 按本文调用 `scripts/run.sh`；首次调用自动从包内 `wheelhouse/` 安装依赖，不访问网络。
 
 两种方式都要求 Python 3.10 或更新版本。离线 zip 按平台区分，因为依赖中的 `lxml` 是原生扩展，wheel 与平台和 Python 小版本绑定。
 
