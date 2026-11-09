@@ -26,15 +26,14 @@ metadata:
 
 ## 平台与启动
 
-公开发布目标为 macOS ARM64 和 Kylin V10 ARM64。始终通过本 Skill 的启动脚本运行：
+本 Skill 以 Python 源码分发，支持 macOS 与 Linux 上 Python 3.10 或更新版本。Windows 需在 Git Bash 或 WSL 等 POSIX shell 中运行。始终通过本 Skill 的启动脚本运行：
 
-1. macOS 状态为 `accepted` 时继续。
-2. Kylin 状态为 `candidate` 时，启动脚本输出 `WXDF-W-RUNTIME-CANDIDATE` 后继续。交付时保留真机复核项。
-3. 平台状态为 `unavailable`，平台条目缺失，状态未知或 manifest 损坏时，启动脚本以退出码 3 停止。保留原始文件并向用户报告稳定错误码。
-4. 在线仓库安装首次运行时下载当前版本制品并校验 SHA256。离线安装包直接使用包内运行时，不执行下载。
-5. 运行时由目标机 Python 3.10 或更新版本解释执行，依赖随包携带。解释器版本不足输出 `WXDF-E-PYTHON-UNAVAILABLE`，包内依赖与解释器小版本不匹配输出 `WXDF-E-VENDOR-UNAVAILABLE`，两者均以退出码 3 停止。载荷缺失或完整性校验失败输出 `WXDF-E-PAYLOAD` 并以退出码 4 停止。
+1. 首次运行前安装依赖。执行 `"$SKILL_ROOT/scripts/setup.sh"` 创建本目录内的 `.venv` 并安装 `requirements.txt`，或对现有 Python 执行 `pip install -r "$SKILL_ROOT/requirements.txt"`。该步骤需要网络。
+2. 启动脚本按 `WXDF_PYTHON`、`$SKILL_ROOT/.venv`、`$SKILL_ROOT/scripts/.venv`、`python3`、`python3.14` 到 `python3.10`、`/usr/bin/python3` 的顺序选择解释器。
+3. 找不到 Python 3.10 或更新版本时输出 `WXDF-E-PYTHON-UNAVAILABLE`，退出码 3。
+4. 当前解释器缺少 `python-docx`、`lxml` 或 `markdown-it-py` 时输出 `WXDF-E-DEPENDENCY-MISSING`，退出码 3，并给出安装命令。
 
-完成条件：启动脚本接受当前平台，或已按退出码 3 停止且没有尝试转换。
+完成条件：启动脚本找到可用解释器与依赖，或已按退出码 3 停止且没有尝试转换。
 
 ## 普通模式
 

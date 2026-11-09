@@ -11,16 +11,12 @@ input/*
 !input/benchmark_report.md
 agents/
 .pytest_cache/
-build/nuitka/
-dist/
 docs/
 !docs/
 docs/*
 !docs/markdown-ast-recognition-spec.md
 !docs/release-*.md
 !docs/development-workflow.md
-!docs/desktop-delivery-policy.md
-!docs/desktop-delivery-policy-evidence.md
 !docs/caption-inline-contract-fix.md
 !docs/modular-pipeline-design-v3.md
 !docs/modular-pipeline-migration-v3.1.md
@@ -61,8 +57,6 @@ tests/*
 !tests/test_table_formatting.py
 !tests/test_delivery_policy.py
 !tests/test_cli_delivery_policy.py
-!tests/test_nuitka_distribution.py
-!tests/test_interpreted_distribution.py
 !tests/test_modular_*.py
 !tests/test_outline_heading_recognition.py
 !tests/test_t01_kernel_static_relocation.py
@@ -86,7 +80,6 @@ tests/*
 !tests/test_v6_residuals_r6.py
 !tests/test_v6_residuals_r7.py
 !tests/test_fu3_convergence.py
-!tests/test_t09_compiled_acceptance.py
 !tests/test_corpus_defects.py
 !tests/test_issue4_acceptance.py
 !tests/test_kept_semantics.py
@@ -101,6 +94,8 @@ tests/*
 !tests/fixtures/modular_v3/**
 requirements.txt
 !requirements.txt
+requirements-dev.txt
+!requirements-dev.txt
 .commandcode/
 # Local validation output and tool markers stay on disk but never enter the tree.
 _build/

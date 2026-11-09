@@ -2,6 +2,14 @@
 
 Markdown / DOCX 转 WX 模板格式 DOCX 的格式转换服务。按八个阶段把源文档经过解析、裁决、规范化、渲染、审计，最终按模板合同输出 DOCX 与 JSON 审计报告。
 
+## 功能
+
+- 格式转换：把 Markdown 或 DOCX 转换为符合 WX 模板的技术文档 DOCX。
+- 格式审查：按模板合同审查 DOCX，输出百分制评分与逐项整改建议。
+- LLM 增强：目录区域复核、列表识别、题注生成、审计后受限复核，以及引用文件排序、术语与缩略语、列项用法检查。
+
+四种模式与触发说法见 [`SKILL.md`](SKILL.md)。
+
 ## 架构
 
 流水线由 `scripts/wxdf/ConversionKernel` 编排，`ModuleRegistry` 调度注册好的 module。八个阶段：
@@ -23,21 +31,60 @@ LLM 增强以 Capability 插拔方式接入，当前能力：`toc_region_review`
 
 | 路径 | 用途 |
 |------|------|
-| `scripts/main.py` | CLI 入口，开发运行 `scripts/.venv/bin/python3 -m main` |
+| `SKILL.md` | Skill 入口说明，Agent 按此调用启动脚本 |
+| `scripts/run.sh` | 启动脚本：选择解释器、检查依赖、执行 CLI |
+| `scripts/setup.sh` | 创建 `.venv` 并安装依赖 |
+| `scripts/main.py` | CLI 入口 |
 | `scripts/wxdf/` | 流水线实现：kernel、registry、parser、semantics、normalization、rendering、audit、publication |
 | `scripts/wxdf/semantics/` | 各语义能力模块：lists、tables、captions、appendices、regions、structure、protected |
 | `scripts/*.py` | 流水线复用的顶层模块：语义词汇、文本工具、模板合同与 LLM 能力注册 |
-| `tests/` | 76 个测试文件 |
-| `packaging/nuitka/` | Nuitka 构建、公开薄 Skill 组装 |
-| `docs/` | 设计文档与执行记录 |
 | `assets/wx_template.docx` | WX 格式模板 |
+| `tests/` | 测试 |
+| `docs/` | 设计文档与开发流程 |
 
-文档分工：`SKILL.md` 与公开 README 是发布到公开仓库的薄 Skill 内容；本文件（README.md）、`AGENTS.md`、`CLAUDE.md` 是私有开发仓库的内部文档。
+## 环境要求
 
-## 开发与运行
+- Python 3.10 或更新版本。
+- `python-docx`、`lxml`、`markdown-it-py`，版本见 `requirements.txt`。
+
+## 安装
 
 ```bash
-cd scripts && .venv/bin/python3 -m main \
+./scripts/setup.sh
+```
+
+该命令在仓库根创建 `.venv` 并安装运行时依赖，需要网络。
+
+也可以对现有 Python 环境安装：
+
+```bash
+python3 -m pip install -r requirements.txt
+```
+
+## 运行
+
+```bash
+./scripts/run.sh \
+  --input input/xxx.docx \
+  --output outputs/xxx.docx \
+  --template assets/wx_template.docx \
+  --report outputs/report.json
+```
+
+格式审查：
+
+```bash
+./scripts/run.sh \
+  --review \
+  --input input/xxx.docx \
+  --template assets/wx_template.docx \
+  --report-md outputs/review.md
+```
+
+也可以直接使用虚拟环境：
+
+```bash
+cd scripts && ../.venv/bin/python3 -m main \
   --input ../input/xxx.docx \
   --output ../outputs/xxx.docx \
   --template ../assets/wx_template.docx \
@@ -45,25 +92,16 @@ cd scripts && .venv/bin/python3 -m main \
 ```
 
 常用标志：
+
 - `--source-ast / --ast` 导出源 AST 或归一化 AST
 - `--llm-enhance all --llm-command <cmd>` 启用 LLM 增强
 - `--strict-normalize / --fail-on-risk`
 - `--table-row-height-cm / --table-row-height-rule`
+- `--caption-numbering chapter|sequential`
 
-测试：
+## 测试
 
 ```bash
-cd scripts && .venv/bin/python3 -m pytest ../tests/ -q
+./scripts/setup.sh --dev
+.venv/bin/python3 -m pytest tests/ -q
 ```
-
-不要修改 `scripts/main.py` 与 `scripts/document_model.py` 的公开接口。
-
-## 双仓库与分支模型
-
-私有 `mh577/wx-doc-format-skill-dev`（远程名 `dev`）是源码与构建规则的唯一事实源，本地 `dev` 推送到远程 `dev/main`。公开 `mh577/wx-doc-format-skill`（远程名 `origin`）只保留生成的薄 Skill，本地 `main` 跟踪 `origin/main`。详见 [`docs/development-workflow.md`](docs/development-workflow.md)。
-
-- 所有功能、修复、测试和构建工具变更只在本地 `dev` 开发并推送到 `dev/main`。
-- 本地 `main` 只跟踪公开 `origin/main`，不承担源码开发。
-- 公开发布只复制已验证的 `dist/public-skill/` 生成树。
-- 公开分支禁止 merge 或 cherry-pick 私有分支；公开历史中不能出现 `.py` / `.pyc` / `.pyo`。
-- 执行分支操作、构建、公开 Skill 生成、标签或 Release 前，必须完整读取 `docs/development-workflow.md`。

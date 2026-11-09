@@ -1,4 +1,0 @@
-Nuitka[standalone]==4.1.2
-ordered-set==4.1.0
-zstandard==0.25.0
-pytest==9.1.1

@@ -23,7 +23,7 @@ LLM 增强为 Capability 插拔架构，当前能力：
 - `document_review` — 审计后受限复核（带 `review_packet`）
 - 新增能力只需注册 `CapabilityConfig`（`scripts/wxdf/capabilities.py`）
 
-入口：`scripts/.venv/bin/python3 -m main`。开发不依赖 `scripts/run.sh`，该脚本只存在于发布包内。
+入口：`scripts/run.sh`，它选择解释器、检查依赖并执行 `scripts/main.py`。开发时也可以直接用 `scripts/.venv/bin/python3 -m main`。
 
 ### 顶层模块归属
 
@@ -127,20 +127,18 @@ LLM 增强为 Capability 插拔架构，当前能力：
 - 只有正文能渲染的根级段落算源已声明标题。标题样式落在表格单元格内或源目录控件内时不算，仍补生成标题
 - 报告按源类型写入风险提示：DOCX 为 `document_title_generated`，Markdown 为 `markdown_title_generated`（见决策 11）
 
-### 13. 交付形态：解释型加密载荷
-- 发布包不再编译原生运行时。包结构为 `lib/boot.py`、`lib/payload.bin` 和 `vendor/cp3xx/`，由目标机已有的 Python 3.10 或更新版本解释执行。制品内没有第一方 Mach-O，因此不触发 macOS 代码签名与公证
-- 加密只保护静态制品。密钥随包发送，能运行包的人就能取出明文，它的定位是提高阅读门槛，不作为保密手段，也不替代许可与追溯
-- 依赖只随包携带，不在目标机联网安装。只有 `lxml` 是原生扩展，由 wheel 构建方签名；`pillow` 不进入运行时依赖，全仓没有 `import PIL`
-- `vendor` 按 CPython 小版本分目录，启动器按解释器版本选择目录。解释器低于 3.10 或小版本不匹配时以退出码 3 停止，不自动降级
-- 公开仓库仍不得出现 `.py`。业务源码只存在于 `payload.bin`，`lib/boot.py` 不含业务逻辑，也不进入公开仓库
-- 载荷内模块的 `__file__` 由 loader 设为虚拟路径。`scripts/main.py` 是唯一依赖该路径定位 `VERSION` 的位置，业务代码不为打包改动
-- 构建与验收入口在 `packaging/interpreted/`，Nuitka 入口保留为历史路径
+### 13. 交付形态：纯 Python 源码
+- 仓库直接包含可运行的 Python 源码、测试、模板与文档，不再编译、加密或组装发布包
+- 运行时由目标机 Python 3.10 或更新版本解释执行，`scripts/run.sh` 负责选择解释器、检查依赖并执行 `scripts/main.py`
+- 依赖只声明在 `requirements.txt`，由目标机通过 `scripts/setup.sh` 或 `pip install -r requirements.txt` 安装。仓库不携带 `.so`、`.dylib`、`.pyd`、wheel 或 `payload.bin`
+- `lxml` 是唯一的原生扩展，安装在目标机 Python 环境或本目录 `.venv` 中，不进入仓库，因此不会触发对 Skill 目录的原生二进制扫描
+- 首次运行需要联网安装依赖。离线部署改为从内网 wheel 目录执行 `pip install --no-index --find-links`
+- `scripts/main.py` 通过 `scripts/../VERSION` 读取版本，源码树与 Skill 目录布局一致
 
 ## 输出验证不变量
 
 - unexpected_styles 必须为空
-- 解释型包内获批的 Python 文件只有 `lib/boot.py`、`vendor/` 与随包解释器的 `runtime/python/`，其余位置不得出现 `.py`；`vendor/` 与 `runtime/python/` 之外不得出现 `.pyc` 或 `.pyo`
-- 解释型包内第一方 Mach-O 数为零，原生代码只允许出现在 `vendor/` 与 `runtime/python/`
+- 仓库内原生二进制数为零，不得出现 `.so`、`.dylib`、`.pyd`、`.pyc`、`.pyo`、wheel 或 `payload.bin`
 - 标题文本不含手工编号
 - 普通语义表格单元格全部为 表正文
 - 表格格式合同的段落部分覆盖单元格内全部段落，不止每格首段（渲染器在单元格内容生成后执行合同，`strip_direct_format=False`，因为列项编号和源表头 marks 由渲染器所有权持有）
@@ -165,22 +163,23 @@ LLM 增强为 Capability 插拔架构，当前能力：
 
 ## 仓库管理
 
-执行分支操作、Nuitka 构建、公开 Skill 生成、标签或 Release 前，必须完整读取 [`docs/development-workflow.md`](docs/development-workflow.md)。
+执行分支操作、标签或 Release 前，必须完整读取 [`docs/development-workflow.md`](docs/development-workflow.md)。
 
-- 私有 `mh567/wx-doc-format-skill-dev` 是唯一源码开发仓库，本地 `dev` 推送到远程 `dev/main`。
-- 公开 `mh567/wx-doc-format-skill` 只保留生成后的薄 Skill，本地 `main` 跟踪 `origin/main`。
-- 公开发布只消费 `dist/public-skill/`，禁止 merge 或 cherry-pick 私有分支到公开分支。
-- 公开历史中 `.py`、`.pyc`、`.pyo` 必须为零。
+- 只维护一个公开仓库 `mh567/wx-doc-format-skill`，源码、测试、文档同仓。
+- 本地 `dev` 推送到公开仓库的 `main`，不再保留私有仓库与生成树。
+- 发布只打 `vX.Y.Z` tag，不产归档，不上传二进制资产。
 - 历史重写、强制推送、同版本标签移动或 Release 资产替换需要用户明确授权。
 
 ## 常用命令
 
 ```bash
-cd scripts && .venv/bin/python3 -m main \
-  --input ../input/xxx.docx \
-  --output ../wx_output/xxx.docx \
-  --template ../assets/wx_template.docx \
-  --report ../wx_output/report.json
+./scripts/setup.sh --dev
 
-cd .. && scripts/.venv/bin/python3 -m pytest tests/ -q
+./scripts/run.sh \
+  --input input/xxx.docx \
+  --output wx_output/xxx.docx \
+  --template assets/wx_template.docx \
+  --report wx_output/report.json
+
+.venv/bin/python3 -m pytest tests/ -q
 ```

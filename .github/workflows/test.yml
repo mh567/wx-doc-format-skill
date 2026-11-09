@@ -1,0 +1,57 @@
+name: Test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+        python:
+          - "3.12"
+          - "3.14"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: Run tests
+        run: python -m pytest tests/ -q
+      - name: Check runtime version
+        run: |
+          expected=$(tr -d '\r\n' < VERSION)
+          actual=$(sh scripts/run.sh --version)
+          test "$actual" = "$expected"
+      - name: Convert markdown
+        run: |
+          mkdir -p outputs
+          sh scripts/run.sh \
+            --input input/test_baseline.md \
+            --output outputs/smoke.docx \
+            --template assets/wx_template.docx \
+            --report outputs/report.json
+      - name: Review docx
+        run: |
+          sh scripts/run.sh \
+            --review \
+            --input outputs/smoke.docx \
+            --template assets/wx_template.docx \
+            --report-md outputs/review.md
+      - name: Reject native binaries
+        run: |
+          if find . -type f \( -name '*.so' -o -name '*.dylib' -o -name '*.pyd' -o -name '*.pyc' -o -name '*.whl' \) -print -quit | grep -q .; then
+            echo "native binaries are forbidden"
+            exit 1
+          fi
