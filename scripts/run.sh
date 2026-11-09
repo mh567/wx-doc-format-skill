@@ -40,15 +40,21 @@ if ! select_python; then
     exit 3
 fi
 
-if ! dependencies_ready "$PYTHON"; then
+if ! dependencies_ready "$PYTHON" && [ -x "$SKILL_ROOT/scripts/setup.sh" ]; then
     if [ -f "$SKILL_ROOT/OFFLINE_PACKAGE" ] || [ -d "$SKILL_ROOT/wheelhouse" ]; then
         echo "WXDF-I-OFFLINE-BOOTSTRAP: installing bundled dependencies into $SKILL_ROOT/.venv" >&2
         if ! "$SKILL_ROOT/scripts/setup.sh" --offline >&2; then
             echo "WXDF-E-OFFLINE-BOOTSTRAP: bundled dependencies could not be installed." >&2
             exit 3
         fi
-        PYTHON="$SKILL_ROOT/.venv/bin/python3"
+    else
+        echo "WXDF-I-DEPENDENCY-BOOTSTRAP: installing dependencies into $SKILL_ROOT/.venv" >&2
+        if ! "$SKILL_ROOT/scripts/setup.sh" >&2; then
+            echo "WXDF-E-DEPENDENCY-BOOTSTRAP: dependencies could not be installed." >&2
+            exit 3
+        fi
     fi
+    PYTHON="$SKILL_ROOT/.venv/bin/python3"
 fi
 
 if ! dependencies_ready "$PYTHON"; then

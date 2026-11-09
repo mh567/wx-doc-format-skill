@@ -33,7 +33,7 @@ LLM 增强以 Capability 插拔方式接入，当前能力：`toc_region_review`
 |------|------|
 | `SKILL.md` | Skill 入口说明，Agent 按此调用启动脚本 |
 | `scripts/run.sh` | 启动脚本：选择解释器、检查依赖、执行 CLI |
-| `scripts/setup.sh` | 创建 `.venv` 并安装依赖 |
+| `scripts/setup.sh` | 创建 `.venv` 并安装依赖，由 `run.sh` 自动调用 |
 | `scripts/main.py` | CLI 入口 |
 | `scripts/wxdf/` | 流水线实现：kernel、registry、parser、semantics、normalization、rendering、audit、publication |
 | `scripts/wxdf/semantics/` | 各语义能力模块：lists、tables、captions、appendices、regions、structure、protected |
@@ -51,17 +51,13 @@ LLM 增强以 Capability 插拔方式接入，当前能力：`toc_region_review`
 
 把仓库地址 `https://github.com/mh567/wx-doc-format-skill` 交给 agent，并要求安装 `wx-doc-format` skill。agent 将仓库放到自己的 skills 目录，目录名为 `wx-doc-format`。
 
-在 Skill 目录安装依赖：
+在 Skill 目录直接运行：
 
 ```bash
-./scripts/setup.sh
+./scripts/run.sh --version
 ```
 
-该命令创建 `.venv` 并安装运行时依赖，需要网络。也可以对现有 Python 环境安装：
-
-```bash
-python3 -m pip install -r requirements.txt
-```
+首次运行自动创建 `.venv` 并从 PyPI 安装依赖，需要网络。
 
 ## 离线安装包
 
@@ -74,12 +70,6 @@ python3 -m pip install -r requirements.txt
 ```
 
 首次运行会在包目录创建 `.venv`，并从 `wheelhouse/` 离线安装依赖。安装固定使用 `--no-index`，不访问网络。
-
-手工安装依赖时使用：
-
-```bash
-./scripts/setup.sh --offline
-```
 
 `wheelhouse/manifest.json` 记录包内覆盖的平台与 Python 小版本。
 

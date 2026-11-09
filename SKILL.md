@@ -15,14 +15,13 @@ metadata:
 
 1. 把仓库地址 `https://github.com/mh567/wx-doc-format-skill` 交给 agent，并要求安装 `wx-doc-format` skill。
 2. agent 将仓库克隆或下载到自己的 skills 目录，目录名为 `wx-doc-format`，保证该目录根下是本文文件。
-3. 在 Skill 目录执行 `scripts/setup.sh` 安装依赖。该步骤需要网络。
-4. 安装完成后通过 `scripts/run.sh` 调用。
+3. 直接调用 `scripts/run.sh`。首次运行自动在 Skill 目录创建 `.venv` 并从 PyPI 安装依赖。
 
 ### 离线安装
 
 1. 从 Release 下载与目标设备平台一致的 zip，文件名形如 `wx-doc-format-<VERSION>-macos-arm64.zip` 或 `wx-doc-format-<VERSION>-linux-arm64.zip`。
 2. 解压到 agent 的 skills 目录，得到 `wx-doc-format/`，该目录根下是本文文件。
-3. 直接运行 `scripts/run.sh`。首次运行从包内 `wheelhouse/` 安装依赖，不访问网络。
+3. 直接调用 `scripts/run.sh`。首次运行自动从包内 `wheelhouse/` 安装依赖，不访问网络。
 
 两种方式都要求 Python 3.10 或更新版本。离线 zip 按平台区分，因为依赖中的 `lxml` 是原生扩展，wheel 与平台和 Python 小版本绑定。
 
@@ -45,12 +44,12 @@ metadata:
 
 本 Skill 以 Python 源码分发，支持 macOS 与 Linux 上 Python 3.10 或更新版本。Windows 需在 Git Bash 或 WSL 等 POSIX shell 中运行。始终通过本 Skill 的启动脚本运行：
 
-1. 离线安装包的 `wheelhouse/` 已包含运行时依赖。首次运行 `"$SKILL_ROOT/scripts/run.sh"` 时，启动器在本目录创建 `.venv` 并从包内 wheel 安装依赖，全程使用 `--no-index`，不访问网络。
-2. 从源码仓库安装时，执行 `"$SKILL_ROOT/scripts/setup.sh"` 安装依赖，该步骤需要网络。离线环境执行 `"$SKILL_ROOT/scripts/setup.sh" --offline`，只从包内 `wheelhouse/` 安装。
+1. 首次运行 `"$SKILL_ROOT/scripts/run.sh"` 时自动安装依赖。离线包从 `wheelhouse/` 安装，固定使用 `--no-index`，不访问网络；源码安装从 PyPI 安装。
+2. 依赖已就绪时直接执行，不重复安装。
 3. 离线环境只使用包内 wheel。禁止执行联网的 `pip install -r requirements.txt`。
 4. 启动脚本按 `WXDF_PYTHON`、`$SKILL_ROOT/.venv`、`$SKILL_ROOT/scripts/.venv`、`python3`、`python3.14` 到 `python3.10`、`/usr/bin/python3` 的顺序选择解释器。
 5. 找不到 Python 3.10 或更新版本时输出 `WXDF-E-PYTHON-UNAVAILABLE`，退出码 3。
-6. 当前解释器缺少 `python-docx`、`lxml` 或 `markdown-it-py`，且包内没有 `wheelhouse/` 时输出 `WXDF-E-DEPENDENCY-MISSING`，退出码 3。
+6. 自动安装依赖失败时输出 `WXDF-E-DEPENDENCY-BOOTSTRAP` 或 `WXDF-E-OFFLINE-BOOTSTRAP`，退出码 3。
 7. 包内 `wheelhouse/` 不覆盖当前解释器小版本时输出 `WXDF-E-VENDOR-UNAVAILABLE`，退出码 3。
 
 完成条件：启动脚本找到可用解释器与依赖，或已按退出码 3 停止且没有尝试转换。

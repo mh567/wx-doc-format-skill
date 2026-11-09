@@ -130,10 +130,10 @@ LLM 增强为 Capability 插拔架构，当前能力：
 ### 13. 交付形态：纯 Python 源码
 - 仓库直接包含可运行的 Python 源码、测试、模板与文档，不再编译、加密或组装发布包
 - 运行时由目标机 Python 3.10 或更新版本解释执行，`scripts/run.sh` 负责选择解释器、检查依赖并执行 `scripts/main.py`
-- 依赖只声明在 `requirements.txt`，由目标机通过 `scripts/setup.sh` 或 `pip install -r requirements.txt` 安装。仓库不携带 `.so`、`.dylib`、`.pyd`、wheel 或 `payload.bin`
+- 依赖只声明在 `requirements.txt`。仓库不携带 `.so`、`.dylib`、`.pyd`、wheel 或 `payload.bin`
 - `lxml` 是唯一的原生扩展，安装在目标机 Python 环境或本目录 `.venv` 中，不进入仓库，因此不会触发对 Skill 目录的原生二进制扫描
-- 离线 zip 在 `wheelhouse/` 携带对应平台与 Python 小版本的依赖 wheel。首次运行 `scripts/run.sh` 会从包内安装到 `.venv`，固定使用 `--no-index`，不访问网络
-- 从源码仓库安装依赖需要联网，执行 `scripts/setup.sh`；离线环境执行 `scripts/setup.sh --offline`
+- 首次运行 `scripts/run.sh` 自动安装依赖：源码安装从 PyPI 安装，离线 zip 从包内 `wheelhouse/` 安装并固定使用 `--no-index`，不访问网络
+- `scripts/setup.sh` 是内部安装入口，由 `run.sh` 自动调用；开发环境用 `scripts/setup.sh --dev` 安装测试依赖
 - `scripts/main.py` 通过 `scripts/../VERSION` 读取版本，源码树与 Skill 目录布局一致
 
 ## 输出验证不变量
