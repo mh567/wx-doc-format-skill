@@ -132,13 +132,15 @@ LLM 增强为 Capability 插拔架构，当前能力：
 - 运行时由目标机 Python 3.10 或更新版本解释执行，`scripts/run.sh` 负责选择解释器、检查依赖并执行 `scripts/main.py`
 - 依赖只声明在 `requirements.txt`，由目标机通过 `scripts/setup.sh` 或 `pip install -r requirements.txt` 安装。仓库不携带 `.so`、`.dylib`、`.pyd`、wheel 或 `payload.bin`
 - `lxml` 是唯一的原生扩展，安装在目标机 Python 环境或本目录 `.venv` 中，不进入仓库，因此不会触发对 Skill 目录的原生二进制扫描
-- 首次运行需要联网安装依赖。离线部署改为从内网 wheel 目录执行 `pip install --no-index --find-links`
+- 离线 zip 在 `wheelhouse/` 携带对应平台与 Python 小版本的依赖 wheel。首次运行 `scripts/run.sh` 会从包内安装到 `.venv`，固定使用 `--no-index`，不访问网络
+- 从源码仓库安装依赖需要联网，执行 `scripts/setup.sh`；离线环境执行 `scripts/setup.sh --offline`
 - `scripts/main.py` 通过 `scripts/../VERSION` 读取版本，源码树与 Skill 目录布局一致
 
 ## 输出验证不变量
 
 - unexpected_styles 必须为空
 - 仓库内原生二进制数为零，不得出现 `.so`、`.dylib`、`.pyd`、`.pyc`、`.pyo`、wheel 或 `payload.bin`
+- 离线 zip 的 `wheelhouse/` 覆盖 `manifest.json` 声明的平台与 Python 小版本，首次运行使用 `--no-index`，不访问网络
 - 标题文本不含手工编号
 - 普通语义表格单元格全部为 表正文
 - 表格格式合同的段落部分覆盖单元格内全部段落，不止每格首段（渲染器在单元格内容生成后执行合同，`strip_direct_format=False`，因为列项编号和源表头 marks 由渲染器所有权持有）
@@ -167,7 +169,7 @@ LLM 增强为 Capability 插拔架构，当前能力：
 
 - 只维护一个公开仓库 `mh567/wx-doc-format-skill`，源码、测试、文档同仓。
 - 本地 `dev` 推送到公开仓库的 `main`，不再保留私有仓库与生成树。
-- 发布只打 `vX.Y.Z` tag，不产归档，不上传二进制资产。
+- 发布打 `vX.Y.Z` tag，并上传按平台区分的离线 zip 作为 Release 资产。
 - 历史重写、强制推送、同版本标签移动或 Release 资产替换需要用户明确授权。
 
 ## 常用命令

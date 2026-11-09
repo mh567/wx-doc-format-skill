@@ -49,6 +49,8 @@ LLM 增强以 Capability 插拔方式接入，当前能力：`toc_region_review`
 
 ## 安装
 
+从源码仓库安装时，执行：
+
 ```bash
 ./scripts/setup.sh
 ```
@@ -60,6 +62,24 @@ LLM 增强以 Capability 插拔方式接入，当前能力：`toc_region_review`
 ```bash
 python3 -m pip install -r requirements.txt
 ```
+
+## 离线安装包
+
+离线包为按平台区分的 zip，包内 `wheelhouse/` 携带对应平台与 Python 小版本的依赖 wheel。解压后直接运行：
+
+```bash
+./scripts/run.sh --version
+```
+
+首次运行会在包目录创建 `.venv`，并从 `wheelhouse/` 离线安装依赖。安装固定使用 `--no-index`，不访问网络。
+
+手工安装依赖时使用：
+
+```bash
+./scripts/setup.sh --offline
+```
+
+`wheelhouse/manifest.json` 记录包内覆盖的平台与 Python 小版本。
 
 ## 运行
 

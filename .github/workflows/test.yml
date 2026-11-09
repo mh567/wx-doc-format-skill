@@ -51,7 +51,7 @@ jobs:
             --report-md outputs/review.md
       - name: Reject native binaries
         run: |
-          if find . -type f \( -name '*.so' -o -name '*.dylib' -o -name '*.pyd' -o -name '*.pyc' -o -name '*.whl' \) -print -quit | grep -q .; then
+          if git ls-files | grep -Eq '\.(so|dylib|pyd|pyc|pyo|whl)$'; then
             echo "native binaries are forbidden"
             exit 1
           fi

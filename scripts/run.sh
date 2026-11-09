@@ -3,6 +3,10 @@ set -eu
 
 SKILL_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 
+dependencies_ready() {
+    "$1" -B -c 'import docx, lxml, markdown_it' >/dev/null 2>&1
+}
+
 PYTHON=
 select_python() {
     for candidate in \
@@ -36,7 +40,18 @@ if ! select_python; then
     exit 3
 fi
 
-if ! "$PYTHON" -B -c 'import docx, lxml, markdown_it' >/dev/null 2>&1; then
+if ! dependencies_ready "$PYTHON"; then
+    if [ -f "$SKILL_ROOT/OFFLINE_PACKAGE" ] || [ -d "$SKILL_ROOT/wheelhouse" ]; then
+        echo "WXDF-I-OFFLINE-BOOTSTRAP: installing bundled dependencies into $SKILL_ROOT/.venv" >&2
+        if ! "$SKILL_ROOT/scripts/setup.sh" --offline >&2; then
+            echo "WXDF-E-OFFLINE-BOOTSTRAP: bundled dependencies could not be installed." >&2
+            exit 3
+        fi
+        PYTHON="$SKILL_ROOT/.venv/bin/python3"
+    fi
+fi
+
+if ! dependencies_ready "$PYTHON"; then
     echo "WXDF-E-DEPENDENCY-MISSING: python-docx, lxml and markdown-it-py are required." >&2
     echo "Install them with: \"$SKILL_ROOT/scripts/setup.sh\"" >&2
     echo "Or run: $PYTHON -m pip install -r \"$SKILL_ROOT/requirements.txt\"" >&2

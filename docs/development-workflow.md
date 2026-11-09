@@ -67,15 +67,22 @@ git push origin dev:main
 3. 确认仓库内原生二进制为零：
 
 ```bash
-find . -type f \( -name '*.so' -o -name '*.dylib' -o -name '*.pyd' -o -name '*.pyc' -o -name '*.pyo' -o -name '*.whl' \)
+git ls-files | grep -E '\.(so|dylib|pyd|pyc|pyo|whl)$'
 ```
 
-4. 在当前提交上创建 `v<VERSION>` annotated tag。
-5. 推送提交与 tag。
+4. 构建按平台区分的离线 zip：
 
-不生成归档，不上传二进制资产。Release 说明写明纯 Python 源码分发。
+```bash
+scripts/.venv/bin/python3 scripts/build_offline_package.py
+```
 
-完成条件：远程 `main` 与 tag 指向预期提交，Release 无附件，干净 clone 后按 README 安装依赖即可运行。
+5. 在当前提交上创建 `v<VERSION>` annotated tag。
+6. 推送提交与 tag。
+7. 将 `dist/wx-doc-format-skill-<VERSION>-<platform>.zip` 上传到 Release。
+
+离线 zip 内包含 `wheelhouse/`，首次运行只从包内安装依赖。Release 说明写明平台与 Python 覆盖范围。
+
+完成条件：远程 `main` 与 tag 指向预期提交，Release 附件齐全，离线解压后可直接运行。
 
 ## 5. 回滚和异常处理
 

@@ -28,10 +28,13 @@ metadata:
 
 本 Skill 以 Python 源码分发，支持 macOS 与 Linux 上 Python 3.10 或更新版本。Windows 需在 Git Bash 或 WSL 等 POSIX shell 中运行。始终通过本 Skill 的启动脚本运行：
 
-1. 首次运行前安装依赖。执行 `"$SKILL_ROOT/scripts/setup.sh"` 创建本目录内的 `.venv` 并安装 `requirements.txt`，或对现有 Python 执行 `pip install -r "$SKILL_ROOT/requirements.txt"`。该步骤需要网络。
-2. 启动脚本按 `WXDF_PYTHON`、`$SKILL_ROOT/.venv`、`$SKILL_ROOT/scripts/.venv`、`python3`、`python3.14` 到 `python3.10`、`/usr/bin/python3` 的顺序选择解释器。
-3. 找不到 Python 3.10 或更新版本时输出 `WXDF-E-PYTHON-UNAVAILABLE`，退出码 3。
-4. 当前解释器缺少 `python-docx`、`lxml` 或 `markdown-it-py` 时输出 `WXDF-E-DEPENDENCY-MISSING`，退出码 3，并给出安装命令。
+1. 离线安装包的 `wheelhouse/` 已包含运行时依赖。首次运行 `"$SKILL_ROOT/scripts/run.sh"` 时，启动器在本目录创建 `.venv` 并从包内 wheel 安装依赖，全程使用 `--no-index`，不访问网络。
+2. 从源码仓库安装时，执行 `"$SKILL_ROOT/scripts/setup.sh"` 安装依赖，该步骤需要网络。离线环境执行 `"$SKILL_ROOT/scripts/setup.sh" --offline`，只从包内 `wheelhouse/` 安装。
+3. 离线环境只使用包内 wheel。禁止执行联网的 `pip install -r requirements.txt`。
+4. 启动脚本按 `WXDF_PYTHON`、`$SKILL_ROOT/.venv`、`$SKILL_ROOT/scripts/.venv`、`python3`、`python3.14` 到 `python3.10`、`/usr/bin/python3` 的顺序选择解释器。
+5. 找不到 Python 3.10 或更新版本时输出 `WXDF-E-PYTHON-UNAVAILABLE`，退出码 3。
+6. 当前解释器缺少 `python-docx`、`lxml` 或 `markdown-it-py`，且包内没有 `wheelhouse/` 时输出 `WXDF-E-DEPENDENCY-MISSING`，退出码 3。
+7. 包内 `wheelhouse/` 不覆盖当前解释器小版本时输出 `WXDF-E-VENDOR-UNAVAILABLE`，退出码 3。
 
 完成条件：启动脚本找到可用解释器与依赖，或已按退出码 3 停止且没有尝试转换。
 

@@ -11,6 +11,7 @@ input/*
 !input/benchmark_report.md
 agents/
 .pytest_cache/
+dist/
 docs/
 !docs/
 docs/*
