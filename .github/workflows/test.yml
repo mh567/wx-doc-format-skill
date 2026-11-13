@@ -24,6 +24,11 @@ jobs:
         exclude:
           - os: macos-latest
             python: "3.8"
+          - os: ubuntu-latest
+            python: "3.8"
+        include:
+          - os: ubuntu-22.04
+            python: "3.8"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
