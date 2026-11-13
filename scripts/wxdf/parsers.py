@@ -271,7 +271,7 @@ def _line_offsets(text: str) -> list[int]:
     return offsets
 
 
-def _inline_nodes(tokens: Iterable[Any], handle: SourceHandle, part: str, resources: dict[str, Any], diagnostics: list[dict[str, Any]], source_ref: dict[str, Any], parser_version: str | None = None) -> list[dict[str, Any]]:
+def _inline_nodes(tokens: Iterable[Any], handle: SourceHandle, part: str, resources: dict[str, Any], diagnostics: list[dict[str, Any]], source_ref: dict[str, Any], parser_version: str | None = None, allow_external_assets: bool = False) -> list[dict[str, Any]]:
     tokens = list(tokens)
 
     def parse_range(start: int, stop_kind: str | None = None, marks: list[str] | None = None) -> tuple[list[dict[str, Any]], int]:
@@ -311,12 +311,20 @@ def _inline_nodes(tokens: Iterable[Any], handle: SourceHandle, part: str, resour
             elif kind == "image":
                 target = str(token.attrGet("src") or "")
                 alt_text = str(token.content or "")
+                target_path = Path(target)
+                if not target_path.is_absolute():
+                    target_path = handle.path.parent / target_path
+                if not allow_external_assets:
+                    try:
+                        target_path.resolve(strict=False).relative_to(handle.path.parent.resolve(strict=False))
+                    except ValueError:
+                        diagnostics.append({"code": "external_asset_outside_source", "severity": "warning", "message": target})
+                        result.append({"kind": "text", "text": alt_text})
+                        index += 1
+                        continue
                 resource_id = _stable_id("res", handle.source_id, target)
                 if resource_id not in resources:
                     resource_bytes: bytes | None = None
-                    target_path = Path(target)
-                    if not target_path.is_absolute():
-                        target_path = handle.path.parent / target_path
                     try:
                         resource_bytes = target_path.read_bytes()
                     except OSError:
@@ -401,6 +409,7 @@ class _MarkdownFactsBuilder:
     source_text: str
     handle: SourceHandle
     part: str
+    allow_external_assets: bool = False
 
     def __post_init__(self) -> None:
         self.facts = _empty_facts(self.handle, "markdown-source-facts", "commonmark+table")
@@ -559,6 +568,7 @@ class _MarkdownFactsBuilder:
                     self.facts["diagnostics"],
                     ref,
                     self.facts["parser"]["version"],
+                    self.allow_external_assets,
                 )
                 # CommonMark leaves letter markers in a hard-break paragraph.
                 # Record each explicitly marked line without consuming source text.
@@ -608,7 +618,7 @@ class _MarkdownFactsBuilder:
         return self.facts
 
 
-def _parse_markdown(source: Path | str, *, store: SourceStore, text: str | None = None) -> dict[str, Any]:
+def _parse_markdown(source: Path | str, *, store: SourceStore, text: str | None = None, allow_external_assets: bool = False) -> dict[str, Any]:
     from markdown_it import MarkdownIt
 
     handle = store.open_source(source, text=text)
@@ -616,7 +626,7 @@ def _parse_markdown(source: Path | str, *, store: SourceStore, text: str | None 
     if isinstance(source_text, bytes):
         source_text = source_text.decode(handle.encoding or "utf-8")
     parser = MarkdownIt("commonmark", {"html": False}).enable("table")
-    builder = _MarkdownFactsBuilder(str(source_text), handle, handle.path.name)
+    builder = _MarkdownFactsBuilder(str(source_text), handle, handle.path.name, allow_external_assets=allow_external_assets)
     builder.facts["parser"]["version"] = MARKDOWN_PARSER_VERSION
     facts = builder.consume(parser.parse(str(source_text)))
     validate_source_facts(facts)
@@ -2391,6 +2401,7 @@ def parse(source: Path | str, context: dict[str, Any] | None = None) -> dict[str
     if store is None:
         store = SourceStore()
     text = context.get("text")
+    allow_external_assets = bool(context.get("allow_external_assets"))
     # A caller that already knows the container can pass a ``source_type`` hint.
     # The saved-output readback re-parses a staging artifact whose name
     # (``.<name>.staging``) carries no usable suffix, so without the
@@ -2405,7 +2416,7 @@ def parse(source: Path | str, context: dict[str, Any] | None = None) -> dict[str
     try:
         if source_type == "docx":
             return _parse_docx(source, store=store)
-        return _parse_markdown(source, store=store, text=text)
+        return _parse_markdown(source, store=store, text=text, allow_external_assets=allow_external_assets)
     finally:
         if owns_store:
             store.close()

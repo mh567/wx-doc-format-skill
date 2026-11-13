@@ -16,9 +16,11 @@ from test_modular_contracts import _valid_checkpoint
 from wxdf.checkpoint_store import (
     CheckpointError,
     load_checkpoint,
+    prepare_native_resume,
     save_checkpoint,
     transition_status,
 )
+from wxdf.source_store import SourceStore
 from wxdf.response_store import (
     apply_response,
     complete_pending_response,
@@ -224,3 +226,33 @@ def test_checkpoint_load_recovers_previous_generation_after_process_interrupt(
 
     assert restored["round"] == 0
     assert not list(tmp_path.glob(".wxdf-publication-*.journal"))
+
+
+def test_resume_recovery_acquires_the_publication_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from wxdf import publication
+    from wxdf.publication_lock import held_lock_paths
+
+    checkpoint_path = tmp_path / "run.json"
+    output = tmp_path / "output.docx"
+    report = tmp_path / "report.json"
+    observed: list[set[str]] = []
+
+    def recover(targets):
+        observed.append(set(held_lock_paths()))
+        raise publication.PublicationError("sentinel recovery failure")
+
+    monkeypatch.setattr(publication, "recover_pending_publications", recover)
+
+    with pytest.raises(CheckpointError, match="sentinel recovery failure"):
+        prepare_native_resume(
+            checkpoint_path,
+            source_path=tmp_path / "source.md",
+            template_path=None,
+            contracts={},
+            modules=[],
+            configuration={"output": str(output), "report": str(report)},
+            source_store=SourceStore(),
+        )
+
+    assert observed
+    assert str((tmp_path / ".wxdf-publication.lock").resolve()) in observed[0]

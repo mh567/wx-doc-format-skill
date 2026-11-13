@@ -393,12 +393,16 @@ def test_bundle_recovery_rejects_untrusted_manifest_paths_without_reading_outsid
     outside_reads: list[Path] = []
 
     def tracked_read_bytes(path):
-        if not path.resolve().is_relative_to(destination):
+        try:
+            path.resolve().relative_to(destination)
+        except ValueError:
             outside_reads.append(path)
         return real_read_bytes(path)
 
     def tracked_read_text(path, *args, **kwargs):
-        if not path.resolve().is_relative_to(destination):
+        try:
+            path.resolve().relative_to(destination)
+        except ValueError:
             outside_reads.append(path)
         return real_read_text(path, *args, **kwargs)
 

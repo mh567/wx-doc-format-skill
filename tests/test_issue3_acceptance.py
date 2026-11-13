@@ -457,7 +457,10 @@ def test_saved_output_audit_rejects_retargeted_image_relationship(tmp_path: Path
         root = ElementTree.fromstring(data)
         for relationship in root:
             if relationship.get("Id") == relationship_id:
-                relationship.set("Target", alternate_part.removeprefix("word/"))
+                relationship.set(
+                    "Target",
+                    alternate_part[len("word/"):] if alternate_part.startswith("word/") else alternate_part,
+                )
         return ElementTree.tostring(root, encoding="utf-8", xml_declaration=True)
 
     retargeted = tmp_path / "image-target-audit-retargeted.docx"

@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+import os
+import sys
+
+if os.environ.get("WXDF_DEPS"):
+    sys.path.insert(0, os.environ["WXDF_DEPS"])
+
 import argparse
 from copy import deepcopy
+import errno
 import json
 import re
-import sys
+import tempfile
 from pathlib import Path
 from zipfile import BadZipFile
 
@@ -24,6 +31,120 @@ NATIVE_PROFILE = "wx-default-v2"
 DEFAULT_TABLE_ROW_HEIGHT_CM = 0.7
 DEFAULT_TABLE_ROW_HEIGHT_RULE = "at-least"
 DEFAULT_CAPTION_NUMBERING = "chapter"
+
+
+class _PathIdentityError(RuntimeError):
+    pass
+
+
+def _resolve_path(path: Path) -> Path:
+    try:
+        resolved = Path(path).resolve(strict=False)
+    except RuntimeError as exc:
+        raise _PathIdentityError(f"cannot resolve path {path}: {exc}") from exc
+    try:
+        os.stat(path)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise _PathIdentityError(f"cannot resolve path {path}: {exc}") from exc
+    return resolved
+
+
+def _absolute_path(path: Path) -> Path:
+    return Path(os.path.abspath(os.fspath(path)))
+
+
+def _missing_path_parts(path: Path) -> tuple[Path, tuple[str, ...]]:
+    absolute = _absolute_path(path)
+    parts = [absolute.name]
+    parent = absolute.parent
+    while not parent.exists():
+        if parent == parent.parent:
+            break
+        parts.insert(0, parent.name)
+        parent = parent.parent
+    return parent, tuple(parts)
+
+
+def _probe_aliases(left: Path, right: Path) -> bool:
+    left_parent, left_parts = _missing_path_parts(left)
+    right_parent, right_parts = _missing_path_parts(right)
+    try:
+        same_parent = os.path.samefile(left_parent, right_parent)
+    except OSError:
+        same_parent = _resolve_path(left_parent) == _resolve_path(right_parent)
+    if not same_parent:
+        return False
+    try:
+        with tempfile.TemporaryDirectory(prefix=".wxdf-identity-", dir=str(left_parent)) as directory:
+            first = Path(directory).joinpath(*left_parts)
+            second = Path(directory).joinpath(*right_parts)
+            first.parent.mkdir(parents=True, exist_ok=True)
+            second.parent.mkdir(parents=True, exist_ok=True)
+            first.touch(exist_ok=False)
+            try:
+                second.touch(exist_ok=False)
+            except FileExistsError:
+                return True
+            return os.path.samefile(first, second)
+    except OSError:
+        return _resolve_path(left) == _resolve_path(right)
+
+
+def _same_path(left: Path, right: Path) -> bool:
+    if _resolve_path(left) == _resolve_path(right):
+        return True
+    try:
+        if Path(left).exists() and Path(right).exists():
+            return os.path.samefile(left, right)
+    except OSError:
+        pass
+    return _probe_aliases(Path(left), Path(right))
+
+
+def _validate_distinct_paths(
+    parser: argparse.ArgumentParser,
+    *,
+    sources: list[tuple[str, Path | None]],
+    outputs: list[tuple[str, Path | None]],
+) -> None:
+    source_entries = [(name, Path(path)) for name, path in sources if path is not None]
+    output_entries = [(name, Path(path)) for name, path in outputs if path is not None]
+    try:
+        for output_name, output_path in output_entries:
+            for source_name, source_path in source_entries:
+                if _same_path(output_path, source_path):
+                    parser.error(f"{output_name} must not be the same path as {source_name}")
+        for index, (first_name, first_path) in enumerate(output_entries):
+            for second_name, second_path in output_entries[index + 1:]:
+                if _same_path(first_path, second_path):
+                    parser.error(f"{first_name} and {second_name} must be different paths")
+    except _PathIdentityError as exc:
+        parser.error(str(exc))
+
+
+def _write_json_report(path: Path, report: dict) -> None:
+    """Write a report through a same-directory temporary file and atomic replace."""
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(report, ensure_ascii=False, indent=2)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+        os.chmod(temporary_name, 0o600)
+        os.replace(temporary_name, path)
+    except BaseException:
+        try:
+            os.unlink(temporary_name)
+        except OSError:
+            pass
+        raise
 
 
 def skill_version() -> str:
@@ -416,6 +537,8 @@ def _native_checkpoint_configuration(args, *, output_path: Path) -> dict:
         "pipeline": NATIVE_PIPELINE,
         "list_policy": NATIVE_PROFILE,
     }
+    if getattr(args, "allow_external_assets", False):
+        configuration["allow_external_assets"] = True
     if getattr(args, "_legacy_delivery_configuration", False):
         configuration.pop("delivery_policy")
     return configuration
@@ -465,6 +588,18 @@ def _run_review_mode(args: argparse.Namespace, parser: argparse.ArgumentParser) 
         print(f"REVIEW_INPUT_UNSUPPORTED: 审查只接受 DOCX 输入：{args.input}", file=sys.stderr)
         raise SystemExit(2)
 
+    _validate_distinct_paths(
+        parser,
+        sources=[("--input", args.input), ("--template", args.template)],
+        outputs=[
+            ("--report", args.report),
+            ("--report-md", args.report_md),
+            ("--report-html", args.report_html),
+            ("--ast", args.ast),
+            ("--source-ast", args.source_ast),
+        ],
+    )
+
     if mode != "off" and not (args.llm_command or args.generate_requests or args.resume):
         parser.error("AI review requires --llm-command, --generate-requests or --resume")
 
@@ -497,8 +632,7 @@ def _run_review_mode(args: argparse.Namespace, parser: argparse.ArgumentParser) 
         print(f"REVIEW_FAILED: {exc}", file=sys.stderr)
         raise SystemExit(1) from None
     if args.report:
-        args.report.parent.mkdir(parents=True, exist_ok=True)
-        args.report.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        _write_json_report(args.report, result)
     if args.report_md:
         write_review_report(result, args.report_md)
     if args.report_html:
@@ -554,7 +688,8 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
     parser.add_argument("--input", type=Path, help="Source file (optional when --resume is used)")
     parser.add_argument("--output", type=Path, help="Output .docx path (optional when --resume is used)")
     parser.add_argument("--template", type=Path, default=None, help="DOCX template driving styles and numbering.")
-    parser.add_argument("--strict-normalize", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--strict-normalize", action="store_true", default=True)
+    parser.add_argument("--no-strict-normalize", dest="strict_normalize", action="store_false")
     parser.add_argument(
         "--delivery-policy", choices=["strict", "desktop"], default="strict",
         help="Delivery gate: strict audit acceptance, or readable Desktop output with review findings.",
@@ -562,6 +697,12 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
     parser.add_argument("--report", type=Path, default=None)
     parser.add_argument("--report-md", type=Path, default=None)
     parser.add_argument("--report-html", type=Path, default=None, help="HTML review report path (--review mode).")
+    parser.add_argument(
+        "--allow-external-assets",
+        action="store_true",
+        default=False,
+        help="Allow Markdown images outside the source directory to be read.",
+    )
     parser.add_argument("--ast", type=Path, default=None, help="Normalized document model (Step 2 output).")
     parser.add_argument("--source-ast", type=Path, default=None, help="Parsed source document model (Step 1 output).")
     parser.add_argument("--table-row-height-cm", type=float, default=DEFAULT_TABLE_ROW_HEIGHT_CM)
@@ -751,6 +892,8 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
             args.table_row_height_rule = run_args["table_row_height_rule"]
         if "caption_numbering" in run_args and restore_native("--caption-numbering"):
             args.caption_numbering = run_args["caption_numbering"]
+        if run_args.get("allow_external_assets") and restore_native("--allow-external-assets"):
+            args.allow_external_assets = True
     if args.delivery_policy not in {"strict", "desktop"}:
         parser.error("unsupported delivery policy in checkpoint")
     if _os.environ.get("WX_DOC_FORMAT_RELEASE") == "1" and (args.ast or args.source_ast):
@@ -761,6 +904,19 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
         raise SystemExit("--resume: run.json does not contain 'input', provide --input on CLI")
     if args.resume and not args.output:
         raise SystemExit("--resume: run.json does not contain 'output', provide --output on CLI")
+
+    _validate_distinct_paths(
+        parser,
+        sources=[("--input", args.input), ("--template", args.template)],
+        outputs=[
+            ("--output", args.output),
+            ("--report", args.report),
+            ("--report-md", args.report_md),
+            ("--report-html", args.report_html),
+            ("--ast", args.ast),
+            ("--source-ast", args.source_ast),
+        ],
+    )
 
     modular_protocol_mode = "resume" if args.resume else "generate_requests" if args.generate_requests else None
 
@@ -793,6 +949,7 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
         "table_row_height_cm": args.table_row_height_cm,
         "table_row_height_rule": args.table_row_height_rule,
         "caption_numbering": args.caption_numbering,
+        "allow_external_assets": bool(args.allow_external_assets),
     }
     if args.generate_requests is not None:
         request_dir = args.generate_requests.resolve()
@@ -831,8 +988,7 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
     )
     output_report = report_for_output(result.as_report())
     if args.report is not None and not kernel_published_report:
-        args.report.parent.mkdir(parents=True, exist_ok=True)
-        args.report.write_text(json.dumps(output_report, ensure_ascii=False, indent=2), encoding="utf-8")
+        _write_json_report(args.report, output_report)
     if args.report_md is not None:
         write_markdown_report(output_report, args.report_md)
     if result.diagnostics:

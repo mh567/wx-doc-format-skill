@@ -129,10 +129,10 @@ LLM 增强为 Capability 插拔架构，当前能力：
 
 ### 13. 交付形态：纯 Python 源码
 - 仓库直接包含可运行的 Python 源码、测试、模板与文档，不再编译、加密或组装发布包
-- 运行时由目标机 Python 3.10 或更新版本解释执行，`scripts/run.sh` 负责选择解释器、检查依赖并执行 `scripts/main.py`
+- 运行时由目标机 Python 3.8 或更新版本解释执行，`scripts/run.sh` 负责选择解释器、检查依赖并执行 `scripts/main.py`；离线包覆盖常规 CPython 3.8 至 3.14
 - 依赖只声明在 `requirements.txt`。仓库不携带 `.so`、`.dylib`、`.pyd`、wheel 或 `payload.bin`
-- `lxml` 是唯一的原生扩展，安装在目标机 Python 环境或本目录 `.venv` 中，不进入仓库，因此不会触发对 Skill 目录的原生二进制扫描
-- 首次运行 `scripts/run.sh` 自动安装依赖：源码安装从 PyPI 安装，离线 zip 从包内 `wheelhouse/` 安装并固定使用 `--no-index`，不访问网络
+- `lxml` 是唯一的原生扩展，源码安装在目标机 Python 环境或本目录 `.venv` 中；离线包展开至 Skill 私有 `.deps/`，原生文件不进入仓库
+- 首次运行 `scripts/run.sh` 自动准备依赖：源码安装从 PyPI 安装，离线 zip 从包内 `wheelhouse/` 解包后直接加载，无需 venv、pip 或 ensurepip，不访问网络或修改系统环境；使用标准系统 Python 自带的 lzma
 - `scripts/setup.sh` 是内部安装入口，由 `run.sh` 自动调用；开发环境用 `scripts/setup.sh --dev` 安装测试依赖
 - `scripts/main.py` 通过 `scripts/../VERSION` 读取版本，源码树与 Skill 目录布局一致
 
@@ -140,7 +140,8 @@ LLM 增强为 Capability 插拔架构，当前能力：
 
 - unexpected_styles 必须为空
 - 仓库内原生二进制数为零，不得出现 `.so`、`.dylib`、`.pyd`、`.pyc`、`.pyo`、wheel 或 `payload.bin`
-- 离线 zip 的 `wheelhouse/` 覆盖 `manifest.json` 声明的平台与 Python 小版本，首次运行使用 `--no-index`，不访问网络
+- 离线 zip 的 `wheelhouse/` 覆盖 `manifest.json` 声明的平台与 Python 小版本，按 `environments` 精确清单准备私有依赖；不调用安装工具、不访问网络
+- 每个平台统一一个小于 14,000,000 字节的离线包；完整 wheel 以 ZIP_STORED 重包后保存于 `wheelhouse/wheels.tar.xz`，运行时只解出匹配版本并校验 SHA256；不得裁减 wheel 功能，包内资源与版本元数据必须可用
 - 标题文本不含手工编号
 - 普通语义表格单元格全部为 表正文
 - 表格格式合同的段落部分覆盖单元格内全部段落，不止每格首段（渲染器在单元格内容生成后执行合同，`strip_direct_format=False`，因为列项编号和源表头 marks 由渲染器所有权持有）

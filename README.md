@@ -33,7 +33,7 @@ LLM 增强以 Capability 插拔方式接入，当前能力：`toc_region_review`
 |------|------|
 | `SKILL.md` | Skill 入口说明，Agent 按此调用启动脚本 |
 | `scripts/run.sh` | 启动脚本：选择解释器、检查依赖、执行 CLI |
-| `scripts/setup.sh` | 创建 `.venv` 并安装依赖，由 `run.sh` 自动调用 |
+| `scripts/setup.sh` | 源码安装创建 `.venv`；离线包准备私有依赖目录 |
 | `scripts/main.py` | CLI 入口 |
 | `scripts/wxdf/` | 流水线实现：kernel、registry、parser、semantics、normalization、rendering、audit、publication |
 | `scripts/wxdf/semantics/` | 各语义能力模块：lists、tables、captions、appendices、regions、structure、protected |
@@ -44,8 +44,8 @@ LLM 增强以 Capability 插拔方式接入，当前能力：`toc_region_review`
 
 ## 环境要求
 
-- Python 3.10 或更新版本。
-- `python-docx`、`lxml`、`markdown-it-py`，版本见 `requirements.txt`。
+- Python 3.8 或更新版本。离线包使用标准库 `lzma`，无需 `venv`、`pip` 或 `ensurepip`。
+- `python-docx`、`lxml`、`markdown-it-py`、`typing_extensions`，按解释器版本选择 `requirements.txt` 中的固定版本，离线包已包含全部运行依赖。
 
 ## 在线安装
 
@@ -61,11 +61,13 @@ cmd skills add mh567/wx-doc-format-skill
 
 ## 离线安装包
 
-从 Release 下载与目标设备平台一致的 zip，解压到 agent 的 skills 目录，得到 `wx-doc-format/`。包内 `wheelhouse/` 携带对应平台与 Python 小版本的依赖 wheel。
+从 Release 下载匹配平台的 zip，例如 `wx-doc-format-<VERSION>-macos-arm64.zip` 或 `wx-doc-format-<VERSION>-linux-arm64.zip`，解压到 agent 的 skills 目录，得到 `wx-doc-format/`。每个平台只有一个包，覆盖常规 CPython 3.8 至 3.14，每包小于 14 MB（14,000,000 字节）。Linux ARM64 wheel 要求 glibc 2.28 或更新版本；macOS ARM64 要求 macOS 11 或更新版本。
 
-安装后直接提出转换或审查请求，agent 调用 `scripts/run.sh`。首次调用自动从 `wheelhouse/` 离线安装依赖，固定使用 `--no-index`，不访问网络。
+运行前用 `python3 --version` 确认版本。多解释器设备可设置 `WXDF_PYTHON` 为目标解释器的绝对路径。
 
-`wheelhouse/manifest.json` 记录包内覆盖的平台与 Python 小版本。
+安装后直接提出转换或审查请求，agent 调用 `scripts/run.sh`。首次调用自动从 `wheelhouse/` 解出当前 Python 对应的依赖，放入 Skill 内的 `.deps/` 并直接加载，不访问网络，不调用安装工具，也不修改系统 Python 环境。
+
+`wheelhouse/wheels.tar.xz` 对完整 wheel 做共享压缩，首次运行只解出当前 Python 所需依赖并校验 SHA256，保留包内资源与版本元数据；后续启动复用校验通过的私有缓存。`wheelhouse/manifest.json` 记录覆盖范围、每个解释器的精确依赖清单与 wheel 摘要。Python 3.8 使用兼容依赖版本；未覆盖的小版本、PyPy 和自由线程版 Python 无对应原生 wheel，不承诺离线运行。标准库 `lzma` 被裁掉的精简 Python 会给出明确错误。
 
 ## 运行
 

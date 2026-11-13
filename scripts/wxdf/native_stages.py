@@ -730,16 +730,15 @@ def _native_reviewer(context: ModuleExecutionContext) -> dict[str, Any]:
         for name in ("model", "saved_output", "appendix")
     )
     baseline_path = Path(context.services["staging_path"])
-    candidate_path = baseline_path.with_name(
-        f".{request.output_path.name}.review-candidate.staging"
-    )
+    candidate_path = baseline_path.with_name(baseline_path.name + ".review-candidate")
     if candidate_path.is_file():
         candidate_path.unlink()
     baseline_bundle = {
         "source_ast": baseline_commit.snapshot.ast,
         "normalized_ast": baseline_normalized,
         "findings": baseline_audits["findings"],
-        "artifacts": {"docx": str(baseline_path)},
+        # The formal path keeps the checkpointed review packet stable across resume runs.
+        "artifacts": {"docx": str(request.output_path)},
         "round": 0,
     }
     packet = build_review_packet(baseline_bundle, baseline_audits["findings"])

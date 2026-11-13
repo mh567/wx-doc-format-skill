@@ -295,3 +295,30 @@ AST 2.0 已增加 `title` role、table `header_rows`、table_cell `cell_role`、
 本次代码审查另修复公开报告任意 message/location 字符串暴露、必需审计缺项被判 passed、失败报告缺失、copy 失败临时文件泄漏、回滚失败备份清理、硬链接输出碰撞问题。审计结果 passed、交付门禁与能力迁移验证须分别表达，格式提示不得污染语义迁移证明。当前使用 source adapter 验证真实 Desktop 调用链，未构建或替换安装软件。
 
 0.18.1 后续修复红灯：原手册 strict 退出 1，saved_output_audit 有3条inline_content_changed。另16条format_run_direct_override均为4个REF源原子内cached/end run字体，决定通过渲染来源run指纹精确表达格式所有权，不泛豁免字段或正文段落。
+
+# 2026-11-13 离线兼容性与体积
+
+- 当前包体积主要来自多套 lxml 编译 wheel；按小版本拆包已经达标，但用户要求统一包并兼容 Python 3.8+、目标机完全断网。
+- lxml 6.1.1 官方元数据 Requires-Python 为 >=3.8，但 ARM64 wheel 从 cp39 开始，cp38 仅提供 macOS x86_64，Linux ARM64 也缺 cp38。
+- 源码中的 future annotations 可避免大量注解重写；运行期类型别名、MutableMapping 泛型基类、BooleanOptionalAction 和 removeprefix 需单独适配。
+- 原始 wheel 内部文件不变，只把 ZIP 压缩方式改为 STORED 后整体 LZMA 压缩，7 版本依赖实测 Linux 8,835,808 字节，macOS 11,912,980 字节。
+- 通过官方便携 CPython 3.8.19 ARM64 和官方 lxml 5.4.0 源码，在临时目录构建了 macOS 11+ ARM64 wheel，约 1.61 MB；仅依赖系统动态库，实际导入与 XSLT 已通过，无需 Rosetta。
+- Python 3.8 单独选兼容依赖，较新解释器保留当前版本；首次安装固定隔离配置与 --no-index，只解出当前 cp 标签并校验 SHA256。
+- 最终统一 zip：macOS ARM64 11,740,881 字节，Linux ARM64 9,265,537 字节，均低于 14,000,000 字节。每包覆盖常规 CPython 3.8 至 3.14。
+- macOS 七个 Python 小版本分别在全新目录完成自动离线安装、真实 Markdown 转换和 DOCX 格式审查；网络审计钩子捕获连接与域名解析，七次均为零次尝试。
+- 独立审查确认两包 CRC、14 个 wheel 的内部载荷与源码一致性；macOS cp38 六个扩展均为 ARM64、最低 macOS 11 且仅链接系统库。Linux 和 macOS 11 真机验收仍未执行。
+- 包 SHA256：macOS `b650672b7b78535678b565c4f50f35baeac57c03d24790c60abe4f250d498289`；Linux `21ee6570b7feaa800ac0172a2b3124d3fb36d2c261b33af6ea74ebef3d93c25d`。
+
+## 仅依赖系统 Python 的追加约束
+
+- 用户明确要求目标机只提供标准系统 Python，其他均在 Skill 内集成。原方案的 venv、ensurepip/pip 与可选标准库 lzma 前提需移除。
+- 已有包通过 `offline_install.py` 解出 wheel 后调用 pip，`setup.sh` 在此之前创建 venv；离线分支需提前接管并直接加载 Skill 私有依赖。
+- 压缩与运行期路径隔离由两名智能体分别做实验与只读架构审计；后续使用当前本地缓存，禁止联网。
+- 用户随后指出标准 Python 通常自带 lzma，已按其最新澄清保留标准库 lzma 与现有 XZ，共享压缩实验停止。重点去掉 venv、pip、ensurepip。精简掉 lzma 的非标准 Python 不在本轮环境假定内。
+- 所有现有 wheel 均无 `.data` 或 `.pth`；可按原始包树完整展开，保留 `.dist-info` 与 docx 模板资源。构建期读取 requirements 标记生成每个 CPython tag 的精确依赖列表，运行期不实现依赖解析器。
+
+## 直接加载收口
+
+- 离线目标机不再具备 venv/pip 时，安装职责只剩“选 wheel、验摘要、展开包树、加入 `PYTHONPATH`”。构建期已经把每个 CPython tag 的依赖解析进 `manifest.environments`，运行期不需要依赖解析器。
+- 缓存状态记录包摘要与顶层条目；换解释器或换包后自动重装，损坏状态触发重建而不是带病加载。
+- 旧 `dist/` 统一包没有 `environments` 字段，说明上一轮产物早于清单改造，交付前必须按当前脚本重建并复核体积与 SHA256。

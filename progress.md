@@ -517,3 +517,37 @@ Desktop 四个文件已通过工具授权写回配对仓库；原仓库完整测
 用户要求提交并发布Skill与Desktop，版本定为补丁号0.18.2。本轮内容为大纲级别标题识别、源目录控件表格范围、内联图标题注资格、文档标题派生与对应审计不变量。冻结Skill源码9b11fde/tree94c7506、Desktop源码73bb33f，推送私有dev/main后本地构建macOS ARM64，Colima容器构建kylin-v10-arm64，两平台各1319 passed/3 skipped。
 
 发布完成：Skill薄仓库7bcd7b9/v0.18.2，两平台归档hash与线上下载一致；全新克隆的validator、shell与历史门禁通过，空缓存与离线安装版本检查得到0.18.2，发布包运行用户手册返回码0、两项审计passed、无模板外样式。Desktop73bb33f/v0.18.2，Release工作流38599967940四项全部success，两次CI success，两个资产hash通过。证据docs/release-0.18.2-evidence.md。macOS最低26.0，Linux保持容器候选，Word/WPS视觉与Kylin真机仍待验收，本次未构建Windows制品。
+# 2026-11-13 离线兼容性与体积
+
+已启动架构兼容性只读审计和多版本 wheel 共享压缩实验。读取现有构建、启动、安装脚本与依赖声明；正在查询官方 wheel 覆盖和适配所需版本。
+源码兼容适配的相关回归 269 项通过；打包与兼容专项初轮 25 项通过。完整 7 版本压缩实验满足体积目标，正式统一包构建中。正在执行全量测试、实际版本离线安装和独立审查。
+
+正式统一包位于 `dist/unified/`，macOS 11,740,881 字节、Linux 9,265,537 字节。macOS CPython 3.8 至 3.14 七个解释器全部完成新目录自动离线安装、真实转换和格式审查，网络尝试为零。上一轮全量 1116 passed、3 skipped；最后补充四项打包边界测试并修复两处测试自身的 3.8 路径 API，相关 180 项通过，最终全量复跑中。
+
+最终全量复跑完成：1120 passed、3 skipped（132.58 秒）。Shell 语法、Git 差异空白检查和已跟踪原生二进制禁入检查均通过；最终包大小及 SHA256 已复核，当前任务完成。
+
+独立复审确认包内容与源码一致、wheel 无删减、cp38 macOS 原生架构与系统库依赖正确；修复后的 151 个源码与测试文件在真实 Python 3.8 下通过语法解析。未运行远程 CI、完整 Python 3.8 pytest、Linux 与 macOS 11 真机验收，不提交或发布。
+
+## 仅依赖系统 Python 的离线启动
+
+用户追加要求：标准系统 Python 之外的安装与解压组件全部由 Skill 自带。已读取打包、启动、安装及测试，启动压缩实验与运行期架构审计，计划去掉离线链对 venv、pip、ensurepip、lzma 的依赖。
+
+用户澄清 lzma 通常随标准 Python 自带后，方案收敛为保留 XZ 与标准库 lzma，去掉 venv、pip、ensurepip。架构智能体确认 wheel 无特殊安装 scheme，负责直接加载与启动测试；主智能体负责构建期精确依赖清单、旧打包测试和文档。已启动本地缓存 Linux VM，后续使用缓存镜像并禁用容器网络验证。
+
+## 仅依赖系统 Python 的直接加载实现
+
+`scripts/offline_install.py` 改为按 `manifest.environments` 选出当前 CPython 的 wheel，从 `wheels.tar.xz` 校验 SHA256 后完整展开包树到 `.deps/`，写入解释器标签与包摘要状态；摘要与顶层条目一致时复用缓存。非法记录、重复记录、缺失 wheel、校验失败、tar 成员类型异常与 wheel 内路径穿越均拒绝，失败保留旧缓存。
+
+`scripts/setup.sh` 离线分支不再创建 venv，直接用传入解释器展开 `.deps/`；在线与 `--dev` 分支保持 venv 与 pip。`scripts/run.sh` 离线时把 `.deps/` 加入 `PYTHONPATH` 后再导入依赖，在线时仍走 venv。`.deps/` 已加入忽略列表。
+
+验证：打包与兼容专项 33 项通过；全量 1124 passed、3 skipped（130.46 秒）。用旧统一包中的真实 wheel 重建清单后，Python 3.14 直接加载 docx 1.2.0、lxml 6.1.1、markdown-it-py 4.2.0，二次运行复用缓存；符号链接 Skill 根目录跑 `run.sh` 完成真实转换，status completed、模型与保存审计通过、unexpected_styles 为空、未创建 `.venv`。
+
+限制：现有 `dist/` 产物的清单不含 `environments`，需重新构建后才是可直接交付的新包；Linux、Python 3.8 与 macOS 11 真机未复验，未提交或发布。
+
+独立审查后修复五处：`run.sh` 不再导出 `PYTHONPATH`，改由 `main.py` 在导入流水线前把 `WXDF_DEPS` 放入 `sys.path`，外部 LLM 命令不会继承 Skill 依赖路径；离线模式每次启动都校验并复用 `.deps`，系统已装同名包不会绕过包内固定版本；缓存键加入环境选择摘要，清单变化但 tar 未变时会重建；`setup.sh` 拒绝低于 3.8 的旧 `.venv`；清单与状态文件增加顶层类型校验，异常统一为 `WXDF-E-VENDOR-UNAVAILABLE` 与退出码 3。新增测试覆盖真实导入、清单失效与 `setup.sh --offline` 不创建 venv。
+
+审查记录的残余风险：未加并发锁，同一 Skill 目录两个首次运行可能竞争 `.deps.old`；`manifest.platform` 未与运行平台比对，架构不匹配会在导入原生 lxml 时报错；macOS 3.8、Linux 与 macOS 11 真机、musl/Rosetta/PyPy 未验证；包无外部签名。最终全量 1127 passed、3 skipped（129.18 秒）。
+
+用本地缓存的 22 个 wheel 重建两平台统一包（未联网）：macOS 11,742,733 字节，SHA256 `25a0c985220af251817ea7fac8ba6d14b8ad73cd4f7af387e9d81c36fec58446`；Linux 9,267,389 字节，SHA256 `f3f251ee7d8086d8d5eba5541a37a9258d9ed91440d19b555a1cfc8b9022f269`。新包清单包含 `environments`，cp38 选中项不含 x86_64 wheel；macOS cp38 扩展为 ARM64 Mach-O，Linux cp38 扩展为 AArch64 ELF，全部 wheel 摘要与 tar 内载荷一致。
+
+全新目录验收：用新包跑 `setup.sh --offline` 生成 `.deps/`、不创建 `.venv`；再用禁用 `site` 且拒绝 `pip`、`venv`、`ensurepip` 的包装解释器跑完整转换，status completed、模型与保存审计通过、unexpected_styles 为空。第二次 `setup.sh` 命中缓存不重复安装。

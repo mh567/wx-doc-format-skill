@@ -1,12 +1,11 @@
 """Native source interpretation modules and semantic candidate builders."""
 from __future__ import annotations
 
-from collections.abc import MutableMapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 import json
 from pathlib import Path
-from typing import Any, Callable, Iterable, Iterator, Mapping
+from typing import Any, Callable, Iterable, Iterator, Mapping, MutableMapping
 
 from .contracts import validate_capability_payload
 from .parsers import digest_source_facts, parse, summarize_source_facts
@@ -85,14 +84,15 @@ def _registered(module_id: str, stages: tuple[str, ...], requires: tuple[str, ..
 def source_facts_module() -> RegisteredModule:
     def execute(c: ModuleExecutionContext) -> dict[str, Any]:
         with c.stage("source"):
-            restored = c.request.options.get("restored_source_facts")
-            facts = json.loads(json.dumps(restored, ensure_ascii=False)) if isinstance(restored, Mapping) else parse(c.request.input_path, {"source_store": c.services.get("store")})
+            options = c.request.options
+            restored = options.get("restored_source_facts")
+            facts = json.loads(json.dumps(restored, ensure_ascii=False)) if isinstance(restored, Mapping) else parse(c.request.input_path, {"source_store": c.services.get("store"), "allow_external_assets": bool(options.get("allow_external_assets"))})
             metrics = c.services.get("metrics"); metrics.record_source_opened() if metrics is not None else None
             summary, digest = summarize_source_facts(dict(facts)), digest_source_facts(dict(facts))
         c.provide("source_facts", facts); c.evidence["source-facts-parser"] = summary
         c.provide("source_facts_summary", summary); c.provide("source_facts_digest", digest)
         return summary
-    return _registered("source-facts-parser", ("source",), (), ("source_facts", "source_facts_summary", "source_facts_digest"), execute, runtime_services=("metrics", "store"), option_keys=("restored_source_facts",))
+    return _registered("source-facts-parser", ("source",), (), ("source_facts", "source_facts_summary", "source_facts_digest"), execute, runtime_services=("metrics", "store"), option_keys=("restored_source_facts", "allow_external_assets"))
 
 def source_region_module() -> RegisteredModule:
     def execute(c: ModuleExecutionContext) -> dict[str, Any]:

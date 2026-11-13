@@ -1,7 +1,7 @@
 ---
 name: wx-doc-format
 description: 将 Markdown 或 DOCX 转换为模板化技术文档 DOCX，或审查文档是否符合模板要求并给出评分与整改报告。当用户要求技术文档格式、WX 格式转换、按模板整理标题、目录、列表、表格、题注与附录，或要求格式审查、格式检查、格式评分与整改建议时使用。
-compatibility: Requires Python 3.10 or newer. Runtime dependencies are installed automatically on first run.
+compatibility: Requires Python 3.8 or newer. Offline ARM64 packages cover standard CPython 3.8 through 3.14 with its lzma standard library; no venv, pip or ensurepip required.
 metadata:
   short-description: 技术文档格式转换与审查
 ---
@@ -20,11 +20,11 @@ metadata:
 
 ### 离线安装
 
-1. 从 Release 下载与目标设备平台一致的 zip，文件名形如 `wx-doc-format-<VERSION>-macos-arm64.zip` 或 `wx-doc-format-<VERSION>-linux-arm64.zip`。
+1. 用 `python3 --version` 确认版本，从 Release 下载匹配平台的统一包：`wx-doc-format-<VERSION>-macos-arm64.zip` 或 `wx-doc-format-<VERSION>-linux-arm64.zip`。每包覆盖常规 CPython 3.8 至 3.14，并小于 14 MB（14,000,000 字节）。多解释器设备可设置 `WXDF_PYTHON` 为目标解释器的绝对路径。
 2. 解压到 agent 的 skills 目录，得到 `wx-doc-format/`，该目录根下是本文文件。
-3. 安装完成后不需要手工执行任何脚本。用户提出转换或审查请求时，agent 按本文调用 `scripts/run.sh`；首次调用自动从包内 `wheelhouse/` 安装依赖，不访问网络。
+3. 安装完成后不需要手工执行任何脚本。用户提出转换或审查请求时，agent 按本文调用 `scripts/run.sh`；首次调用自动从包内 `wheelhouse/` 解出依赖到 Skill 私有 `.deps/` 并直接加载，不访问网络或修改系统 Python。
 
-两种方式都要求 Python 3.10 或更新版本。离线 zip 按平台区分，因为依赖中的 `lxml` 是原生扩展，wheel 与平台和 Python 小版本绑定。
+目标机只需标准系统 Python，使用其自带的 `lzma` 标准库，无需 `venv`、`pip` 或 `ensurepip`。Linux ARM64 要求 glibc 2.28 或更新版本；macOS ARM64 要求 macOS 11 或更新版本。包内 `wheelhouse/wheels.tar.xz` 保存完整 wheel，启动脚本按清单选择并验证摘要，直接加载依赖。未覆盖的 Python 小版本、PyPy 与自由线程版不承诺离线运行；禁止为缺少 wheel 自动联网补装。
 
 ## 触发与模式
 
@@ -43,14 +43,14 @@ metadata:
 
 ## 平台与启动
 
-本 Skill 以 Python 源码分发，支持 macOS 与 Linux 上 Python 3.10 或更新版本。Windows 需在 Git Bash 或 WSL 等 POSIX shell 中运行。始终通过本 Skill 的启动脚本运行：
+本 Skill 以 Python 源码分发，最低要求 Python 3.8。Windows 源码安装需在 Git Bash 或 WSL 等 POSIX shell 中运行，离线包仅提供 macOS 与 Linux ARM64。始终通过本 Skill 的启动脚本运行：
 
-1. 首次运行 `"$SKILL_ROOT/scripts/run.sh"` 时自动安装依赖。离线包从 `wheelhouse/` 安装，固定使用 `--no-index`，不访问网络；源码安装从 PyPI 安装。
-2. 依赖已就绪时直接执行，不重复安装。
+1. 首次运行 `"$SKILL_ROOT/scripts/run.sh"` 时自动准备依赖。离线包从 `wheelhouse/` 解出到私有 `.deps/`，直接加载，不调用安装工具或访问网络；源码安装从 PyPI 安装。
+2. 离线包复用校验通过的私有缓存，始终优先于系统第三方包；源码安装的依赖已就绪时直接执行。
 3. 离线环境只使用包内 wheel。禁止执行联网的 `pip install -r requirements.txt`。
-4. 启动脚本按 `WXDF_PYTHON`、`$SKILL_ROOT/.venv`、`$SKILL_ROOT/scripts/.venv`、`python3`、`python3.14` 到 `python3.10`、`/usr/bin/python3` 的顺序选择解释器。
-5. 找不到 Python 3.10 或更新版本时输出 `WXDF-E-PYTHON-UNAVAILABLE`，退出码 3。
-6. 自动安装依赖失败时输出 `WXDF-E-DEPENDENCY-BOOTSTRAP` 或 `WXDF-E-OFFLINE-BOOTSTRAP`，退出码 3。
+4. 启动脚本按 `WXDF_PYTHON`、`$SKILL_ROOT/.venv`、`$SKILL_ROOT/scripts/.venv`、`python3`、`python3.14` 到 `python3.8`、`/usr/bin/python3` 的顺序选择解释器，并将所选解释器传给安装脚本。
+5. 找不到 Python 3.8 或更新版本时输出 `WXDF-E-PYTHON-UNAVAILABLE`，退出码 3。
+6. 源码自动安装依赖失败时输出 `WXDF-E-DEPENDENCY-BOOTSTRAP`；离线包无法准备依赖时输出 `WXDF-E-VENDOR-UNAVAILABLE`，退出码 3。
 7. 包内 `wheelhouse/` 不覆盖当前解释器小版本时输出 `WXDF-E-VENDOR-UNAVAILABLE`，退出码 3。
 
 完成条件：启动脚本找到可用解释器与依赖，或已按退出码 3 停止且没有尝试转换。

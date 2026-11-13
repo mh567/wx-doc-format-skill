@@ -772,7 +772,10 @@ def apply_stage_batch(
             continue
         if group and all(decision.get("revision_id") for decision in group):
             continue
-        normalized_previous = "sha256:" + str(previous_digest).removeprefix("sha256:")
+        previous_digest = str(previous_digest)
+        normalized_previous = "sha256:" + (
+            previous_digest[len("sha256:"):] if previous_digest.startswith("sha256:") else previous_digest
+        )
         if normalized_previous != decision_digest:
             raise TransactionConflict(f"transaction {transaction_id} has a different content digest")
     if not fresh_groups:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Literal, Mapping, Sequence, TypeAlias, TypedDict
+from typing import Any, Callable, Dict, List, Literal, Mapping, Sequence, TypedDict, Union
 
 
 SOURCE_FACTS_SCHEMA_VERSION = "1.0"
@@ -278,8 +278,8 @@ def validate_capability_payload(name: str, value: Any) -> None:
     if element_validator is not None:
         element_validator(value)
 
-JSONValue: TypeAlias = None | bool | int | float | str | list["JSONValue"] | dict[str, "JSONValue"]
-JSONObject: TypeAlias = dict[str, JSONValue]
+JSONValue = Union[None, bool, int, float, str, List["JSONValue"], Dict[str, "JSONValue"]]
+JSONObject = Dict[str, JSONValue]
 
 
 class ContractError(ValueError):

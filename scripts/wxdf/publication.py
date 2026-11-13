@@ -13,6 +13,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from .publication_lock import publication_lock
+
 
 class PublicationError(RuntimeError):
     """Raised when a required publication artifact is missing or invalid."""
@@ -278,6 +280,16 @@ def _recover_journal(journal_path: Path, trusted_targets: set[Path]) -> str:
         raise PublicationError(f"publication recovery failed: {exc}") from exc
 
 
+def recover_pending_publications_locked(
+    path: Path | str | Iterable[Path | str],
+) -> dict[str, Any]:
+    """Recover one generation while holding every target directory lock."""
+
+    targets = [Path(path)] if isinstance(path, (Path, str)) else [Path(item) for item in path]
+    with publication_lock(targets):
+        return recover_pending_publications(targets)
+
+
 def recover_pending_publications(
     path: Path | str | Iterable[Path | str],
 ) -> dict[str, Any]:
@@ -303,7 +315,7 @@ def recover_pending_publications(
     for target in trusted_targets:
         prefix = f".{target.name}.staging-"
         for candidate in target.parent.glob(prefix + "*"):
-            transaction_id = candidate.name.removeprefix(prefix)
+            transaction_id = candidate.name[len(prefix):] if candidate.name.startswith(prefix) else candidate.name
             if _TRANSACTION_ID_PATTERN.fullmatch(transaction_id) is not None:
                 _remove_path(candidate)
     target = targets[0]

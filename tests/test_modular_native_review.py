@@ -244,7 +244,9 @@ def test_native_heading_review_rejects_incomplete_value_before_candidate_artifac
         if invalid_value == "extra_field":
             value["semantic_role"] = "appendix_title"
         else:
-            value.pop(invalid_value.removeprefix("missing_"))
+            value.pop(
+                invalid_value[len("missing_"):] if invalid_value.startswith("missing_") else invalid_value
+            )
         patch["candidates"][0]["proposal"] = {
             "operation": "update_role",
             "property_scope": ["role", "level"],

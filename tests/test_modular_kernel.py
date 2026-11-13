@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
+import time
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -251,3 +254,200 @@ def test_native_v2_enabled_enhancement_requires_programmatic_adapter_before_publ
     }]
     assert result.report["enhancement"]["status"] == "missing_adapter"
     assert not output.exists()
+
+
+def test_kernel_staging_paths_are_unique_and_independently_cleaned(tmp_path: Path) -> None:
+    from wxdf.kernel import _staging_paths
+
+    output = tmp_path / "output.docx"
+    first_staging, first_candidate = _staging_paths(output)
+    second_staging, second_candidate = _staging_paths(output)
+
+    assert first_staging != second_staging
+    assert first_candidate == first_staging.with_name(first_staging.name + ".review-candidate")
+    assert second_candidate == second_staging.with_name(second_staging.name + ".review-candidate")
+    assert first_staging.name.startswith(f".{output.name}.staging-")
+    # A bare 32-hex token would be mistaken for a publication transaction.
+    assert not re.fullmatch(r"[0-9a-f]{32}", first_staging.name.split(".staging-", 1)[1])
+
+    first_staging.write_bytes(b"first")
+    second_staging.write_bytes(b"second")
+    first_staging.unlink()
+    assert not first_staging.exists()
+    assert second_staging.read_bytes() == b"second"
+
+
+def test_two_processes_can_write_the_same_output_without_leftover_staging(tmp_path: Path) -> None:
+    """Two concurrent CLI runs share one output path and leave no staging files."""
+
+    source = tmp_path / "input.md"
+    source.write_text("# 文档\n\n## 章节\n\n正文内容。\n", encoding="utf-8")
+    output = tmp_path / "output.docx"
+    commands = [
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "main.py"),
+            "--input", str(source),
+            "--output", str(output),
+            "--template", str(ROOT / "assets" / "wx_template.docx"),
+            "--report", str(tmp_path / f"report-{index}.json"),
+        ]
+        for index in range(2)
+    ]
+
+    first = subprocess.Popen(commands[0], cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    second = subprocess.Popen(commands[1], cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    first_stdout, first_stderr = first.communicate(timeout=30)
+    second_stdout, second_stderr = second.communicate(timeout=30)
+
+    assert first.returncode == 0, first_stderr or first_stdout
+    assert second.returncode == 0, second_stderr or second_stdout
+    assert output.is_file()
+    assert not list(tmp_path.glob(".*.staging*"))
+    with zipfile.ZipFile(output) as archive:
+        assert "word/document.xml" in archive.namelist()
+
+
+def test_recovery_waits_for_an_active_publication_lock(tmp_path: Path) -> None:
+    from wxdf.publication import recover_pending_publications_locked
+    from wxdf.publication_lock import publication_lock
+
+    target = tmp_path / "output.docx"
+    transaction_id = "a" * 32
+    staged = tmp_path / f".{target.name}.staging-{transaction_id}"
+    backup = tmp_path / f".{target.name}.rollback-{transaction_id}"
+    journal_path = tmp_path / f".wxdf-publication-{transaction_id}.journal"
+    target.write_bytes(b"new content")
+    backup.write_bytes(b"old content")
+    journal_path.write_text(json.dumps({
+        "schema_version": "1.0",
+        "transaction_id": transaction_id,
+        "state": "prepared",
+        "entries": [{
+            "target": str(target.resolve()),
+            "staged": str(staged.resolve()),
+            "backup": str(backup.resolve()),
+            "had_original": True,
+        }],
+        "journal_paths": [str(journal_path.resolve())],
+    }), encoding="utf-8")
+    marker = tmp_path / "locked"
+    script = f"""
+import json, sys, time
+from pathlib import Path
+sys.path.insert(0, {str(ROOT / 'scripts')!r})
+from wxdf.publication_lock import publication_lock
+target, journal_path, backup, marker = (Path(value) for value in sys.argv[1:5])
+with publication_lock([target]):
+    marker.write_text("locked", encoding="utf-8")
+    time.sleep(0.8)
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    journal["state"] = "committed"
+    journal_path.write_text(json.dumps(journal), encoding="utf-8")
+    backup.unlink(missing_ok=True)
+    journal_path.unlink(missing_ok=True)
+"""
+    child = subprocess.Popen(
+        [sys.executable, "-c", script, str(target), str(journal_path), str(backup), str(marker)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert marker.exists(), child.stderr.read() if child.poll() is not None else "lock marker missing"
+
+        started = time.monotonic()
+        recovered = recover_pending_publications_locked(target)
+        elapsed = time.monotonic() - started
+    finally:
+        child.communicate(timeout=10)
+
+    assert recovered["status"] == "clean"
+    assert target.read_bytes() == b"new content"
+    assert elapsed >= 0.5
+    assert not journal_path.exists()
+    lock_file = tmp_path / ".wxdf-publication.lock"
+    assert lock_file.is_file()
+    assert lock_file.stat().st_mode & 0o777 == 0o600
+
+
+def test_two_outputs_in_one_directory_publish_concurrently(tmp_path: Path) -> None:
+    source = tmp_path / "input.md"
+    source.write_text("# 文档\n\n## 章节\n\n正文内容。\n", encoding="utf-8")
+    template = ROOT / "assets" / "wx_template.docx"
+    worker = tmp_path / "worker.py"
+    worker.write_text(f"""
+import json, sys, time
+from pathlib import Path
+sys.path.insert(0, {str(ROOT / 'scripts')!r})
+from wxdf import publication
+from wxdf.kernel import ConversionKernel, ConversionRequest
+
+source, output, report, template, marker, delay = sys.argv[1:7]
+output_path = Path(output)
+report_path = Path(report)
+marker_path = Path(marker)
+real_replace = publication.os.replace
+
+def delayed_replace(src, dst):
+    result = real_replace(src, dst)
+    if Path(src).name.startswith(f".{{output_path.name}}.staging-") and Path(dst).resolve() == output_path.resolve():
+        marker_path.write_text("staged", encoding="utf-8")
+        time.sleep(float(delay))
+    return result
+
+publication.os.replace = delayed_replace
+result = ConversionKernel().convert(ConversionRequest(
+    input_path=Path(source),
+    output_path=output_path,
+    template_path=Path(template),
+    pipeline="modular",
+    list_policy="wx-default-v2",
+    options={{"report_path": report_path}},
+))
+print(json.dumps(result.diagnostics, ensure_ascii=False))
+raise SystemExit(result.exit_code)
+""", encoding="utf-8")
+
+    first_output = tmp_path / "first.docx"
+    second_output = tmp_path / "second.docx"
+    first_report = tmp_path / "first-report.json"
+    second_report = tmp_path / "second-report.json"
+    first_marker = tmp_path / "first-staged"
+    first = subprocess.Popen(
+        [sys.executable, str(worker), str(source), str(first_output), str(first_report), str(template), str(first_marker), "1.0"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while not first_marker.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert first_marker.exists(), first.stderr.read() if first.poll() is not None else "first run did not stage"
+
+        second = subprocess.Popen(
+            [sys.executable, str(worker), str(source), str(second_output), str(second_report), str(template), str(tmp_path / "second-staged"), "0"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        second_stdout, second_stderr = second.communicate(timeout=30)
+        first_stdout, first_stderr = first.communicate(timeout=30)
+    finally:
+        if first.poll() is None:
+            first.kill()
+            first.communicate(timeout=10)
+
+    assert first.returncode == 0, first_stderr or first_stdout
+    assert second.returncode == 0, second_stderr or second_stdout
+    for output in (first_output, second_output):
+        with zipfile.ZipFile(output) as archive:
+            assert "word/document.xml" in archive.namelist()
+    for report in (first_report, second_report):
+        assert json.loads(report.read_text(encoding="utf-8"))["status"] == "completed"
+    assert not list(tmp_path.glob(".wxdf-publication-*.journal"))
+    assert not list(tmp_path.glob(".*.staging-*"))

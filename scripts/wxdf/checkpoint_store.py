@@ -29,6 +29,7 @@ from .response_identity import (
     response_digest as _response_digest,
 )
 from .validation import validate_checkpoint
+from .publication_lock import publication_lock
 from .request_append import (
     _exclusive_file_lock,
     _recover_native_request_append,
@@ -345,7 +346,7 @@ def prepare_native_resume(
         checkpoint_path.name + ".request-append.lock"
     )
     with _exclusive_file_lock(checkpoint_lock_path):
-        from .publication import PublicationError, recover_pending_publications
+        from .publication import PublicationError, recover_pending_publications_locked
 
         recovery_targets = [checkpoint_path]
         for field in ("output", "source_ast", "ast", "report", "report_md"):
@@ -353,7 +354,7 @@ def prepare_native_resume(
             if value:
                 recovery_targets.append(Path(value))
         try:
-            recover_pending_publications(recovery_targets)
+            recover_pending_publications_locked(recovery_targets)
         except PublicationError as exc:
             raise CheckpointError(
                 f"cannot recover native terminal generation: {exc}",
@@ -375,7 +376,8 @@ def prepare_native_resume(
             code="unsupported_resume_stage",
         )
     baseline_id = str(checkpoint.get("candidate_baseline_id") or "")
-    expected_run_id = "native-file-" + baseline_id.removeprefix("sha256:")[:20]
+    baseline_digest = baseline_id[len("sha256:"):] if baseline_id.startswith("sha256:") else baseline_id
+    expected_run_id = "native-file-" + baseline_digest[:20]
     if checkpoint["status"] == "waiting_external" and checkpoint.get("run_id") != expected_run_id:
         raise CheckpointError(
             "relation checkpoint candidate baseline identity changed",
@@ -384,7 +386,13 @@ def prepare_native_resume(
     request_path = Path(checkpoint["files"]["requests_path"])
     from .parsers import parse
 
-    current_source_facts = parse(source_path, {"source_store": source_store})
+    current_source_facts = parse(
+        source_path,
+        {
+            "source_store": source_store,
+            "allow_external_assets": bool(configuration.get("allow_external_assets")),
+        },
+    )
     verified_resources = _verified_resource_bytes(source_path, current_source_facts, source_store)
     try:
         template_bytes = b"" if template_path is None else _path(template_path).read_bytes()
@@ -610,7 +618,9 @@ def complete_native_checkpoint(
 
     completed = copy.deepcopy(dict(checkpoint))
     transaction_digests = {
-        str(saved_id): "sha256:" + str(digest).removeprefix("sha256:")
+        str(saved_id): "sha256:" + (
+            str(digest)[len("sha256:"):] if str(digest).startswith("sha256:") else str(digest)
+        )
         for saved_id, digest in transactions.items()
     }
     applied_transactions = [
@@ -948,7 +958,8 @@ def _write_json_atomic(checkpoint: Mapping[str, Any], path: Path, *, crash_at: s
 
     payload = (canonical_json(checkpoint) + "\n").encode("utf-8")
     try:
-        publish_files_atomically({path: payload}, crash_at=crash_at)
+        with publication_lock([path]):
+            publish_files_atomically({path: payload}, crash_at=crash_at)
     except PublicationError as exc:
         code = "injected_failure" if crash_at is not None else "checkpoint_write_failed"
         raise CheckpointError(str(exc), code=code) from exc
@@ -1050,10 +1061,10 @@ def load_checkpoint(
     """Load, validate and optionally bind a checkpoint to current inputs."""
 
     source = _path(path)
-    from .publication import PublicationError, recover_pending_publications
+    from .publication import PublicationError, recover_pending_publications_locked
 
     try:
-        recover_pending_publications(source)
+        recover_pending_publications_locked(source)
     except PublicationError as exc:
         raise CheckpointError(
             f"cannot recover checkpoint publication: {exc}",

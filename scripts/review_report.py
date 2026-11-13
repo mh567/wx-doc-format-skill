@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 from pathlib import Path
 from typing import Any
 
@@ -196,11 +197,16 @@ def write_review_report(result: dict[str, Any], path: Path) -> None:
 
 def write_review_report_html(result: dict[str, Any], path: Path) -> None:
     path = Path(path)
-    score = result.get("score", 0)
-    grade = result.get("grade", "unknown")
+    score = str(result.get("score", 0))
+    grade = html.escape(str(result.get("grade", "unknown")))
     issues = result.get("issues", [])
 
-    score_color = "#28a745" if score >= 80 else "#ffc107" if score >= 60 else "#dc3545"
+    try:
+        numeric_score = float(score)
+    except ValueError:
+        numeric_score = 0.0
+    score_color = "#28a745" if numeric_score >= 80 else "#ffc107" if numeric_score >= 60 else "#dc3545"
+    score_html = html.escape(score)
 
     html_parts: list[str] = []
     html_parts.append("""<!DOCTYPE html>
@@ -236,7 +242,7 @@ h3 { color: #34495e; }
 """)
 
     html_parts.append("<h1>文档格式审查报告</h1>")
-    html_parts.append(f'<div class="score-box"><div class="score-value">{score}</div><div class="score-grade">等级：{grade}</div></div>')
+    html_parts.append(f'<div class="score-box"><div class="score-value">{score_html}</div><div class="score-grade">等级：{grade}</div></div>')
 
     grouped = _format_issues_by_severity(issues)
     html_parts.append('<h2>问题统计</h2>')
@@ -251,21 +257,23 @@ h3 { color: #34495e; }
     if issues:
         html_parts.append('<h2>问题清单</h2>')
         for issue in issues:
-            level = issue.get("level", "low")
-            title = issue.get("title", issue.get("code", "unknown"))
+            level = str(issue.get("level", "low"))
+            if level not in {"critical", "high", "medium", "low"}:
+                level = "low"
+            title = html.escape(str(issue.get("title", issue.get("code", "unknown"))))
             count, locations, omitted = location_view(issue)
-            suggestion = issue.get("suggestion", "")
+            suggestion = html.escape(str(issue.get("suggestion", "")))
             html_parts.append(f'<div class="issue-card issue-{level}">')
             html_parts.append(f'<div class="issue-title">{title}</div>')
             if len(locations) == 1 and count <= 1:
-                html_parts.append(f'<div class="issue-location">位置：{locations[0]}</div>')
+                html_parts.append(f'<div class="issue-location">位置：{html.escape(str(locations[0]))}</div>')
             elif locations:
                 html_parts.append(f'<div class="issue-location">位置（共 {count} 处）：</div>')
                 html_parts.append('<ul class="issue-locations">')
                 for location in locations:
-                    html_parts.append(f'<li>{location}</li>')
+                    html_parts.append(f'<li>{html.escape(str(location))}</li>')
                 if omitted:
-                    html_parts.append(f'<li>（其余 {omitted} 处从略）</li>')
+                    html_parts.append(f'<li>（其余 {int(omitted)} 处从略）</li>')
                 html_parts.append('</ul>')
             if suggestion:
                 html_parts.append(f'<div class="issue-suggestion">建议：{suggestion}</div>')
@@ -276,14 +284,14 @@ h3 { color: #34495e; }
         html_parts.append('<h2>合规项摘要</h2>')
         html_parts.append('<ul class="compliant-list">')
         for item in compliant_items:
-            html_parts.append(f'<li>{item}</li>')
+            html_parts.append(f'<li>{html.escape(str(item))}</li>')
         html_parts.append('</ul>')
 
     risk_warnings = result.get("risk_warnings", [])
     if risk_warnings:
         html_parts.append('<h2>风险提示</h2>')
         for warning in risk_warnings:
-            html_parts.append(f'<div class="warning-box">{warning}</div>')
+            html_parts.append(f'<div class="warning-box">{html.escape(str(warning))}</div>')
 
     html_parts.append("</body></html>")
 

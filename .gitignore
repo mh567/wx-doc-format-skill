@@ -2,6 +2,9 @@
 __pycache__/
 *.pyc
 .venv/
+.deps/
+wxdf-deps-*/
+.deps.old/
 .hermes/
 *.pdf
 wx_output/
@@ -89,6 +92,11 @@ tests/*
 !tests/test_input_review.py
 !tests/test_page_contract.py
 !tests/test_review_enhancement.py
+!tests/test_offline_package.py
+!tests/test_python_compatibility.py
+!tests/test_cli_path_safety.py
+!tests/test_source_hardening.py
+!tests/test_review_report.py
 !tests/modular_support.py
 !tests/fixtures/
 !tests/fixtures/modular_v3/
@@ -101,3 +109,5 @@ requirements-dev.txt
 # Local validation output and tool markers stay on disk but never enter the tree.
 _build/
 paseo.json
+.deps.lock
+.wxdf-publication.lock

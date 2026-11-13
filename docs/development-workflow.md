@@ -54,10 +54,10 @@ git push origin dev:main
 
 ## 3. 依赖与运行环境
 
-- 运行时只依赖 `python-docx`、`lxml`、`markdown-it-py`，版本固定在 `requirements.txt`。
+- 运行时要求 Python 3.8 或更新版本，依赖 `python-docx`、`lxml`、`markdown-it-py`、`typing_extensions`，按解释器版本在 `requirements.txt` 固定版本。Python 3.8 使用兼容版本，较新解释器保留现有依赖。
 - 开发依赖包含 `pytest`，声明在 `requirements-dev.txt`。
-- `scripts/setup.sh` 在仓库根创建 `.venv` 并安装依赖；`--dev` 同时安装开发依赖。
-- `scripts/run.sh` 依次尝试 `WXDF_PYTHON`、`$SKILL_ROOT/.venv`、`$SKILL_ROOT/scripts/.venv`、`python3`、`python3.14` 到 `python3.10`、`/usr/bin/python3`。
+- 源码安装的 `scripts/setup.sh` 在仓库根创建 `.venv` 并安装依赖；`--dev` 同时安装开发依赖。离线包由启动入口直接准备并加载 `.deps/` 私有依赖，不依赖 venv、pip 或 ensurepip。
+- `scripts/run.sh` 依次尝试 `WXDF_PYTHON`、`$SKILL_ROOT/.venv`、`$SKILL_ROOT/scripts/.venv`、`python3`、`python3.14` 到 `python3.8`、`/usr/bin/python3`，并把选中的解释器传给安装脚本。
 - 仓库不携带任何原生二进制、wheel、加密载荷或制品清单。
 
 ## 4. 发布
@@ -70,17 +70,29 @@ git push origin dev:main
 git ls-files | grep -E '\.(so|dylib|pyd|pyc|pyo|whl)$'
 ```
 
-4. 构建按平台区分的离线 zip：
+4. 构建每个平台一个的统一离线 zip：
 
 ```bash
-scripts/.venv/bin/python3 scripts/build_offline_package.py
+scripts/.venv/bin/python3 scripts/build_offline_package.py \
+  --macos-cp38-wheel /absolute/path/lxml-5.4.0-cp38-cp38-macosx_11_0_arm64.whl
 ```
+
+macOS ARM64 的 CPython 3.8 wheel 需在构建机用原生 Python 3.8 和官方 lxml 5.4.0 源码预先构建；官方没有提供该 wheel。使用系统 XML/XSLT，避免引入目标机不存在的 Homebrew 动态依赖：
+
+```bash
+MACOSX_DEPLOYMENT_TARGET=11.0 \
+XML2_CONFIG=/usr/bin/xml2-config XSLT_CONFIG=/usr/bin/xslt-config \
+python3.8 -m pip wheel --no-index --no-deps --no-build-isolation \
+  --wheel-dir /absolute/path/wheels /absolute/path/lxml-5.4.0.tar.gz
+```
+
+核验官方源码摘要、生成 wheel 的 ARM64 架构、最低系统版本和 `otool -L`，仅允许目标系统自带动态库。wheel 保留在构建临时目录或离线包内，禁止提交。构建 Linux 包可单独传 `--platform linux-arm64`，无需 macOS wheel。
 
 5. 在当前提交上创建 `v<VERSION>` annotated tag。
 6. 推送提交与 tag。
 7. 将 `dist/wx-doc-format-<VERSION>-<platform>.zip` 上传到 Release。
 
-离线 zip 内包含 `wheelhouse/`，首次运行只从包内安装依赖。Release 说明写明平台与 Python 覆盖范围。
+离线 zip 内包含 `wheelhouse/manifest.json` 与 `wheels.tar.xz`，覆盖常规 CPython 3.8 至 3.14。wheel 内部成员内容完整保留，以 ZIP_STORED 重包后整体 LZMA 压缩。构建机用 pip 内置的 packaging 解析 `requirements.txt`，把每个 CPython tag 的精确依赖写入 `environments`；目标机只需标准系统 Python 及其自带 lzma。首次运行按清单解出 wheel 并校验摘要，完整展开包树到 Skill 私有 `.deps/`，保留资源与版本元数据，直接加入加载路径；后续复用校验通过的缓存。离线链不创建 venv、不调用 pip 或 ensurepip、不访问网络。每包必须小于 14,000,000 字节，超限时构建失败并移除该包。Release 说明写明 macOS 11+ ARM64、glibc 2.28+ Linux ARM64 与 Python 覆盖范围。
 
 完成条件：远程 `main` 与 tag 指向预期提交，Release 附件齐全，离线解压后可直接运行。
 

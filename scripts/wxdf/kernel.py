@@ -4,12 +4,23 @@ from __future__ import annotations
 
 import copy
 import json
+import os
+import uuid
 from pathlib import Path
 from typing import Any, Mapping
 
+from .publication_lock import publication_lock
 from .run_result import ConversionRequest, RunResult
 
 _NATIVE_PROFILE = "wx-default-v2"
+
+
+def _staging_paths(output_path: Path) -> tuple[Path, Path]:
+    # The pid keeps the token outside publication's bare 32-hex recovery glob.
+    token = f"{uuid.uuid4().hex}-{os.getpid()}"
+    staging_path = output_path.with_name(f".{output_path.name}.staging-{token}")
+    review_candidate_path = staging_path.with_name(staging_path.name + ".review-candidate")
+    return staging_path, review_candidate_path
 
 
 class ConversionKernel:
@@ -39,7 +50,7 @@ class ConversionKernel:
                 "TransactionManagerSourceAST", "NormalizationPolicy", "RenderPlan", "Renderer", "AuditModule", "ReviewEvaluator", "Publisher",
             ],
         }
-        from .publication import PublicationError, recover_pending_publications
+        from .publication import PublicationError, recover_pending_publications_locked
 
         recovery_targets = [request.output_path]
         for key in ("source_ast_path", "normalized_ast_path", "report_path", "checkpoint_path"):
@@ -47,7 +58,7 @@ class ConversionKernel:
             if value is not None:
                 recovery_targets.append(Path(value))
         try:
-            recover_pending_publications(recovery_targets)
+            recover_pending_publications_locked(recovery_targets)
         except PublicationError as exc:
             return RunResult(
                 status="failed",
@@ -125,10 +136,7 @@ class ConversionKernel:
                 report=report,
                 diagnostics=[diagnostic],
             )
-        staging_path = request.output_path.with_name(f".{request.output_path.name}.staging")
-        review_candidate_path = request.output_path.with_name(
-            f".{request.output_path.name}.review-candidate.staging"
-        )
+        staging_path, review_candidate_path = _staging_paths(request.output_path)
         store = SourceStore()
         context: Any = None
         checkpoint: dict[str, Any] | None = None
@@ -244,7 +252,8 @@ class ConversionKernel:
                     if options.get("protocol_mode") == "resume" and options.get("checkpoint_path") is not None:
                         context.provide("pending_publication_payloads", publication_payloads)
                     else:
-                        publish_files_atomically(publication_payloads)
+                        with publication_lock(publication_payloads):
+                            publish_files_atomically(publication_payloads)
                 except (OSError, PublicationError) as exc:
                     diagnostic = {
                         "code": "PUBLICATION_FAILED",
@@ -357,7 +366,8 @@ class ConversionKernel:
                 try:
                     from .publication import publish_files_atomically
 
-                    publish_files_atomically(publication_payloads)
+                    with publication_lock(publication_payloads):
+                        publish_files_atomically(publication_payloads)
                 except (OSError, PublicationError) as exc:
                     diagnostic = {
                         "code": "PUBLICATION_FAILED",
