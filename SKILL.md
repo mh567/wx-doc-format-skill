@@ -8,23 +8,17 @@ metadata:
 
 # WX 文档格式
 
-将用户提供的 Markdown 或 DOCX 转换为模板化 DOCX，并依据公开审计摘要决定是否交付。
+将用户提供的 Markdown 或 DOCX 转换为 WX 模板格式 DOCX，或审查现有 DOCX 的格式并给出评分与整改建议。转换后依据公开审计摘要决定是否交付。
 
 ## 安装方式
 
 ### 在线安装
 
-1. 把仓库地址 `https://github.com/mh567/wx-doc-format-skill` 交给 agent，并要求安装 `wx-doc-format` skill。支持 `cmd skills add` 的宿主可直接执行 `cmd skills add mh567/wx-doc-format-skill`。
-2. agent 将仓库安装到自己的 skills 目录，目录名为 `wx-doc-format`，保证该目录根下是本文文件。
-3. 安装完成后不需要手工执行任何脚本。用户提出转换或审查请求时，agent 按本文调用 `scripts/run.sh`；首次调用自动在 Skill 目录创建 `.venv` 并从 PyPI 安装依赖。
+将仓库安装到 agent 的 skills 目录，目录名为 `wx-doc-format`，保证该目录根下是本文文件。用户提出转换或审查请求时，按本文调用 `scripts/run.sh`，首次调用自动准备依赖。面向用户的安装步骤和使用示例见 [README.md](README.md)。
 
 ### 离线安装
 
-1. 用 `python3 --version` 确认版本，从 Release 下载匹配平台的统一包：`wx-doc-format-<VERSION>-macos-arm64.zip` 或 `wx-doc-format-<VERSION>-linux-arm64.zip`。每包覆盖常规 CPython 3.8 至 3.14，并小于 14 MB（14,000,000 字节）。多解释器设备可设置 `WXDF_PYTHON` 为目标解释器的绝对路径。
-2. 解压到 agent 的 skills 目录，得到 `wx-doc-format/`，该目录根下是本文文件。
-3. 安装完成后不需要手工执行任何脚本。用户提出转换或审查请求时，agent 按本文调用 `scripts/run.sh`；首次调用自动从包内 `wheelhouse/` 解出依赖到 Skill 私有 `.deps/` 并直接加载，不访问网络或修改系统 Python。
-
-目标机只需标准系统 Python，使用其自带的 `lzma` 标准库，无需 `venv`、`pip` 或 `ensurepip`。Linux ARM64 要求 glibc 2.28 或更新版本；macOS ARM64 要求 macOS 11 或更新版本。包内 `wheelhouse/wheels.tar.xz` 保存完整 wheel，启动脚本按清单选择并验证摘要，直接加载依赖。未覆盖的 Python 小版本、PyPy 与自由线程版不承诺离线运行；禁止为缺少 wheel 自动联网补装。
+将匹配平台的离线包解压到 agent 的 skills 目录，得到 `wx-doc-format/SKILL.md`。离线包覆盖标准 CPython 3.8 至 3.14，要求自带 `lzma`，无需 `venv`、`pip` 或 `ensurepip`。Linux ARM64 要求 glibc 2.28 或更新版本；macOS ARM64 要求 macOS 11 或更新版本。启动与异常处理按下节执行，禁止为缺少 wheel 自动联网补装。
 
 ## 触发与模式
 
@@ -75,7 +69,7 @@ metadata:
 
 ## 文档格式审查
 
-审查模式不转换文档，而是审查一个输入 DOCX 是否符合模板要求，输出百分制评分和整改报告。使用独立入口，与普通模式、LLM 文件协议互斥：
+审查模式检查输入 DOCX 是否符合模板要求，输出百分制评分和整改报告。使用独立入口，与普通模式、LLM 文件协议互斥：
 
 ```bash
 "$SKILL_ROOT/scripts/run.sh" \
