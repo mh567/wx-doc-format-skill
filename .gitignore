@@ -61,6 +61,7 @@ tests/*
 !tests/test_table_formatting.py
 !tests/test_delivery_policy.py
 !tests/test_cli_delivery_policy.py
+!tests/test_local_ci.py
 !tests/test_modular_*.py
 !tests/test_outline_heading_recognition.py
 !tests/test_t01_kernel_static_relocation.py

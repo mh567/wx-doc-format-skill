@@ -112,6 +112,23 @@ def test_wheelhouse_contains_only_manifest_and_bundle(wheelhouse):
     assert {path.name for path in wheelhouse.iterdir()} == {"manifest.json", "wheels.tar.xz"}
 
 
+def test_package_preserves_skill_reference_documents(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    reference = source / "references/ai-conversion.md"
+    reference.parent.mkdir(parents=True)
+    reference.write_text("AI response protocol", encoding="utf-8")
+    installer = source / "scripts/offline_install.py"
+    installer.parent.mkdir()
+    installer.write_text("", encoding="utf-8")
+    monkeypatch.setattr(package, "ROOT", source)
+    monkeypatch.setattr(package, "tracked_files", lambda: ["references/ai-conversion.md"])
+    destination = tmp_path / "skill"
+
+    package.stage_source(destination)
+
+    assert (destination / "references/ai-conversion.md").read_bytes() == reference.read_bytes()
+
+
 @pytest.mark.parametrize("platform_id", package.PLATFORMS)
 def test_package_covers_all_python_versions(tmp_path, monkeypatch, platform_id):
     def download(requirements, destination, **kwargs):

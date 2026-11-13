@@ -33,11 +33,16 @@ git remote -v
 
 ```bash
 ./scripts/setup.sh --dev
-.venv/bin/python3 -m pytest tests/ -q
-git diff --check
+WXDF_PYTHON="$PWD/.venv/bin/python3" sh tools/check.sh
 ```
 
-DOCX 功能变更还需执行真实文件转换，检查 CLI 返回码、JSON 报告、ZIP 完整性和专项审计。页面级视觉质量未验证时需明确记录。
+已有开发环境位于 `scripts/.venv` 时，将 `WXDF_PYTHON` 改为该环境的解释器路径。依赖已就绪时直接运行检查，无需重复安装。
+
+`tools/check.sh` 是本地完整检查入口，依次检查工作区、暂存区和最新提交的差异格式、仓库内禁止的二进制、全量测试、运行版本、真实 Markdown 转换、公开审计摘要、DOCX ZIP 完整性和格式审查报告。任一步失败即停止，临时输出自动清理。
+
+远程 CI 仅使用一个 Linux / Python 3.12 环境运行 `sh tools/check.sh --smoke`，复用上述检查并跳过全量测试。依赖启用缓存；只对 `main` 推送、PR 和手工触发运行；纯 Markdown 变更跳过，tag 不重复触发。同一分支的新提交取消尚未结束的旧检查。
+
+提交和发布前必须在本地运行完整检查。Python 兼容性、离线依赖和平台相关变更还需针对受影响的解释器与平台单独验证；单环境本地通过和远程冒烟通过均不能代表跨平台兼容性已验收。页面级视觉质量未验证时需明确记录。
 
 完成条件：相关测试、全量测试和真实样例均通过，`unexpected_styles` 为空，无未解释高风险项。
 
@@ -63,7 +68,7 @@ git push origin dev:main
 ## 4. 发布
 
 1. 更新 `VERSION`。
-2. 在干净提交上跑全量测试与至少一次真实转换。
+2. 在最终提交上运行本地 `tools/check.sh` 完整检查，并完成受影响环境的专项验证；不再等待远程全量测试矩阵。
 3. 确认仓库内原生二进制为零：
 
 ```bash

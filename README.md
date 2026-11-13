@@ -12,34 +12,9 @@
 
 ## 安装
 
-### 在线安装
+按所用 agent 的 Skill 安装方式导入本仓库或 Skill 目录，确保目录根部包含 `SKILL.md`。
 
-把下面这句话发给支持 Skill 的 agent：
-
-```text
-请从 https://github.com/mh567/wx-doc-format-skill 安装 wx-doc-format Skill。
-```
-
-支持 `cmd skills add` 的宿主也可以执行：
-
-```bash
-cmd skills add mh567/wx-doc-format-skill
-```
-
-需要 Python 3.8 或更新版本。首次使用会自动准备依赖，需要联网，无需手工运行安装脚本。
-
-### 离线安装
-
-从仓库的 Releases 页面下载与目标机匹配的离线包，解压到 agent 的 skills 目录，确认目录结构为 `wx-doc-format/SKILL.md`。
-
-| 离线包 | 目标环境 |
-|--------|----------|
-| `wx-doc-format-<版本>-macos-arm64.zip` | Apple Silicon，macOS 11 或更新版本 |
-| `wx-doc-format-<版本>-linux-arm64.zip` | Linux ARM64，glibc 2.28 或更新版本 |
-
-两个包均包含运行依赖，支持标准 CPython 3.8 至 3.14。目标 Python 需带有标准库 `lzma`，无需 `pip`、`venv` 或 `ensurepip`。安装后直接使用，首次运行自动准备依赖，全程无需联网。
-
-离线包暂不覆盖 Windows、x86、PyPy 和自由线程版 Python。多解释器环境可用 `WXDF_PYTHON` 指定 Python 的绝对路径。
+运行需要 Python 3.8 或更新版本和 POSIX shell。首次使用时启动脚本自动准备依赖。离线环境使用与目标平台和 Python 版本匹配的离线包，具体覆盖范围见包内清单。
 
 ## 怎么用
 

@@ -1,66 +1,33 @@
-name: Test
+name: Smoke
 
 on:
   push:
+    branches: [main]
+    paths-ignore: ["**/*.md"]
   pull_request:
+    paths-ignore: ["**/*.md"]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  test:
-    name: ${{ matrix.os }} / Python ${{ matrix.python }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-          - ubuntu-latest
-          - macos-latest
-        python:
-          - "3.8"
-          - "3.12"
-          - "3.14"
-        exclude:
-          - os: macos-latest
-            python: "3.8"
-          - os: ubuntu-latest
-            python: "3.8"
-        include:
-          - os: ubuntu-22.04
-            python: "3.8"
+  smoke:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python }}
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
       - name: Install dependencies
-        run: python -m pip install -r requirements-dev.txt
-      - name: Run tests
-        run: python -m pytest tests/ -q
-      - name: Check runtime version
-        run: |
-          expected=$(tr -d '\r\n' < VERSION)
-          actual=$(sh scripts/run.sh --version)
-          test "$actual" = "$expected"
-      - name: Convert markdown
-        run: |
-          mkdir -p outputs
-          sh scripts/run.sh \
-            --input input/test_baseline.md \
-            --output outputs/smoke.docx \
-            --template assets/wx_template.docx \
-            --report outputs/report.json
-      - name: Review docx
-        run: |
-          sh scripts/run.sh \
-            --review \
-            --input outputs/smoke.docx \
-            --template assets/wx_template.docx \
-            --report-md outputs/review.md
-      - name: Reject native binaries
-        run: |
-          if git ls-files | grep -Eq '\.(so|dylib|pyd|pyc|pyo|whl)$'; then
-            echo "native binaries are forbidden"
-            exit 1
-          fi
+        run: python -m pip install -r requirements.txt
+      - name: Check version, conversion, audits and review
+        run: sh tools/check.sh --smoke

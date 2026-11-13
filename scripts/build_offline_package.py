@@ -38,7 +38,7 @@ PLATFORMS = {
 }
 OFFLINE_MARKER = "OFFLINE_PACKAGE"
 PACKAGE_ROOT_FILES = {"SKILL.md", "README.md", "VERSION", "requirements.txt"}
-PACKAGE_PREFIXES = ("assets/", "scripts/")
+PACKAGE_PREFIXES = ("assets/", "scripts/", "references/")
 PACKAGE_EXCLUDED = {"scripts/build_offline_package.py"}
 ARCHIVE_ROOT = "wx-doc-format"
 MAX_ARCHIVE_BYTES = 14_000_000
