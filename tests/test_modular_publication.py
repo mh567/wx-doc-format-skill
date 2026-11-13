@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 from uuid import UUID
@@ -592,10 +593,10 @@ def test_samefile_targets_fail_before_staging_recovery_or_replacement(
     # Exercise the actual case alias on insensitive volumes and the same
     # physical-file boundary through a hard link on sensitive volumes.
     if not alias.exists():
-        alias.hardlink_to(formal)
+        os.link(formal, alias)
     if str(formal.resolve()) == str(alias.resolve()):
         alias = tmp_path / "linked.docx"
-        alias.hardlink_to(formal)
+        os.link(formal, alias)
     assert formal.samefile(alias)
     assert str(formal.resolve()) != str(alias.resolve())
     poison = tmp_path / (".wxdf-publication-" + "e" * 32 + ".journal")
@@ -703,10 +704,10 @@ def test_recovery_rejects_samefile_journal_targets_before_mutation(tmp_path: Pat
     formal.write_bytes(b"old-formal")
     alias = tmp_path / "FORMAL.DOCX"
     if not alias.exists():
-        alias.hardlink_to(formal)
+        os.link(formal, alias)
     if str(formal.resolve()) == str(alias.resolve()):
         alias = tmp_path / "linked.docx"
-        alias.hardlink_to(formal)
+        os.link(formal, alias)
     assert formal.samefile(alias)
     transaction_id = "c" * 32
     entries = []
