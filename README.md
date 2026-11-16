@@ -12,9 +12,14 @@
 
 ## 安装
 
-按所用 agent 的 Skill 安装方式导入本仓库或 Skill 目录，确保目录根部包含 `SKILL.md`。
+本 Skill 以单一目录形态分发，目录根部是 `SKILL.md`，离线包解压后就是这个目录。
 
-运行需要 Python 3.8 或更新版本和 POSIX shell。首次使用时启动脚本自动准备依赖。离线环境使用与目标平台和 Python 版本匹配的离线包，具体覆盖范围见包内清单。
+- 离线：把压缩包上传到宿主的 Skill 入口，或解压到 skills 目录下的 `wx-doc-format` 子目录。
+- 在线：把本仓库导入 agent 的 skills 目录。
+
+安装后不需要手工执行脚本。宿主提示本 Skill 未安装时，说明包还没有落到 skills 目录，按上面的方式安装后重试，不要改为联网下载。
+
+离线包按平台和 Python 版本区分，覆盖 Apple Silicon macOS 11 或更新版本、glibc 2.28 或更新版本的 Linux ARM64，以及 CPython 3.8 至 3.14，精确清单见包内 `wheelhouse/manifest.json`。首次使用时启动脚本自动准备依赖，离线包直接加载包内依赖，不访问网络。
 
 ## 怎么用
 

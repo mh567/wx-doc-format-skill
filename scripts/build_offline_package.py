@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -40,8 +41,11 @@ OFFLINE_MARKER = "OFFLINE_PACKAGE"
 PACKAGE_ROOT_FILES = {"SKILL.md", "README.md", "VERSION", "requirements.txt"}
 PACKAGE_PREFIXES = ("assets/", "scripts/", "references/")
 PACKAGE_EXCLUDED = {"scripts/build_offline_package.py"}
-ARCHIVE_ROOT = "wx-doc-format"
+PACKAGE_NAME = "wx-doc-format"
 MAX_ARCHIVE_BYTES = 14_000_000
+FILE_MODE = 0o644
+EXECUTABLE_MODE = 0o755
+DIRECTORY_MODE = 0o755
 
 
 def sha256_file(path: Path) -> str:
@@ -215,17 +219,32 @@ def build_wheelhouse(
     )
 
 
-def write_archive(staging: Path, archive: Path, root_name: str) -> None:
+def write_archive(staging: Path, archive: Path) -> None:
+    """Pack the Skill so the zip root is the Skill root.
+
+    Hosts that register a Skill from an uploaded archive look for SKILL.md in
+    the archive root, so the archive must not wrap the tree in another
+    directory. Directory entries and Unix file-type bits are written as well:
+    an archive with bare file members is read as an empty tree by extractors
+    that enumerate directories.
+    """
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as handle:
         for path in sorted(staging.rglob("*")):
+            relative = path.relative_to(staging).as_posix()
+            if path.is_dir():
+                info = zipfile.ZipInfo(relative + "/")
+                info.create_system = 3
+                info.compress_type = zipfile.ZIP_STORED
+                info.external_attr = ((stat.S_IFDIR | DIRECTORY_MODE) << 16) | 0x10
+                handle.writestr(info, b"")
+                continue
             if not path.is_file():
                 continue
-            relative = path.relative_to(staging).as_posix()
-            name = f"{root_name}/{relative}"
-            info = zipfile.ZipInfo.from_file(path, name)
+            info = zipfile.ZipInfo.from_file(path, relative)
+            info.create_system = 3
             info.compress_type = zipfile.ZIP_DEFLATED
-            mode = 0o755 if path.suffix in {".sh"} else 0o644
-            info.external_attr = mode << 16
+            mode = EXECUTABLE_MODE if path.suffix == ".sh" else FILE_MODE
+            info.external_attr = (stat.S_IFREG | mode) << 16
             with path.open("rb") as stream:
                 handle.writestr(info, stream.read())
 
@@ -244,9 +263,9 @@ def build(
     (staging / OFFLINE_MARKER).write_text(
         f"version={version}\nplatform={platform_id}\n", encoding="utf-8"
     )
-    archive = output_dir / f"{ARCHIVE_ROOT}-{version}-{platform_id}.zip"
+    archive = output_dir / f"{PACKAGE_NAME}-{version}-{platform_id}.zip"
     archive.unlink(missing_ok=True)
-    write_archive(staging, archive, ARCHIVE_ROOT)
+    write_archive(staging, archive)
     shutil.rmtree(staging)
     if archive.stat().st_size >= MAX_ARCHIVE_BYTES:
         size = archive.stat().st_size

@@ -26,6 +26,8 @@ metadata:
 
 ## 准备运行
 
+本 Skill 以目录形态分发，目录根部是本文件。宿主没有把它登记为已安装的 Skill 时，按 README 的离线安装步骤把本目录放到 `<skills>/wx-doc-format`，不要改为从网络安装。
+
 将 `SKILL_ROOT` 解析为包含本文件的绝对目录。输入、输出、模板、报告和请求目录均使用绝对路径。默认模板为 `$SKILL_ROOT/assets/wx_template.docx`。
 
 运行需要 Python 3.8 或更新版本和 POSIX shell。统一通过 `scripts/run.sh` 启动，由启动脚本选择解释器并准备依赖；需要指定解释器时设置 `WXDF_PYTHON`。离线环境使用包内依赖，准备失败时停止并报告错误，不自动联网补装。

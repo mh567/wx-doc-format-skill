@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import sys
 import io
 import subprocess
@@ -139,8 +140,12 @@ def test_package_covers_all_python_versions(tmp_path, monkeypatch, platform_id):
             handle.writestr("fixture", requirements[0])
         return [path]
 
+    def stage(destination):
+        destination.mkdir(parents=True, exist_ok=True)
+        (destination / "SKILL.md").write_text("---\nname: wx-doc-format\n---\n", encoding="utf-8")
+
     monkeypatch.setattr(package, "pip_download", download)
-    monkeypatch.setattr(package, "stage_source", lambda destination: None)
+    monkeypatch.setattr(package, "stage_source", stage)
     native = tmp_path / "lxml-5.4.0-cp38-cp38-macosx_11_0_arm64.whl"
     with zipfile.ZipFile(native, "w") as handle:
         handle.writestr("fixture", "lxml==5.4.0")
@@ -149,7 +154,10 @@ def test_package_covers_all_python_versions(tmp_path, monkeypatch, platform_id):
     assert archive.stat().st_size < 14_000_000
     with zipfile.ZipFile(archive) as handle:
         assert handle.testzip() is None
-        manifest = json.loads(handle.read("wx-doc-format/wheelhouse/manifest.json"))
+        names = handle.namelist()
+        assert "SKILL.md" in names
+        assert not any(name.startswith("wx-doc-format/") for name in names)
+        manifest = json.loads(handle.read("wheelhouse/manifest.json"))
         assert manifest["platform"] == platform_id
         assert manifest["python_versions"] == [f"3.{minor}" for minor in range(8, 15)]
         assert {record["python_tag"] for record in manifest["wheels"]} == {
@@ -168,7 +176,7 @@ def test_package_covers_all_python_versions(tmp_path, monkeypatch, platform_id):
             for pin in expected:
                 assert any(Path(name).name.startswith(pin + "-") for name in selected)
         with tarfile.open(fileobj=io.BytesIO(handle.read(
-            "wx-doc-format/wheelhouse/wheels.tar.xz"
+            "wheelhouse/wheels.tar.xz"
         )), mode="r:xz") as bundle:
             for record in manifest["wheels"]:
                 path = f"{record['python_tag']}/{record['wheel']}"
@@ -177,6 +185,33 @@ def test_package_covers_all_python_versions(tmp_path, monkeypatch, platform_id):
                 with zipfile.ZipFile(io.BytesIO(payload)) as wheel:
                     assert wheel.testzip() is None
                     assert all(i.compress_type == zipfile.ZIP_STORED for i in wheel.infolist())
+
+
+def test_archive_root_is_skill_root(tmp_path):
+    staging = tmp_path / "skill"
+    (staging / "scripts").mkdir(parents=True)
+    (staging / "assets").mkdir()
+    (staging / "SKILL.md").write_text("---\nname: wx-doc-format\n---\n", encoding="utf-8")
+    (staging / "scripts" / "run.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    (staging / "scripts" / "main.py").write_text("", encoding="utf-8")
+    archive = tmp_path / "skill.zip"
+
+    package.write_archive(staging, archive)
+
+    with zipfile.ZipFile(archive) as handle:
+        names = handle.namelist()
+        assert "SKILL.md" in names
+        assert "scripts/" in names
+        assert "assets/" in names
+        assert not any(name.startswith("wx-doc-format/") for name in names)
+        for info in handle.infolist():
+            kind = (info.external_attr >> 16) & 0o170000
+            assert kind == (stat.S_IFDIR if info.is_dir() else stat.S_IFREG), info.filename
+        extracted = tmp_path / "extracted"
+        handle.extractall(extracted)
+
+    assert (extracted / "SKILL.md").is_file()
+    assert (extracted / "scripts" / "run.sh").read_text(encoding="utf-8").startswith("#!")
 
 
 @pytest.mark.parametrize("minor", range(8, 15))

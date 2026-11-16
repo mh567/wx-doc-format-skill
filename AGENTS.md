@@ -135,12 +135,14 @@ LLM 增强为 Capability 插拔架构，当前能力：
 - 首次运行 `scripts/run.sh` 自动准备依赖：源码安装从 PyPI 安装，离线 zip 从包内 `wheelhouse/` 解包后直接加载，无需 venv、pip 或 ensurepip，不访问网络或修改系统环境；使用标准系统 Python 自带的 lzma
 - `scripts/setup.sh` 是内部安装入口，由 `run.sh` 自动调用；开发环境用 `scripts/setup.sh --dev` 安装测试依赖
 - `scripts/main.py` 通过 `scripts/../VERSION` 读取版本，源码树与 Skill 目录布局一致
+- 2026-11-16 用户裁定：离线 zip 只有一种形态，zip 根部即 Skill 根目录，`SKILL.md`、`README.md`、`VERSION`、`requirements.txt`、`assets/`、`scripts/`、`references/`、`wheelhouse/` 直接位于根下，不再额外套一层 `wx-doc-format/`。宿主按「zip 根含 `SKILL.md`」识别 Skill，套壳目录会让上传后的包显示未安装。手工安装解压到 `skills/wx-doc-format`。归档写入显式目录条目与 Unix 文件类型位，避免按目录枚举的解包器读成空树。安装说明以离线为主，宿主提示未安装时使用本地包重装，不改为联网下载
 
 ## 输出验证不变量
 
 - unexpected_styles 必须为空
 - 仓库内原生二进制数为零，不得出现 `.so`、`.dylib`、`.pyd`、`.pyc`、`.pyo`、wheel 或 `payload.bin`
 - 离线 zip 的 `wheelhouse/` 覆盖 `manifest.json` 声明的平台与 Python 小版本，按 `environments` 精确清单准备私有依赖；不调用安装工具、不访问网络
+- 离线 zip 根目录包含 `SKILL.md`，没有额外的套壳目录；归档含目录条目，每个成员带 Unix 文件类型位
 - 每个平台统一一个小于 14,000,000 字节的离线包；完整 wheel 以 ZIP_STORED 重包后保存于 `wheelhouse/wheels.tar.xz`，运行时只解出匹配版本并校验 SHA256；不得裁减 wheel 功能，包内资源与版本元数据必须可用
 - 标题文本不含手工编号
 - 普通语义表格单元格全部为 表正文

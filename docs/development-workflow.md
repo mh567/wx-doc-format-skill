@@ -75,7 +75,7 @@ git push origin dev:main
 git ls-files | grep -E '\.(so|dylib|pyd|pyc|pyo|whl)$'
 ```
 
-4. 构建每个平台一个的统一离线 zip：
+4. 构建每个平台一个的统一离线 zip。zip 根部即 Skill 根目录，`SKILL.md`、`README.md`、`VERSION`、`requirements.txt`、`assets/`、`scripts/`、`references/`、`wheelhouse/` 直接位于根下，不额外套一层 `wx-doc-format/`：宿主按「zip 根含 `SKILL.md`」识别 Skill，套壳目录会让上传后的包显示未安装。
 
 ```bash
 scripts/.venv/bin/python3 scripts/build_offline_package.py \
@@ -97,9 +97,9 @@ python3.8 -m pip wheel --no-index --no-deps --no-build-isolation \
 6. 推送提交与 tag。
 7. 将 `dist/wx-doc-format-<VERSION>-<platform>.zip` 上传到 Release。
 
-离线 zip 内包含 `wheelhouse/manifest.json` 与 `wheels.tar.xz`，覆盖常规 CPython 3.8 至 3.14。wheel 内部成员内容完整保留，以 ZIP_STORED 重包后整体 LZMA 压缩。构建机用 pip 内置的 packaging 解析 `requirements.txt`，把每个 CPython tag 的精确依赖写入 `environments`；目标机只需标准系统 Python 及其自带 lzma。首次运行按清单解出 wheel 并校验摘要，完整展开包树到 Skill 私有 `.deps/`，保留资源与版本元数据，直接加入加载路径；后续复用校验通过的缓存。离线链不创建 venv、不调用 pip 或 ensurepip、不访问网络。每包必须小于 14,000,000 字节，超限时构建失败并移除该包。Release 说明写明 macOS 11+ ARM64、glibc 2.28+ Linux ARM64 与 Python 覆盖范围。
+离线 zip 的根部是 Skill 根目录，手工安装解压到 `skills/wx-doc-format`。归档写入显式目录条目和 Unix 文件类型位，只含文件成员的包会被按目录枚举的解包器读成空树。zip 内包含 `wheelhouse/manifest.json` 与 `wheels.tar.xz`，覆盖常规 CPython 3.8 至 3.14。wheel 内部成员内容完整保留，以 ZIP_STORED 重包后整体 LZMA 压缩。构建机用 pip 内置的 packaging 解析 `requirements.txt`，把每个 CPython tag 的精确依赖写入 `environments`；目标机只需标准系统 Python 及其自带 lzma。首次运行按清单解出 wheel 并校验摘要，完整展开包树到 Skill 私有 `.deps/`，保留资源与版本元数据，直接加入加载路径；后续复用校验通过的缓存。离线链不创建 venv、不调用 pip 或 ensurepip、不访问网络。每包必须小于 14,000,000 字节，超限时构建失败并移除该包。Release 说明写明 macOS 11+ ARM64、glibc 2.28+ Linux ARM64 与 Python 覆盖范围。
 
-完成条件：远程 `main` 与 tag 指向预期提交，Release 附件齐全，离线解压后可直接运行。
+完成条件：远程 `main` 与 tag 指向预期提交，Release 附件齐全，zip 根目录含 `SKILL.md` 且解压后可直接运行。
 
 ## 5. 回滚和异常处理
 
