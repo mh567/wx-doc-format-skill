@@ -254,6 +254,53 @@ def _candidate_from_start(
     }
 
 
+def _merge_shared_end_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Fold anchors that describe one directory region into a single candidate.
+
+    A Word TOC field starts its entry cluster one paragraph after the "目  次"
+    title, so the title anchor and the field anchor produce two candidates with
+    the same end position and the same score.  Two equal scores leave the run
+    ``ambiguous`` with nothing selected, and the whole directory then survives
+    into the body while its title becomes the document title.
+
+    Anchors are grouped by ``end_source_position`` only: two candidates that stop
+    at the same block cover the same directory, and the one that starts earlier
+    spans the other.  Separate directories (a figure list after the main one)
+    end at different blocks and stay apart.  The kept candidate takes the earliest
+    start, the union of the evidence, and the highest confidence; the folded ones
+    are reported with ``merged_into`` rather than dropped, so the report still
+    explains why the run resolved instead of asking for a review.
+    """
+
+    groups: dict[int, list[dict[str, Any]]] = {}
+    for candidate in candidates:
+        groups.setdefault(int(candidate["end_source_position"]), []).append(candidate)
+
+    result: list[dict[str, Any]] = []
+    for group in groups.values():
+        if len(group) == 1:
+            result.append(group[0])
+            continue
+        group.sort(key=lambda candidate: int(candidate["start_source_position"]))
+        kept, folded = group[0], group[1:]
+        evidence = list(kept.get("evidence", []))
+        for candidate in folded:
+            for item in candidate.get("evidence", []):
+                if item not in evidence:
+                    evidence.append(item)
+        kept["evidence"] = evidence
+        kept["confidence"] = max(candidate.get("confidence", 0) for candidate in group)
+        selection_eligible = bool(_TOC_IDENTITY_EVIDENCE.intersection(evidence))
+        kept["selection_eligible"] = selection_eligible
+        kept["negative_evidence"] = [] if selection_eligible else ["missing_toc_identity"]
+        kept["merged_candidate_ids"] = [str(candidate["candidate_id"]) for candidate in folded]
+        for candidate in folded:
+            candidate["selected"] = False
+            candidate["merged_into"] = str(kept["candidate_id"])
+        result.extend(group)
+    return result
+
+
 def _report_source_toc(context: dict, report: dict, *, method: str) -> None:
     meta = context.get("source_context", {})
     candidates = context.get("document", {}).get("blocks", [])
@@ -308,8 +355,12 @@ def detect_toc_regions(doc, report: dict) -> dict:
             candidates.append(candidate)
 
     candidates.sort(key=lambda candidate: candidate.get("confidence", 0), reverse=True)
+    candidates = _merge_shared_end_candidates(candidates)
     status = "no_candidate"
-    eligible = [candidate for candidate in candidates if candidate["selection_eligible"]]
+    eligible = [
+        candidate for candidate in candidates
+        if candidate["selection_eligible"] and not candidate.get("merged_into")
+    ]
     if eligible:
         best = eligible[0]
         runner_up = eligible[1] if len(eligible) > 1 else None

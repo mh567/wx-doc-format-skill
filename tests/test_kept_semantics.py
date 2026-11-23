@@ -343,6 +343,110 @@ def test_native_regions_extract_the_cover_title(tmp_path: Path) -> None:
     assert title.get("text") == "系统建设方案"
 
 
+def _add_field_paragraph(document: Document, instruction: str, cached: str) -> None:
+    """Append one paragraph holding a complex field with its cached result."""
+
+    paragraph = document.add_paragraph()
+    for kind, value in (
+        ("begin", None),
+        ("instrText", instruction),
+        ("separate", None),
+        ("text", cached),
+        ("end", None),
+    ):
+        run = OxmlElement("w:r")
+        if kind in {"begin", "separate", "end"}:
+            element = OxmlElement("w:fldChar")
+            element.set(qn("w:fldCharType"), kind)
+        elif kind == "instrText":
+            element = OxmlElement("w:instrText")
+            element.set(qn("xml:space"), "preserve")
+            element.text = value
+        else:
+            element = OxmlElement("w:t")
+            element.text = value
+        run.append(element)
+        paragraph._p.append(run)
+
+
+def _end_directory(document: Document) -> None:
+    """Close an entry cluster the way a Word TOC region ends: a page break."""
+
+    from docx.enum.text import WD_BREAK
+
+    document.add_paragraph().add_run().add_break(WD_BREAK.PAGE)
+
+
+def _field_toc_document(*, second_directory: bool = False) -> Document:
+    """Build a source whose directory is a real TOC field, not plain entries."""
+
+    document = Document()
+    document.core_properties.title = "系统操作手册"
+    document.add_paragraph("目  次")
+    _add_field_paragraph(document, ' TOC \\o "1-3" \\h \\u ', "1 项目概述2 总体设计")
+    for label in ("1 项目概述", "2 总体设计"):
+        _add_field_paragraph(document, f" HYPERLINK \\l _Toc{label}  PAGEREF _Toc{label} \\h ", f"{label}1")
+    _end_directory(document)
+    if second_directory:
+        document.add_paragraph("图  目  录")
+        _add_field_paragraph(document, ' TOC \\h \\z \\c "图" ', "图1 系统架构4")
+        _add_field_paragraph(document, " HYPERLINK \\l _TocGraph  PAGEREF _TocGraph \\h ", "图1 系统架构4")
+        _end_directory(document)
+    document.add_paragraph("1 项目概述", style="Heading 1")
+    document.add_paragraph("正文内容。")
+    document.add_paragraph("2 总体设计", style="Heading 1")
+    document.add_paragraph("正文内容。")
+    return document
+
+
+def test_native_regions_merge_a_directory_title_and_its_toc_field_anchor(tmp_path: Path) -> None:
+    path = _save(_field_toc_document(), tmp_path, "field-toc")
+    facts = parse(path)
+
+    resolution = resolve_source_regions(path, facts)
+    source_toc = resolution["report"]["source_toc"]
+
+    # Both anchors stay in the report, the folded one names what absorbed it.
+    assert len(source_toc["candidates"]) == 2
+    assert source_toc["status"] == "detected"
+    selected = next(item for item in source_toc["candidates"] if item["selected"])
+    folded = next(item for item in source_toc["candidates"] if item["candidate_id"] != selected["candidate_id"])
+    assert selected["start_source_position"] == 0, "the anchor carrying the title must win"
+    assert selected["candidate_id"] == source_toc["selected_candidate_id"]
+    assert folded["selected"] is False
+    assert folded["merged_into"] == selected["candidate_id"]
+    assert {"toc_title", "toc_field"} <= set(selected["evidence"])
+
+    # The title paragraph and every entry paragraph leave the body.
+    excluded = set(resolution["excluded_source_positions"])
+    assert excluded == set(range(0, int(selected["end_source_position"]) + 1))
+
+    front_matter = resolution["front_matter_context"] or {}
+    assert front_matter["status"] == "no_cover"
+    assert front_matter["title"]["source"] == "core_properties"
+    assert front_matter["title"]["text"] == "系统操作手册"
+    assert front_matter["body_start_source_position"] == int(selected["end_source_position"]) + 1
+
+
+def test_native_regions_do_not_merge_two_directories_on_separate_pages(tmp_path: Path) -> None:
+    path = _save(_field_toc_document(second_directory=True), tmp_path, "two-directories")
+    facts = parse(path)
+
+    candidates = resolve_source_regions(path, facts)["report"]["source_toc"]["candidates"]
+
+    # The main directory folds into one anchor pair; the figure list keeps its
+    # own candidate because it ends at a different block.
+    ends = sorted(item["end_source_position"] for item in candidates)
+    assert len(set(ends)) == 2, ends
+    figure_directory = next(item for item in candidates if item["end_source_position"] == max(ends))
+    assert "merged_into" not in figure_directory
+    main_directory = [
+        item for item in candidates if item["end_source_position"] == min(ends)
+    ]
+    assert len(main_directory) == 2
+    assert [item["start_source_position"] for item in main_directory] == [0, 1]
+
+
 # ---------------------------------------------------------------------------
 # appendix_semantics through a real conversion
 # ---------------------------------------------------------------------------

@@ -314,3 +314,97 @@ def test_page_only_paragraph_is_excluded_from_text_order_but_still_audited(tmp_p
     audit = check_saved_output(damaged_path, expected, render_map)
     assert audit["passed"] is False
     assert any(issue["code"] == "inline_paragraph_missing" for issue in audit["issues"])
+
+
+def _source_with_sequence_field_caption(
+    path: Path,
+    *,
+    label: str = "图",
+    body: str = "登录界面",
+    number: str = "1",
+) -> Path:
+    """Build a caption whose number lives in the source's own SEQ field."""
+
+    document = Document()
+    document.add_heading("第一章", level=1)
+    image_path = path / f"seq-figure-{label}.png"
+    Image.new("RGB", (24, 18), (60, 90, 120)).save(image_path)
+    document.add_paragraph().add_run().add_picture(str(image_path))
+    caption = document.add_paragraph(style="Caption")
+    caption.add_run(label)
+    for kind, value in (
+        ("begin", None),
+        ("instrText", f" SEQ {label} \\* ARABIC "),
+        ("separate", None),
+        ("text", number),
+        ("end", None),
+    ):
+        run = OxmlElement("w:r")
+        if kind in {"begin", "separate", "end"}:
+            field_char = OxmlElement("w:fldChar")
+            field_char.set(qn("w:fldCharType"), kind)
+            run.append(field_char)
+        elif kind == "instrText":
+            instruction = OxmlElement("w:instrText")
+            instruction.set(qn("xml:space"), "preserve")
+            instruction.text = value
+            run.append(instruction)
+        else:
+            text = OxmlElement("w:t")
+            text.text = value
+            run.append(text)
+        caption._p.append(run)
+    if body:
+        caption.add_run(body)
+    source = path / f"seq-caption-{label}.docx"
+    document.save(source)
+    return source
+
+
+def _caption_block_of(normalized: dict):
+    return next(
+        block
+        for block in normalized["source_ast"]["document"]["blocks"].values()
+        if block.get("role") == "caption"
+    )
+
+
+def test_caption_separates_a_dropped_sequence_field_from_its_text(tmp_path: Path, monkeypatch) -> None:
+    source = _source_with_sequence_field_caption(tmp_path)
+    output, result, normalized, render_map = _convert(tmp_path, source, monkeypatch)
+
+    assert result.exit_code == 0, result.diagnostics
+
+    # The caption owns the numbering, so the source field leaves and one
+    # separator stays where it was: the label and its text must stay apart.
+    caption_block = _caption_block_of(normalized)
+    texts = [item.get("text") for item in caption_block["inline_content"] if item.get("kind") == "text"]
+    assert texts == ["图", " ", "登录界面"]
+
+    paragraph = next(item for item in Document(output).paragraphs if "登录界面" in item.text)
+    assert paragraph.text == "图 1-1 登录界面"
+    instructions = "".join(node.text or "" for node in paragraph._p.iter(qn("w:instrText")))
+    assert instructions.count("SEQ 图") == 1
+
+    assert result.report["saved_output_audit"]["passed"] is True, result.report["saved_output_audit"]["issues"]
+    assert not any(item.get("code") == "caption_number_prefix_not_consumed" for item in result.diagnostics)
+
+
+def test_caption_sequence_field_adds_no_second_separator(tmp_path: Path, monkeypatch) -> None:
+    source = _source_with_sequence_field_caption(tmp_path, body=" 登录界面")
+    _, result, normalized, _ = _convert(tmp_path, source, monkeypatch)
+
+    assert result.exit_code == 0, result.diagnostics
+    caption_block = _caption_block_of(normalized)
+    texts = [item.get("text") for item in caption_block["inline_content"] if item.get("kind") == "text"]
+    assert texts == ["图", " 登录界面"], "a source separator is kept, not doubled"
+
+
+def test_caption_sequence_field_at_the_end_leaves_no_trailing_separator(tmp_path: Path, monkeypatch) -> None:
+    source = _source_with_sequence_field_caption(tmp_path, label="图", body="")
+    _, result, normalized, _ = _convert(tmp_path, source, monkeypatch)
+
+    assert result.exit_code == 0, result.diagnostics
+    caption_block = _caption_block_of(normalized)
+    texts = [item.get("text") for item in caption_block["inline_content"] if item.get("kind") == "text"]
+    assert texts == ["图"], "a caption that is only a label keeps no trailing space"

@@ -263,6 +263,43 @@ def _authored_caption_role_candidates(ast: Mapping[str, Any]) -> list[dict[str, 
     return result
 
 
+def _starts_with_whitespace(item: Mapping[str, Any]) -> bool:
+    """Return whether a visible token already opens with a separator."""
+
+    kind = item.get("kind")
+    if kind in {"break", "tab"}:
+        return True
+    if kind == "text":
+        return str(item.get("text") or "").startswith((" ", "\t"))
+    if kind == "link":
+        children = list(item.get("children") or [])
+        return bool(children) and _starts_with_whitespace(children[0])
+    return False
+
+
+def _ends_with_whitespace(items: list[Mapping[str, Any]]) -> bool:
+    for item in reversed(items):
+        kind = item.get("kind")
+        if kind == "bookmark":
+            continue
+        if kind in {"break", "tab"}:
+            return True
+        if kind == "text":
+            return str(item.get("text") or "").endswith((" ", "\t"))
+        if kind == "link":
+            children = list(item.get("children") or [])
+            return bool(children) and _ends_with_whitespace(children)
+        return False
+    return False
+
+
+def _next_visible(inline_content: list[Mapping[str, Any]], index: int) -> Mapping[str, Any] | None:
+    for item in inline_content[index + 1:]:
+        if item.get("kind") != "bookmark":
+            return item
+    return None
+
+
 def _without_images(inline_content: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
     """Keep the authored caption inlines without images or its own numbering field.
 
@@ -270,14 +307,28 @@ def _without_images(inline_content: list[Mapping[str, Any]]) -> list[dict[str, A
     and number is dropped here and written back as this module's own sequence
     field at render time.  Any other retained field, a cross reference for
     example, stays with the caption text.
+
+    Dropping the numbering field fuses the label with the caption text.  A source
+    caption spelled ``图`` + ``SEQ 图`` + ``登录界面`` would project as
+    ``图登录界面``, which no caption pattern reads as a label, so the label and
+    the whole text reach the output and the figure prints twice.  One separator is
+    left in the field's place whenever neither neighbour supplies one.
     """
 
     result: list[dict[str, Any]] = []
-    for item in inline_content:
+    for index, item in enumerate(inline_content):
         kind = item.get("kind")
         if kind == "image":
             continue
         if kind == "field" and str(item.get("instruction") or "").upper().startswith("SEQ "):
+            following = _next_visible(inline_content, index)
+            if (
+                result
+                and following is not None
+                and not _ends_with_whitespace(result)
+                and not _starts_with_whitespace(following)
+            ):
+                result.append({"kind": "text", "text": " ", "marks": []})
             continue
         copied = copy.deepcopy(dict(item))
         if copied.get("kind") == "link":
