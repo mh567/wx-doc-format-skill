@@ -876,3 +876,29 @@ def test_review_caps_printed_locations_but_keeps_the_full_count(tmp_path: Path) 
     assert captions[0]["count"] == 12
     assert len(captions[0]["locations"]) == 10
     assert "等 12 处" in captions[0]["location"]
+
+
+def test_review_treats_ambiguous_shared_figure_caption_as_covered(tmp_path: Path) -> None:
+    """Two consecutive figures sharing one authored caption are not double-penalized."""
+
+    from docx.shared import Cm
+    from PIL import Image
+
+    image_a = tmp_path / "a.png"
+    image_b = tmp_path / "b.png"
+    Image.new("RGB", (48, 32), (20, 80, 140)).save(image_a)
+    Image.new("RGB", (48, 32), (140, 80, 20)).save(image_b)
+
+    source = tmp_path / "shared-caption.docx"
+    document = Document()
+    document.add_paragraph("文档标题", style="Heading 1")
+    document.add_paragraph().add_run().add_picture(str(image_a), width=Cm(3))
+    document.add_paragraph().add_run().add_picture(str(image_b), width=Cm(3))
+    document.add_paragraph("图 1-1 组合示意图", style="Caption")
+    document.save(source)
+
+    result = review_input_document(source, TEMPLATE)
+
+    codes = _issue_codes(result)
+    assert "figure_missing_caption" not in codes, result["issues"]
+    assert result["dimension_scores"]["caption"] == 100.0

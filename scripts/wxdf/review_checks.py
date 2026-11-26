@@ -808,7 +808,14 @@ def _caption_measurement(
         and caption.get("status") == "associated"
         and caption.get("target_node_id")
     }
-    return list(inventory), targets, None
+    ambiguous_targets = {
+        str(target_id)
+        for caption in captions
+        if isinstance(caption, Mapping) and caption.get("status") == "ambiguous"
+        for target_id in (caption.get("candidate_target_node_ids") or ())
+        if target_id
+    }
+    return list(inventory), targets | ambiguous_targets, None
 
 
 def check_captions(
