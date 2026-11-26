@@ -185,17 +185,32 @@ def _order_stage_decisions(snapshot: StageSnapshot, decisions: Sequence[Mapping[
                 available.add(node_id)
             pending = [item for item in pending if item[0] != original_index]
     move_decisions = [decision for decision in other_decisions if decision.get("operation") == "move_node"]
+    plain_moves = [
+        decision for decision in move_decisions
+        if not isinstance((decision.get("value") or {}).get("anchor_node_id"), str)
+    ]
+    anchored_moves = [
+        decision for decision in move_decisions
+        if isinstance((decision.get("value") or {}).get("anchor_node_id"), str)
+    ]
     remaining_decisions = [decision for decision in other_decisions if decision.get("operation") != "move_node"]
     # Same-parent moves keep their source order through ``source_index``: the
     # ownership record a list materializer emits is in source order, so a table
     # interleaved between two continuation paragraphs is placed in its source
     # slot rather than by node id.  ``index`` stays the primary key for the moves
-    # that anchor against a fixed slot.
-    move_decisions.sort(
+    # that anchor against a fixed slot.  Anchored moves run after plain moves so
+    # an authored caption follows its target into an appendix or list item.
+    plain_moves.sort(
         key=lambda decision: (
             str((decision.get("value") or {}).get("new_parent_id")),
             int((decision.get("value") or {}).get("index", 10**9)),
             int((decision.get("value") or {}).get("source_index", 10**9)),
+            str((decision.get("target_node_ids") or [""])[0]),
+        )
+    )
+    anchored_moves.sort(
+        key=lambda decision: (
+            str((decision.get("value") or {}).get("anchor_node_id")),
             str((decision.get("target_node_ids") or [""])[0]),
         )
     )
@@ -205,7 +220,7 @@ def _order_stage_decisions(snapshot: StageSnapshot, decisions: Sequence[Mapping[
             str((decision.get("value") or {}).get("node_id")),
         )
     )
-    return [*ordered, *move_decisions, *anchored_creates, *remaining_decisions]
+    return [*ordered, *plain_moves, *anchored_moves, *anchored_creates, *remaining_decisions]
 
 
 def _parent_map(ast: Mapping[str, Any]) -> dict[str, str]:
@@ -335,13 +350,14 @@ def _inherited_scope_metadata(
 def _apply_move_node(ast: dict[str, Any], decision: Mapping[str, Any]) -> None:
     target_ids = decision.get("target_node_ids", [])
     value = decision.get("value") or {}
+    anchor_id = value.get("anchor_node_id")
     new_parent_id = value.get("new_parent_id")
-    if len(target_ids) != 1 or not isinstance(new_parent_id, str):
+    if len(target_ids) != 1 or (not isinstance(anchor_id, str) and not isinstance(new_parent_id, str)):
         raise TransactionConflict("move_node requires one target and value.new_parent_id")
     node_id = target_ids[0]
     document = ast["document"]
     nodes = _node_map(ast)
-    if node_id not in nodes or new_parent_id not in nodes:
+    if node_id not in nodes:
         raise TransactionConflict("move_node references an unknown node")
     if node_id == document["root_id"]:
         raise TransactionConflict("root cannot be moved")
@@ -349,8 +365,6 @@ def _apply_move_node(ast: dict[str, Any], decision: Mapping[str, Any]) -> None:
     old_parent = parent.get(node_id)
     if old_parent is None:
         raise TransactionConflict("move_node target has no parent")
-    if new_parent_id == node_id:
-        raise TransactionConflict("move_node would create a cycle")
     descendants = {node_id}
     frontier = [node_id]
     while frontier:
@@ -359,16 +373,30 @@ def _apply_move_node(ast: dict[str, Any], decision: Mapping[str, Any]) -> None:
             if child_id not in descendants:
                 descendants.add(child_id)
                 frontier.append(child_id)
-    if new_parent_id in descendants:
-        raise TransactionConflict("move_node would create a cycle")
-    document["children"][old_parent].remove(node_id)
-    destination = document["children"].setdefault(new_parent_id, [])
-    index = value.get("index")
-    if isinstance(index, int) and not isinstance(index, bool):
-        destination.insert(max(0, min(index, len(destination))), node_id)
+    if isinstance(anchor_id, str):
+        effective_parent = parent.get(anchor_id)
+        if not isinstance(effective_parent, str) or effective_parent not in nodes or anchor_id not in document["children"].get(effective_parent, []):
+            raise TransactionConflict("move_node anchor is unknown")
+        if effective_parent in descendants or anchor_id in descendants:
+            raise TransactionConflict("move_node would create a cycle")
+        document["children"][old_parent].remove(node_id)
+        destination = document["children"].setdefault(effective_parent, [])
+        insert_at = destination.index(anchor_id) + (1 if value.get("anchor_position") == "after" else 0)
+        destination.insert(insert_at, node_id)
     else:
-        destination.append(node_id)
-    metadata = _inherited_scope_metadata(ast, new_parent_id)
+        effective_parent = str(new_parent_id)
+        if effective_parent not in nodes:
+            raise TransactionConflict("move_node references an unknown node")
+        if effective_parent == node_id or effective_parent in descendants:
+            raise TransactionConflict("move_node would create a cycle")
+        document["children"][old_parent].remove(node_id)
+        destination = document["children"].setdefault(effective_parent, [])
+        index = value.get("index")
+        if isinstance(index, int) and not isinstance(index, bool):
+            destination.insert(max(0, min(index, len(destination))), node_id)
+        else:
+            destination.append(node_id)
+    metadata = _inherited_scope_metadata(ast, effective_parent)
     explicit_metadata = value.get("semantic_metadata")
     if isinstance(explicit_metadata, Mapping):
         metadata.update(copy.deepcopy(dict(explicit_metadata)))
@@ -530,17 +558,27 @@ def _applied_move_node(
     document = ast["document"]
     target_ids = revision.get("target_node_ids") or []
     value = decision.get("value") or {}
-    if len(target_ids) != 1 or not isinstance(value.get("new_parent_id"), str):
+    anchor_id = value.get("anchor_node_id")
+    if len(target_ids) != 1 or (not isinstance(anchor_id, str) and not isinstance(value.get("new_parent_id"), str)):
         return False
     target_id = target_ids[0]
-    siblings = document["children"].get(value["new_parent_id"], [])
-    if target_id not in siblings:
-        return False
-    index = value.get("index")
-    if isinstance(index, int) and not isinstance(index, bool):
-        expected_index = max(0, min(index, len(siblings) - 1))
-        if siblings.index(target_id) != expected_index:
+    if isinstance(anchor_id, str):
+        anchor_parent = _parent_map(ast).get(anchor_id)
+        siblings = document["children"].get(anchor_parent, []) if isinstance(anchor_parent, str) else []
+        if target_id not in siblings or anchor_id not in siblings:
             return False
+        expected = siblings.index(anchor_id) + (1 if value.get("anchor_position") == "after" else -1)
+        if siblings.index(target_id) != expected:
+            return False
+    else:
+        siblings = document["children"].get(value["new_parent_id"], [])
+        if target_id not in siblings:
+            return False
+        index = value.get("index")
+        if isinstance(index, int) and not isinstance(index, bool):
+            expected_index = max(0, min(index, len(siblings) - 1))
+            if siblings.index(target_id) != expected_index:
+                return False
     metadata = value.get("semantic_metadata")
     if isinstance(metadata, Mapping):
         nodes = {**document["blocks"], **document["containers"]}

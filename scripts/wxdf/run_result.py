@@ -180,6 +180,12 @@ def build_native_run_result(
     }
 
     diagnostics = list(list_result.get("diagnostics") or [])
+    caption_semantics_result = context.artifacts.get("caption_semantics_result")
+    for issue in (caption_semantics_result or {}).get("issues") or []:
+        if isinstance(issue, Mapping) and issue.get("code") == "caption_attribution_ambiguous":
+            diagnostic = dict(issue)
+            diagnostic.setdefault("severity", "warning")
+            diagnostics.append(diagnostic)
     if not source_facts_immutable:
         diagnostics.append({
             "code": "SOURCE_FACTS_MUTATED",

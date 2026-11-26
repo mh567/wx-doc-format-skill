@@ -854,7 +854,7 @@ def check_captions(
                 "level": "medium",
                 "location": f"图片 {index + 1}",
                 **get_suggestion("figure_missing_caption"),
-            }, locator, _node_positions(locator, node_id)))
+            }, locator, _node_positions(locator, str(obj.get("source_node_id") or node_id))))
     text_by_node = {
         str(caption.get("node_id")): str(caption.get("text") or "")
         for caption in (caption_semantics.get("captions") or [])

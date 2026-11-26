@@ -348,6 +348,8 @@ def _caption_target_block_id(
     blocks = ast["document"]["blocks"]
     if caption_type == "table" and source_target_id in blocks:
         return source_target_id
+    if source_target_id in blocks and blocks[source_target_id].get("block_type") == "image":
+        return source_target_id
     image_id = f"{source_target_id}-image"
     if image_id in blocks and blocks[image_id].get("block_type") == "image":
         return image_id
@@ -358,6 +360,70 @@ def _caption_target_block_id(
         if basis and str(basis[0]) == source_target_id:
             return str(node_id)
     return None
+
+
+def _is_caption_adjacent(
+    ast: Mapping[str, Any],
+    caption_id: str,
+    target_id: str,
+    caption_type: str,
+) -> bool:
+    for siblings in ast["document"]["children"].values():
+        if target_id in siblings and caption_id in siblings:
+            target_index = siblings.index(target_id)
+            caption_index = siblings.index(caption_id)
+            return caption_index == (target_index + 1 if caption_type == "figure" else target_index - 1)
+    return False
+
+
+def _authored_caption_content_candidate(
+    caption: Mapping[str, Any],
+    caption_id: str,
+    refs: list[dict[str, Any]],
+    facts: Mapping[str, Any],
+    blocks: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Return the normalized inline-content write for one authored caption, if changed."""
+
+    source_unit = facts["units"].get(caption_id, {})
+    source_inline = list(source_unit.get("inline_content") or []) if isinstance(source_unit, Mapping) else []
+    projected = inline_text_projection(source_inline).strip()
+    wrapped = len(projected) >= 2 and (projected[0], projected[-1]) in {("(", ")"), ("（", "）")}
+    cleaned = (
+        [{"kind": "text", "text": str(caption.get("text") or "").strip(), "marks": []}]
+        if wrapped
+        else _without_images(source_inline)
+    )
+    if not wrapped:
+        from .paragraphs import canonicalize_docx_paragraph_inline_content
+
+        cleaned = canonicalize_docx_paragraph_inline_content(
+            cleaned,
+            facts.get("evidence", {}).get(caption_id, {}),
+            eligible=True,
+            role="body",
+            style=None,
+        )
+    if cleaned == blocks[caption_id].get("inline_content", []):
+        return None
+    return {
+        "candidate_id": f"caption-content-{caption_id}",
+        "module_id": "caption_semantics",
+        "module_version": "1.0",
+        "target_source_refs": refs,
+        "target_node_ids": [caption_id],
+        "proposal": {
+            "operation": "update_node_content",
+            "property_scope": ["inline_content"],
+            "value": {"inline_content": copy.deepcopy(cleaned)},
+        },
+        "positive_evidence": [{"kind": "format_contract", "source": "authored_caption_content"}],
+        "negative_evidence": [],
+        "scope": {"stages": ["relation"]},
+        "constraints": [{"kind": "preserve_caption_text"}],
+        "rationale": "caption content is normalized after caption ownership is established",
+        "confidence": None,
+    }
 
 
 def _authored_caption_candidates(
@@ -401,6 +467,39 @@ def _authored_caption_candidates(
                 "rationale": "adjacent identical authored captions name the same target; retain one rendering and both source records",
             })
             continue
+        if caption.get("status") in {"ambiguous", "orphan"}:
+            caption_id = str(caption.get("node_id") or "")
+            caption_type = str(caption.get("caption_type") or "")
+            if (
+                caption_id not in blocks
+                or blocks[caption_id].get("block_type") != "paragraph"
+                or caption_type not in {"figure", "table"}
+            ):
+                continue
+            source_ref = facts["units"].get(caption_id, {}).get("source_ref")
+            refs = [copy.deepcopy(dict(source_ref))] if isinstance(source_ref, Mapping) else []
+            result.append({
+                "candidate_id": f"caption-semantic-role-{caption_id}",
+                "module_id": "caption_semantics",
+                "module_version": "1.0",
+                "target_source_refs": refs,
+                "target_node_ids": [caption_id],
+                "proposal": {
+                    "operation": "update_node_semantics",
+                    "property_scope": ["semantic_role"],
+                    "value": {"semantic_role": f"{caption_type}_caption"},
+                },
+                "positive_evidence": [{"kind": "format_contract", "source": "authored_caption_role"}],
+                "negative_evidence": [],
+                "scope": {"stages": ["relation"]},
+                "constraints": [{"kind": "preserve_caption_text"}],
+                "rationale": "unattributed or ambiguous authored caption keeps caption styling and numbering without forced target binding",
+                "confidence": None,
+            })
+            content_candidate = _authored_caption_content_candidate(caption, caption_id, refs, facts, blocks)
+            if content_candidate is not None:
+                result.append(content_candidate)
+            continue
         if caption.get("status") != "associated":
             continue
         caption_id = str(caption.get("node_id") or "")
@@ -433,52 +532,15 @@ def _authored_caption_candidates(
             "confidence": None,
         })
 
-        source_unit = facts["units"].get(caption_id, {})
-        source_inline = list(source_unit.get("inline_content") or []) if isinstance(source_unit, Mapping) else []
         image_ids = [
             str(node_id)
             for node_id, block in blocks.items()
             if block.get("block_type") == "image"
             and str((block.get("generation_basis") or [""])[0]) == caption_id
         ]
-        wrapped = len(inline_text_projection(source_inline).strip()) >= 2 and (
-            inline_text_projection(source_inline).strip()[0],
-            inline_text_projection(source_inline).strip()[-1],
-        ) in {("(", ")"), ("（", "）")}
-        cleaned = (
-            [{"kind": "text", "text": str(caption.get("text") or "").strip(), "marks": []}]
-            if wrapped
-            else _without_images(source_inline)
-        )
-        if not wrapped:
-            from .paragraphs import canonicalize_docx_paragraph_inline_content
-
-            cleaned = canonicalize_docx_paragraph_inline_content(
-                cleaned,
-                facts.get("evidence", {}).get(caption_id, {}),
-                eligible=True,
-                role="body",
-                style=None,
-            )
-        if cleaned != blocks[caption_id].get("inline_content", []):
-            result.append({
-                "candidate_id": f"caption-content-{caption_id}",
-                "module_id": "caption_semantics",
-                "module_version": "1.0",
-                "target_source_refs": refs,
-                "target_node_ids": [caption_id],
-                "proposal": {
-                    "operation": "update_node_content",
-                    "property_scope": ["inline_content"],
-                    "value": {"inline_content": copy.deepcopy(cleaned)},
-                },
-                "positive_evidence": [{"kind": "format_contract", "source": "authored_caption_content"}],
-                "negative_evidence": [],
-                "scope": {"stages": ["relation"]},
-                "constraints": [{"kind": "preserve_caption_text"}],
-                "rationale": "caption content is normalized after caption ownership is established",
-                "confidence": None,
-            })
+        content_candidate = _authored_caption_content_candidate(caption, caption_id, refs, facts, blocks)
+        if content_candidate is not None:
+            result.append(content_candidate)
 
         if image_ids:
             caption_position = root_children.index(caption_id) if caption_id in root_children else len(root_children)
@@ -520,6 +582,38 @@ def _authored_caption_candidates(
                     "rationale": "mixed figure image is placed before its authored caption",
                     "confidence": None,
                 })
+
+        if caption_type == "figure" and not image_ids and not _is_caption_adjacent(ast, caption_id, target_id, caption_type):
+            parent_id = next(
+                (
+                    candidate_parent
+                    for candidate_parent, child_ids in ast["document"]["children"].items()
+                    if target_id in child_ids
+                ),
+                ast["document"]["root_id"],
+            )
+            result.append({
+                "candidate_id": f"caption-move-{caption_id}",
+                "module_id": "caption_semantics",
+                "module_version": "1.0",
+                "target_source_refs": refs,
+                "target_node_ids": [caption_id],
+                "proposal": {
+                    "operation": "move_node",
+                    "property_scope": ["children"],
+                    "value": {
+                        "new_parent_id": parent_id,
+                        "anchor_node_id": target_id,
+                        "anchor_position": "after",
+                    },
+                },
+                "positive_evidence": [{"kind": "format_contract", "source": "authored_figure_caption_placement"}],
+                "negative_evidence": [],
+                "scope": {"stages": ["relation"]},
+                "constraints": [{"kind": "figure_before_caption"}],
+                "rationale": "authored figure caption is placed directly after its target image",
+                "confidence": None,
+            })
 
         association = {"kind": "caption_target", "source_id": caption_id, "target_id": target_id}
         if (association["kind"], caption_id, target_id) not in existing_associations:
@@ -595,6 +689,7 @@ def collect_caption_candidates(
     caption_semantics: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     validate_ast(ast)
+    ambiguous_targets: set[str] = set()
     if facts is None:
         result = _authored_caption_role_candidates(ast)
         captioned = _captioned_targets(ast)
@@ -607,6 +702,11 @@ def collect_caption_candidates(
                 facts,
                 collect_source_table_semantics(facts),
             )
+        for issue in (caption_semantics or {}).get("issues", []):
+            if isinstance(issue, Mapping) and issue.get("code") == "caption_attribution_ambiguous":
+                for raw_target in issue.get("candidate_target_node_ids") or []:
+                    resolved = _caption_target_block_id(ast, str(raw_target), "figure")
+                    ambiguous_targets.add(resolved or str(raw_target))
         result, captioned = _authored_caption_candidates(ast, facts, caption_semantics)
         # A capability can create a caption before relation recognition. Its
         # committed AST role and target own that caption, even though the source
@@ -617,6 +717,21 @@ def collect_caption_candidates(
         captioned.update(_captioned_targets(ast))
     blocks = ast["document"]["blocks"]
     indexes = build_indexes(ast, validate=False)
+    secondary_inline_images: set[str] = set()
+    seen_non_standalone_owners: set[str] = set()
+    for node_id, block in blocks.items():
+        if (
+            block.get("block_type") == "image"
+            and block.get("generated_by") == "source_ast.inline_image"
+            and block.get("materialization_mode") != "standalone"
+        ):
+            basis = block.get("generation_basis") or []
+            if basis:
+                owner_id = str(basis[0])
+                if owner_id in seen_non_standalone_owners:
+                    secondary_inline_images.add(str(node_id))
+                else:
+                    seen_non_standalone_owners.add(owner_id)
     for node_id, block in blocks.items():
         if block.get("block_type") == "table" and block.get("table_type") == "data":
             value = {"caption_type": "table", "eligible": True}
@@ -630,7 +745,12 @@ def collect_caption_candidates(
                     constraint="caption_above_table",
                 ))
         elif block.get("block_type") == "image":
-            if _image_shares_text_paragraph(blocks, block) or _node_inside_table(indexes, blocks, node_id):
+            if (
+                node_id in ambiguous_targets
+                or node_id in secondary_inline_images
+                or _image_shares_text_paragraph(blocks, block)
+                or _node_inside_table(indexes, blocks, node_id)
+            ):
                 continue
             value = {"caption_type": "figure", "eligible": True}
             result.append({"candidate_id": f"caption-target-{node_id}", "module_id": "caption_semantics", "module_version": "1.0", "target_source_refs": [copy.deepcopy(dict(block["source_ref"]))] if isinstance(block.get("source_ref"), Mapping) else [], "target_node_ids": [node_id], "proposal": {"operation": "create_overlay", "property_scope": overlay_property_scope(value), "value": value}, "positive_evidence": [{"kind": "format_contract", "source": "image_caption_eligibility"}], "negative_evidence": [], "scope": {"stage": "relation"}, "constraints": [{"kind": "caption_below_figure"}], "rationale": "image is figure caption eligible", "confidence": None})
@@ -722,34 +842,119 @@ def _is_unlabeled_table_title(unit: Mapping[str, Any], text: str) -> bool:
     )
 
 
+def _parse_caption_number(raw_number: str | None) -> tuple[tuple[int, int | str], ...] | None:
+    if not raw_number:
+        return None
+    parts = [part for part in re.split(r"[.-]+", raw_number.strip()) if part]
+    if not parts:
+        return None
+    parsed: list[tuple[int, int | str]] = []
+    for part in parts:
+        if part.isdigit():
+            parsed.append((0, int(part)))
+        else:
+            parsed.append((1, part.upper()))
+    return tuple(parsed)
+
+
+def _caption_run_supports_sequential_pairing(caption_run: list[Mapping[str, Any]]) -> bool:
+    """Return whether a grouped run of figure captions supports 1-to-1 source pairing."""
+
+    numbers = [_parse_caption_number(caption.get("raw_number")) for caption in caption_run]
+    if all(number is None for number in numbers):
+        return True
+    if any(number is None for number in numbers):
+        return False
+    return all(
+        numbers[index] < numbers[index + 1]  # type: ignore[operator]
+        for index in range(len(numbers) - 1)
+    )
+
+
+def _is_inert_spacer_unit(unit: Mapping[str, Any] | None, evidence: Mapping[str, Any]) -> bool:
+    if not isinstance(unit, Mapping) or unit.get("kind") != "paragraph":
+        return False
+    if str(unit.get("role") or "body") != "body":
+        return False
+    if isinstance(evidence, Mapping) and (
+        evidence.get("source_toc") is True
+        or isinstance(evidence.get("outline_level"), int)
+        and not isinstance(evidence.get("outline_level"), bool)
+    ):
+        return False
+    style = str(unit.get("style") or "").strip().casefold()
+    if style.startswith(("heading", "标题")):
+        return False
+    inline = list(unit.get("inline_content") or [])
+    if inline_text_projection(inline).strip():
+        return False
+    for item in inline:
+        kind = item.get("kind")
+        if kind == "image":
+            return False
+        if kind == "break" and item.get("break_type", "line") != "line":
+            return False
+    return True
+
+
 def collect_source_caption_semantics(
     facts: Mapping[str, Any],
     table_semantics: list[Mapping[str, Any]],
 ) -> dict[str, Any]:
     """Resolve authored caption roles and target relationships from SourceFacts."""
 
+    from .source_ast import is_promotable_multi_image_unit
+
     validate_source_facts(facts)
     tables = {str(item.get("node_id")): item for item in table_semantics}
     root_children = list(facts["children"].get("root", []))
+    parent_by_id = {
+        str(child_id): str(parent_id)
+        for parent_id, child_ids in (facts.get("children") or {}).items()
+        for child_id in child_ids
+    }
     objects: list[dict[str, Any]] = []
     captions: list[dict[str, Any]] = []
+    inert_orders: set[int] = set()
     source_type = str(facts.get("source", {}).get("source_type") or "")
     for order, node_id in enumerate(root_children):
         unit = facts["units"].get(node_id)
         container = facts["containers"].get(node_id, {})
         if unit is not None and unit.get("kind") == "paragraph":
             evidence = facts.get("evidence", {}).get(node_id, {})
+            if isinstance(evidence, Mapping) and evidence.get("source_toc") is True:
+                continue
             inline = list(unit.get("inline_content") or [])
+            source_text = inline_text_projection(inline).strip()
+            caption_type, label, raw_number, text = _source_caption_parts(source_text)
             image_count = sum(item.get("kind") == "image" for item in inline)
-            if image_count:
+            if is_promotable_multi_image_unit(str(node_id), unit, facts, parent_by_id=parent_by_id):
+                image_index = 0
+                for item in inline:
+                    if item.get("kind") != "image":
+                        continue
+                    image_index += 1
+                    image_node_id = f"{node_id}-image" if image_index == 1 else f"{node_id}-image{image_index}"
+                    objects.append({
+                        "node_id": image_node_id,
+                        "kind": "figure",
+                        "order": order,
+                        "sub_order": image_index,
+                        "source_node_id": node_id,
+                        "location": _source_location(facts, node_id),
+                    })
+            elif image_count and (not source_text or caption_type == "figure"):
                 objects.append({
                     "node_id": node_id,
                     "kind": "figure",
                     "order": order,
+                    "sub_order": 0,
+                    "source_node_id": node_id,
                     "location": _source_location(facts, node_id),
                 })
-            source_text = inline_text_projection(inline).strip()
-            caption_type, label, raw_number, text = _source_caption_parts(source_text)
+            elif _is_inert_spacer_unit(unit, evidence):
+                inert_orders.add(order)
+
             if caption_type in {"table", "figure"}:
                 captions.append({
                     "node_id": node_id,
@@ -803,51 +1008,41 @@ def collect_source_caption_semantics(
                     "node_id": node_id,
                     "kind": "table",
                     "order": order,
+                    "sub_order": 0,
+                    "source_node_id": node_id,
                     "location": _source_location(facts, node_id),
                 })
 
     assigned: set[str] = set()
+    ambiguous_figures: set[str] = set()
     issues: list[dict[str, Any]] = []
     previous_caption: dict[str, Any] | None = None
+    duplicate_orders: set[int] = set()
     for caption in captions:
-        if (previous_caption is not None
-                and previous_caption.get("status") in {"associated", "duplicate"}
-                and caption["order"] == previous_caption["order"] + 1
-                and caption["caption_type"] == previous_caption["caption_type"]
-                and caption["raw_number"] == previous_caption["raw_number"]
-                and caption["text"] == previous_caption["text"]
-                and all(item.get("kind") == "text" for node_id in
-                        (caption["node_id"], previous_caption["node_id"])
-                        for item in facts["units"][node_id].get("inline_content", []))):
-            caption.update({"status": "duplicate", "duplicate_of": previous_caption.get("duplicate_of", previous_caption["node_id"])})
+        if (
+            previous_caption is not None
+            and previous_caption.get("status") in {"candidate", "duplicate"}
+            and caption["order"] == previous_caption["order"] + 1
+            and caption["caption_type"] == previous_caption["caption_type"]
+            and caption["raw_number"] == previous_caption["raw_number"]
+            and caption["text"] == previous_caption["text"]
+            and all(
+                item.get("kind") == "text"
+                for node_id in (caption["node_id"], previous_caption["node_id"])
+                for item in facts["units"][node_id].get("inline_content", [])
+            )
+        ):
+            caption.update({
+                "status": "duplicate",
+                "duplicate_of": previous_caption.get("duplicate_of", previous_caption["node_id"]),
+            })
+            duplicate_orders.add(int(caption["order"]))
             previous_caption = caption
             continue
+        caption["status"] = "candidate"
         previous_caption = caption
-        caption_type = str(caption["caption_type"])
-        if caption_type == "table":
-            candidates = [item for item in objects if item["kind"] == "table" and item["order"] > caption["order"]]
-            candidates.sort(key=lambda item: item["order"])
-            required = "before"
-        else:
-            mixed_figure = next(
-                (
-                    item for item in objects
-                    if item["kind"] == "figure"
-                    and item["node_id"] == caption["node_id"]
-                ),
-                None,
-            )
-            candidates = [mixed_figure] if mixed_figure is not None else [
-                item for item in objects
-                if item["kind"] == "figure" and item["order"] < caption["order"]
-            ]
-            candidates.sort(key=lambda item: item["order"], reverse=True)
-            required = "after"
-        target = next((item for item in candidates if item["node_id"] not in assigned), None)
-        if target is None:
-            caption.update({"target_location": None, "required_placement": required, "source_placement": None, "status": "orphan"})
-            issues.append({"code": "caption_target_missing", "node_id": caption["node_id"], "caption_type": caption_type})
-            continue
+
+    def _associate(caption: dict[str, Any], target: Mapping[str, Any], required: str) -> None:
         assigned.add(str(target["node_id"]))
         caption.update({
             "target_node_id": target["node_id"],
@@ -856,8 +1051,146 @@ def collect_source_caption_semantics(
             "source_placement": "before" if caption["order"] < target["order"] else "after",
             "status": "associated",
         })
+
+    # Resolve table captions and mixed-paragraph figure captions first.
+    figures_by_order: dict[int, list[dict[str, Any]]] = {}
+    for obj in objects:
+        if obj["kind"] == "figure":
+            figures_by_order.setdefault(int(obj["order"]), []).append(obj)
+    figure_captions_by_order: dict[int, dict[str, Any]] = {}
+    for caption in captions:
+        if caption.get("status") == "duplicate":
+            continue
+        if str(caption["caption_type"]) == "table":
+            candidates = [item for item in objects if item["kind"] == "table" and item["order"] > caption["order"]]
+            candidates.sort(key=lambda item: item["order"])
+            target = next((item for item in candidates if item["node_id"] not in assigned), None)
+            if target is None:
+                caption.update({"target_location": None, "required_placement": "before", "source_placement": None, "status": "orphan"})
+                issues.append({"code": "caption_target_missing", "node_id": caption["node_id"], "caption_type": "table"})
+            else:
+                _associate(caption, target, "before")
+            continue
+        mixed_figure = next(
+            (
+                item for item in objects
+                if item["kind"] == "figure"
+                and item.get("source_node_id", item["node_id"]) == caption["node_id"]
+            ),
+            None,
+        )
+        if mixed_figure is not None:
+            _associate(caption, mixed_figure, "after")
+        else:
+            figure_captions_by_order[int(caption["order"])] = caption
+
+    # Resolve contiguous local figure runs paired with immediately following figure captions.
+    current_figures: list[dict[str, Any]] = []
+    current_captions: list[dict[str, Any]] = []
+
+    def _flush_local_run() -> None:
+        if not current_figures or not current_captions:
+            current_figures.clear()
+            current_captions.clear()
+            return
+        if len(current_figures) == 1 and len(current_captions) == 1:
+            _associate(current_captions[0], current_figures[0], "after")
+        elif (
+            len(current_figures) >= 2
+            and len(current_captions) == len(current_figures)
+            and _caption_run_supports_sequential_pairing(current_captions)
+        ):
+            for fig, cap in zip(current_figures, current_captions):
+                _associate(cap, fig, "after")
+        elif len(current_figures) >= 2:
+            candidate_ids = [str(fig["node_id"]) for fig in current_figures]
+            ambiguous_figures.update(candidate_ids)
+            for cap in current_captions:
+                cap.update({
+                    "target_location": None,
+                    "required_placement": "after",
+                    "source_placement": None,
+                    "status": "ambiguous",
+                    "candidate_target_node_ids": list(candidate_ids),
+                })
+                issues.append({
+                    "code": "caption_attribution_ambiguous",
+                    "severity": "info",
+                    "node_id": cap["node_id"],
+                    "caption_type": "figure",
+                    "candidate_target_node_ids": list(candidate_ids),
+                    "needs_confirmation": True,
+                    "message": "多图共用或归属不明确的源题注已保留，待人工确认。",
+                })
+        elif len(current_figures) == 1 and len(current_captions) >= 2:
+            if _caption_run_supports_sequential_pairing(current_captions):
+                _associate(current_captions[0], current_figures[0], "after")
+            else:
+                candidate_ids = [str(current_figures[0]["node_id"])]
+                ambiguous_figures.update(candidate_ids)
+                for cap in current_captions:
+                    cap.update({
+                        "target_location": None,
+                        "required_placement": "after",
+                        "source_placement": None,
+                        "status": "ambiguous",
+                        "candidate_target_node_ids": list(candidate_ids),
+                    })
+                    issues.append({
+                        "code": "caption_attribution_ambiguous",
+                        "severity": "info",
+                        "node_id": cap["node_id"],
+                        "caption_type": "figure",
+                        "candidate_target_node_ids": list(candidate_ids),
+                        "needs_confirmation": True,
+                        "message": "多图共用或归属不明确的源题注已保留，待人工确认。",
+                    })
+        current_figures.clear()
+        current_captions.clear()
+
+    for order in range(len(root_children)):
+        order_figs = [
+            obj for obj in figures_by_order.get(order, [])
+            if obj["node_id"] not in assigned and obj["node_id"] not in ambiguous_figures
+        ]
+        order_cap = figure_captions_by_order.get(order)
+        if order_figs:
+            if current_captions:
+                _flush_local_run()
+            current_figures.extend(order_figs)
+            continue
+        if order_cap is not None and order_cap.get("status") == "candidate":
+            if current_figures:
+                current_captions.append(order_cap)
+            continue
+        if order in inert_orders or order in duplicate_orders:
+            continue
+        _flush_local_run()
+    _flush_local_run()
+
+    # Fallback for any remaining unassigned non-mixed figure captions (e.g., separated by text).
+    for caption in captions:
+        if caption.get("caption_type") != "figure" or caption.get("status") != "candidate":
+            continue
+        candidates = [
+            item for item in objects
+            if item["kind"] == "figure"
+            and item["order"] < caption["order"]
+            and item["node_id"] not in assigned
+            and item["node_id"] not in ambiguous_figures
+        ]
+        candidates.sort(key=lambda item: (item["order"], item.get("sub_order", 0)), reverse=True)
+        target = candidates[0] if candidates else None
+        if target is None:
+            caption.update({"target_location": None, "required_placement": "after", "source_placement": None, "status": "orphan"})
+            issues.append({"code": "caption_target_missing", "node_id": caption["node_id"], "caption_type": "figure"})
+            continue
+        _associate(caption, target, "after")
+
     for caption in captions:
         caption.pop("order", None)
+    for obj in objects:
+        obj.pop("sub_order", None)
     # The inventory the captions were resolved against is part of the published
     # result: a consumer that checks whether an object carries a caption needs
     # the objects, not only the captions, or an object nobody captioned and a

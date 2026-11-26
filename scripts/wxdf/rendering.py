@@ -475,6 +475,19 @@ def _break_enum(item: Mapping[str, Any]) -> Any:
     )
 
 
+def _caption_kind(block: Mapping[str, Any]) -> str | None:
+    """Return the caption category for attributed or unattributed caption blocks."""
+
+    if block.get("role") == "caption":
+        return str(block.get("caption_type") or "table")
+    semantic_role = block.get("semantic_role")
+    if semantic_role == "figure_caption":
+        return "figure"
+    if semantic_role == "table_caption":
+        return "table"
+    return None
+
+
 def _caption_audit_inline(
     block: Mapping[str, Any], *, chapter_numbered: bool
 ) -> list[Mapping[str, Any]]:
@@ -486,7 +499,7 @@ def _caption_audit_inline(
     if prefix_length and (not safely_consumed or inline_text_projection(body) != authored[prefix_length:]):
         body = list(block.get("inline_content") or [])
     _, label, _, _ = caption_parts(authored)
-    label = label or ("图" if block.get("caption_type") == "figure" else "表")
+    label = label or ("图" if _caption_kind(block) == "figure" else "表")
     prefix = label + (" - " if chapter_numbered else " ")
     return [{"kind": "text", "text": prefix}, *body]
 
@@ -721,7 +734,7 @@ def _write_caption(
     compare paragraph text without special casing captions.
     """
 
-    caption_type = str(block.get("caption_type") or "table")
+    caption_type = _caption_kind(block) or "table"
     sequence = _caption_sequence(caption_type, sequences)
     inline_content = list(block.get("inline_content") or [])
     # A caption carries anchors its text refers to, so the retained markers are
@@ -836,7 +849,7 @@ def _style_for_block(
     if role == "heading":
         level = effective_outline_level(block, presentation) or 1
         return styles.get(f"heading_{level}", "Heading 1")
-    if role == "caption":
+    if _caption_kind(block) is not None:
         return styles.get("caption", "Caption")
     if role in {"note", "numbered_note"}:
         return styles.get(str(role), "Normal")
@@ -1123,8 +1136,11 @@ def render(
     retained_runs_by_node: dict[str, list[Any]] = {}
     retained_elements_by_node: dict[str, list[Any]] = {}
     diagnostics: list[dict[str, Any]] = []
+    from .semantics.source_ast import standalone_inline_images_by_owner
+
     presentation_outline = normalized.get("presentation", {}).get("outline", {})
     presentation_paragraphs = normalized.get("presentation", {}).get("paragraphs", {})
+    standalone_image_owners = set(standalone_inline_images_by_owner(document["blocks"]))
     paragraph_counter = 0
     table_counter = 0
     initial_cell_paragraphs: set[Any] = set()
@@ -1186,16 +1202,16 @@ def render(
                 except KeyError:
                     paragraph = parent.add_paragraph()
         caption_text: str | None = None
+        caption_number: Mapping[str, Any] | None = None
+        caption_kind = _caption_kind(block)
         retained_run_collector: list[Any] = []
         retained_element_collector: list[Any] = []
-        if block.get("role") == "caption":
-            caption_number: Mapping[str, Any] | None = None
+        if caption_kind is not None:
             if (
                 chapter_caption_numbering
                 and current_chapter is not None
                 and not (block.get("source_number_preserved") and block.get("appendix_id"))
             ):
-                caption_kind = str(block.get("caption_type") or "table")
                 caption_sequence_counters[caption_kind] = caption_sequence_counters.get(caption_kind, 0) + 1
                 caption_number = {
                     "chapter": current_chapter,
@@ -1260,11 +1276,11 @@ def render(
             # reports.
             "text": caption_text if caption_text is not None else _text(block.get("inline_content", []), resources),
             "inline_content": block.get("inline_content", []),
-            "role": block.get("role"),
+            "role": "caption" if caption_kind is not None else block.get("role"),
             "style": actual_style,
             "numbered": actual_style in {"List Number", "List Bullet"} or "列项" in actual_style,
         }
-        if block.get("role") == "caption":
+        if caption_kind is not None:
             render_map[node_id]["audit_inline_content"] = _caption_audit_inline(
                 block,
                 chapter_numbered=bool(
@@ -1367,11 +1383,19 @@ def render(
         render_map[node_id] = {"kind": "table", "table": table_index, "rows": row_count, "cols": column_count}
 
     def render_block(block_id: str, *, parent: Any | None = None) -> None:
-        nonlocal paragraph_counter
+        nonlocal paragraph_counter, pending_page_break
         block = document["blocks"].get(block_id)
         if block is None:
             return
         if block.get("block_type") == "paragraph":
+            if (
+                block_id in standalone_image_owners
+                and not block.get("inline_content")
+                and block.get("role") == "body"
+            ):
+                # Multi-image carrier paragraphs transferred all content to their
+                # standalone image blocks, so no empty carrier paragraph is emitted.
+                return
             add_paragraph(block_id, block, parent=parent)
         elif block.get("block_type") == "table":
             add_table(block_id, block_id, parent=parent)
@@ -1399,7 +1423,12 @@ def render(
                     paragraph = parent.add_paragraph()
             media.embed(paragraph.add_run(), block)
             if parent is None or parent._tc not in semantic_table_cells:
-                _apply_paragraph_alignment(paragraph, presentation_paragraphs.get(block_id))
+                paragraph_presentation = presentation_paragraphs.get(block_id)
+                _apply_paragraph_alignment(paragraph, paragraph_presentation)
+                _apply_paragraph_indent(paragraph, paragraph_presentation)
+            if pending_page_break:
+                paragraph.paragraph_format.page_break_before = True
+                pending_page_break = False
             paragraph_counter += 1
             render_map[block_id] = {
                 "kind": "image",

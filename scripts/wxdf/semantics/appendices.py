@@ -331,15 +331,28 @@ def prepare_native_appendix_semantics(
         for item_id, list_id in (item_map or {}).items()
         if item_id and list_id
     }
+    from .source_ast import standalone_inline_images_by_owner
+
+    blocks = source_ast["document"]["blocks"]
+    root_order = list(source_ast["document"]["children"].get(source_ast["document"]["root_id"], []))
+    order_rank = {str(node_id): pos for pos, node_id in enumerate(root_order)}
+    standalone_images_by_owner = {
+        owner: sorted(image_ids, key=lambda img_id: order_rank.get(img_id, len(root_order)))
+        for owner, image_ids in standalone_inline_images_by_owner(blocks).items()
+    }
     for appendix in prepared.get("ranges", []):
         seen: set[str] = set()
         mapped: list[str] = []
         for node_id in appendix.get("root_node_ids", []):
             native_id = item_to_list.get(str(node_id), str(node_id))
-            if native_id in seen:
-                continue
-            seen.add(native_id)
-            mapped.append(native_id)
+            if native_id not in seen:
+                seen.add(native_id)
+                mapped.append(native_id)
+            if native_id == str(node_id):
+                for image_id in standalone_images_by_owner.get(str(node_id), []):
+                    if image_id not in seen:
+                        seen.add(image_id)
+                        mapped.append(image_id)
         appendix["source_root_node_ids"] = list(appendix.get("root_node_ids") or [])
         appendix["root_node_ids"] = mapped
     return prepared
@@ -469,7 +482,7 @@ def collect_native_appendix_candidates(
                     "property_scope": ["children", "semantics"],
                     "value": {
                         "new_parent_id": container_id,
-                        "index": index,
+                        "source_index": index,
                         "semantic_metadata": {
                             "appendix_id": appendix_id,
                             "semantic_scope_id": semantic_scope_id,

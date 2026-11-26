@@ -1186,6 +1186,57 @@ def check_model(normalized: Mapping[str, Any]) -> dict[str, Any]:
     listed = [item["node_id"] for item in plan["operations"] if item.get("kind") == "list_item"]
     if set(listed) != set(presentation):
         issues.append({"code": "render_plan_list_mismatch", "expected": sorted(presentation), "actual": sorted(listed)})
+    overlay = normalized.get("overlay") or {}
+    children_map = normalized.get("source_ast", {}).get("document", {}).get("children", {})
+    associations = normalized.get("source_ast", {}).get("document", {}).get("associations", [])
+    captions_by_target: dict[str, list[str]] = {}
+    for block_id, block in (blocks.items() if isinstance(blocks, Mapping) else ()):
+        if isinstance(block, Mapping) and block.get("role") == "caption" and block.get("target_id"):
+            captions_by_target.setdefault(str(block["target_id"]), []).append(str(block_id))
+    caption_assoc_pairs = {
+        (str(assoc.get("source_id")), str(assoc.get("target_id")))
+        for assoc in (associations if isinstance(associations, list) else ())
+        if isinstance(assoc, Mapping) and assoc.get("kind") == "caption_target"
+    }
+    siblings_by_node: dict[str, list[str]] = {}
+    if isinstance(children_map, Mapping):
+        for sibling_list in children_map.values():
+            if isinstance(sibling_list, list):
+                for child_id in sibling_list:
+                    siblings_by_node[str(child_id)] = [str(item) for item in sibling_list]
+    if isinstance(overlay, Mapping):
+        for node_id, values in overlay.items():
+            if not (isinstance(values, Mapping) and values.get("caption_type") == "figure" and values.get("eligible") is True):
+                continue
+            target_block = blocks.get(node_id) if isinstance(blocks, Mapping) else None
+            if not isinstance(target_block, Mapping) or target_block.get("block_type") != "image":
+                continue
+            bound = captions_by_target.get(str(node_id), [])
+            valid_binding = len(bound) == 1 and (bound[0], str(node_id)) in caption_assoc_pairs
+            if valid_binding:
+                siblings = siblings_by_node.get(str(node_id), [])
+                if bound[0] not in siblings or str(node_id) not in siblings:
+                    valid_binding = False
+                else:
+                    target_idx = siblings.index(str(node_id))
+                    caption_idx = siblings.index(bound[0])
+                    if caption_idx <= target_idx:
+                        valid_binding = False
+                    else:
+                        between = siblings[target_idx + 1 : caption_idx]
+                        valid_binding = all(
+                            isinstance(blocks.get(sid), Mapping)
+                            and blocks[sid].get("block_type") == "image"
+                            and (blocks[sid].get("generation_basis") or [None])[0] == bound[0]
+                            for sid in between
+                        )
+            if not valid_binding:
+                issues.append({
+                    "code": "figure_caption_binding_invalid",
+                    "node_id": str(node_id),
+                    "severity": "high",
+                    "caption_count": len(bound),
+                })
     blocking = [issue for issue in issues if not is_advisory_audit_issue(issue)]
     return {"passed": not blocking, "issues": issues, "render_plan": plan}
 
@@ -1204,14 +1255,25 @@ def _expected_paragraph_texts(expected: Mapping[str, Any], render_map: Mapping[s
 
 def _is_page_only_paragraph(item: Mapping[str, Any]) -> bool:
     inline_content = item.get("inline_content", [])
-    return (
-        isinstance(inline_content, list)
-        and len(inline_content) == 1
-        and isinstance(inline_content[0], Mapping)
-        and inline_content[0].get("kind") == "break"
-        and inline_content[0].get("break_type") == "page"
-        and str(item.get("text") or "") == "\n"
-    )
+    if not isinstance(inline_content, list) or not inline_content:
+        return False
+    has_page_break = False
+    for token in inline_content:
+        if not isinstance(token, Mapping):
+            return False
+        kind = token.get("kind")
+        if kind == "break":
+            if token.get("break_type", "line") == "page":
+                has_page_break = True
+            else:
+                return False
+        elif kind == "text" and not str(token.get("text") or ""):
+            continue
+        elif kind in {"image", "bookmark"}:
+            continue
+        else:
+            return False
+    return has_page_break and set(str(item.get("text") or "")) == {"\n"}
 
 
 def _inline_signature(inline_content: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -1444,11 +1506,8 @@ def check_saved_output(
                 parts.append("\t")
         return "".join(parts)
 
-    actual_texts = [
-        text
-        for paragraph in xml_paragraphs
-        if (text := paragraph_text(paragraph))
-        and (
+    def paragraph_has_visible_text(paragraph: Any, text: str) -> bool:
+        return bool(text) and (
             "\t" in text
             or any(node.text for node in paragraph.findall(".//w:t", ns))
             or any(
@@ -1457,6 +1516,28 @@ def check_saved_output(
                 for node in paragraph.iter()
             )
         )
+
+    def inline_has_visible_text(inline_items: Sequence[Mapping[str, Any]]) -> bool:
+        for entry in inline_items:
+            if not isinstance(entry, Mapping):
+                continue
+            kind = entry.get("kind")
+            if kind == "text" and entry.get("text"):
+                return True
+            if kind == "tab":
+                return True
+            if kind == "break" and entry.get("break_type", "line") != "page":
+                return True
+            if kind in {"field", "opaque_inline"} and entry.get("cached_result"):
+                return True
+            if kind == "link" and inline_has_visible_text(list(entry.get("children") or [])):
+                return True
+        return False
+
+    actual_texts = [
+        text
+        for paragraph in xml_paragraphs
+        if (text := paragraph_text(paragraph)) and paragraph_has_visible_text(paragraph, text)
     ]
     expected_texts = [text for text in _expected_paragraph_texts(expected, render_map) if text]
     if actual_texts != expected_texts:
@@ -1482,10 +1563,29 @@ def check_saved_output(
             (
                 (index, paragraph)
                 for index, paragraph in enumerate(xml_paragraphs)
-                if index not in used_paragraph_indexes and paragraph_text(paragraph) == expected_text
+                if index not in used_paragraph_indexes
+                and paragraph_text(paragraph) == expected_text
+                and (
+                    not item.get("image_resources")
+                    or paragraph.find(".//{http://schemas.openxmlformats.org/drawingml/2006/main}blip") is not None
+                )
             ),
             None,
         )
+        if candidate is None:
+            candidate = next(
+                (
+                    (index, paragraph)
+                    for index, paragraph in enumerate(xml_paragraphs)
+                    if index not in used_paragraph_indexes
+                    and paragraph_text(paragraph) == expected_text
+                    and not (
+                        item.get("image_resources")
+                        and paragraph.find("w:pPr/w:sectPr", ns) is not None
+                    )
+                ),
+                None,
+            )
         if candidate is None:
             issues.append({"code": "inline_paragraph_missing", "node_id": node_id, "expected_text": expected_text})
             continue
@@ -1538,6 +1638,9 @@ def check_saved_output(
             if relationship.get("Type", "").endswith("/image")
         }
         actual_image_hashes: list[tuple[str | None, str | None, str | None]] = []
+        part_hash_cache: dict[str, str] = {}
+        actual_flow: list[tuple[str, tuple[str, ...]]] = []
+        check_interleaved_flow = not expected.get("expected_texts") and bool(expected_image_hashes)
         with ZipFile(output) as archive:
             names = set(archive.namelist())
             for blip in document_root.findall(f".//{{{drawing_namespace}}}blip"):
@@ -1548,7 +1651,26 @@ def check_saved_output(
                     actual_image_hashes.append((relationship_id, package_path, None))
                     issues.append({"code": "image_relationship_missing", "relationship_id": relationship_id, "target": target})
                     continue
-                actual_image_hashes.append((relationship_id, package_path, "sha256:" + hashlib.sha256(archive.read(package_path)).hexdigest()))
+                if package_path not in part_hash_cache:
+                    part_hash_cache[package_path] = "sha256:" + hashlib.sha256(archive.read(package_path)).hexdigest()
+                actual_image_hashes.append((relationship_id, package_path, part_hash_cache[package_path]))
+            if check_interleaved_flow:
+                for paragraph in xml_paragraphs:
+                    text = paragraph_text(paragraph)
+                    has_text = paragraph_has_visible_text(paragraph, text)
+                    p_hashes: list[str] = []
+                    for blip in paragraph.findall(f".//{{{drawing_namespace}}}blip"):
+                        rid = blip.get(f"{{{rel_namespace}}}embed")
+                        target = relationships.get(rid)
+                        package_path = posixpath.normpath(posixpath.join("word", target.lstrip("/"))) if target else None
+                        if package_path is None or package_path not in names:
+                            p_hashes.append("")
+                        else:
+                            if package_path not in part_hash_cache:
+                                part_hash_cache[package_path] = "sha256:" + hashlib.sha256(archive.read(package_path)).hexdigest()
+                            p_hashes.append(part_hash_cache[package_path])
+                    if has_text or p_hashes:
+                        actual_flow.append((text if has_text else "", tuple(p_hashes)))
         if len(actual_image_hashes) != len(expected_image_hashes):
             issues.append({"code": "image_count_changed", "expected": len(expected_image_hashes), "actual": len(actual_image_hashes)})
         if expected_media_parts is not None:
@@ -1561,6 +1683,42 @@ def check_saved_output(
                 issues.append({"code": "image_resource_mismatch", "index": index, "resource_id": resource_id, "expected": expected_hash, "actual": actual_hash})
             if index < len(expected_image_targets) and expected_image_targets[index] != actual_target:
                 issues.append({"code": "image_relationship_target_mismatch", "index": index, "resource_id": resource_id, "expected": expected_image_targets[index], "actual": actual_target})
+        if check_interleaved_flow:
+            expected_flow: list[tuple[str, tuple[str, ...]]] = []
+            for item in render_map.values():
+                if not isinstance(item, Mapping):
+                    continue
+                if (
+                    item.get("kind") not in {"paragraph", "image"}
+                    or item.get("omitted_empty")
+                    or (_is_page_only_paragraph(item) and not item.get("image_resources"))
+                ):
+                    continue
+                item_text = str(item.get("text") or "")
+                inline_items = list(item.get("inline_content") or [])
+                if (
+                    item.get("kind") == "paragraph"
+                    and item.get("role") != "caption"
+                    and inline_items
+                    and not inline_has_visible_text(inline_items)
+                ):
+                    item_text = ""
+                rids = list(item.get("image_resources") or [])
+                e_hashes = tuple(
+                    str(source_resources[rid]["content_sha256"])
+                    for rid in rids
+                    if isinstance(source_resources, Mapping)
+                    and isinstance(source_resources.get(rid), Mapping)
+                    and source_resources[rid].get("content_sha256")
+                )
+                if item_text or e_hashes:
+                    expected_flow.append((item_text, e_hashes))
+            if expected_flow != actual_flow:
+                issues.append({
+                    "code": "figure_caption_order_changed",
+                    "expected": expected_flow,
+                    "actual": actual_flow,
+                })
     expected_numbered_items = [item for item in render_map.values() if item.get("numbered") and not item.get("omitted_empty")]
     expected_numbered_texts = [str(item.get("text") or "") for item in expected_numbered_items if str(item.get("text") or "")]
     expected_numbered_styles = {str(item.get("style") or "") for item in expected_numbered_items if item.get("style")}

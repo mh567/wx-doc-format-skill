@@ -382,6 +382,9 @@ def _close_dropped_references(document: dict[str, Any], dropped: set[str]) -> No
     until no remaining node points into the dropped set.
     """
 
+    from .semantics.source_ast import standalone_inline_images_by_owner
+
+    standalone_by_owner = standalone_inline_images_by_owner(document["blocks"])
     while True:
         dependent = {
             str(node_id)
@@ -399,6 +402,12 @@ def _close_dropped_references(document: dict[str, Any], dropped: set[str]) -> No
             and isinstance(container, Mapping)
             and container.get("title_ref") is not None
             and str(container["title_ref"]) in dropped
+        }
+        dependent |= {
+            image_id
+            for owner_id in dropped
+            for image_id in standalone_by_owner.get(owner_id, [])
+            if image_id not in dropped
         }
         if not dependent:
             break

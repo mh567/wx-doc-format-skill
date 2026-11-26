@@ -110,7 +110,7 @@ def collect_paragraph_candidates(
     caption_ids = {
         str(item.get("node_id"))
         for item in caption_semantics_result.get("captions", [])
-        if item.get("status") == "associated"
+        if item.get("status") in {"associated", "ambiguous", "orphan"}
     }
 
     result: list[dict[str, Any]] = []
@@ -120,6 +120,8 @@ def collect_paragraph_candidates(
         if not isinstance(unit, Mapping) or unit.get("kind") != "paragraph":
             continue
         if not isinstance(block, Mapping) or block.get("block_type") != "paragraph":
+            continue
+        if not block.get("inline_content"):
             continue
         evidence = facts.get("evidence", {}).get(node_id, {})
         if (

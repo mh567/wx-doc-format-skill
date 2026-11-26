@@ -43,20 +43,130 @@ def _image_alt_text(
     return name or str(resource_id)
 
 
+def standalone_inline_images_by_owner(blocks: Mapping[str, Any]) -> dict[str, list[str]]:
+    """Map source paragraph IDs to their standalone materialized image IDs."""
+
+    grouped: dict[str, list[str]] = {}
+    for node_id, block in blocks.items():
+        if (
+            isinstance(block, Mapping)
+            and block.get("block_type") == "image"
+            and block.get("materialization_mode") == "standalone"
+            and block.get("generated_by") == "source_ast.inline_image"
+            and isinstance(block.get("generation_basis"), list)
+            and block["generation_basis"]
+        ):
+            grouped.setdefault(str(block["generation_basis"][0]), []).append(str(node_id))
+    return grouped
+
+
+def _is_protected_image_carrier_style(style: Any) -> bool:
+    """Return whether a paragraph style belongs to a non-body structural role."""
+
+    raw = str(style or "").strip()
+    if not raw:
+        return False
+    from note_semantics import heading_style_level
+
+    if heading_style_level(raw) is not None:
+        return True
+    normalized = raw.casefold().replace(" ", "")
+    return (
+        normalized.startswith((
+            "heading", "toc", "title", "list",
+            "标题", "文档标题", "文件标题", "主标题", "目录", "目次",
+            "代码", "code", "附录",
+        ))
+        or "题注" in normalized
+        or "caption" in normalized
+        or "列项" in normalized
+        or "注-" in normalized
+    )
+
+
+def is_promotable_multi_image_unit(
+    unit_id: str,
+    unit: Mapping[str, Any],
+    facts: Mapping[str, Any],
+    *,
+    parent_by_id: Mapping[str, str] | None = None,
+) -> bool:
+    """Return whether a paragraph contains only 2+ standalone images and spacing.
+
+    Table cells, list-item markers, source TOC controls, and paragraphs carrying
+    sub-figure labels, page/column breaks, bookmarks, fields, links, or math
+    keep their source inline representation until explicit structure says
+    otherwise.
+    """
+
+    if not isinstance(unit, Mapping) or unit.get("kind") != "paragraph":
+        return False
+    if str(unit.get("role") or "body") != "body":
+        return False
+    evidence = (facts.get("evidence") or {}).get(unit_id, {})
+    if isinstance(evidence, Mapping):
+        if (
+            evidence.get("source_toc") is True
+            or evidence.get("marker_kind")
+            or evidence.get("visible_marker")
+            or evidence.get("numbering_status") == "detected"
+            or (
+                isinstance(evidence.get("outline_level"), int)
+                and not isinstance(evidence.get("outline_level"), bool)
+            )
+        ):
+            return False
+        if _is_protected_image_carrier_style(unit.get("style") or evidence.get("style")):
+            return False
+    elif _is_protected_image_carrier_style(unit.get("style")):
+        return False
+
+    if parent_by_id is None:
+        parent_by_id = {
+            str(child_id): str(parent_id)
+            for parent_id, child_ids in (facts.get("children") or {}).items()
+            for child_id in child_ids
+        }
+    containers = facts.get("containers") or {}
+    current = parent_by_id.get(str(unit_id))
+    while current is not None:
+        if containers.get(current, {}).get("kind") in {"table", "table_row", "table_cell", "list_item"}:
+            return False
+        current = parent_by_id.get(current)
+
+    image_count = 0
+    for item in unit.get("inline_content") or []:
+        if not isinstance(item, Mapping):
+            return False
+        kind = item.get("kind")
+        if kind == "image":
+            image_count += 1
+        elif kind == "text":
+            if str(item.get("text") or "").strip():
+                return False
+        elif kind == "tab":
+            continue
+        elif kind == "break":
+            if item.get("break_type", "line") != "line":
+                return False
+        else:
+            return False
+    return image_count >= 2
+
+
 def _inline_image_nodes(
     unit_id: str,
     unit: Mapping[str, Any],
     resources: Mapping[str, Any],
+    *,
+    standalone: bool = False,
 ) -> list[tuple[str, dict[str, Any]]]:
     """Build explicit image nodes for the images embedded in one paragraph.
 
-    The paragraph keeps its text, its other inline tokens and its inline
-    images, so the source projection stays intact.  Each image additionally
-    becomes an ``image`` node that carries the reference of the image part it
-    came from and records the source paragraph it was materialized from.
-    Normal inline images remain owned by the paragraph.  The caption semantics
-    module can later publish a transaction that changes ownership for a mixed
-    authored figure caption.
+    A single-image paragraph keeps its inline image token so existing carrier
+    rendering and caption assumptions stay unchanged.  A promotable multi-image
+    paragraph materializes each image as a ``standalone`` block while preserving
+    its source paragraph ID and inline index in ``generation_basis``.
     """
 
     source_ref = copy.deepcopy(dict(unit["source_ref"]))
@@ -78,6 +188,8 @@ def _inline_image_nodes(
             "generated_by": "source_ast.inline_image",
             "generation_basis": [unit_id, inline_index],
         }
+        if standalone:
+            node["materialization_mode"] = "standalone"
         for field in ("source_embedding", "display_size"):
             if field in item:
                 node[field] = copy.deepcopy(item[field])
@@ -120,16 +232,27 @@ def build_source_ast(facts: Mapping[str, Any]) -> dict[str, Any]:
     resources = facts["resources"]
     blocks: dict[str, dict[str, Any]] = {}
     materialized: dict[str, list[str]] = {}
+    parent_by_id = {
+        str(child_id): str(parent_id)
+        for parent_id, child_ids in (facts.get("children") or {}).items()
+        for child_id in child_ids
+    }
 
     for unit_id, unit in facts["units"].items():
         kind = unit.get("kind")
         source_ref = copy.deepcopy(unit["source_ref"])
         if kind == "paragraph":
             role = str(unit.get("role") or "body")
+            promote_images = is_promotable_multi_image_unit(
+                str(unit_id),
+                unit,
+                facts,
+                parent_by_id=parent_by_id,
+            )
             block: dict[str, Any] = {
                 "block_type": "paragraph",
                 "role": role,
-                "inline_content": copy.deepcopy(unit.get("inline_content", [])),
+                "inline_content": [] if promote_images else copy.deepcopy(unit.get("inline_content", [])),
                 "source_ref": source_ref,
             }
             if role == "heading":
@@ -141,7 +264,12 @@ def build_source_ast(facts: Mapping[str, Any]) -> dict[str, Any]:
                     dict(unit["source_paragraph_format"])
                 )
             blocks[unit_id] = block
-            image_nodes = _inline_image_nodes(str(unit_id), unit, resources)
+            image_nodes = _inline_image_nodes(
+                str(unit_id),
+                unit,
+                resources,
+                standalone=promote_images,
+            )
             if image_nodes:
                 materialized[str(unit_id)] = [node_id for node_id, _ in image_nodes]
                 for node_id, node in image_nodes:
@@ -761,4 +889,4 @@ def materialize_list_semantics(
     return ast, candidates, item_map
 
 
-__all__ = ["build_source_ast", "materialize_list_semantics"]
+__all__ = ["build_source_ast", "is_promotable_multi_image_unit", "materialize_list_semantics", "standalone_inline_images_by_owner"]
