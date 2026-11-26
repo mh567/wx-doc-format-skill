@@ -76,7 +76,8 @@ sh "$SKILL_ROOT/scripts/run.sh" \
 2. `status=completed_with_warnings` 时，文档可按带警告交付，但需在交付说明中逐项列出 `audits` 内未通过或带警告的项以及 `diagnostic_codes`。暂不视为发布阻断，除非 `manual_review_required=true`。
 3. `status=waiting_external` 时继续 [AI 增强转换协议](references/ai-conversion.md)，暂不交付。
 4. `status=failed`、摘要缺失、摘要版本错误，任一审计未通过，或 `unexpected_styles_count` 为 `null`、非整数及非零值时停止交付，并报告 `diagnostic_codes`。
-5. `manual_review_required=true` 时，在交付说明中逐项列出人工复核要求。
+5. `diagnostic_codes` 含 `WXDF-E-INPUT-COMMENTS` 或 `WXDF-E-INPUT-TRACKED-CHANGES` 时，输入 DOCX 含有批注或未处理的修订，转换已在预检阶段停止且未生成输出。告知用户先在 Word 或 WPS 中处理批注和修订，另存为副本后重新转换，不要自行接受、拒绝或删除，也不继续转换。这类停止属于输入问题，与审计证据缺失无关。
+6. `manual_review_required=true` 时，在交付说明中逐项列出人工复核要求。
 
 报告异常时依据状态与诊断码定位原因，必要时检查相关模型或 DOCX XML；截图与原生应用检查不替代失败的审计，也不解除交付阻断。
 
@@ -89,7 +90,7 @@ sh "$SKILL_ROOT/scripts/run.sh" \
 以下为按适用情况告知用户的事项，不构成代理默认执行步骤。`manual_review_required=true` 时按「审计与交付」处理，列出具体要求并保留其阻断状态，不自动启动桌面应用或将复核项标记为已完成。
 
 1. 目录页码与复杂域需在 Word 或 WPS 中更新，分节效果需在原生应用中复核。
-2. 复杂嵌入对象及无法完整重建的文本框、形状、SmartArt、批注和修订记录需人工复核。
+2. 复杂嵌入对象及无法完整重建的文本框、形状、SmartArt 需人工复核。
 
 ### 按需检查
 

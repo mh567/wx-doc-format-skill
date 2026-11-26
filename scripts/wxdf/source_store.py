@@ -280,6 +280,15 @@ class SourceStore:
         except KeyError as exc:
             raise SourceStoreError(f"source part is unavailable: {part}") from exc
 
+    def part_names(self) -> list[str]:
+        """Return the package part names of the open DOCX snapshot."""
+
+        handle = self.handle
+        if handle.source_type != "docx":
+            return []
+        aliases = {str(handle.path), handle.path.name}
+        return sorted(name for name in self._parts if name not in aliases)
+
     def bind_part(self, part: str, payload: bytes) -> None:
         """Retain one verified resource snapshot without permitting replacement."""
 

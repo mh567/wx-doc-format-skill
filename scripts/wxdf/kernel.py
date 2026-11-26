@@ -103,7 +103,8 @@ class ConversionKernel:
             prepare_native_resume,
             write_native_waiting_checkpoint,
         )
-        from .source_store import SourceStore
+        from .input_guard import detect_input_marks, precheck_failure
+        from .source_store import SourceStore, SourceStoreError
         from .transaction import TransactionConflict
 
         metrics = MetricsCollector()
@@ -148,6 +149,34 @@ class ConversionKernel:
                 request.list_policy,
                 registry=registry,
             )
+            source_type = detect_source_type(request.input_path)
+
+            def blocked_input() -> RunResult | None:
+                # The precheck reads the snapshot the parser reads, so a source
+                # that changed between the two cannot pass one and fail the other.
+                if source_type != "docx" or not store.is_open:
+                    return None
+                codes = detect_input_marks(store)
+                if not codes:
+                    return None
+                fields, diagnostics = precheck_failure(codes)
+                return RunResult(
+                    status="failed",
+                    exit_code=1,
+                    report={**report, **fields},
+                    diagnostics=diagnostics,
+                    metrics=metrics.snapshot(),
+                )
+
+            if protocol_mode != "resume" and source_type == "docx":
+                try:
+                    store.open_source(request.input_path)
+                except SourceStoreError:
+                    pass
+                else:
+                    blocked = blocked_input()
+                    if blocked is not None:
+                        return blocked
             if protocol_mode == "resume":
                 lock_native_checkpoint_identity(Path(options["checkpoint_path"]))
                 contracts = {
@@ -191,6 +220,9 @@ class ConversionKernel:
                             ),
                         },
                     )
+                blocked = blocked_input()
+                if blocked is not None:
+                    return blocked
                 options.update(resume_options)
                 options["enhancement_request_sink"] = []
                 options["available_response_ids"] = list(response_map)

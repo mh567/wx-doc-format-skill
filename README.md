@@ -33,6 +33,8 @@
 用 wx-doc-format 将这份方案转换成 WX 模板格式，输出到 outputs/方案.docx，使用普通格式转换。
 ```
 
+普通转换和 AI 增强转换都会预检输入 DOCX。检测到批注（`WXDF-E-INPUT-COMMENTS`）或未处理的修订（`WXDF-E-INPUT-TRACKED-CHANGES`）时，终端和报告会提示所检出的类别，转换停止且不会生成或覆盖输出文档。请在 Word 或 WPS 中处理相应内容，另存为副本后重新转换。仅开启修订跟踪、没有实际修订记录的文档可以正常转换。
+
 需要 AI 辅助识别复杂结构时：
 
 ```text

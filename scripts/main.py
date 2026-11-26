@@ -17,6 +17,7 @@ from zipfile import BadZipFile
 
 from reporting import write_markdown_report
 from wxdf.capabilities import normalize_mode
+from wxdf.input_guard import GUIDANCE as INPUT_GUIDANCE, blocked_codes as blocked_input_codes
 from wxdf.kernel import ConversionKernel, ConversionRequest
 
 
@@ -463,7 +464,7 @@ def public_report_summary(report: dict) -> dict:
     status = _public_summary_scalar(report.get("status"))
     unexpected_styles_count = _public_unexpected_styles_count(report)
     diagnostic_codes = _public_diagnostic_codes(report)
-    if unexpected_styles_count is None:
+    if unexpected_styles_count is None and not blocked_input_codes(report):
         diagnostic_codes = sorted({*diagnostic_codes, "WXDF-E-AUDIT-EVIDENCE-MISSING"})
     explicit_manual_review = report.get("manual_review_required")
     manual_review_required = (
@@ -991,7 +992,11 @@ def main(argv: list[str] | None = None, *, runtime_context: dict | None = None) 
         _write_json_report(args.report, output_report)
     if args.report_md is not None:
         write_markdown_report(output_report, args.report_md)
-    if result.diagnostics:
+    precheck_codes = blocked_input_codes(result.report)
+    if precheck_codes:
+        for code in precheck_codes:
+            print(f"{code}: {INPUT_GUIDANCE[code]}", file=sys.stderr)
+    elif result.diagnostics:
         print(_reported_diagnostic_code(result.diagnostics), file=sys.stderr)
     raise SystemExit(result.exit_code)
 

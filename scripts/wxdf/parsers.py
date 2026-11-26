@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import re
 from collections import Counter
@@ -1992,7 +1993,8 @@ def _parse_docx(source: Path | str, *, store: SourceStore) -> dict[str, Any]:
     from .semantics.tables import capture_docx_table_layout
 
     handle = store.open_source(source)
-    document = Document(str(handle.path))
+    package_bytes = store.resolve({"source_id": handle.source_id, "part": str(handle.path)})
+    document = Document(io.BytesIO(package_bytes))
     facts = _empty_facts(handle, "docx-source-facts", "docx-ooxml", parser_version="1.1.0")
     parser_version = facts["parser"]["version"]
     report: dict[str, Any] = {}
